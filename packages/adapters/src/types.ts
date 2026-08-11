@@ -93,6 +93,15 @@ export interface AgentAdapter {
    * 訊息、SDK 內部 session 狀態)完全不受影響地保留 —— 這是比「dispose +
    * respawn」更好的方案,故採用之。
    *
+   * `OpenCodeAdapter` 沒有 SDK 這種官方支援的「設定當前 model」方法——
+   * opencode 的 model 是每則訊息各自可選的 `{providerID,modelID}` 欄位
+   * (`POST /session/{id}/message` body 的一部分),不是一個獨立可設定的
+   * 狀態。做法是把解析後的值存成 session 內的覆寫,下一則 `sendPrompt()`
+   * 才真正送給 opencode(細節與取捨見 `opencode-adapter.ts` 的
+   * `setModel()`/`parseModelString()` 註解)——呼叫這個方法後「立即」只代表
+   * 覆寫已記錄,並不保證 opencode 真的認得這個 model,不合法的值會在下一輪
+   * 對話透過既有的錯誤事件路徑浮現。
+   *
    * ACP/PTY 協議本身沒有對應的「呼叫端指定 model」機制(ACP 的
    * `session/new`/`session/prompt` 沒有 model 參數,model 完全由被 spawn
    * 出來的那個外部 agent/CLI 自行決定與管理;PTY 更只是無結構化的終端

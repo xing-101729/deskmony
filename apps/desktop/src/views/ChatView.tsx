@@ -10,9 +10,13 @@ import { Meter } from "../ui/Feedback.js";
 import { shortenPath } from "../lib/workspaces.js";
 
 /**
- * 顯示目前 session 的 model,並(僅 `software="claude-agent-sdk"`)提供切換
- * 用的下拉選單(功能3d)。acp/pty/opencode/codex 的 model 由外部 agent/CLI
- * 自行管理,這裡只顯示唯讀資訊,不提供切換控制。
+ * 顯示目前 session 的 model,並(`software="claude-agent-sdk"` 或
+ * `"opencode"`)提供切換用的下拉選單(功能3d)。兩者的 `AgentAdapter.
+ * setModel()` 實作方式不同(前者呼叫 SDK 官方 API,後者是 adapter 內部的
+ * session 覆寫,下一則訊息才生效),但對這裡是同一個 `session.setModel`
+ * gateway 呼叫,不需要分流處理,見 packages/adapters/src/types.ts 的介面
+ * 註解。acp/pty/codex 的 model 由外部 agent/CLI 自行管理,這裡只顯示唯讀
+ * 資訊,不提供切換控制。
  */
 function ModelControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element {
   const setSessionModel = useSessionStore((s) => s.setSessionModel);
@@ -22,12 +26,16 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const claudeModels = useMemo(
+  // 注意:`selectProviderModels()` 本身是通用邏輯(依 profile.providerId 查
+  // resolveProviders() 的結果),不是 Claude 專屬——opencode profile 只要是
+  // 透過 ProfileCreateDialog 目前的流程建立(帶 providerId="opencode"),這裡
+  // 就能拿到 `opencode models` 偵測到的清單,變數名稱維持通用命名。
+  const availableModels = useMemo(
     () => selectProviderModels(profile, detectedAgents, providerPrefs, enabledModelIds),
     [profile, detectedAgents, providerPrefs, enabledModelIds],
   );
 
-  const isSdk = session.adapterType === "claude-agent-sdk";
+  const supportsModelSwitch = session.adapterType === "claude-agent-sdk" || session.adapterType === "opencode";
   const currentModel = session.model ?? profile?.model ?? "";
 
   const handleChange = async (model: string): Promise<void> => {
@@ -43,15 +51,15 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
     }
   };
 
-  if (!isSdk) {
+  if (!supportsModelSwitch) {
     return <Badge tone="neutral" mono title="model 由 agent/CLI 自行管理">{currentModel || "由 agent 管理"}</Badge>;
   }
 
-  const knownIds = new Set(claudeModels.map((m) => m.id));
+  const knownIds = new Set(availableModels.map((m) => m.id));
   const options =
     currentModel && !knownIds.has(currentModel)
-      ? [{ id: currentModel, label: currentModel }, ...claudeModels]
-      : claudeModels;
+      ? [{ id: currentModel, label: currentModel }, ...availableModels]
+      : availableModels;
 
   return (
     <div className="flex items-center gap-1.5">

@@ -28,10 +28,12 @@ export const SessionSchema = z.object({
   /**
    * session 級別的 model 覆寫(M5 Round C:對話中切換 model)。建立時預設取自
    * `AgentProfile.model`(見 `SessionManager.createSession()`);之後可透過
-   * `session.setModel` gateway 方法變更,只有 `adapterType ===
-   * "claude-agent-sdk"` 的 session 支援(見 packages/adapters/src/types.ts
-   * 的 `AgentAdapter.setModel()` 介面註解)。舊 session(建立於這個欄位存在
-   * 之前)或 acp/pty session 這個欄位可能是 `undefined` —— UI 應 fallback
+   * `session.setModel` gateway 方法變更,`adapterType === "claude-agent-sdk"`
+   * 與 `"opencode"` 的 session 支援(見 packages/adapters/src/types.ts 的
+   * `AgentAdapter.setModel()` 介面註解——兩者實作方式不同:前者呼叫 SDK
+   * 官方的 `Query.setModel()`,後者是 adapter 內部的 session 覆寫,下一則
+   * 訊息才真正生效)。acp/pty session 呼叫這個方法會得到明確錯誤。舊 session
+   * (建立於這個欄位存在之前)這個欄位可能是 `undefined` —— UI 應 fallback
    * 顯示 profile 的 model,或標示「(由 agent 管理)」。
    */
   model: z.string().optional(),

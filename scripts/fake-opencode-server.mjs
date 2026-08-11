@@ -23,7 +23,11 @@
  * 協定(僅供本腳本與 e2e-gateway.mjs 之間使用,非 opencode 官方 API 的一部分):
  *   - 一般 prompt:固定回覆 FAKE_OPENCODE_REPLY_CHUNKS 串接而成的文字,拆成
  *     多個 `message.part.delta` 事件送出(同一個 partID),驗證
- *     message-delta 轉換是否正確、`completed` 事件是否正確送達。
+ *     message-delta 轉換是否正確、`completed` 事件是否正確送達。若請求 body
+ *     帶了 `model` 欄位(`OpenCodeAdapter.sendPrompt()`/`setModel()` 的
+ *     覆寫,見該檔案),回覆文字前面會多一段 `[model:providerID/modelID]`
+ *     標記——只用來讓 e2e(步驟24f)斷言「setModel() 之後,實際送出的請求
+ *     真的帶新 model」,沒有帶 model 的既有呼叫方式完全不受影響。
  *   - 若 prompt 文字以 TOOL_CALL_PREFIX 開頭:送出 `message.part.updated`
  *     (tool part,status:"pending"),再送 `permission.asked`,等待對應的
  *     `POST /permission/{id}/reply`:
@@ -106,7 +110,7 @@ async function streamTextReply(sessionId, messageId, chunks, { chunkDelayMs = 5 
   return partId;
 }
 
-async function handlePrompt(sessionId, text) {
+async function handlePrompt(sessionId, text, model) {
   const session = sessions.get(sessionId);
   const userMessageId = `msg_${randomUUID()}`;
   const assistantMessageId = `msg_${randomUUID()}`;
@@ -186,7 +190,14 @@ async function handlePrompt(sessionId, text) {
     }
     broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   } else {
-    await streamTextReply(sessionId, assistantMessageId, FAKE_OPENCODE_REPLY_CHUNKS);
+    // `model` 有值時(POST /session/{id}/message body 的 model 欄位,見
+    // OpenCodeAdapter.sendPrompt()/setModel())在回覆前面加一段可觀察的
+    // 標記——只用來讓 e2e(步驟24f)能斷言「收到的 model 欄位真的變了」,
+    // 不影響既有沒有帶 model 的呼叫(該分支維持與之前完全相同的純文字回覆)。
+    const chunks = model
+      ? [`[model:${model.providerID}/${model.modelID}] `, ...FAKE_OPENCODE_REPLY_CHUNKS]
+      : FAKE_OPENCODE_REPLY_CHUNKS;
+    await streamTextReply(sessionId, assistantMessageId, chunks);
     broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   }
 
@@ -244,7 +255,7 @@ async function route(req, res, url) {
       .filter((p) => p && p.type === "text")
       .map((p) => p.text)
       .join("");
-    const result = await handlePrompt(sessionId, text);
+    const result = await handlePrompt(sessionId, text, body.model);
     sendJson(res, 200, result);
     return;
   }

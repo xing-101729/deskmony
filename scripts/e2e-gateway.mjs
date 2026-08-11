@@ -1237,6 +1237,11 @@ async function ptyAdapterSmokeTest(client, workspaceDir) {
 //     tool-result 事件轉換,比照步驟9c/9d 的 ACP 先例)。
 //   - interrupt() 送出 /session/{id}/abort 後,原本忙碌中的回合確實收斂
 //     (不會永久卡住),且 MessageAbortedError 不會被誤轉成 error 事件。
+//   - session.setModel 對話中切換 model(這輪補上 OpenCodeAdapter.setModel()
+//     的實作,見 packages/adapters/src/opencode-adapter.ts):session.model
+//     欄位確實更新、下一則訊息實際送出的 model 欄位確實跟著換(靠
+//     fake-opencode-server.mjs 這輪新增的 `[model:providerID/modelID]`
+//     回覆前綴觀察,見該檔案協定說明)、非法格式(無 "/")會被明確拒絕。
 //   - session.delete 清理成功(子程序與 SSE 連線一併結束)。
 // ---------------------------------------------------------------------
 async function opencodeAdapterSmokeTest(client, workspaceDir) {
@@ -1389,18 +1394,67 @@ async function opencodeAdapterSmokeTest(client, workspaceDir) {
     record("步驟24e OpenCode interrupt()", false, String(err));
   }
 
-  // ---- 24f: 清理 ----
+  // ---- 24f: session.setModel() 對話中切換 model ----
+  // 這輪補上 OpenCodeAdapter.setModel() 的實作(見該檔案:opencode 沒有
+  // 「設定當前 model」的獨立端點,做法是存成 session 內的覆寫,下一則
+  // sendPrompt() 才真正送給 opencode)。斷言三件事:
+  //   1. RPC 回應與之後的 session.list 查詢,session.model 都確實更新
+  //      (比照步驟20b 對 claude-agent-sdk 的既有斷言方式)。
+  //   2. 下一則訊息實際送給 fake server 的 model 欄位真的變了——這件事光看
+  //      session.model 欄位無法證明(那只是 DB 落地值),必須靠
+  //      fake-opencode-server.mjs 這輪新增的回覆前綴機制實際觀察「wire 上
+  //      送出去的請求」才能證明,見該檔案協定說明。
+  //   3. 傳入不合法格式(沒有 "/")會被明確拒絕,不可默默成功(比照
+  //      步驟20d 對 acp/pty 的既有先例,但這裡是「格式不合法」而非
+  //      「這個 adapter 完全不支援」)。
+  try {
+    const NEW_MODEL = "openai/gpt-5-mini";
+    const setResult = await client.rpc("session.setModel", { sessionId: opencodeSessionId, model: NEW_MODEL });
+    const listAfterSet = await client.rpc("session.list", {});
+    const sessionRow = listAfterSet.sessions.find((s) => s.id === opencodeSessionId);
+    const setModelOk = setResult.session.model === NEW_MODEL && sessionRow?.model === NEW_MODEL;
+
+    const { finalEvent, collected } = await client.drivePrompt(opencodeSessionId, "hello after model switch", {
+      onPermission: async () => "deny",
+      timeoutMs: 20_000,
+    });
+    const { groups, violation } = analyzeMessageDeltas(collected);
+    const fullText = groups.map((g) => g.text).join("");
+    const expectedText = `[model:${NEW_MODEL}] ${FAKE_OPENCODE_REPLY_CHUNKS.join("")}`;
+    const wireOk = !violation && finalEvent.event.type === "completed" && fullText === expectedText;
+
+    let rejectedInvalid = false;
+    let rejectionMessage;
+    try {
+      await client.rpc("session.setModel", { sessionId: opencodeSessionId, model: "not-a-valid-model" });
+    } catch (err) {
+      rejectedInvalid = true;
+      rejectionMessage = String(err);
+    }
+
+    record(
+      "步驟24f OpenCode session.setModel 對話中切換 model(session.model 更新 + 下一則訊息 wire 上的 model 欄位確實跟著換 + 非法格式被拒絕)",
+      setModelOk && wireOk && rejectedInvalid,
+      `setResult.session.model=${setResult.session.model}, session.list 查得=${sessionRow?.model}, ` +
+        `換 model 後回覆=${JSON.stringify(fullText)}(預期 ${JSON.stringify(expectedText)}), ` +
+        `非法格式是否被拒絕=${rejectedInvalid}${rejectionMessage ? `(${rejectionMessage})` : ""}`,
+    );
+  } catch (err) {
+    record("步驟24f OpenCode session.setModel 對話中切換 model", false, String(err));
+  }
+
+  // ---- 24g: 清理 ----
   try {
     await client.rpc("session.delete", { sessionId: opencodeSessionId });
     const listAfter = await client.rpc("session.list", {});
     const stillThere = listAfter.sessions.some((s) => s.id === opencodeSessionId);
     record(
-      "步驟24f OpenCode session.delete 清理成功(子程序與 SSE 連線一併結束)",
+      "步驟24g OpenCode session.delete 清理成功(子程序與 SSE 連線一併結束)",
       !stillThere,
       `刪除後 session.list 是否仍含此 session: ${stillThere}`,
     );
   } catch (err) {
-    record("步驟24f OpenCode session.delete 清理成功", false, String(err));
+    record("步驟24g OpenCode session.delete 清理成功", false, String(err));
   }
 }
 

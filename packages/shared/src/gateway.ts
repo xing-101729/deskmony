@@ -130,8 +130,8 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * M5 Round C 新增:對話中切換 model(見 apps/core/src/session/
    * session-manager.ts 的 `SessionManager.setSessionModel()`、
    * packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
-   * 只有 `software="claude-agent-sdk"` 的 session 支援;acp/pty 呼叫這個
-   * 方法會得到明確的錯誤(而不是默默成功),見對應 adapter 的實作。
+   * `software="claude-agent-sdk"` 與 `"opencode"` 的 session 支援;acp/pty
+   * 呼叫這個方法會得到明確的錯誤(而不是默默成功),見對應 adapter 的實作。
    */
   z.object({
     ...baseRequest,

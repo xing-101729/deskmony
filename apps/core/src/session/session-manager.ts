@@ -602,9 +602,13 @@ export class SessionManager extends EventEmitter {
 
   /**
    * M5 Round C:對話中切換 model(見 packages/adapters/src/types.ts 的
-   * `AgentAdapter.setModel()` 介面註解、`ClaudeAgentSdkAdapter.setModel()`
-   * 的實作——直接呼叫 SDK 的 `Query.setModel()`,對話上下文原封不動保留,
-   * 不需要 dispose/respawn)。
+   * `AgentAdapter.setModel()` 介面註解)。`ClaudeAgentSdkAdapter.setModel()`
+   * 直接呼叫 SDK 的 `Query.setModel()`,對話上下文原封不動保留,不需要
+   * dispose/respawn;`OpenCodeAdapter.setModel()` 則是把值存成 session 內的
+   * 覆寫,下一則訊息才真正送給 opencode(opencode 沒有對應的「設定當前
+   * model」端點,見該檔案 `setModel()` 的實作註解)——兩種實作方式不同,但
+   * 對這裡呼叫端而言是同一個 await 得到 resolve/reject 的介面,不需要分流
+   * 處理。
    *
    * 要求 session 目前必須是「執行中」的(`this.runtime` 有對應的
    * RuntimeState)——沒有 runtime 就沒有 adapter handle 可以呼叫

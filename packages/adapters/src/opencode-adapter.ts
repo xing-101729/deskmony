@@ -98,14 +98,13 @@ import { AsyncQueue } from "./async-queue.js";
  *  - `interrupt`:true(見上方)。`terminal`:false(這不是 PTY 直通)。
  *
  * ---- 已知限制 / TODO ----
- *  - `setModel()` 明確拋出錯誤:opencode 的「換 model」是每則訊息各自可選的
- *    `model:{providerID,modelID}` 欄位(`POST /session/{id}/message` body
- *    的一部分),不是一個獨立的「設定當前 model」操作;而我們的
- *    `AgentProfile.model` 是一個扁平字串,沒有可靠、不臆測的方式拆解成
- *    opencode 要求的 `{providerID,modelID}` 兩個欄位(需要另外查
- *    `/provider`/`/config/providers` 才能正確對應,超出這輪範圍)——見
- *    `AgentAdapter.setModel()` 介面註解「不可靜默忽略成功」的規則,故明確
- *    拋出錯誤而非假裝支援。
+ *  - `setModel()`(對話中途換 model)已實作,但用的是「session 記憶體內的
+ *    覆寫值,下一則訊息才套用」這個折衷方案——opencode 沒有「設定當前
+ *    model」的獨立端點可呼叫,也沒有機會本機驗證 `/provider`/
+ *    `/config/providers` 這兩個端點的實際形狀(見檔案開頭的對接策略,一貫
+ *    要求「以實際觀察到的行為為準,不臆測」),所以不驗證這組
+ *    providerID/modelID 是否真的存在。完整取捨說明見 `setModel()` 方法本身
+ *    的註解。
  *  - **每個 session 各自 spawn 一個獨立的 `opencode serve` 子程序**(與
  *    AcpAdapter/GenericPtyAdapter 每個 session 各自 spawn 一個子程序的既有
  *    模式一致,換取實作簡單、session 之間互不干擾),而非在這個 adapter
@@ -259,14 +258,15 @@ export class OpenCodeAdapter implements AgentAdapter {
     const internal = this.mustGet(handle);
     internal.busy = true;
     internal.turnErrored = false;
-    // 這輪新增:profile.model 若有設定(profile 建立時挑選的
-    // "providerID/modelID" 組合字串,見 ProfileCreateDialog.tsx 的送出邏輯),
-    // 從第一個 "/" 拆成 opencode 要求的 {providerID, modelID} 兩個欄位,隨
-    // POST /session/{id}/message 一起送出——這是讓「建立 profile 時挑的
-    // model」對 opencode session 真正生效的唯一管道(setModel() 仍明確拋出
-    // 錯誤,見該方法註解:對話中途換 model 不在這輪範圍內)。profile.model
-    // 沒有 "/" 或未設定時,完全不帶 model 欄位,交給 opencode 自己的預設。
-    const modelField = parseProfileModel(handle.profile.model);
+    // model 解析優先序:`internal.modelOverride`(透過 setModel() 對話中途
+    // 設定,見該方法)> `handle.profile.model`(profile 建立時挑選的
+    // "providerID/modelID" 組合字串,見 ProfileCreateDialog.tsx 的送出邏輯)。
+    // 兩者都用同一個 parseModelString() 從第一個 "/" 拆成 opencode 要求的
+    // {providerID, modelID} 兩個欄位,隨 POST /session/{id}/message 一起送
+    // 出——setModel() 本身只是把覆寫記在記憶體裡,並不會呼叫任何 opencode
+    // API(沒有對應的端點),真正「生效」永遠是靠這裡讀到覆寫值的下一次
+    // sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
+    const modelField = internal.modelOverride ?? parseModelString(handle.profile.model);
     void postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/message`, {
       parts: [{ type: "text", text: prompt.text }],
       ...(modelField ? { model: modelField } : {}),
@@ -335,18 +335,35 @@ export class OpenCodeAdapter implements AgentAdapter {
   }
 
   /**
-   * 見本檔案頂端「已知限制」:opencode 的 model 選擇是每則訊息各自可選的
-   * `{providerID,modelID}`,不是一個「設定當前 model」的獨立操作,而我們的
-   * `AgentProfile.model` 是扁平字串,沒有不臆測的方式拆解——明確拋出錯誤,
-   * 不可靜默忽略成功(見 packages/adapters/src/types.ts 的
-   * `AgentAdapter.setModel()` 介面註解)。
+   * opencode 沒有 SDK 那種官方支援的「設定當前 model」方法(見本檔案頂端
+   * 對接策略註解):model 是每則訊息各自可選的 `{providerID,modelID}` 欄位
+   * (`POST /session/{id}/message` body 的一部分),不是一個獨立可設定的
+   * 狀態。這裡的作法:把 `model` 解析成 `{providerID,modelID}` 後存進
+   * `internal.modelOverride`,`sendPrompt()` 送下一則訊息時會優先讀這個值
+   * (見該方法)——覆寫在這個方法 resolve 的當下就已經生效(保證下一次
+   * sendPrompt() 會用到,不需要、也沒有 API 可以呼叫去讓它「立即」生效),
+   * 符合 `AgentAdapter.setModel()` 介面註解「不可靜默忽略成功」的要求。
+   *
+   * 唯一會拋錯的情況是 `model` 本身不是合法的 "providerID/modelID" 形狀,
+   * 無法解析(與 `parseModelString()` 判斷 `profile.model` 是否合法的規則
+   * 完全一致)。刻意不做的部分:呼叫 `/config/providers`(或 `/provider`)
+   * 驗證這組 providerID/modelID 是否真的存在——本檔案的對接策略一貫要求
+   * 「以實際觀察到的 opencode 行為為準,不臆測」,這輪沒有機會對這兩個端點
+   * 做本機驗證。若使用者傳入語法正確但實際不存在的 model,opencode 會在
+   * 下一次 `POST /session/{id}/message` 時自行判定失敗,經由既有的
+   * `message.updated` 錯誤事件轉發路徑浮現(見 `handleEvent()`)——與
+   * 「`profile.model` 打錯字」的既有行為完全一致,不需要另外處理。
    */
-  async setModel(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new Error(
-      'software="opencode" 目前不支援對話中變更 model(opencode 的 model 是每則訊息各自可選的 ' +
-        "{providerID, modelID},不是一個可設定的獨立狀態,且無法從單一字串可靠拆解,見 opencode-adapter.ts 頂端註解)",
-    );
+  async setModel(handle: AgentHandle, model: string): Promise<void> {
+    const internal = this.mustGet(handle);
+    const parsed = parseModelString(model);
+    if (!parsed) {
+      throw new Error(
+        `software="opencode" 的 model 必須是 "providerID/modelID" 形式(例如 ` +
+          `"anthropic/claude-sonnet-4-20250514"),收到的值 "${model}" 無法解析`,
+      );
+    }
+    internal.modelOverride = parsed;
   }
 
   private mustGet(handle: AgentHandle): InternalSession {
@@ -645,6 +662,8 @@ interface InternalSession {
   turnErrored: boolean;
   idleWaiters: Array<() => void>;
   sseController: AbortController;
+  /** setModel() 設定的覆寫值,優先於 handle.profile.model——見 setModel()/sendPrompt() 方法註解。 */
+  modelOverride?: { providerID: string; modelID: string };
 }
 
 interface OpencodePart {
@@ -681,15 +700,19 @@ function waitForIdle(internal: InternalSession, timeoutMs: number): Promise<void
 }
 
 /**
- * 把 `AgentProfile.model` 這個扁平字串(建立 profile 時，`ProfileCreateDialog`
- * 從 `opencode models` 偵測結果挑出的 "providerID/modelID" 組合，見
- * provider-catalog.ts/resolve-providers.ts 的模型偵測流程)拆成 opencode
- * `POST /session/{id}/message` body 要求的 `{providerID, modelID}` 兩個欄位。
+ * 把一個扁平字串拆成 opencode `POST /session/{id}/message` body 要求的
+ * `{providerID, modelID}` 兩個欄位。兩種呼叫來源共用這個函式：
+ *   - `AgentProfile.model`(建立 profile 時，`ProfileCreateDialog` 從
+ *     `opencode models` 偵測結果挑出的 "providerID/modelID" 組合，見
+ *     provider-catalog.ts/resolve-providers.ts 的模型偵測流程)。
+ *   - `setModel()` 收到的、對話中途要換的 model 字串(來源同上——UI 選單的
+ *     選項本來就是同一份偵測清單，見 ChatView.tsx 的 ModelControl)。
  * 只切第一個 "/"（modelID 本身可能含 "/"，例如某些 provider 的模型 id），
- * 沒有 "/" 或是空字串一律回傳 undefined（呼叫端就不帶 model 欄位，交給
- * opencode 自己的預設，而不是送一個猜測、可能無效的組合）。
+ * 沒有 "/" 或是空字串一律回傳 undefined——`sendPrompt()` 視為「不帶 model
+ * 欄位，交給 opencode 自己的預設」，`setModel()` 則視為輸入不合法，拋出
+ * 錯誤而非靜默忽略(見該方法註解)。
  */
-function parseProfileModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
+function parseModelString(model: string | undefined): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
   const slashIndex = model.indexOf("/");
   if (slashIndex <= 0 || slashIndex === model.length - 1) return undefined;
