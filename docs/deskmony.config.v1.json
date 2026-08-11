@@ -1,0 +1,261 @@
+{
+  "$id": "https://deskmony/schemas/deskmony.config.v1.json",
+  "title": "Deskmony core config (v1)",
+  "description": "apps/core 的分層設定檔格式(defaults → 這份設定檔 → 環境變數,環境變數永遠優先)。由 packages/shared/src/core-config.ts 的 CoreConfigSchema 用 zod-to-json-schema 產生,見 scripts/generate-config-schema.mjs。",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": [
+        "number",
+        "string"
+      ],
+      "enum": [
+        1,
+        "1"
+      ]
+    },
+    "daemon": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "bindHost": {
+          "type": "string",
+          "minLength": 1
+        },
+        "permissionTimeoutMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "authRateLimit": {
+          "type": "object",
+          "properties": {
+            "max": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "cooldownMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "defaultWorkingDir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worktreesRoot": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "dataDir": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "features": {
+      "type": "object",
+      "properties": {
+        "staticDir": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "log": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warn",
+            "error"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "when": {
+                "type": "object",
+                "properties": {
+                  "commandEquals": {
+                    "type": "string"
+                  },
+                  "commandMatches": {
+                    "type": "string"
+                  },
+                  "pathUnder": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "effect": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "scope": {
+                "type": "object",
+                "properties": {
+                  "profileId": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "addedBy": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "ui-remember"
+                ]
+              },
+              "addedAt": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "tool",
+              "effect"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "allowedHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "default": {
+        "rules": [],
+        "allowedHosts": []
+      }
+    },
+    "notification": {
+      "type": "object",
+      "properties": {
+        "desktop": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "additionalProperties": false,
+          "default": {
+            "enabled": true
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "default": ""
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "minSeverity": {
+              "type": "string",
+              "enum": [
+                "escalate",
+                "trip"
+              ],
+              "default": "escalate"
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "url": "",
+            "enabled": false,
+            "minSeverity": "escalate"
+          }
+        },
+        "batchIntervalMinutes": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 20
+        },
+        "quietHours": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "default": {
+        "desktop": {
+          "enabled": true
+        },
+        "webhook": {
+          "url": "",
+          "enabled": false,
+          "minSeverity": "escalate"
+        },
+        "batchIntervalMinutes": 20
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -1,0 +1,81 @@
+{
+  "name": "@deskmony/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deskmony - Agent Team 管理平台",
+  "author": "Agent Team",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json && vite build",
+    "bundle:core": "node ../../scripts/bundle-core.mjs",
+    "package": "pnpm bundle:core && pnpm build && electron-builder --win",
+    "package:dir": "pnpm bundle:core && pnpm build && electron-builder --win --dir",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "clean": "rimraf dist dist-electron core-bundle release",
+    "electron": "electron ."
+  },
+  "build": {
+    "appId": "com.deskmony.desktop",
+    "productName": "Deskmony",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "core-bundle",
+        "to": "core"
+      },
+      {
+        "from": "dist",
+        "to": "desktop-ui"
+      }
+    ],
+    "afterPack": "./scripts/after-pack.mjs",
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Deskmony",
+      "unicode": true
+    },
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**"
+    ]
+  },
+  "dependencies": {
+    "@deskmony/shared": "workspace:*",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@types/node": "^22.10.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "electron": "^33.2.1",
+    "electron-builder": "^26.15.3",
+    "postcss": "^8.4.49",
+    "rimraf": "^6.0.1",
+    "tailwindcss": "^3.4.16",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3"
+  }
+}

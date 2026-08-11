@@ -1,0 +1,36 @@
+{
+  "name": "deskmony",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deskmony - Agent Team 管理平台 (M1 單 agent MVP)",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "dev:core": "pnpm --filter @deskmony/core run dev",
+    "dev:desktop": "pnpm --filter @deskmony/desktop run dev",
+    "dev:electron": "pnpm --filter @deskmony/desktop run electron",
+    "start:core": "pnpm --filter @deskmony/core run start",
+    "package": "pnpm --filter @deskmony/desktop run package",
+    "package:dir": "pnpm --filter @deskmony/desktop run package:dir",
+    "clean": "pnpm -r run clean",
+    "generate:config-schema": "node scripts/generate-config-schema.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@agentclientprotocol/sdk": "^1.2.1",
+    "@electron/rebuild": "^4.2.0",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "packageManager": "pnpm@10.13.1",
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "esbuild",
+      "node-pty"
+    ]
+  }
+}

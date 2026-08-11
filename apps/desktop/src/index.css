@@ -1,0 +1,212 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================================================================
+ * Deskmony 設計 token
+ * ===========================================================================
+ *
+ * 所有顏色以 **RGB 通道值**(不是 `#rrggbb`)存放,tailwind.config.js 用
+ * `rgb(var(--x) / <alpha-value>)` 包起來——這樣 `bg-accent/10`、`border-line/60`
+ * 這類透明度修飾詞才能運作。
+ *
+ * `:root` = 深色(這是一個開發者工具,深色才是主場景);
+ * `:root[data-theme="light"]` = 淺色。主題切換只改 `<html data-theme>`,
+ * 見 src/ui/theme.ts。
+ *
+ * 階梯設計原則(深色):背景層次靠「非常接近的四階近黑」建立(canvas → panel
+ * → surface → surface-2),邊框靠低對比的線(line/line-subtle)而不是明顯框線
+ * ——這是 Linear / Cursor / Raycast 共通的作法:**用層次而不是邊框分隔區塊**。
+ * ========================================================================= */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --c-canvas: 10 10 12; /* #0a0a0c 內容區 */
+  --c-panel: 15 15 18; /* #0f0f12 側欄 / 頂列 */
+  --c-surface: 22 22 26; /* #16161a 卡片 / 輸入框 */
+  --c-surface-2: 30 30 35; /* #1e1e23 徽章底 / hover */
+
+  --c-line-subtle: 32 32 38; /* 密集列表的分隔線(幾乎看不見) */
+  --c-line: 42 42 50; /* 一般邊框 */
+  --c-line-strong: 60 60 70; /* 次要按鈕邊框 */
+
+  --c-fg: 237 237 240; /* 正文 / 標題 */
+  --c-fg-soft: 206 206 213; /* 次級標題 */
+  --c-fg-muted: 166 166 176; /* 說明文字 */
+  --c-fg-subtle: 137 137 148; /* meta / 標籤 */
+  --c-fg-faint: 104 104 116; /* placeholder / 停用 */
+
+  --c-accent: 217 119 87; /* #d97757 品牌色(維持不變) */
+  --c-accent-hover: 228 140 111;
+  --c-accent-muted: 138 79 58;
+  --c-accent-fg: 255 255 255;
+
+  --c-ok: 63 185 80;
+  --c-warn: 214 158 46;
+  --c-danger: 248 97 89;
+  --c-info: 96 165 250;
+
+  --c-scrim: 0 0 0;
+
+  --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-overlay: 0 16px 48px -12px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.04);
+  --shadow-pop: 0 8px 24px -8px rgb(0 0 0 / 0.6), 0 0 0 1px rgb(255 255 255 / 0.05);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* 亮度階梯「反轉」:canvas 最亮、fg 最暗——既有 base-950…base-100 類名的
+   * 語意(950 = 最底層背景、100 = 正文)因此在淺色下自動成立。 */
+  --c-canvas: 255 255 255;
+  --c-panel: 249 249 250;
+  --c-surface: 244 244 246;
+  --c-surface-2: 234 234 238;
+
+  --c-line-subtle: 236 236 240;
+  --c-line: 221 221 227;
+  --c-line-strong: 198 198 206;
+
+  --c-fg: 24 24 28;
+  --c-fg-soft: 51 51 58;
+  --c-fg-muted: 82 82 92;
+  --c-fg-subtle: 111 111 122;
+  --c-fg-faint: 148 148 158;
+
+  --c-accent: 191 92 57; /* 深一階,確保白底上的對比 ≥ 4.5:1 */
+  --c-accent-hover: 168 78 46;
+  --c-accent-muted: 233 190 173;
+  --c-accent-fg: 255 255 255;
+
+  --c-ok: 22 122 51;
+  --c-warn: 154 103 0;
+  --c-danger: 200 34 44;
+  --c-info: 9 105 218;
+
+  --c-scrim: 24 24 30;
+
+  --shadow-panel: 0 1px 2px rgb(16 16 20 / 0.06);
+  --shadow-overlay: 0 16px 48px -12px rgb(16 16 20 / 0.22), 0 0 0 1px rgb(16 16 20 / 0.06);
+  --shadow-pop: 0 8px 24px -8px rgb(16 16 20 / 0.16), 0 0 0 1px rgb(16 16 20 / 0.06);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  /* 深色下關閉次像素抗鋸齒,細字重才不會顯得糊(dev tool 標準作法) */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/*
+ * M5 Round B(任務2,響應式):App.tsx 根容器改用 `.app-shell` 取代原本的
+ * `h-screen`(= 100vh)。行動裝置(尤其 iOS Safari)彈出虛擬鍵盤時,`100vh`
+ * 不會跟著可視區域縮小,會讓底部的聊天輸入框被鍵盤蓋住而看不到、也捲不到。
+ * `100dvh`(dynamic viewport height)會隨鍵盤彈出/收起即時調整。用
+ * `@supports` 保留 `100vh` 當 fallback。
+ */
+.app-shell {
+  height: 100vh;
+}
+@supports (height: 100dvh) {
+  .app-shell {
+    height: 100dvh;
+  }
+}
+
+/* ---- 捲軸:細、無軌道、hover 才明顯(不搶視覺層級)---- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgb(var(--c-line-strong) / 0.7);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(var(--c-fg-faint) / 0.8);
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background-color: transparent;
+}
+
+::selection {
+  background-color: rgb(var(--c-accent) / 0.28);
+}
+
+/* ---- 表單元件的原生外觀對齊主題 ---- */
+input,
+textarea,
+select,
+button {
+  font: inherit;
+  color: inherit;
+}
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: rgb(var(--c-accent));
+}
+select option {
+  background-color: rgb(var(--c-surface));
+  color: rgb(var(--c-fg));
+}
+
+@layer components {
+  /*
+   * 統一的鍵盤焦點環:滑鼠點擊不出現(focus-visible),鍵盤操作一定看得到
+   * ——「鍵盤優先操作」的前提是焦點永遠可見。
+   */
+  .focus-ring {
+    @apply outline-none ring-offset-0 focus-visible:ring-2 focus-visible:ring-accent/55;
+  }
+
+  /* 數字對齊(用量/成本/計數等會跳動的數字不要抖) */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 密集列表的分隔線(取代「每列都畫一個框」) */
+  .divide-rows > * + * {
+    border-top: 1px solid rgb(var(--c-line-subtle));
+  }
+}
+
+@layer utilities {
+  /* 可捲動區域的漸層遮罩提示(內容還有更多時上緣淡出) */
+  .mask-fade-top {
+    mask-image: linear-gradient(to bottom, transparent, black 12px);
+  }
+
+  /* 標題列/工具列不可被使用者選取(桌面 app 手感) */
+  .select-chrome {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+/* 尊重「減少動態效果」的系統設定 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
