@@ -25,6 +25,7 @@ import {
   type CostGetSummaryResult,
   AdapterCapabilitiesResultSchema,
   BUILTIN_PROVIDERS,
+  CLAUDE_MODEL_ALIASES,
   ConfigGetEffectiveResultSchema,
   ConfigSetFileResultSchema,
   CostGetSummaryResultSchema,
@@ -32,7 +33,7 @@ import {
   EnforcementNotificationPushSchema,
   formatEnforcementNotificationText,
   GatewayCapabilitiesResultSchema,
-  KNOWN_CLAUDE_MODELS,
+  mergeModelsById,
   ProfileCreateResultSchema,
   ProfileListResultSchema,
   resolveCapabilitySupport,
@@ -116,8 +117,9 @@ interface SessionStoreState {
   /** M5 Round D:`env.detectAgents` 的偵測結果快取(見 SettingsDialog.tsx、
    * ChatView.tsx 的 ModelControl)。初始為空陣列(尚未偵測過),`connect()`
    * 時會 fire-and-forget 呼叫一次 `detectAgents()`,失敗時維持空陣列 ——
-   * 讀取端(ChatView 的 model 下拉)遇到空陣列會安全地退回
-   * `KNOWN_CLAUDE_MODELS`,不阻塞任何畫面。 */
+   * 讀取端(ChatView 的 model 下拉,見 `selectEnabledClaudeModels()`)遇到
+   * 空陣列會安全地顯示「目前沒有可選 model」,不阻塞任何畫面、也不會拿一份
+   * 寫死的舊清單充數。 */
   detectedAgents: AgentDetectionEntry[];
   detectingAgents: boolean;
   /**
@@ -340,14 +342,32 @@ function appendTerminalData(sessionId: string, data: string): void {
  * `ModelControl`(對話中切換 model)都必須呼叫這個 selector,不要各自實作
  * 一份判斷邏輯,否則兩處對「設定改了之後該顯示哪些 model」的認知會漂移。
  *
- * 語意:`enabledModelIds` 空陣列時視為「全部啟用」,回傳完整的
- * `KNOWN_CLAUDE_MODELS`;非空時只回傳交集(依 `KNOWN_CLAUDE_MODELS` 原本的
- * 順序,忽略 `enabledModelIds` 內任何不存在於已知清單的 id)。
+ * 這輪起**不再讀寫死的 `KNOWN_CLAUDE_MODELS`**(該清單會隨 Anthropic 發布新
+ * model/棄用舊 model 而過時,見 apps/core/src/detect/agent-detector.ts
+ * `detectClaudeAgentSdk()` 同一輪的理由)——改讀 `detectedAgents` 裡
+ * `key==="claude-agent-sdk"` 這筆的 `models`(即時查詢 Anthropic Models API
+ * 拿到的清單,查不到就是空陣列,見該函式的 fail-soft 設計)。
+ *
+ * 語意:`enabledModelIds` 空陣列時視為「全部啟用」,回傳偵測到的完整清單;
+ * 非空時只回傳交集(依偵測清單原本的順序,忽略 `enabledModelIds` 內任何不
+ * 存在於偵測清單的 id)。
+ *
+ * 這輪起:即時查詢清單(`sdkEntry?.models`)之上疊了 `CLAUDE_MODEL_ALIASES`
+ * 當底線(見 known-models.ts 的檔案註解——這些是 claude CLI/SDK 原生支援、
+ * 永遠指向「目前最新版」的別名,不是會過期的日期快照 model ID)。沒有
+ * `ANTHROPIC_API_KEY`(只用 `claude login` 本機登入)時即時查詢必定拿不到
+ * 清單,過去這裡會直接回傳空陣列、選單完全空白;現在至少還有這幾個別名可
+ * 選。真的查得到即時清單時,即時清單附加在別名之後(`mergeModelsById` 以
+ * id 去重,別名的 id 如 "opus" 不會跟即時清單的日期快照 id 撞名,兩者並存,
+ * 不互相覆蓋)。
  */
-export function selectEnabledClaudeModels(enabledModelIds: string[]): KnownClaudeModel[] {
-  if (enabledModelIds.length === 0) return KNOWN_CLAUDE_MODELS;
+export function selectEnabledClaudeModels(detectedAgents: AgentDetectionEntry[], enabledModelIds: string[]): KnownClaudeModel[] {
+  const sdkEntry = detectedAgents.find((a) => a.key === "claude-agent-sdk");
+  const detected = sdkEntry?.models ?? [];
+  const withAliasFloor = mergeModelsById(CLAUDE_MODEL_ALIASES, detected);
+  if (enabledModelIds.length === 0) return withAliasFloor;
   const enabled = new Set(enabledModelIds);
-  return KNOWN_CLAUDE_MODELS.filter((m) => enabled.has(m.id));
+  return withAliasFloor.filter((m) => enabled.has(m.id));
 }
 
 /**
@@ -391,7 +411,7 @@ export function selectProviderModels(
     const provider = resolved.find((p) => p.id === profile.providerId);
     if (provider) return provider.models;
   }
-  if (profile.software === "claude-agent-sdk") return selectEnabledClaudeModels(enabledModelIds);
+  if (profile.software === "claude-agent-sdk") return selectEnabledClaudeModels(detectedAgents, enabledModelIds);
   return [];
 }
 
@@ -584,8 +604,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       set({ detectedAgents: agents });
     } catch {
       // 尚未連線/RPC 失敗:保留舊值(通常是初始的空陣列),讀取端(ChatView
-      // 的 model 下拉、SettingsDialog)遇到空陣列會安全地退回 KNOWN_CLAUDE_MODELS
-      // 或顯示「尚未偵測」,不阻塞畫面。
+      // 的 model 下拉、SettingsDialog)遇到空陣列會安全地顯示「目前沒有可選
+      // model」或「尚未偵測」,不阻塞畫面,也不會拿一份寫死的舊清單充數。
     } finally {
       set({ detectingAgents: false });
     }
@@ -745,7 +765,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       set({ enabledModelIds });
     } catch {
       // 尚未連線/RPC 失敗:保留舊值(初始為空陣列 = 全部啟用),讀取端
-      // (selectEnabledClaudeModels)會安全地退回顯示 KNOWN_CLAUDE_MODELS 全部。
+      // (selectEnabledClaudeModels)會安全地退回顯示偵測到的清單全部
+      // (detectedAgents 內 claude-agent-sdk 的 models,可能是空陣列)。
     }
   },
 

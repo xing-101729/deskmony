@@ -185,14 +185,16 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   /**
    * M5 Round E 新增:「設定」介面的「啟用哪些偵測到的 model」偏好(見
    * apps/core/src/settings/settings-store.ts 的 `SettingsStore`)。目前唯一
-   * 適用的偵測項是 `claude-agent-sdk`(models = KNOWN_CLAUDE_MODELS)——其餘
-   * software 的 model 由外部工具自管,沒有「啟用/停用」的概念。
+   * 適用的偵測項是 `claude-agent-sdk`(models = 即時查詢 Anthropic Models API
+   * 拿到的清單,查不到就是空陣列,見 agent-detector.ts 的
+   * `detectClaudeAgentSdk()`)——其餘 software 的 model 由外部工具自管,沒有
+   * 「啟用/停用」的概念。
    *
    * 語意約定(務必與 SettingsGetEnabledModelsResultSchema 的註解保持一致):
    * **空陣列 = 全部啟用**。未曾呼叫過 `settings.setEnabledModels` 時,
    * `getEnabledModels` 回傳空陣列,呼叫端(ProfileCreateDialog/ChatView)
-   * 一律把「空陣列」解讀為「沒有限制,顯示 KNOWN_CLAUDE_MODELS 全部」,而不是
-   * 「一個都不啟用」——這樣預設值(尚未進過設定頁面)才會是「所有已知
+   * 一律把「空陣列」解讀為「沒有限制,顯示偵測到的 model 全部」,而不是
+   * 「一個都不啟用」——這樣預設值(尚未進過設定頁面)才會是「目前查得到的
    * model 都可以選」,符合使用者的直覺。
    */
   z.object({ ...baseRequest, method: z.literal("settings.getEnabledModels"), params: z.object({}).default({}) }),

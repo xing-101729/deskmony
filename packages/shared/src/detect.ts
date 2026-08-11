@@ -16,8 +16,10 @@ import { AgentSoftwareSchema } from "./agent-profile.js";
 /**
  * 一個 agent 軟體回報的單一可用 model。與 `known-models.ts` 的
  * `KnownClaudeModel` 同構(id/label),這裡獨立定義是因為這份型別要涵蓋
- * 所有 agent 軟體(不只 Claude)—— `claude-agent-sdk` 這個偵測項目直接把
- * `KNOWN_CLAUDE_MODELS` 的內容塞進 `models` 欄位(欄位剛好一致,不需要轉換)。
+ * 所有 agent 軟體(不只 Claude)—— `claude-agent-sdk` 這個偵測項目把
+ * Anthropic Models API 動態查到的清單(查不到就是空陣列)塞進 `models`
+ * 欄位(欄位剛好一致,不需要轉換),見 agent-detector.ts 的
+ * `detectClaudeAgentSdk()`。
  */
 export const DetectedModelSchema = z.object({
   id: z.string(),

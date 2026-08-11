@@ -12,6 +12,7 @@
     "clean": "rimraf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.112.3",
     "@deskmony/adapters": "workspace:*",
     "@deskmony/db": "workspace:*",
     "@deskmony/shared": "workspace:*",

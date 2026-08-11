@@ -23,6 +23,9 @@ importers:
 
   apps/core:
     dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.112.3
+        version: 0.112.3(zod@3.25.76)
       '@deskmony/adapters':
         specifier: workspace:*
         version: link:../../packages/adapters

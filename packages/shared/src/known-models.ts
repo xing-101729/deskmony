@@ -1,25 +1,13 @@
 /**
- * KNOWN_CLAUDE_MODELS(M5 Round C):UI 建立/切換 model 時可選的已知 Claude
- * model 清單,集中定義在這裡,供 desktop UI(ProfileCreateDialog 未來若要
- * 選 model、ChatView 的「切換 model」下拉選單)與未來 Round B 的模型偵測
- * 功能共用,不在各處各自硬編一份會漂移的清單。
+ * KnownClaudeModel:一個 Claude model 的 id/label 形狀,供
+ * `session.setModel` 下拉選單、`ChatView` 的「切換 model」控制項共用型別。
  *
- * ID 來源與格式(讀取 node_modules 內 `@anthropic-ai/claude-agent-sdk` 的
- * `sdk.d.ts` 後確認,見 `packages/adapters/src/claude-sdk-adapter.ts` 頂端
- * 對接策略註解的延伸調查):
- *   - `Options.model?: string` 的官方註解逐字寫著
- *     `Examples: 'claude-sonnet-5', 'claude-opus-4-8', 'claude-fable-5'`
- *     —— 這裡的 id 直接採用這份 SDK 型別定義檔本身給出的完整 model ID,
- *     不臆測、不外加任何日期尾碼(SDK 註解也沒有帶日期尾碼)。
- *   - SDK 另外在 `AgentDefinition.model`/`AgentInfo.model` 允許簡短 alias
- *     (`'opus'`/`'sonnet'`/`'haiku'`/`'fable'`),但 `Query.setModel()`/
- *     `query({ options: { model } })` 兩處都只在註解舉例完整 ID —— 這裡的
- *     `id` 一律使用完整 ID(避免 alias 在多次呼叫之間指向不同真實模型版本的
- *     歧義),`label` 則是給 UI 顯示用的中文友善名稱。
- *
- * 用途:
- *   - `session.setModel` 的下拉選單選項(`value = id`)。
- *   - 未來若要在 UI 顯示目前 model 的友善名稱,可用 `id` 反查 `label`。
+ * 這輪起**移除**了原本寫死在這裡的 `KNOWN_CLAUDE_MODELS` 清單——那份清單
+ * 會隨 Anthropic 發布新 model/棄用舊 model 而過時,顯示過時清單比完全不顯示
+ * 更容易誤導使用者。實際可選的 model 清單改為即時查詢 Anthropic 官方 Models
+ * API 取得(見 `apps/core/src/detect/agent-detector.ts` 的
+ * `detectClaudeAgentSdk()`/`detectClaudeModelsFromApi()`),查不到就是空
+ * 陣列 + 說明原因,不再有寫死的清單可以退回。
  */
 export interface KnownClaudeModel {
   /** 完整 model ID,直接對應 SDK `Options.model`/`Query.setModel()` 接受的字串。 */
@@ -28,13 +16,30 @@ export interface KnownClaudeModel {
   label: string;
 }
 
-export const KNOWN_CLAUDE_MODELS: KnownClaudeModel[] = [
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
-  { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
-  { id: "claude-fable-5", label: "Claude Fable 5" },
-  { id: "claude-opus-4-7", label: "Claude Opus 4.7(舊版)" },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6(舊版)" },
+/**
+ * CLAUDE_MODEL_ALIASES:claude CLI/Agent SDK 原生支援的「別名」
+ * (`claude --model <alias>`,例如 `opus`/`sonnet`),不是特定日期的 model
+ * 快照 ID——這是刻意跟上面「移除 KNOWN_CLAUDE_MODELS」的理由分開處理的例外:
+ * 別名的語意就是「目前最新的那一版」,由 Anthropic 官方保證永遠指向現行
+ * model,不會像具體 model ID 那樣過時,所以不違反這個檔案「不留可能過期清單」
+ * 的原則(見上方 `KnownClaudeModel` 的檔案註解)。
+ *
+ * 用途:`ANTHROPIC_API_KEY` 不存在(例如只用 `claude login` 本機登入)時,
+ * `apps/core/src/detect/agent-detector.ts` 的 `detectClaudeAgentSdk()` 沒辦法
+ * 查 Anthropic Models API 拿到即時清單——這時候別名是唯一「不用猜、也不會
+ * 過期」的退路,讓 model 選單至少有東西可選,而不是完全空白(見
+ * `resolve-providers.ts`/`session-store.ts` 的 `selectEnabledClaudeModels()`
+ * 如何把這份清單當作「底線」跟即時查詢結果合併)。
+ *
+ * 這份清單只收「已經在這台開發機上用 `claude --model <alias> -p ...`
+ * 實測過、CLI 回應沒有出現『There's an issue with the selected model』錯誤」
+ * 的別名——不是憑印象猜的。
+ */
+export const CLAUDE_MODEL_ALIASES: KnownClaudeModel[] = [
+  { id: "opus", label: "Opus(別名,自動對應目前最新版)" },
+  { id: "sonnet", label: "Sonnet(別名,自動對應目前最新版)" },
+  { id: "haiku", label: "Haiku(別名,自動對應目前最新版)" },
+  { id: "fable", label: "Fable(別名,自動對應目前最新版)" },
 ];
 
 /**

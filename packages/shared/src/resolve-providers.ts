@@ -52,7 +52,7 @@ export interface ResolvedProvider {
 /** 以 model id 去重合併,`extra`(使用者的 additionalModels)優先——出現在
  *  `base` 裡的 id 會被 `extra` 同 id 項目就地覆寫(保留原本在陣列中的位置,
  *  不是移到最後),`extra` 裡不存在於 `base` 的新 id 附加在陣列尾端。 */
-function mergeModelsById(base: ProviderModel[], extra: ProviderModel[] | undefined): ProviderModel[] {
+export function mergeModelsById(base: ProviderModel[], extra: ProviderModel[] | undefined): ProviderModel[] {
   if (!extra || extra.length === 0) return base;
   const map = new Map(base.map((m) => [m.id, m] as const));
   for (const model of extra) {

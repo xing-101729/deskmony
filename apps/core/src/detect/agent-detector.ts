@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
-import { KNOWN_CLAUDE_MODELS, type AgentDetectionEntry, type AgentSoftware, type DetectedModel } from "@deskmony/shared";
+import Anthropic from "@anthropic-ai/sdk";
+import { type AgentDetectionEntry, type AgentSoftware, type DetectedModel } from "@deskmony/shared";
 
 /**
  * agent-detector.ts(M5 Round D 新增):偵測本機裝了哪些已知 agent CLI(以及
@@ -38,13 +39,32 @@ import { KNOWN_CLAUDE_MODELS, type AgentDetectionEntry, type AgentSoftware, type
  *    確保任何一個探測卡住都不會拖垨整個 `detectAllAgents()`(內部用
  *    `Promise.all` 平行探測,單一項目最壞情況 ~2 個逾時週期,不會被其他
  *    項目的逾時拖著排隊)。
- * 4. **model 偵測務實降級**:只有 `claude-agent-sdk`(內嵌,直接用
- *    `KNOWN_CLAUDE_MODELS`)有結構化 model 清單;各外部 CLI 只做「安裝與否
- *    + 版本」,`models` 回空陣列 + `modelsNote` 說明「模型由該工具自行管理」
- *    ——不臆測、不嘗試跑任何可能互動式/昂貴的「列出 model」指令。
+ * 4. **model 偵測務實降級**:`claude-agent-sdk`(內嵌)有 `ANTHROPIC_API_KEY`
+ *    時會呼叫 Anthropic 官方 Models API(`GET /v1/models`,見下方
+ *    `detectClaudeModelsFromApi()`)動態列出真正可用的清單;沒有金鑰或查詢
+ *    失敗一律回空陣列 + `modelsNote` 說明原因(**不**內建任何寫死的 model
+ *    清單當退路——舊清單會隨 Anthropic 發布新 model/棄用舊 model 而過時,
+ *    顯示過時清單比完全不顯示更容易誤導使用者)。各外部 CLI 除了
+ *    `opencode`(見 `modelsCommandArgs`)以外只做「安裝與否 + 版本」,`models`
+ *    回空陣列 + `modelsNote` 說明「模型由該工具自行管理」——不臆測、不嘗試跑
+ *    任何可能互動式/昂貴的「列出 model」指令。
  */
 
 const PROBE_TIMEOUT_MS = 3_000;
+
+/** Anthropic Models API(`client.models.list()`)逾時——單純一次 HTTPS 請求,
+ *  不像 `opencode models` 需要啟動整個 CLI process,5 秒對正常網路狀況綽綽
+ *  有餘;逾時/任何錯誤一律 fail-soft 回空陣列(見 `detectClaudeModelsFromApi()`),
+ *  不影響 `detectAllAgents()` 其餘偵測項目。 */
+const CLAUDE_MODELS_API_TIMEOUT_MS = 5_000;
+
+/** 「列出 model」子命令(目前只有 `opencode models`)實測比 `--version` 慢得多
+ *  ——本機實測透過 `shell:true`(.cmd shim)跑一次要 4~5 秒,3000ms 的
+ *  `PROBE_TIMEOUT_MS` 幾乎每次都會在拿到結果前把它殺掉,導致 `models` 靜默
+ *  退回空陣列、UI 上完全不會出現 model 選單,而且沒有任何錯誤訊息可看
+ *  (fail-soft 設計吞掉了逾時)。獨立開一個較長的逾時,只套用在
+ *  `runModelsCommand()`,不影響 `--version` 探測的既有 3000ms 節奏。 */
+const MODELS_PROBE_TIMEOUT_MS = 10_000;
 
 /** Windows 上 `where` 可能列出同名但不可直接執行的候選(例如 npm 同時安裝了
  *  一個無副檔名的 unix shell script 版本),依這個優先順序挑一個「Node 在
@@ -138,19 +158,21 @@ function quoteForShell(value: string): string {
  * 對已解析出的完整路徑跑一個「列出模型」子命令(目前只有 opencode 的
  * `opencode models` 用得到,見下方 AllowlistEntry.modelsCommandArgs)——與
  * `runVersionCommand()` 共用一模一樣的安全前提與執行方式(同一個
- * `execFile`,同一個 `PROBE_TIMEOUT_MS` 逾時,同一套 Windows shim 判斷/
- * quoting),只是拿到 stdout 之後改用 `parseModelsOutput()` 解析,而不是
- * `extractVersion()`。任何錯誤(執行失敗、逾時、找不到子命令)一律 resolve
- * 空陣列,絕不 throw——呼叫端(`detectExternalCli()`)才能在「模型偵測失敗」
- * 時優雅降級回 `modelsNote` 說明,不影響其餘偵測項目或整條 `detectAllAgents()`
- * pipeline(比照 class 頂端註解第3點「每次探測都有逾時」的既有紀律)。
+ * `execFile`,同一套 Windows shim 判斷/quoting),只是逾時改用較長的
+ * `MODELS_PROBE_TIMEOUT_MS`(見該常數註解:實測列 model 比 `--version` 慢
+ * 得多,沿用 3000ms 會幾乎每次都被殺掉),拿到 stdout 之後改用
+ * `parseModelsOutput()` 解析,而不是 `extractVersion()`。任何錯誤(執行失敗、
+ * 逾時、找不到子命令)一律 resolve 空陣列,絕不 throw——呼叫端
+ * (`detectExternalCli()`)才能在「模型偵測失敗」時優雅降級回 `modelsNote`
+ * 說明,不影響其餘偵測項目或整條 `detectAllAgents()` pipeline(比照 class
+ * 頂端註解第3點「每次探測都有逾時」的既有紀律)。
  */
 function runModelsCommand(resolvedPath: string, args: string[]): Promise<DetectedModel[]> {
   return new Promise((resolve) => {
     const ext = path.extname(resolvedPath).toLowerCase();
     const needsShell = process.platform === "win32" && (ext === ".cmd" || ext === ".bat");
     const file = needsShell ? quoteForShell(resolvedPath) : resolvedPath;
-    execFile(file, args, { timeout: PROBE_TIMEOUT_MS, shell: needsShell }, (error, stdout) => {
+    execFile(file, args, { timeout: MODELS_PROBE_TIMEOUT_MS, shell: needsShell }, (error, stdout) => {
       if (error) {
         resolve([]);
         return;
@@ -296,6 +318,29 @@ async function detectExternalCli(entry: AllowlistEntry): Promise<AgentDetectionE
 }
 
 /**
+ * 呼叫 Anthropic 官方 Models API(`GET /v1/models`,SDK 方法是
+ * `client.models.list()`,見 node_modules 內
+ * `@anthropic-ai/sdk/resources/models.d.ts`——`ModelInfo` 有 `id`/`display_name`
+ * 兩個欄位剛好對應 `DetectedModel` 的 `id`/`label`,不需要轉換格式)動態列出
+ * 這把 API 金鑰真正能用的 model 清單(官方文件:「More recently released
+ * models are listed first」)。只取第一頁(`list()` 預設分頁上限通常遠大於
+ * 目前 Anthropic 對外發布的 model 數量,不為了理論上的完整性去走多頁,保持
+ * 這裡簡單)。任何錯誤(金鑰無效、逾時、網路問題)一律 resolve `undefined`,
+ * 絕不 throw——呼叫端 `detectClaudeAgentSdk()` 才能安全地退回空陣列 +
+ * `modelsNote` 說明(比照 `runModelsCommand()` 的既有 fail-soft 紀律)。
+ */
+async function detectClaudeModelsFromApi(apiKey: string): Promise<DetectedModel[] | undefined> {
+  try {
+    const client = new Anthropic({ apiKey, timeout: CLAUDE_MODELS_API_TIMEOUT_MS, maxRetries: 0 });
+    const page = await client.models.list();
+    const models = page.data.map((m) => ({ id: m.id, label: m.display_name }));
+    return models.length > 0 ? models : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 「Claude Agent SDK(內嵌)」這個特殊項:不是外部 CLI,是隨 apps/core 一起
  * 安裝的內嵌 SDK,永遠 `installed: true`。可用性真正的關鍵是「有沒有可用憑證」
  * ——這裡採用保守、不會誤報的判斷:只檢查 `ANTHROPIC_API_KEY` 環境變數是否
@@ -303,15 +348,36 @@ async function detectExternalCli(entry: AllowlistEntry): Promise<AgentDetectionE
  * 儲存格式/位置(不同版本/平台可能不同,沒有穩定公開的探測方式),與其猜測
  * 檔案位置冒著「誤報沒有其實有」或「誤報有其實沒有」的風險,不如老實回報
  * 「憑證狀態未知」——這正是需求明講的「拿不準就報『已內建,憑證狀態未知』」。
+ *
+ * model 清單:這輪起**移除**寫死的 `KNOWN_CLAUDE_MODELS` fallback(該清單會
+ * 隨 Anthropic 發布新 model/棄用舊 model 而過時,失去維護就是一份會誤導使用者
+ * 的舊清單,比完全不顯示更危險)——只有 `ANTHROPIC_API_KEY` 存在且
+ * `detectClaudeModelsFromApi()` 真的查得到資料時,`models` 才非空;其餘情況
+ * (沒有金鑰、查詢失敗/逾時)一律回空陣列 + `modelsNote` 如實說明原因,UI 端
+ * 因為 `models.length > 0` 才顯示選單的既有條件(見 ProfileCreateDialog.tsx)
+ * 會自然隱藏 model 選單,不會顯示任何過時資訊。刻意**不**在只有 `claude
+ * login`(無 API 金鑰、僅本機 CLI 登入)的情況下嘗試呼叫 Models API——沒有
+ * 金鑰可傳,呼叫只會確定失敗。
  */
-function detectClaudeAgentSdk(): AgentDetectionEntry {
-  const hasApiKey = Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+async function detectClaudeAgentSdk(): Promise<AgentDetectionEntry> {
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const hasApiKey = Boolean(apiKey);
+  const dynamicModels = apiKey ? await detectClaudeModelsFromApi(apiKey) : undefined;
+  const models = dynamicModels ?? [];
   return {
     key: "claude-agent-sdk",
     displayName: "Claude Agent SDK(內嵌)",
     software: "claude-agent-sdk",
     installed: true,
-    models: KNOWN_CLAUDE_MODELS.map((m) => ({ id: m.id, label: m.label })),
+    models,
+    // 有真的查到動態清單時不需要額外說明(比照 detectExternalCli() 對
+    // opencode 的既有處理);查不到時如實說明原因,不再有「內建已知清單」
+    // 這種退路可以說。
+    modelsNote: dynamicModels
+      ? undefined
+      : hasApiKey
+        ? "已偵測到 ANTHROPIC_API_KEY,但查詢 Anthropic Models API 失敗,暫時無法列出可用 model。"
+        : "未偵測到 ANTHROPIC_API_KEY,無法動態查詢可用 model 清單(若已用 `claude login` 完成本機登入,SDK 仍可正常運作,只是這裡列不出清單)。",
     credentialHint: hasApiKey
       ? "已偵測到 ANTHROPIC_API_KEY 環境變數。"
       : "已內建,憑證狀態未知(未偵測到 ANTHROPIC_API_KEY;若已用 `claude login` 完成本機登入,SDK 仍可正常運作)。",
@@ -326,6 +392,9 @@ function detectClaudeAgentSdk(): AgentDetectionEntry {
  * 「單一探測的兩次逾時週期」,不會隨 allowlist 項目數線性增加。
  */
 export async function detectAllAgents(): Promise<AgentDetectionEntry[]> {
-  const externalResults = await Promise.all(AGENT_ALLOWLIST.map((entry) => detectExternalCli(entry)));
-  return [detectClaudeAgentSdk(), ...externalResults];
+  const [claudeAgentSdk, externalResults] = await Promise.all([
+    detectClaudeAgentSdk(),
+    Promise.all(AGENT_ALLOWLIST.map((entry) => detectExternalCli(entry))),
+  ]);
+  return [claudeAgentSdk, ...externalResults];
 }

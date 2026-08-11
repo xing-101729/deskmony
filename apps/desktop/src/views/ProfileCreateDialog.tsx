@@ -71,6 +71,14 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
   const [workingDir, setWorkingDir] = useState(defaultWorkingDir);
   const [args, setArgs] = useState("");
   const [model, setModel] = useState("");
+  /** 只在 isSdkTarget 時有意義:每個 profile 各自選要用 `claude login` 的本機
+   *  登入憑證,還是這裡直接填一把 API key(存成這個 profile 的
+   *  `env.ANTHROPIC_API_KEY`)——見 handleSubmit() 怎麼把 apiKey 併進
+   *  buildEnv()。預設 "login" 是因為它不需要使用者額外提供任何東西就能動
+   *  (前提是本機已經 `claude login` 過),API key 是進階/多帳號情境才需要
+   *  的選項。 */
+  const [authMode, setAuthMode] = useState<"login" | "apikey">("login");
+  const [apiKey, setApiKey] = useState("");
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
   const [role, setRole] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -113,7 +121,14 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
 
   function buildEnv(): Record<string, string> | undefined {
     const entries = envRows.map((r) => [r.key.trim(), r.value] as const).filter(([key]) => key.length > 0);
-    return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+    const env = Object.fromEntries(entries);
+    // isSdkTarget 且選了「API Key」認證方式時,把這裡填的金鑰併進
+    // env.ANTHROPIC_API_KEY——放在下面的 envRows 之後 assign,讓這個欄位優先
+    // (使用者不需要在下方環境變數區再手動加一次同名的列)。
+    if (isSdkTarget && authMode === "apikey" && apiKey.trim()) {
+      env.ANTHROPIC_API_KEY = apiKey.trim();
+    }
+    return Object.keys(env).length > 0 ? env : undefined;
   }
 
   function resolveTarget():
@@ -131,7 +146,14 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
     if (selectedProvider.software !== "claude-agent-sdk" && !selectedProvider.command) {
       return { error: "找不到這個 CLI 的完整路徑(偵測不到 path),請改用「自訂…」手動輸入" };
     }
-    const combinedArgs = [...(selectedProvider.defaultArgs ?? []), ...(parseArgs(args) ?? [])];
+    // claude-cli(pty 直通)「支援 model 選擇」的實際做法:pty 建立後不能像
+    // SDK 一樣中途切換 model(見 packages/adapters/src/pty-adapter.ts 的
+    // setModel() 一律 throw),只能在建立當下把 `--model <別名>` 烤進固定的
+    // 啟動參數——見 provider-catalog.ts 的 claude-cli entry 註解。只對這個
+    // provider 特別處理,不是通用邏輯:其他 pty provider(codex/aider/自訂)
+    // 沒有 supportsModelSelection,不會有 model 值可烤。
+    const modelArgs = selectedProvider.id === "claude-cli" && model ? ["--model", model] : [];
+    const combinedArgs = [...(selectedProvider.defaultArgs ?? []), ...modelArgs, ...(parseArgs(args) ?? [])];
     return {
       software: selectedProvider.software,
       command: selectedProvider.command,
@@ -270,6 +292,32 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
             </div>
           )}
         </Field>
+
+        {isSdkTarget && (
+          <Field
+            label="認證方式"
+            hint={
+              authMode === "login"
+                ? "沿用本機 claude login 的登入憑證,這裡不需要填任何東西。Model 清單只會有固定的別名(opus/sonnet/haiku/fable),因為沒有 API key 沒辦法即時查詢完整清單。"
+                : "這裡填的金鑰只存成這個 profile 的 env.ANTHROPIC_API_KEY,不影響其他 profile,也不會寫進其他地方(見下方環境變數區的既有處理方式)。"
+            }
+          >
+            <Select value={authMode} onChange={(e) => setAuthMode(e.target.value as "login" | "apikey")}>
+              <option value="login">本機登入(claude login)</option>
+              <option value="apikey">API Key</option>
+            </Select>
+            {authMode === "apikey" && (
+              <Input
+                mono
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-ant-..."
+                className="mt-1.5"
+              />
+            )}
+          </Field>
+        )}
 
         {selectedProvider?.supportsModelSelection && selectedProvider.models.length > 0 && (
           <Field label="Model(選填)" hint="只列出「設定」介面啟用的 model(見設定 · Provider 管理);全部停用視為全部啟用。">

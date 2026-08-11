@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { KNOWN_CLAUDE_MODELS } from "./known-models.js";
+import { CLAUDE_MODEL_ALIASES } from "./known-models.js";
 
 /**
  * provider-catalog.ts(這輪新增):把「Paseo 的 provider 設計」——具名 provider
@@ -129,12 +129,21 @@ export const ProviderPrefsPatchInputSchema = ProviderPrefsSchema;
 export type ProviderPrefsPatchInput = z.infer<typeof ProviderPrefsPatchInputSchema>;
 
 /**
- * 內建 provider 目錄。`claude-agent-sdk` 的 `models` 直接把既有
- * `KNOWN_CLAUDE_MODELS`(見 known-models.ts)遷移過來,標記第一項為
- * `isDefault`——這是唯一「模型清單非空」的內建項,其餘外部 CLI 一律交由
- * `modelsNote`(見 detect.ts/agent-detector.ts)說明模型由該工具自管,
- * `models: []`(可用 provider 偏好的 `additionalModels` 補上已知清單,例如
- * Paseo 範例的 gemini `experimental-model`)。
+ * 內建 provider 目錄。`claude-agent-sdk` 的靜態 `models` 這輪起改成 `[]`——
+ * 不再把任何寫死的 model 清單放在這裡(原本的 `KNOWN_CLAUDE_MODELS`,見
+ * known-models.ts,已整個移除——那份清單會過時,顯示過時清單比完全不顯示更
+ * 容易誤導使用者)。實際可選的 model 清單完全來自
+ * `apps/core/src/detect/agent-detector.ts` 的 `detectClaudeAgentSdk()`:
+ * 有 `ANTHROPIC_API_KEY` 且查得到 Anthropic Models API 才非空,查不到就是
+ * 空陣列 + `modelsNote` 說明原因,不再有任何靜態清單可以退回。
+ * `resolveProviders()` 的 `mergeModelsById(entry.models, detected.models)`
+ * (見 resolve-providers.ts)在這裡的靜態 `models` 是 `[]` 時,等同直接採用
+ * 偵測結果——與下方 `opencode` 項目「靜態 `models: []`,實際清單由偵測結果
+ * 補上」的既有模式完全一致,不是這輪新發明的合併語意。其餘外部 CLI
+ * (`gemini`/`codex`/`aider`/`claude-cli`)一律交由 `modelsNote`(見
+ * detect.ts/agent-detector.ts)說明模型由該工具自管,`models: []`(可用
+ * provider 偏好的 `additionalModels` 補上已知清單,例如 Paseo 範例的 gemini
+ * `experimental-model`)。
  *
  * `software` 選擇的原則(呼應 agent-target.ts 既有的
  * `deriveDefaultAgentTarget()` 安全預設,但這裡刻意不呼叫該函式——provider
@@ -161,7 +170,11 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     description: "深度整合 Claude Code,內嵌 SDK 直接呼叫,不需要 spawn 任何子程序。",
     software: "claude-agent-sdk",
     detectKey: "claude-agent-sdk",
-    models: KNOWN_CLAUDE_MODELS.map((m, i) => ({ id: m.id, label: m.label, isDefault: i === 0 })),
+    // 靜態底線用穩定別名(見 known-models.ts 的 CLAUDE_MODEL_ALIASES 註解)
+    // ——沒有 ANTHROPIC_API_KEY(只用 claude login 本機登入)時即時查詢拿不到
+    // 清單,resolve-providers.ts 會把這份底線跟即時查詢結果合併,保證選單
+    // 永遠至少有這幾個別名可選,不會完全空白。
+    models: CLAUDE_MODEL_ALIASES,
     supportsModelSelection: true,
     order: 0,
   },
@@ -171,8 +184,13 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     description: "外部 claude 執行檔,以 PTY 直通對接。",
     software: "pty",
     detectKey: "claude-code-cli",
-    models: [],
-    supportsModelSelection: false,
+    // pty 是無結構化終端直通,建立後不能像 SDK 一樣中途切換 model(見
+    // packages/adapters/src/pty-adapter.ts 的 setModel() 一律 throw)——這裡的
+    // 「支援 model 選擇」意思是「建立 profile 時把 --model <別名> 烤進固定的
+    // 啟動參數」(見 ProfileCreateDialog.tsx 的 resolveTarget()),不是隨時可
+    // 切換。底層是同一支 claude 執行檔,同樣的別名清單直接適用。
+    models: CLAUDE_MODEL_ALIASES,
+    supportsModelSelection: true,
     order: 10,
   },
   {

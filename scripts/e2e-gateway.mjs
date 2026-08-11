@@ -3271,15 +3271,17 @@ async function detectAgentsGatewaySmokeTest(client) {
       `agents=${JSON.stringify(agents)}`,
     );
 
+    // claude-agent-sdk 這輪起移除了寫死的 KNOWN_CLAUDE_MODELS fallback(見
+    // agent-detector.ts detectClaudeAgentSdk() 註解:舊清單會過時、比不顯示
+    // 更容易誤導使用者)——models 是否非空完全取決於這台跑 e2e 的機器有沒有
+    // 設定 ANTHROPIC_API_KEY 且能成功查到 Anthropic Models API,不是決定性
+    // 行為,不能再斷言 `models.length > 0`。改成只斷言結構本身(一定存在、
+    // installed=true、models 一定是陣列),models 是否有內容不斷言。
     const sdkEntry = agents.find((a) => a.key === "claude-agent-sdk");
     const sdkOk =
-      Boolean(sdkEntry) &&
-      sdkEntry.software === "claude-agent-sdk" &&
-      sdkEntry.installed === true &&
-      Array.isArray(sdkEntry.models) &&
-      sdkEntry.models.length > 0;
+      Boolean(sdkEntry) && sdkEntry.software === "claude-agent-sdk" && sdkEntry.installed === true && Array.isArray(sdkEntry.models);
     record(
-      "步驟21e env.detectAgents 一定包含 claude-agent-sdk 內嵌項(installed=true,models 非空,不依賴任何外部 CLI)",
+      "步驟21e env.detectAgents 一定包含 claude-agent-sdk 內嵌項(installed=true,models 是陣列,不依賴任何外部 CLI;是否非空視本機是否有 ANTHROPIC_API_KEY 而定,不斷言)",
       sdkOk,
       `sdkEntry=${JSON.stringify(sdkEntry)}`,
     );
@@ -3576,8 +3578,24 @@ async function resolveProvidersSmokeTest() {
     record("步驟25a BUILTIN_PROVIDERS software 皆已註冊", false, String(err));
   }
 
+  // claude-agent-sdk/claude-cli 這輪起 BUILTIN_PROVIDERS 的靜態 models 改成
+  // CLAUDE_MODEL_ALIASES(opus/sonnet/haiku/fable 這幾個 claude CLI/SDK 原生
+  // 支援、永遠指向「目前最新版」的別名,見 known-models.ts 該常數的完整理由
+  // ——跟先前移除的 KNOWN_CLAUDE_MODELS 日期快照清單不是同一回事,不會過
+  // 期),不再是 `[]`;這裡的 fixture 額外用兩個假 model 模擬「偵測到一份
+  // 即時清單,合併在別名之後」,下方 25h/25i 用 baselineSdkModels(靜態別名
+  // + fixture 偵測結果合併後的清單)當比對基準,不假設任何固定筆數。
   const fixtureDetection = [
-    { key: "claude-agent-sdk", displayName: "SDK", software: "claude-agent-sdk", installed: true, models: [] },
+    {
+      key: "claude-agent-sdk",
+      displayName: "SDK",
+      software: "claude-agent-sdk",
+      installed: true,
+      models: [
+        { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
+        { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+      ],
+    },
     {
       key: "claude-code-cli",
       displayName: "Claude Code CLI",
@@ -3592,6 +3610,14 @@ async function resolveProvidersSmokeTest() {
     { key: "codex-cli", displayName: "Codex CLI", software: "codex", installed: true, path: "C:\\fake\\codex.exe", models: [] },
     { key: "aider-cli", displayName: "Aider", software: "pty", installed: false, models: [] },
   ];
+
+  // claude-agent-sdk 的「沒有使用者偏好時的基礎 model 清單」——靜態目錄本身是
+  // CLAUDE_MODEL_ALIASES(見 provider-catalog.ts 該項註解),跟偵測結果
+  // (fixtureDetection)以 id 去重合併(別名在前,偵測到的即時清單附加在
+  // 後)。25h/25i 都要用這份基準做比對,在這裡算一次共用。
+  const baselineSdkModels = resolveProviders(BUILTIN_PROVIDERS, fixtureDetection, {}).find(
+    (p) => p.id === "claude-agent-sdk",
+  ).models;
 
   // ---- 25b: 沒有任何使用者偏好時,resolveProviders() 的輸出一定也只會是
   //           已註冊四種之一(對整個合併輸出再次套用同一條規則,而不只是
@@ -3687,9 +3713,13 @@ async function resolveProvidersSmokeTest() {
   // ---- 25h: additionalModels 合併(以 id 去重,使用者定義優先;既有 id 原地
   //           覆寫、新 id 附加在尾端;defaultModelId 隨新的 isDefault 標記
   //           移動)----
+  //           注意:claude-agent-sdk 的「基礎」model 清單是 BUILTIN_PROVIDERS
+  //           靜態的 CLAUDE_MODEL_ALIASES 跟 fixtureDetection 合併後的結果
+  //          (見 provider-catalog.ts 該項註解),所以這裡先呼叫一次
+  //           resolveProviders(prefs={}) 拿「沒有使用者偏好時的基礎清單」當
+  //           作比對基準,不假設任何固定筆數/固定第一筆是哪個 id。
   try {
-    const claudeAgentSdkEntry = BUILTIN_PROVIDERS.find((p) => p.id === "claude-agent-sdk");
-    const firstBuiltinModelId = claudeAgentSdkEntry.models[0].id; // 目錄預設第一個(isDefault=true)
+    const firstBuiltinModelId = baselineSdkModels[0].id; // 偵測結果第一個(目前 fixture 沒標 isDefault,故取第一個)
     const prefs = {
       "claude-agent-sdk": {
         additionalModels: [
@@ -3700,7 +3730,7 @@ async function resolveProvidersSmokeTest() {
     };
     const resolved = resolveProviders(BUILTIN_PROVIDERS, fixtureDetection, prefs);
     const sdk = resolved.find((p) => p.id === "claude-agent-sdk");
-    const expectedLength = claudeAgentSdkEntry.models.length + 1; // 一個原地覆寫 + 一個新增
+    const expectedLength = baselineSdkModels.length + 1; // 一個原地覆寫 + 一個新增
     const overriddenModel = sdk.models.find((m) => m.id === firstBuiltinModelId);
     const newModelIndex = sdk.models.findIndex((m) => m.id === "brand-new-model");
     const overriddenIndex = sdk.models.findIndex((m) => m.id === firstBuiltinModelId);
@@ -3718,9 +3748,9 @@ async function resolveProvidersSmokeTest() {
   }
 
   // ---- 25i: enabledModelIds 過濾(空陣列/省略 = 全部啟用,非空則只保留交集)----
+  //           同 25h,基準清單改讀偵測結果(baselineSdkModels),不是靜態目錄。
   try {
-    const claudeAgentSdkEntry = BUILTIN_PROVIDERS.find((p) => p.id === "claude-agent-sdk");
-    const keepId = claudeAgentSdkEntry.models[1]?.id ?? claudeAgentSdkEntry.models[0].id;
+    const keepId = baselineSdkModels[1]?.id ?? baselineSdkModels[0].id;
     const prefsFiltered = { "claude-agent-sdk": { enabledModelIds: [keepId] } };
     const prefsEmpty = { "claude-agent-sdk": { enabledModelIds: [] } };
     const resolvedFiltered = resolveProviders(BUILTIN_PROVIDERS, fixtureDetection, prefsFiltered);
@@ -3731,8 +3761,8 @@ async function resolveProvidersSmokeTest() {
       "步驟25i enabledModelIds 非空時只保留交集,空陣列時等同全部啟用",
       sdkFiltered.models.length === 1 &&
         sdkFiltered.models[0].id === keepId &&
-        sdkEmpty.models.length === claudeAgentSdkEntry.models.length,
-      `sdkFiltered.models=${JSON.stringify(sdkFiltered.models)}, sdkEmpty.models.length=${sdkEmpty.models.length}, builtin.length=${claudeAgentSdkEntry.models.length}`,
+        sdkEmpty.models.length === baselineSdkModels.length,
+      `sdkFiltered.models=${JSON.stringify(sdkFiltered.models)}, sdkEmpty.models.length=${sdkEmpty.models.length}, baseline.length=${baselineSdkModels.length}`,
     );
   } catch (err) {
     record("步驟25i enabledModelIds 過濾", false, String(err));
