@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { AgentOverride } from "@deskmony/shared";
 import { client, useSessionStore } from "./stores/session-store.js";
 import { useTeamStore } from "./stores/team-store.js";
 import { useRecoveryStore } from "./stores/recovery-store.js";
@@ -114,17 +115,23 @@ export default function App(): JSX.Element {
 
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId);
 
-  const handleCreateSession = useCallback(async (): Promise<void> => {
-    const profile = selectedProfile ?? profiles[0];
-    if (!profile) return;
-    setCreatingSession(true);
-    try {
-      await createSession(profile.id, profile.workingDir, `對話 ${sessions.length + 1}`);
-      setViewMode("session");
-    } finally {
-      setCreatingSession(false);
-    }
-  }, [createSession, profiles, selectedProfile, sessions.length]);
+  /** agentOverride 選填——⌘N/命令面板呼叫時省略(維持既有「一鍵用目前 profile
+   *  建立」的快速路徑不變);SessionList 的「進階」揭露區展開並選了覆寫時,由
+   *  按鈕點擊那條路徑帶入,見該檔案 onCreateSession 的呼叫處。 */
+  const handleCreateSession = useCallback(
+    async (agentOverride?: AgentOverride): Promise<void> => {
+      const profile = selectedProfile ?? profiles[0];
+      if (!profile) return;
+      setCreatingSession(true);
+      try {
+        await createSession(profile.id, profile.workingDir, `對話 ${sessions.length + 1}`, undefined, agentOverride);
+        setViewMode("session");
+      } finally {
+        setCreatingSession(false);
+      }
+    },
+    [createSession, profiles, selectedProfile, sessions.length],
+  );
 
   const handleConnected = (url: string, token: string): void => {
     client.configure(url, token);
@@ -359,7 +366,7 @@ export default function App(): JSX.Element {
           connectionStatus={status}
           selectedProfileId={selectedProfileId}
           onSelectProfile={setSelectedProfileId}
-          onCreateSession={() => void handleCreateSession()}
+          onCreateSession={(override) => void handleCreateSession(override)}
           creatingSession={creatingSession}
           profileDialogOpen={profileDialogOpen}
           onSetProfileDialogOpen={setProfileDialogOpen}

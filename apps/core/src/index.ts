@@ -284,11 +284,19 @@ async function main(): Promise<void> {
   // 都已在上面建好,無循環依賴。
   const messageBus = new MessageBus(db, teamManager, sessionManager, profiles, taskService, config.messageBudget, auditLog, notifier);
   sessionManager.setTeamBus(messageBus);
-  // S12 Phase2 R2:注入 `spawn_subagent` 的 SubagentPort——子 session 一律沿用
-  // 父 session 自己的 profile(見 session-manager.ts 的 spawnChildFromTool())。與
+  // S12 Phase2 R2:注入 `spawn_subagent` 的 SubagentPort——子 session 預設沿用
+  // 父 session 自己的 profile,agent 也可以呼叫 list_profiles 查完可用選項後自行
+  // 指定別的 profile(見 session-manager.ts 的 spawnChildFromTool())。與
   // setTeamBus() 同一位置群組:SessionManager 已建好,正是能回頭注入的時機。
   claudeAdapter.setSubagentPort({
     spawnChild: (input) => sessionManager.spawnChildFromTool(input),
+    // listProfiles:只回傳 agent 決策需要的最小欄位,不把 env/mcpConfig 等可能
+    // 含密鑰的欄位送進 agent 的對話 context(見 SubagentPort.listProfiles() 的
+    // 介面註解)。
+    listProfiles: async () => {
+      const list = await profiles.list();
+      return list.map((p) => ({ id: p.id, name: p.name, software: p.software, model: p.model, role: p.role }));
+    },
   });
   // L4 §2「已知限制」的對稱補洞:core 啟動時重新計算每個 context 目前的訊息數,
   // 還原 trippedContexts——否則崩潰重啟會讓「這個 context 已經 trip」這個

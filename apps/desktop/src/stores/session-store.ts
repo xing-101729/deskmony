@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   type AdapterCapabilities,
   type AgentDetectionEntry,
+  type AgentOverride,
   type AgentProfile,
   type AgentSoftware,
   type CapabilitySupport,
@@ -166,7 +167,16 @@ interface SessionStoreState {
   connect: () => void;
   refreshProfiles: () => Promise<void>;
   refreshSessions: () => Promise<void>;
-  createSession: (agentProfileId: string, workingDir: string, title?: string, teamMemberId?: string) => Promise<void>;
+  /** 這輪新增最後一個選填參數 `agentOverride`——不落地新 profile,就這一次
+   *  建立臨時覆寫要用的 agent software/model(見 packages/shared/src/
+   *  session.ts 的 `AgentOverrideSchema` 註解)。 */
+  createSession: (
+    agentProfileId: string,
+    workingDir: string,
+    title?: string,
+    teamMemberId?: string,
+    agentOverride?: AgentOverride,
+  ) => Promise<void>;
   createProfile: (input: CreateAgentProfileInput) => Promise<AgentProfile>;
   selectSession: (sessionId: string) => Promise<void>;
   /**
@@ -186,9 +196,17 @@ interface SessionStoreState {
    * 打架或造成畫面閃爍。
    */
   deleteSession: (sessionId: string) => Promise<void>;
-  /** S12 Phase2 R3:從一個既有 session 開子 agent —— child 沿用父 session 的
-   *  agentProfileId(同 software/model)。呼叫既有 `session.spawnChild` RPC。 */
-  spawnChild: (parentSessionId: string, prompt: string, title?: string) => Promise<void>;
+  /** S12 Phase2 R3:從一個既有 session 開子 agent —— agentProfileId 由呼叫端
+   *  (SpawnChildDialog)指定,預設值是父 session 自己的 profile,但使用者可以
+   *  改選別的(這輪新增,不再寫死繼承)。呼叫既有 `session.spawnChild` RPC。
+   *  `agentOverride` 選填,語意同 `createSession()`。 */
+  spawnChild: (
+    parentSessionId: string,
+    prompt: string,
+    agentProfileId: string,
+    title?: string,
+    agentOverride?: AgentOverride,
+  ) => Promise<void>;
   sendPrompt: (text: string) => Promise<void>;
   /** 給 TerminalView 用:把一行原始文字寫進 pty session 的 stdin,不經過
    * ChatItem 時間軸(pty 不是回合制聊天,見 GenericPtyAdapter 的設計說明)。 */
@@ -611,8 +629,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     }
   },
 
-  createSession: async (agentProfileId, workingDir, title, teamMemberId) => {
-    const raw = await client.call("session.create", { agentProfileId, workingDir, title, teamMemberId });
+  createSession: async (agentProfileId, workingDir, title, teamMemberId, agentOverride) => {
+    const raw = await client.call("session.create", { agentProfileId, workingDir, title, teamMemberId, agentOverride });
     const { session } = SessionCreateResultSchema.parse(raw);
     set((state) => ({
       sessions: [...state.sessions, session],
@@ -622,14 +640,15 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void get().fetchCapabilities(session.adapterType);
   },
 
-  spawnChild: async (parentSessionId, prompt, title) => {
+  spawnChild: async (parentSessionId, prompt, agentProfileId, title, agentOverride) => {
     const parent = get().sessions.find((s) => s.id === parentSessionId);
     if (!parent) return;
     const raw = await client.call("session.spawnChild", {
       parentSessionId,
-      agentProfileId: parent.agentProfileId,
+      agentProfileId,
       prompt,
       title,
+      agentOverride,
     });
     const { session } = SessionCreateResultSchema.parse(raw);
     set((state) => ({

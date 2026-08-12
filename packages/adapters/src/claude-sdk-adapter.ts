@@ -18,7 +18,7 @@ import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Tea
 import { AsyncQueue } from "./async-queue.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 import { TEAM_BUS_MCP_SERVER_NAME, TEAM_BUS_TOOL_NAMES, createTeamBusMcpServer } from "./team-bus-mcp.js";
-import { SUBAGENT_MCP_SERVER_NAME, createSubagentMcpServer } from "./subagent-mcp.js";
+import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMcpServer } from "./subagent-mcp.js";
 
 /**
  * ClaudeAgentSdkAdapter — 使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` API
@@ -223,7 +223,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生(line 101),
       // 這裡閉包捕捉當作 parentSessionId,agent 無法覆寫。
       mcpServers[SUBAGENT_MCP_SERVER_NAME] = createSubagentMcpServer(this.subagentPort, handle.id);
-      // ⚠️ 刻意 **不** 把 spawn_subagent 放進 allowedTools —— 見 §4「權限」。
+      // list_profiles 是純查詢,自動放行;spawn_subagent 刻意 **不** 放進
+      // allowedTools —— 見 §4「權限」(會起子程序、燒 token,必須走權限彈窗)。
+      allowedTools.push(...SUBAGENT_ALLOWED_TOOL_NAMES);
     }
     if (Object.keys(mcpServers).length > 0) {
       options.mcpServers = mcpServers;

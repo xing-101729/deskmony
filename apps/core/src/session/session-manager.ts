@@ -8,6 +8,7 @@ import { sessions as sessionsTable, messages as messagesTable } from "@deskmony/
 import type { AdapterRegistry, AgentAdapter, AgentHandle, TeamSpawnContext } from "@deskmony/adapters";
 import type {
   AdapterCapabilities,
+  AgentOverride,
   AgentProfile,
   AgentSoftware,
   CreateSessionInput,
@@ -404,29 +405,37 @@ export class SessionManager extends EventEmitter {
       }
     }
 
+    // 這輪新增:agentOverride 有提供時,套用出一份「這次真正要拿去 spawn」的
+    // profile 形狀(不寫回 DB,base profile 記錄本身不變),見
+    // `applyAgentOverride()` 的完整說明。沒有 override 時原樣等於 profile。
+    const overriddenProfile = this.applyAgentOverride(profile, input.agentOverride);
+
     // S8(agent-lifecycle)L4 §3.2:env 合併 + `.deskmony/notes/` 確保存在 +
     // systemPrompt 附加「指路」段落,三件事都收斂到 `prepareSpawnProfile()`
     // (`performContextCheckpointRestart()` 的 respawn 路徑共用同一份邏輯,
     // 避免兩處各自维护一份而漂移)。
-    const effectiveProfile = await this.prepareSpawnProfile(profile, input.workingDir, member?.name ?? profile.name);
+    const effectiveProfile = await this.prepareSpawnProfile(overriddenProfile, input.workingDir, member?.name ?? profile.name);
 
-    const adapter = this.adapters.get(profile.software);
+    const adapter = this.adapters.get(overriddenProfile.software);
     const handle = await adapter.spawn(effectiveProfile, { path: input.workingDir }, teamContext);
 
     const now = Date.now();
     const session: Session = {
       id: handle.id,
       title: input.title ?? "新對話",
+      // agentProfileId 仍指回 base profile(provenance/permissionLevel 等的
+      // 權威來源不變),adapterType/model 則反映套用 override 之後的最終值。
       agentProfileId: profile.id,
-      adapterType: profile.software,
+      adapterType: overriddenProfile.software,
       status: "idle",
       workingDir: input.workingDir,
       createdAt: now,
       updatedAt: now,
       // M5 Round C:session 級別的 model 預設取自 profile.model(profile 本身
       // 沒設定時維持 undefined,不臆測一個預設值——UI fallback 顯示邏輯見
-      // packages/shared/src/session.ts 的 SessionSchema.model 註解)。
-      model: profile.model,
+      // packages/shared/src/session.ts 的 SessionSchema.model 註解)。這輪起
+      // 若有 agentOverride.model 則反映覆寫後的值(overriddenProfile.model)。
+      model: overriddenProfile.model,
       // S9:建立子 session 時帶入 parent id
       parentSessionId: input.parentSessionId,
     };
@@ -655,19 +664,30 @@ export class SessionManager extends EventEmitter {
       agentProfileId: input.agentProfileId,
       workingDir: input.workingDir ?? parent.workingDir,
       parentSessionId: input.parentSessionId,
+      agentOverride: input.agentOverride,
     });
     await this.sendPrompt(child.id, { text: input.prompt });
     return child;
   }
 
-  /** S12 Phase2 R2:給 `spawn_subagent` MCP 工具用——用父 session 自己的 profile
-   *  spawn 子 session。找不到父 session 時拋錯(工具端會把錯誤回給 agent)。 */
-  async spawnChildFromTool(input: { parentSessionId: string; prompt: string; title?: string }): Promise<{ childSessionId: string }> {
+  /** S12 Phase2 R2:給 `spawn_subagent` MCP 工具用——預設用父 session 自己的
+   *  profile spawn 子 session;agent 也可以透過 `list_profiles` 查詢後,自行指定
+   *  agentProfileId 改用別的 profile(這輪新增,讓 agent 能自己決定要不要換一個
+   *  profile,而不是永遠被迫繼承父 session)。agentProfileId 若指定但不存在,
+   *  沿用 `spawnChild()`→`createSession()` 既有的驗證,直接拋錯讓 agent 看到
+   *  明確訊息(不在這裡重複驗證)。找不到父 session 時也拋錯(工具端會把錯誤
+   *  回給 agent)。 */
+  async spawnChildFromTool(input: {
+    parentSessionId: string;
+    prompt: string;
+    title?: string;
+    agentProfileId?: string;
+  }): Promise<{ childSessionId: string }> {
     const parent = await this.getSession(input.parentSessionId);
     if (!parent) throw new Error(`找不到父 session: ${input.parentSessionId}`);
     const child = await this.spawnChild({
       parentSessionId: input.parentSessionId,
-      agentProfileId: parent.agentProfileId,
+      agentProfileId: input.agentProfileId ?? parent.agentProfileId,
       prompt: input.prompt,
       title: input.title,
     });
@@ -938,6 +958,41 @@ export class SessionManager extends EventEmitter {
    * (3) 在 systemPrompt 尾端附加「指路」段落(§3.2,**不是**取代原本的
    * systemPrompt,也**不**讀取筆記內容塞進去)。
    */
+  /**
+   * 這輪新增:套用 `CreateSessionInput.agentOverride`/`SpawnChildSessionInput.
+   * agentOverride`(見 packages/shared/src/session.ts 的 `AgentOverrideSchema`
+   * 註解)——回傳一份「這次真正要拿去 spawn」的 profile 形狀物件,**不**寫回
+   * DB(base profile 記錄本身不變,覆寫只影響這一次 spawn)。
+   *
+   *   - 沒有 override:原樣回傳 profile。
+   *   - override.software 省略:software 沒變,只換 model——acpConfig/
+   *     ptyConfig/opencodeConfig 沿用 profile 原本的(舊 config 仍然對得上
+   *     沒變的 software)。
+   *   - override.software 有提供且與 profile 原本不同:整批取代該 software
+   *     對應的那個 config 欄位(用 override.command/args),其餘兩個 config
+   *     欄位設回 undefined——避免 profile 原本 software 的舊 config 殘留在
+   *     錯的欄位裡造成混淆;此時要求 override.command 必須提供(除非新
+   *     software 是不需要 command 的 claude-agent-sdk),否則直接拋錯,不臆測
+   *     一個空字串 command 讓錯誤延後到 adapter.spawn() 才發作。
+   */
+  private applyAgentOverride(profile: AgentProfile, override: AgentOverride | undefined): AgentProfile {
+    if (!override) return profile;
+    const software = override.software ?? profile.software;
+    const softwareChanged = override.software !== undefined && override.software !== profile.software;
+    if (softwareChanged && software !== "claude-agent-sdk" && !override.command) {
+      throw new Error(`agentOverride.software="${software}" 需要一併提供 command`);
+    }
+    return {
+      ...profile,
+      software,
+      providerId: override.providerId ?? (softwareChanged ? undefined : profile.providerId),
+      model: override.model ?? profile.model,
+      acpConfig: software === "acp" ? (softwareChanged ? { command: override.command!, args: override.args } : profile.acpConfig) : undefined,
+      ptyConfig: software === "pty" ? (softwareChanged ? { command: override.command!, args: override.args } : profile.ptyConfig) : undefined,
+      opencodeConfig: software === "opencode" ? (softwareChanged ? { command: override.command! } : profile.opencodeConfig) : undefined,
+    };
+  }
+
   private async prepareSpawnProfile(profile: AgentProfile, workingDir: string, displayName: string): Promise<AgentProfile> {
     const providerEnv = profile.providerId ? await getProviderEnv(this.settingsStore, profile.providerId) : {};
     const mergedEnv = { ...providerEnv, ...profile.env };

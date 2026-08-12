@@ -81,6 +81,34 @@ export const SessionSchema = z.object({
 });
 export type Session = z.infer<typeof SessionSchema>;
 
+/**
+ * 這輪新增:建立 session 時,除了套用 agentProfile,也能就這一次建立臨時
+ * 覆寫要用的 agent software/model——不落地成新的 AgentProfile 記錄(profile
+ * 本身還是 permissionLevel/systemPrompt/env/workingDir 的權威來源),純粹是
+ * 「這次 spawn 用這個 software/model 而不是 profile 原本設定的那個」。
+ *
+ * 語意刻意設計成「部分覆寫、以 software 是否提供分流」(見
+ * apps/core/src/session/session-manager.ts 的 `applyAgentOverride()`):
+ *   - 只給 `model`(省略 `software`):software/command/args 全部沿用
+ *     profile 原本的設定,只換 model——對應 UI「不換 agent,只想換個更省成本
+ *     的 model」這個最常見的情境。
+ *   - 給了 `software`:整批取代該 software 對應的 config(acpConfig/
+ *     ptyConfig/opencodeConfig 三選一,其餘設回 undefined,不與 profile 原本
+ *     的舊 config 混用)——`command`/`args` 由前端從 `resolveProviders()`
+ *     解析出的已知(已偵測到、免手動輸入)provider 帶入,見
+ *     apps/desktop/src/lib/agent-override.ts 的 `buildAgentOverride()`。
+ */
+export const AgentOverrideSchema = z.object({
+  software: AgentSoftwareSchema.optional(),
+  /** 對應 ProviderCatalogEntry.id,純中繼資訊(顯示/env 查找用),不影響 spawn。 */
+  providerId: z.string().optional(),
+  /** 只在提供 `software` 時有意義(claude-agent-sdk 不需要 command)。 */
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  model: z.string().optional(),
+});
+export type AgentOverride = z.infer<typeof AgentOverrideSchema>;
+
 export const CreateSessionInputSchema = z.object({
   title: z.string().optional(),
   agentProfileId: z.string(),
@@ -98,6 +126,8 @@ export const CreateSessionInputSchema = z.object({
    * S12(session-subagent):建立子 session 時帶入 parent session id。
    */
   parentSessionId: z.string().optional(),
+  /** 見 `AgentOverrideSchema` 註解。 */
+  agentOverride: AgentOverrideSchema.optional(),
 });
 export type CreateSessionInput = z.infer<typeof CreateSessionInputSchema>;
 
@@ -114,6 +144,8 @@ export const SpawnChildSessionInputSchema = z.object({
   title: z.string().optional(),
   /** 建立子 session 後立即送出的第一段 prompt（子 agent 的任務）。 */
   prompt: z.string().min(1),
+  /** 見 `AgentOverrideSchema` 註解。 */
+  agentOverride: AgentOverrideSchema.optional(),
 });
 export type SpawnChildSessionInput = z.infer<typeof SpawnChildSessionInputSchema>;
 

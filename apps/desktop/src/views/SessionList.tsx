@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
-import type { Session } from "@deskmony/shared";
-import { useSessionStore, selectContextReporting } from "../stores/session-store.js";
+import { useEffect, useMemo, useState } from "react";
+import type { AgentOverride, AgentProfile, Session } from "@deskmony/shared";
+import { useSessionStore, selectContextReporting, selectResolvedProviders, selectProviderModels } from "../stores/session-store.js";
 import { ProfileCreateDialog } from "./ProfileCreateDialog.js";
 import type { ViewMode } from "../App.js";
 import { Icon, type IconName } from "../ui/icons.js";
@@ -13,6 +13,7 @@ import { sessionStatusMeta, softwareLabel } from "../ui/status.js";
 import { MOD_LABEL } from "../ui/hotkeys.js";
 import type { ThemePreference, ResolvedTheme } from "../ui/theme.js";
 import { groupSessionsByWorkspace } from "../lib/workspaces.js";
+import { buildAgentOverride } from "../lib/agent-override.js";
 
 /**
  * S3a(usage-metering)L4 §4:「SessionList 每列顯示 context 使用率(如 32%)」。
@@ -53,7 +54,9 @@ interface SessionListProps {
   connectionStatus: string;
   selectedProfileId: string;
   onSelectProfile: (id: string) => void;
-  onCreateSession: () => void;
+  /** 這輪新增選填參數:「進階」揭露區選了 agent/model 覆寫時,建立當下一併帶入
+   *  (見 apps/desktop/src/lib/agent-override.ts 的 buildAgentOverride())。 */
+  onCreateSession: (agentOverride?: AgentOverride) => void;
   creatingSession: boolean;
   profileDialogOpen: boolean;
   onSetProfileDialogOpen: (open: boolean) => void;
@@ -116,12 +119,25 @@ export function SessionList({
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const selectSession = useSessionStore((s) => s.selectSession);
   const deleteSession = useSessionStore((s) => s.deleteSession);
+  const detectedAgents = useSessionStore((s) => s.detectedAgents);
+  const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set());
   const [spawnParent, setSpawnParent] = useState<Session | null>(null);
+  // 這輪新增:「新對話」的進階 agent/model 覆寫(見 AgentOverrideFields)——
+  // 預設收合、不覆寫,不影響既有一鍵建立/⌘N 的手感。
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [overrideProviderId, setOverrideProviderId] = useState("");
+  const [overrideModel, setOverrideModel] = useState("");
 
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId);
   const workspaces = useMemo(() => groupSessionsByWorkspace(sessions), [sessions]);
   const conn = connectionMeta[connectionStatus] ?? connectionMeta.closed;
+
+  // 換 profile 時重置覆寫——理由同 SpawnChildDialog 的同名 effect。
+  useEffect(() => {
+    setOverrideProviderId("");
+    setOverrideModel("");
+  }, [selectedProfileId]);
 
   /**
    * 刪除對話:原生 `confirm()` 二次確認(既有作法維持不變)——低頻、不可逆但
@@ -308,6 +324,25 @@ export function SessionList({
             </option>
           ))}
         </Select>
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((v) => !v)}
+          className="focus-ring flex h-5 items-center gap-1 text-2xs text-fg-faint underline decoration-dotted hover:text-accent"
+        >
+          <Icon name="chevron-right" size={10} className={`flex-shrink-0 transition-transform ${advancedOpen ? "rotate-90" : ""}`} />
+          進階(自選 agent / model)
+        </button>
+        {advancedOpen && (
+          <div className="space-y-1.5 rounded-md border border-line-subtle bg-surface p-2">
+            <AgentOverrideFields
+              baseProfile={selectedProfile}
+              overrideProviderId={overrideProviderId}
+              onChangeOverrideProviderId={setOverrideProviderId}
+              model={overrideModel}
+              onChangeModel={setOverrideModel}
+            />
+          </div>
+        )}
         <div className="flex gap-1.5">
           <Button
             variant="primary"
@@ -316,7 +351,12 @@ export function SessionList({
             block
             loading={creatingSession}
             disabled={!selectedProfile}
-            onClick={onCreateSession}
+            onClick={() => {
+              const overrideProvider = overrideProviderId
+                ? selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === overrideProviderId)
+                : undefined;
+              onCreateSession(buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model));
+            }}
             title={`新對話(${MOD_LABEL}N)`}
           >
             {creatingSession ? "建立中…" : "新對話"}
@@ -423,19 +463,44 @@ export function SessionList({
   );
 }
 
-/** S12 Phase2 R3:從選定的 session 開一個子 agent 的極簡對話框。 */
+/**
+ * S12 Phase2 R3:從選定的 session 開一個子 agent 的極簡對話框。
+ * 這輪新增:Profile 預設帶入父 session 自己的 agentProfileId(維持原本「順手就是
+ * 沿用」的體感),但使用者可以在送出前改選別的 profile —— 不再寫死繼承(呼應
+ * agent 自己呼叫 spawn_subagent 時也能透過 list_profiles 自行決定的對稱設計)。
+ */
 function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () => void }): JSX.Element {
   const spawnChild = useSessionStore((s) => s.spawnChild);
+  const profiles = useSessionStore((s) => s.profiles);
+  const detectedAgents = useSessionStore((s) => s.detectedAgents);
+  const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
+  const [profileId, setProfileId] = useState(session.agentProfileId);
+  const [overrideProviderId, setOverrideProviderId] = useState("");
+  const [overrideModel, setOverrideModel] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const selectedProfile = profiles.find((p) => p.id === profileId);
+
+  // 換 profile 時重置 agent/model 覆寫——舊的覆寫是針對舊 profile 選的,換了
+  // base profile 之後繼續沿用容易造成不對應的混淆狀態(比照 ProfileCreateDialog
+  // 換 software 時重置 model 的既有作法)。
+  useEffect(() => {
+    setOverrideProviderId("");
+    setOverrideModel("");
+  }, [profileId]);
 
   const handleSubmit = async (): Promise<void> => {
     setError(null);
     setSubmitting(true);
     try {
-      await spawnChild(session.id, prompt.trim(), title.trim() || undefined);
+      const overrideProvider = overrideProviderId
+        ? selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === overrideProviderId)
+        : undefined;
+      const agentOverride = buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model);
+      await spawnChild(session.id, prompt.trim(), profileId, title.trim() || undefined, agentOverride);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -447,7 +512,7 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
   return (
     <Dialog
       title={`在「${session.title}」底下開子 agent`}
-      description="給子 agent 一段任務 prompt,child 沿用父 session 的 agent profile(software/model)。"
+      description="給子 agent 一段任務 prompt,並選擇要用哪個 agent profile 建立(預設沿用這個 session 的 profile,可自行改選);也可以再進一步覆寫 agent 軟體/model。"
       icon="branch"
       size="md"
       onClose={onClose}
@@ -456,13 +521,29 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
           <Button variant="secondary" disabled={submitting} onClick={onClose}>
             取消
           </Button>
-          <Button variant="primary" disabled={!prompt.trim() || submitting} loading={submitting} onClick={() => void handleSubmit()}>
+          <Button variant="primary" disabled={!prompt.trim() || !profileId || submitting} loading={submitting} onClick={() => void handleSubmit()}>
             {submitting ? "建立中…" : "開子 agent"}
           </Button>
         </div>
       }
     >
       <div className="space-y-3">
+        <Field label="Agent Profile">
+          <Select aria-label="選擇子 agent 的 Profile" value={profileId} onChange={(e) => setProfileId(e.target.value)}>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}({softwareLabel(p.software)})
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <AgentOverrideFields
+          baseProfile={selectedProfile}
+          overrideProviderId={overrideProviderId}
+          onChangeOverrideProviderId={setOverrideProviderId}
+          model={overrideModel}
+          onChangeModel={setOverrideModel}
+        />
         <Field label="任務 prompt">
           <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={5} placeholder="描述這個子 agent 要執行的任務…" autoFocus />
         </Field>
@@ -472,5 +553,84 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
         {error && <Alert tone="danger">{error}</Alert>}
       </div>
     </Dialog>
+  );
+}
+
+/**
+ * 這輪新增:「Agent 軟體(選填)」+「Model(選填)」兩個覆寫欄位,SpawnChildDialog
+ * 與 SessionList 側欄的「進階」揭露區共用同一份——只負責選,不負責組送給
+ * `session.create`/`session.spawnChild` 的 payload(那是呼叫端在送出時呼叫
+ * `buildAgentOverride()` 做的事,見 apps/desktop/src/lib/agent-override.ts)。
+ *
+ * 「已知免設定」範圍(呼應「決定 agent」只做到這個深度的既有共識):software
+ * 選單只列出 claude-agent-sdk,或本機已偵測到(installed)的其餘 provider——
+ * 不含 custom-pty 這種需要手動輸入 command 的逃生閥,選了就一定能直接建立,
+ * 不需要再填任何欄位。
+ */
+function AgentOverrideFields({
+  baseProfile,
+  overrideProviderId,
+  onChangeOverrideProviderId,
+  model,
+  onChangeModel,
+}: {
+  baseProfile: AgentProfile | undefined;
+  overrideProviderId: string;
+  onChangeOverrideProviderId: (id: string) => void;
+  model: string;
+  onChangeModel: (model: string) => void;
+}): JSX.Element {
+  const detectedAgents = useSessionStore((s) => s.detectedAgents);
+  const detectingAgents = useSessionStore((s) => s.detectingAgents);
+  const detectAgents = useSessionStore((s) => s.detectAgents);
+  const providerPrefs = useSessionStore((s) => s.providerPrefs);
+  const enabledModelIds = useSessionStore((s) => s.enabledModelIds);
+
+  useEffect(() => {
+    if (detectedAgents.length === 0 && !detectingAgents) {
+      void detectAgents();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const resolvedProviders = useMemo(
+    () => selectResolvedProviders(detectedAgents, providerPrefs),
+    [detectedAgents, providerPrefs],
+  );
+  const selectableProviders = useMemo(
+    () => resolvedProviders.filter((p) => p.enabled && p.id !== "custom-pty" && (p.software === "claude-agent-sdk" || p.installed)),
+    [resolvedProviders],
+  );
+  const overrideProvider = resolvedProviders.find((p) => p.id === overrideProviderId);
+
+  const models = overrideProvider
+    ? overrideProvider.models
+    : selectProviderModels(baseProfile, detectedAgents, providerPrefs, enabledModelIds);
+
+  return (
+    <>
+      <Field label="Agent 軟體(選填,預設沿用 Profile)">
+        <Select value={overrideProviderId} onChange={(e) => onChangeOverrideProviderId(e.target.value)}>
+          <option value="">(沿用 Profile 設定)</option>
+          {selectableProviders.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {models.length > 0 && (
+        <Field label="Model(選填)">
+          <Select value={model} onChange={(e) => onChangeModel(e.target.value)}>
+            <option value="">(沿用{overrideProvider ? "" : " Profile"}預設)</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      )}
+    </>
   );
 }
