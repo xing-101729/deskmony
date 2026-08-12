@@ -62,6 +62,17 @@ export class ProfileStore {
     if (existing) return;
     await this.db.insert(agentProfilesTable).values(profileToRow(profile)).run();
   }
+
+  /**
+   * 刪除 profile——無條件刪除,不檢查是否仍被既有 session/team member 引用
+   * (比照 SessionManager.deleteSession() 的既有作風:agent_profiles 沒有
+   * SQL FOREIGN KEY 約束,呼叫端本來就已經在各處對「profile 可能已不存在」
+   * 做防禦性處理,例如 recovery-service.ts 的 `profile?.name`、
+   * session-manager.ts continueSession() 的 `if (!profile) throw ...`)。
+   */
+  async delete(id: string): Promise<void> {
+    await this.db.delete(agentProfilesTable).where(eq(agentProfilesTable.id, id)).run();
+  }
 }
 
 export function createDefaultProfile(workingDir: string): AgentProfile {

@@ -178,6 +178,7 @@ interface SessionStoreState {
     agentOverride?: AgentOverride,
   ) => Promise<void>;
   createProfile: (input: CreateAgentProfileInput) => Promise<AgentProfile>;
+  deleteProfile: (id: string) => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
   /**
    * 刪除一個對話(功能2)。呼叫 `session.delete` 後從本地 `sessions`/
@@ -664,6 +665,11 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     set((state) => ({ profiles: [...state.profiles, profile] }));
     void get().fetchCapabilities(profile.software);
     return profile;
+  },
+
+  deleteProfile: async (id) => {
+    await client.call("profile.delete", { id });
+    set((state) => ({ profiles: state.profiles.filter((p) => p.id !== id) }));
   },
 
   selectSession: async (sessionId) => {

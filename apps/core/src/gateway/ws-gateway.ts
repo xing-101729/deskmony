@@ -92,14 +92,14 @@ function isLoopbackAddress(normalizedAddress: string): boolean {
 /**
  * S7 L4 §5.1:唯一的安全保證——即使某個 client 想繞過 UI 直接送出這些
  * method 的 raw request,一律在 dispatch 之前被擋下(不是靠 UI 隱藏按鈕)。
- * 之後 S3b 的預算設定 method 也要加進這個清單。`profile.update`/
- * `profile.delete` 目前尚未實作(見 packages/shared/src/gateway.ts),等實作
- * 後也要加進來——這裡先列出 L4 §5.1 明確點名、且目前已存在的方法。
+ * 之後 S3b 的預算設定 method 也要加進這個清單。`profile.update` 目前尚未
+ * 實作(見 packages/shared/src/gateway.ts),等實作後也要加進來。
  */
 const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
   "session.setPermissionMode", // auto / YOLO
   "config.setFile", // 政策與設定
   "profile.create",
+  "profile.delete",
 ]);
 
 /**
@@ -582,6 +582,9 @@ export class WsGateway {
         return { profiles: await this.profiles.list() };
       case "profile.create":
         return { profile: await this.profiles.create(request.params) };
+      case "profile.delete":
+        await this.profiles.delete(request.params.id);
+        return { ok: true };
       case "session.list":
         return { sessions: await this.sessionManager.listSessions() };
       case "session.create":

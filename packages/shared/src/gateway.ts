@@ -88,6 +88,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   z.object({ ...baseRequest, method: z.literal("gateway.capabilities"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("profile.list"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("profile.create"), params: CreateAgentProfileInputSchema }),
+  z.object({ ...baseRequest, method: z.literal("profile.delete"), params: z.object({ id: z.string() }) }),
   z.object({ ...baseRequest, method: z.literal("session.list"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("session.create"), params: CreateSessionInputSchema }),
   z.object({
@@ -601,6 +602,7 @@ export const AuthResultSchema = z.object({ ok: z.literal(true), capabilities: Ga
 
 export const ProfileListResultSchema = z.object({ profiles: z.array(AgentProfileSchema) });
 export const ProfileCreateResultSchema = z.object({ profile: AgentProfileSchema });
+export const ProfileDeleteResultSchema = z.object({ ok: z.literal(true) });
 export const SessionListResultSchema = z.object({ sessions: z.array(SessionSchema) });
 export const SessionCreateResultSchema = z.object({ session: SessionSchema });
 export const SessionHistoryResultSchema = z.object({ messages: z.array(MessageRecordSchema) });

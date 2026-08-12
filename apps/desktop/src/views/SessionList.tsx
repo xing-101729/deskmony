@@ -119,6 +119,7 @@ export function SessionList({
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const selectSession = useSessionStore((s) => s.selectSession);
   const deleteSession = useSessionStore((s) => s.deleteSession);
+  const deleteProfile = useSessionStore((s) => s.deleteProfile);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set());
@@ -147,6 +148,19 @@ export function SessionList({
   const handleDelete = (sessionId: string, title: string): void => {
     if (!window.confirm(`確定要刪除對話「${title}」嗎?此操作無法復原。`)) return;
     void deleteSession(sessionId);
+  };
+
+  /**
+   * 刪除 Agent Profile:與 handleDelete()(刪對話)同樣的原生 confirm() 二次
+   * 確認作風。額外算一下目前有幾個既有對話是用這個 profile 建立的,一併提示
+   * ——刪除不會動到那些對話本身(core 端 ProfileStore.delete() 無條件刪除,
+   * 不檢查引用,見 apps/core/src/profiles.ts),只是讓使用者刪之前心裡有數。
+   */
+  const handleDeleteProfile = (profile: AgentProfile): void => {
+    const inUseCount = sessions.filter((s) => s.agentProfileId === profile.id).length;
+    const usageNote = inUseCount > 0 ? `\n\n目前有 ${inUseCount} 個既有對話是用這個 profile 建立的,刪除不影響那些對話,但之後無法再用這個 profile 建立新對話。` : "";
+    if (!window.confirm(`確定要刪除 Agent Profile「${profile.name}」嗎?此操作無法復原。${usageNote}`)) return;
+    void deleteProfile(profile.id);
   };
 
   const toggleWorkspace = (key: string): void => {
@@ -367,6 +381,15 @@ export function SessionList({
             title="建立 Agent Profile"
             variant="outline"
             onClick={() => onSetProfileDialogOpen(true)}
+          />
+          <IconButton
+            icon="trash"
+            aria-label="刪除 Agent Profile"
+            title="刪除 Agent Profile"
+            variant="outline"
+            className="hover:!text-danger"
+            disabled={!selectedProfile}
+            onClick={() => selectedProfile && handleDeleteProfile(selectedProfile)}
           />
         </div>
       </div>
