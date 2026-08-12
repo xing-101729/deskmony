@@ -29,8 +29,21 @@ type ConnectionStatus = "connecting" | "open" | "closed";
  * 一條連線)。`connect()` 在 `url` 為空字串時直接視為關閉狀態、不嘗試建立
  * WebSocket(瀏覽器場景下,使用者送出連線畫面表單前不應該有任何連線嘗試)。
  */
+interface QueuedCall {
+  method: ClientRequestMethod;
+  params: unknown;
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+}
+
 export class GatewayClient {
   private ws: WebSocket | null = null;
+  /** WS 是否已開啟且完成認證(未設定 authToken 時只需 WS 開啟)——只有這個
+   *  旗標為 true,call() 才會真的送出 request,見 call()/markReady() 註解。 */
+  private ready = false;
+  /** ready 為 false 期間呼叫 call() 排入的請求,markReady() 時依序送出;連線
+   *  斷開時由 close 事件處理器統一 reject(見 rejectQueuedCalls())。 */
+  private sendQueue: QueuedCall[] = [];
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private pushListeners = new Set<(push: ServerPush) => void>();
   private statusListeners = new Set<(status: ConnectionStatus) => void>();
@@ -56,19 +69,22 @@ export class GatewayClient {
       return;
     }
     this.closedByUser = false;
+    this.ready = false;
     this.emitStatus("connecting");
     const ws = new WebSocket(this.url);
     this.ws = ws;
 
     ws.addEventListener("open", () => {
       if (!this.authToken) {
-        this.emitStatus("open");
+        this.markReady();
         return;
       }
       // 認證成功前不對外回報 "open",避免呼叫端在認證完成前就送出其他 request
-      // (core 會拒絕,但沒必要讓 UI 先看到一個之後注定失敗的連線狀態)。
-      this.call("auth", { token: this.authToken }).then(
-        () => this.emitStatus("open"),
+      // (core 會拒絕,但沒必要讓 UI 先看到一個之後注定失敗的連線狀態)。這裡
+      // 直接用 sendNow()(不經過 call() 的 ready 檢查)——auth 本身就是讓
+      // ready 變 true 的那一步,不能被自己擋住。
+      this.sendNow("auth", { token: this.authToken }).then(
+        () => this.markReady(),
         (err: unknown) => {
           console.error("[gateway] 認證失敗,關閉連線:", err instanceof Error ? err.message : err);
           this.ws?.close();
@@ -76,8 +92,11 @@ export class GatewayClient {
       );
     });
     ws.addEventListener("close", () => {
+      this.ready = false;
       this.emitStatus("closed");
-      this.rejectAllPending(new Error("與 Deskmony Core 的連線已中斷"));
+      const err = new Error("與 Deskmony Core 的連線已中斷");
+      this.rejectAllPending(err);
+      this.rejectQueuedCalls(err);
       if (!this.closedByUser) this.scheduleReconnect();
     });
     ws.addEventListener("error", () => {
@@ -102,10 +121,29 @@ export class GatewayClient {
     return () => this.statusListeners.delete(listener);
   }
 
+  /**
+   * `session-store.ts` 的 `connect()` 呼叫 `client.connect()` 後,同一個 tick
+   * 內就緊接著呼叫 `refreshProfiles()`/`refreshSessions()` 等——這時
+   * `WebSocket` 才剛 `new` 出來,規範保證 `readyState` 還是 `CONNECTING`
+   * (`open` 事件一定是之後的 tick 才會觸發)。過去這裡看到還沒 `OPEN` 就直接
+   * `reject`,導致這些呼叫每次都在連線真正建立前就失敗,而呼叫端是 `void`
+   * fire-and-forget、沒有重試,`profiles`/`sessions` 就此永遠停在初始空陣列
+   * ——現在改成:還沒 ready 時把請求排進 `sendQueue`,等 `markReady()`(WS
+   * 開啟、且完成認證)才依序真正送出,呼叫端完全不用改。
+   */
   call<M extends ClientRequestMethod>(method: M, params: ParamsOf<M>): Promise<unknown> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.ws) {
       return Promise.reject(new Error("尚未連線到 Deskmony Core"));
     }
+    if (!this.ready) {
+      return new Promise((resolve, reject) => {
+        this.sendQueue.push({ method, params, resolve, reject });
+      });
+    }
+    return this.sendNow(method, params);
+  }
+
+  private sendNow(method: ClientRequestMethod, params: unknown): Promise<unknown> {
     const id = crypto.randomUUID();
     const request = { id, method, params } as ClientRequest;
 
@@ -113,6 +151,16 @@ export class GatewayClient {
       this.pending.set(id, { resolve, reject });
       this.ws?.send(JSON.stringify(request));
     });
+  }
+
+  private markReady(): void {
+    this.ready = true;
+    this.emitStatus("open");
+    const queue = this.sendQueue;
+    this.sendQueue = [];
+    for (const { method, params, resolve, reject } of queue) {
+      this.sendNow(method, params).then(resolve, reject);
+    }
   }
 
   private handleMessage(raw: string): void {
@@ -148,6 +196,13 @@ export class GatewayClient {
   private rejectAllPending(err: Error): void {
     for (const { reject } of this.pending.values()) reject(err);
     this.pending.clear();
+  }
+
+  /** 連線斷線時,把 sendQueue 裡還沒送出的請求一併 reject(理由同 rejectAllPending())。 */
+  private rejectQueuedCalls(err: Error): void {
+    const queue = this.sendQueue;
+    this.sendQueue = [];
+    for (const { reject } of queue) reject(err);
   }
 
   private scheduleReconnect(): void {
