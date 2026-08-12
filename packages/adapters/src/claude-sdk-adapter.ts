@@ -223,8 +223,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生(line 101),
       // 這裡閉包捕捉當作 parentSessionId,agent 無法覆寫。
       mcpServers[SUBAGENT_MCP_SERVER_NAME] = createSubagentMcpServer(this.subagentPort, handle.id);
-      // list_profiles 是純查詢,自動放行;spawn_subagent 刻意 **不** 放進
-      // allowedTools —— 見 §4「權限」(會起子程序、燒 token,必須走權限彈窗)。
+      // list_profiles/list_subagents 是純查詢,自動放行;spawn_subagent/
+      // send_to_subagent 刻意 **不** 放進 allowedTools —— 見 §4「權限」(兩者
+      // 都會讓某個 session 多跑一輪、燒 token,必須走權限彈窗)。
       allowedTools.push(...SUBAGENT_ALLOWED_TOOL_NAMES);
     }
     if (Object.keys(mcpServers).length > 0) {

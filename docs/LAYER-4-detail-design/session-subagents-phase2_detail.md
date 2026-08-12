@@ -3,7 +3,13 @@
 > 上層：[`session-subagents_detail.md`](./session-subagents_detail.md)（S12 Round 1 已完成）。
 > 階段：**加法/演進**，非破壞性。
 > L4 完成度標準：**另一個工程師照著寫，不用問你。**
-> 對應實作者：opencode subagent（免費模型，例如 `opencode/deepseek-v4-flash-free`）。
+> 對應實作者：opencode subagent（免費模型,例如 `opencode/deepseek-v4-flash-free`）。
+>
+> **2026-08-12 更新**：R4([`…phase2-r4_detail.md`](./session-subagents-phase2-r4_detail.md))
+> 新增 `send_to_subagent` 工具後,這裡的 `pendingParentInjection`/`deliverInjectionToParent`
+> 已改名為通用的 `pendingIdleInjection`/`deliverPromptWhenIdle`(同一套機制,R1 子→父與
+> R4 父→子共用)。下面的程式碼片段仍是**這一輪當時**的命名,照著讀就好,對照現在的原始碼時
+> 記得換算名字即可,行為完全沒變。
 
 ---
 

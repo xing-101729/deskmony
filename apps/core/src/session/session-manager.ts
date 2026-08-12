@@ -21,6 +21,7 @@ import type {
   SessionPermissionMode,
   SessionStatus,
   SpawnChildSessionInput,
+  SubagentChildSummary,
   TeamBusPort,
 } from "@deskmony/shared";
 import type { ProfileStore } from "../profiles.js";
@@ -250,14 +251,18 @@ export class SessionManager extends EventEmitter {
   private readonly contextCheckpointAwaitingRestart = new Set<string>();
 
   /**
-   * S12 Phase2:父 session 正忙(busy/waiting)時,暫存要注入父的子 agent
-   * 回報,等父下一次 `completed` 空檔 flush(見 `deliverInjectionToParent()`
-   * 與 consumeEvents 的 completed case)——一個父可累積多筆(多個子先後回報),
-   * 每次 flush 只送一筆。比照 `contextCheckpointPendingNote` 的清理慣例:
-   * session 結束/重啟時清除(見 deleteSession/disposeSessionForMember/
-   * shutdownAll/reclaimSession),避免無限增長。
+   * S12 Phase2 R1+R4:任一 session 正忙(busy/waiting)時,暫存要在它下一次
+   * `completed` 空檔送達的訊息文字,等到那個空檔才真正送出(見
+   * `deliverPromptWhenIdle()` 與 consumeEvents 的 completed case)——同一個
+   * session 可累積多筆,每次 flush 只送一筆。這個 Map 的 key 只是「目前要
+   * 送訊息的目標 session」,不特別區分父/子,兩個方向共用同一套機制:
+   *   - R1:子完成時把結果注入父(key = 父 sessionId)。
+   *   - R4:`send_to_subagent` 工具把父的追加訊息送給子(key = 子 sessionId)。
+   * 比照 `contextCheckpointPendingNote` 的清理慣例:session 結束/重啟時清除
+   * (見 deleteSession/disposeSessionForMember/shutdownAll/reclaimSession),
+   * 避免無限增長。
    */
-  private readonly pendingParentInjection = new Map<string, string[]>();
+  private readonly pendingIdleInjection = new Map<string, string[]>();
 
   constructor(
     private readonly adapters: AdapterRegistry,
@@ -694,6 +699,54 @@ export class SessionManager extends EventEmitter {
     return { childSessionId: child.id };
   }
 
+  /**
+   * S12 Phase2 R4:給 `send_to_subagent` MCP 工具用——對一個「已經是這個
+   * parentSessionId 的子 session」送出後續訊息(追加指示,不是開新的子任務)。
+   * 兩層檢查,順序刻意如下:
+   *   1. 找不到 childSessionId 對應的 session → 明確報錯(可能打錯 id,或那個
+   *      session 早就被 `deleteSession()` 硬刪了)。
+   *   2. 那個 session 存在,但 `parentSessionId` 不等於呼叫端帶入的
+   *      parentSessionId → 拒絕(**授權檢查**:防止父 agent 對不是自己開的
+   *      子 session 下指令——不管是完全無關的 session,還是自己的祖父/兄弟
+   *      session,一律只認「直接子」這一層關係,同 `spawnChildFromTool()` 的
+   *      冒名防護精神)。
+   *   3. 通過授權檢查,但那個子 session 目前沒有在跑(`this.runtime` 沒有它
+   *      ——可能已被 S3b 的 72 小時資源回收站起,或已 `disposeSessionForMember`)
+   *      → 明確報錯,而不是讓 `deliverPromptWhenIdle()` 靜默丟棄訊息卻讓這個
+   *      工具呼叫看起來像成功了(那樣 agent 會誤以為訊息真的送到了)。
+   * 通過三層檢查後才真的呼叫 `deliverPromptWhenIdle()`——子忙碌中會排隊,
+   * 不會打斷它正在處理的回合;結果一樣經由既有的 completed → child-result
+   * 機制自動回報給父,這裡不需要回傳值。
+   */
+  async sendToChildFromTool(input: { parentSessionId: string; childSessionId: string; message: string }): Promise<void> {
+    const child = await this.getSession(input.childSessionId);
+    if (!child) throw new Error(`找不到子 session: ${input.childSessionId}`);
+    if (child.parentSessionId !== input.parentSessionId) {
+      throw new Error(`session ${input.childSessionId} 不是你的子 session,無法送出訊息`);
+    }
+    if (!this.runtime.has(input.childSessionId)) {
+      throw new Error(`子 session ${input.childSessionId} 目前沒有在執行中(可能已被回收或關閉),無法送出訊息`);
+    }
+    await this.deliverPromptWhenIdle(input.childSessionId, input.message);
+  }
+
+  /**
+   * S12 Phase2 R5:給 `list_subagents` MCP 工具用——回傳這個 parentSessionId
+   * 自己名下的子 session(不管是 agent 自己呼叫 spawn_subagent 開的,還是
+   * 使用者透過 UI「開子 agent」手動開的——後者 agent 完全沒有被告知,這個
+   * 查詢是它唯一能發現「自己名下其實有一個子」的方式)。直接複用
+   * `listSessions()`(R3 UI 的 SessionList 巢狀顯示本身就是同一份資料的
+   * client 端 filter,見 apps/desktop/src/views/SessionList.tsx),避免另開
+   * 一條 DB 查詢路徑。只回傳決策/回答問題需要的最小欄位,不含 workingDir/
+   * agentProfileId 等內部細節(同 `listProfiles()` 的最小揭露原則)。
+   */
+  async listChildrenFromTool(parentSessionId: string): Promise<SubagentChildSummary[]> {
+    const all = await this.listSessions();
+    return all
+      .filter((s) => s.parentSessionId === parentSessionId)
+      .map((s) => ({ id: s.id, title: s.title, status: s.status, software: s.adapterType, model: s.model }));
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     const runtime = this.runtime.get(sessionId);
     if (runtime) {
@@ -710,7 +763,7 @@ export class SessionManager extends EventEmitter {
     this.permissionState.delete(sessionId); // S7:避免 Map 隨 session 生命週期無限增長。
     this.waitingSince.delete(sessionId); // S3b:同上,避免無限增長。
     this.clearContextCheckpointState(sessionId); // S8:同上,避免無限增長。
-    this.pendingParentInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
+    this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
     this.emit("session-list-updated");
   }
 
@@ -735,7 +788,7 @@ export class SessionManager extends EventEmitter {
     this.memberSessions.delete(memberId);
     this.sessionMembers.delete(sessionId);
     this.clearContextCheckpointState(sessionId);
-    this.pendingParentInjection.delete(sessionId); // S12 Phase2:同 clearContextCheckpointState,避免無限增長。
+    this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同 clearContextCheckpointState,避免無限增長。
     await this.setStatus(sessionId, "closed");
     this.emit("session-list-updated");
   }
@@ -780,7 +833,7 @@ export class SessionManager extends EventEmitter {
       this.sessionMembers.delete(sessionId);
     }
     this.clearContextCheckpointState(sessionId); // S8:避免無限增長,理由同 disposeSessionForMember()。
-    this.pendingParentInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
+    this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
     await this.setStatus(
       sessionId,
       "error",
@@ -863,7 +916,7 @@ export class SessionManager extends EventEmitter {
           this.sessionMembers.delete(id);
         }
         this.clearContextCheckpointState(id); // S8:避免無限增長,理由同 disposeSessionForMember()。
-        this.pendingParentInjection.delete(id); // S12 Phase2:同上,避免無限增長。
+        this.pendingIdleInjection.delete(id); // S12 Phase2:同上,避免無限增長。
         try {
           await this.setStatus(id, "closed");
         } catch (err) {
@@ -1199,7 +1252,7 @@ export class SessionManager extends EventEmitter {
               ts: Date.now(),
             });
             const injectText = `[子 agent「${childTitle}」完成回報]\n${finalText}\n\n請根據以上子 agent 的結果繼續你的工作。`;
-            await this.deliverInjectionToParent(parentId, injectText);
+            await this.deliverPromptWhenIdle(parentId, injectText);
           }
 
           // S8(agent-lifecycle)L4 §4.2:「等該回合結束(completed)」的落地
@@ -1230,16 +1283,17 @@ export class SessionManager extends EventEmitter {
             }
           }
 
-          // S12 Phase2:父自己這一輪結束(回到 idle),flush 排在它身上的子回報
-          // 注入——一次只送一筆(其餘等下一輪 completed,避免把多筆塞成一個
-          // 回合)。與上方 checkpoint pending/awaiting-restart 邏輯**互不干擾**,
-          // 刻意用獨立的 if,不塞進同一個 if/else if 鏈。
+          // S12 Phase2 R1+R4:這個 session 自己這一輪結束(回到 idle),flush
+          // 排在它身上待送的訊息(R1:子回報給父的注入;R4:send_to_subagent
+          // 排隊等它有空的訊息)——一次只送一筆(其餘等下一輪 completed,避免
+          // 把多筆塞成一個回合)。與上方 checkpoint pending/awaiting-restart
+          // 邏輯**互不干擾**,刻意用獨立的 if,不塞進同一個 if/else if 鏈。
           {
-            const pendingInjection = this.pendingParentInjection.get(sessionId);
+            const pendingInjection = this.pendingIdleInjection.get(sessionId);
             if (pendingInjection && pendingInjection.length > 0) {
               const injectText = pendingInjection.shift()!;
-              if (pendingInjection.length === 0) this.pendingParentInjection.delete(sessionId);
-              void this.deliverInjectionToParent(sessionId, injectText);
+              if (pendingInjection.length === 0) this.pendingIdleInjection.delete(sessionId);
+              void this.deliverPromptWhenIdle(sessionId, injectText);
             }
           }
           break;
@@ -1447,28 +1501,32 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * S12 Phase2:把一段子 agent 回報投遞給父 session —— 父 idle 就立刻
-   * `sendPrompt`,busy/waiting 就排進 `pendingParentInjection` 等父下一次
-   * completed 空檔 flush;父 runtime 已不存在(父已刪/已 dispose)時丟棄,
-   * 不報錯。`sendPrompt` 內建的成本斷路器可能拒絕 → try/catch 吞掉只
-   * console.warn,不讓它炸掉子的 completed 事件迴圈。
+   * S12 Phase2 R1+R4:把一段文字當作下一則 prompt 投遞給某個 session ——
+   * 目標 idle 就立刻 `sendPrompt`,busy/waiting 就排進 `pendingIdleInjection`
+   * 等它下一次 completed 空檔 flush(見 consumeEvents 的 completed case);
+   * 目標 runtime 已不存在(已刪/已 dispose)時丟棄,不報錯。`sendPrompt`
+   * 內建的成本斷路器可能拒絕 → try/catch 吞掉只 console.warn,不讓它炸掉
+   * 呼叫端(子的 completed 事件迴圈,或 `send_to_subagent` 工具的呼叫鏈)。
+   *
+   * R1(子完成後把結果注入父)與 R4(`send_to_subagent` 把父的追加訊息送給
+   * 已存在的子)共用這個方法 —— 差別只在呼叫端傳入的 sessionId 是父還是子,
+   * 對這個方法而言兩者是同一種操作:「送一則 prompt 給某個 session,尊重它
+   * 目前是否忙碌」。
    */
-  private async deliverInjectionToParent(parentId: string, text: string): Promise<void> {
-    const parentRuntime = this.runtime.get(parentId);
-    if (!parentRuntime) return; // 父已結束,丟棄注入
-    const parent = await this.getSession(parentId);
-    if (parent?.status === "idle") {
+  private async deliverPromptWhenIdle(sessionId: string, text: string): Promise<void> {
+    const targetRuntime = this.runtime.get(sessionId);
+    if (!targetRuntime) return; // 目標已結束,丟棄
+    const target = await this.getSession(sessionId);
+    if (target?.status === "idle") {
       try {
-        await this.sendPrompt(parentId, { text });
+        await this.sendPrompt(sessionId, { text });
       } catch (err) {
-        console.warn(
-          `[session-subagent] 注入子回報到父 session ${parentId} 失敗(忽略,不影響子 session 的 completed): ${String(err)}`,
-        );
+        console.warn(`[session-subagent] 投遞訊息給 session ${sessionId} 失敗(忽略): ${String(err)}`);
       }
     } else {
-      const q = this.pendingParentInjection.get(parentId) ?? [];
+      const q = this.pendingIdleInjection.get(sessionId) ?? [];
       q.push(text);
-      this.pendingParentInjection.set(parentId, q);
+      this.pendingIdleInjection.set(sessionId, q);
     }
   }
 

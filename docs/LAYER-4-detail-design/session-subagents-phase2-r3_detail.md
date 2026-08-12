@@ -144,3 +144,22 @@ repo 根目錄：
 > **驗收核心**：①能從 session 列開子 agent（prompt → `session.spawnChild`,child 用父
 > profile）；②SessionList 子 session 縮排在父底下,孤兒子不消失;③只動 apps/desktop,
 > 後端 e2e 不退步;④用真實存在的 IconName。
+
+---
+
+## 附錄:2026-08-12 真實瀏覽器 runtime 驗證(補上當初標記的缺口)
+
+當初 §0 明講「這個環境不便跑 Electron,只能 build/typecheck/review」。這輪改用 core 內建的
+瀏覽器靜態頁（`apps/desktop` 的 Vite build 產物,core 用同一個 port 服務出來,見
+ARCHITECTURE.md「靜態網頁」段落)+ 這個環境本來就有的瀏覽器工具,實際跑過一次完整流程:
+建立 `claude-agent-sdk` Agent Profile → 開一個 session → 點「開子 agent」→ 填 prompt/標題 →
+子 session 真的建立、跑完、狀態轉 idle → SessionList 立刻在父列後面多出子列(對應 R3 §2.1
+的巢狀排列)→ 父 session 收到注入的子結果並正確接續回覆。UI 這條路徑本身沒有發現任何問題。
+
+⚠️ 但一開始完全連不上——瀏覽器連線畫面(`ConnectScreen.tsx`)一律回報「認證失敗:token
+不正確」,即使 core 完全沒有設定 `DESKMONY_AUTH_TOKEN`。根因與這輪 UI 改動無關,是既有的
+gateway 認證 schema bug（`packages/shared/src/gateway.ts` 的 `auth.params.token` 誤寫成
+`z.string().min(1)`,导致 ConnectScreen 依畫面指示留空 token 時,請求在 schema 驗證這關就
+被拒絕）——已在 [`…phase2-r2_detail.md`](./session-subagents-phase2-r2_detail.md) 附錄修正,
+此後才能实际走完上面這段 UI 驗證。**沒有因為這次驗證而修改任何本文件範圍內(apps/desktop)
+的程式碼**——R3 原始實作本身是正確的。

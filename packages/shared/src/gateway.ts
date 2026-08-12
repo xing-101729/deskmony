@@ -60,8 +60,19 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * 時(向下相容本機開發),呼叫這個方法一律直接成功(見 WsGateway 的
    * 判斷)。刻意選擇「連線後的第一則訊息」而非 Sec-WebSocket-Protocol 或
    * URL query string 傳遞 token,理由見 README 對應章節。
+   *
+   * ⚠️ 修正(原為 `z.string().min(1)`):`token` 刻意**不要求非空**——
+   * ConnectScreen.tsx 明講「伺服器未啟用認證則留空」,client 端(見
+   * gateway-client.ts 的 `probeGatewayConnection()`)因此會送出 `token: ""`。
+   * `.min(1)` 會讓這則請求在 schema 驗證這關就被拒絕(`too_small`),連
+   * WsGateway 內「未設定 authToken 時 auth 一律直接成功」這條既有的向下相容
+   * 判斷都碰不到,UI 端看到的是一個誤導的「認證失敗:token 不正確」——使用者
+   * 完全照著畫面指示操作(留空),卻被回報成憑證錯誤。空字串本身不會削弱
+   * 安全性:core 若真的設定了 authToken,`timingSafeTokenEqual()` 的長度檢查
+   * 一樣會讓空字串比對失敗(見 ws-gateway.ts),真正的認證判斷不依賴這裡的
+   * schema 下限。
    */
-  z.object({ ...baseRequest, method: z.literal("auth"), params: z.object({ token: z.string().min(1) }) }),
+  z.object({ ...baseRequest, method: z.literal("auth"), params: z.object({ token: z.string() }) }),
   /**
    * S7(auto-mode-and-yolo)L4 §5.3 新增:握手能力集,消除 UI/Gateway 對「這個
    * 連線是不是本機」的認知漂移——UI 純依此渲染(遠端隱藏 auto/YOLO/policy/

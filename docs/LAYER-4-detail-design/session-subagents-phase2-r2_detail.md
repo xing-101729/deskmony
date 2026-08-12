@@ -217,3 +217,35 @@ repo 根目錄：
 > **驗收核心**：①agent 能呼叫 `spawn_subagent`（用父 profile spawn 子,parentSessionId 由
 > adapter 以 handle.id 帶入、agent 無法冒名）；②子結果經 R1 機制注入父；③工具走既有權限流程
 > （不在 allowedTools）；④依賴方向守住、既有 e2e 不退步。
+
+---
+
+## 附錄:2026-08-12 真實 Claude 憑證 smoke test(補上當初標記的缺口)
+
+當初 §0 明講「沒有 e2e 網,測不到工具實際被呼叫」。這輪用本機真實 `claude login` 憑證跑了
+兩組 live smoke test(直接對 `apps/core/dist/index.js` 送真實 gateway RPC,子/父都是真的
+`claude-agent-sdk` session,非 fake backend):
+
+1. **明講工具名稱**:prompt 直接要求 agent 呼叫 `spawn_subagent`。結果:agent 先用
+   `ToolSearch` 找到 `mcp__subagent__spawn_subagent`(這個環境的 Claude Code 因為掛載的
+   MCP server 數量多,會把較少用的工具延後載入),再正確呼叫、正確帶參數、`permission-request`
+   正確跳出、允許後子 session 真的建立並跑完、`child-result` push 正確、結果正確注入父
+   session 並被父據此回覆。
+2. **完全不提「spawn_subagent」或「subagent」字樣**(只說「如果你的環境有辦法平行分派給
+   其他 agent,請用」):agent 仍然自主用 `ToolSearch` 找到並正確呼叫
+   `mcp__subagent__spawn_subagent` 三次(平行處理三個獨立子任務),全部正確完成並回報。
+
+**結論**:原本擔心的「MCP 工具被延後載入,agent 找不到」並未發生——`mcp__subagent__spawn_subagent`
+這個名稱本身對模型已經有足夠的語意線索,不需要另外在 systemPrompt 裡加一段「你有這個能力」
+的提示。**這輪沒有因此修改任何 spawn 邏輯或 systemPrompt。**
+
+⚠️ 過程中意外發現一個**與這個 MCP 工具本身無關、但會擋下所有瀏覽器連線**的既有 bug(不是
+這個工具造成的,是 gateway 認證層):`packages/shared/src/gateway.ts` 的 `auth` RPC schema
+把 `token` 寫成 `z.string().min(1)`——但 `ConnectScreen.tsx` 明講「伺服器未啟用認證則留空」,
+於是 client 送出 `token: ""`,在 schema 驗證這關就被 `too_small` 拒絕,連 `WsGateway`「未設
+authToken 時 auth 一律直接成功」的既有向下相容判斷都碰不到,使用者看到誤導的「認證失敗:
+token 不正確」。已修正為 `z.string()`(拿掉下限;`timingSafeTokenEqual()` 的長度檢查本來就
+會讓空字串在有真正 authToken 時比對失敗,安全性不受影響)。修正後重跑
+`scripts/e2e-gateway.mjs --only=deterministic`(141 項,含步驟17/18 全部認證/rate-limit
+案例)與 `scripts/e2e-session-subagents.mjs`(8 項)全數 PASS,並手動透過瀏覽器重新走過一次
+連線流程確認修好。

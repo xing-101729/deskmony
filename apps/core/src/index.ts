@@ -284,12 +284,18 @@ async function main(): Promise<void> {
   // 都已在上面建好,無循環依賴。
   const messageBus = new MessageBus(db, teamManager, sessionManager, profiles, taskService, config.messageBudget, auditLog, notifier);
   sessionManager.setTeamBus(messageBus);
-  // S12 Phase2 R2:注入 `spawn_subagent` 的 SubagentPort——子 session 預設沿用
-  // 父 session 自己的 profile,agent 也可以呼叫 list_profiles 查完可用選項後自行
-  // 指定別的 profile(見 session-manager.ts 的 spawnChildFromTool())。與
+  // S12 Phase2 R2+R4+R5:注入 `spawn_subagent`/`send_to_subagent`/
+  // `list_subagents` 的 SubagentPort——子 session 預設沿用父 session 自己的
+  // profile,agent 也可以呼叫 list_profiles 查完可用選項後自行指定別的
+  // profile(見 session-manager.ts 的 spawnChildFromTool());`send_to_subagent`
+  // (R4)讓 agent 對已經開好的子 session 追加訊息(見 sendToChildFromTool());
+  // `list_subagents`(R5)讓 agent 查自己名下有哪些子——包含使用者透過 UI
+  // 手動開、agent 完全不知情的那些(見 listChildrenFromTool())。與
   // setTeamBus() 同一位置群組:SessionManager 已建好,正是能回頭注入的時機。
   claudeAdapter.setSubagentPort({
     spawnChild: (input) => sessionManager.spawnChildFromTool(input),
+    sendToChild: (input) => sessionManager.sendToChildFromTool(input),
+    listChildren: (input) => sessionManager.listChildrenFromTool(input.parentSessionId),
     // listProfiles:只回傳 agent 決策需要的最小欄位,不把 env/mcpConfig 等可能
     // 含密鑰的欄位送進 agent 的對話 context(見 SubagentPort.listProfiles() 的
     // 介面註解)。
