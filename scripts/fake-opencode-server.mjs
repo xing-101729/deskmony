@@ -115,6 +115,17 @@ async function handlePrompt(sessionId, text, model) {
   const userMessageId = `msg_${randomUUID()}`;
   const assistantMessageId = `msg_${randomUUID()}`;
   broadcast("message.updated", { sessionID: sessionId, info: { id: userMessageId, role: "user", sessionID: sessionId } });
+  // 真實回報的 bug 迴歸模擬:opencode 對使用者自己送出的訊息一樣會建立 text part
+  // 並廣播 message.part.updated(`/event` 是全域 SSE,不分 user/assistant)——這裡
+  // 補上模擬同一個行為(部件內容就是使用者剛送出的 `text`,建立當下就是完整內容,
+  // 沒有串流過程,故 time.start/end 同時給值),讓下面 24b/24f 既有的「回覆全文須與
+  // 預期完全相符」斷言真的能涵蓋這個情境(見 packages/adapters/src/opencode-adapter.ts
+  // handlePartUpdated() 的 role 過濾修復——沒有這段模擬,fake server 永遠不會觸發
+  // 這個 bug,既有測試就算 adapter 忘記過濾使用者訊息 part 也發現不了)。
+  broadcast("message.part.updated", {
+    sessionID: sessionId,
+    part: { id: `prt_${randomUUID()}`, messageID: userMessageId, sessionID: sessionId, type: "text", text, time: { start: Date.now(), end: Date.now() } },
+  });
   broadcast("session.status", { sessionID: sessionId, status: { type: "busy" } });
   broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
 

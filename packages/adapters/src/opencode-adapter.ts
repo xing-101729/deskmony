@@ -226,6 +226,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       toolMeta: new Map(),
       pendingPermissions: new Map(),
       erroredMessageIds: new Set(),
+      messageRoles: new Map(),
       busy: false,
       turnErrored: false,
       idleWaiters: [],
@@ -439,6 +440,12 @@ export class OpenCodeAdapter implements AgentAdapter {
         const info = properties?.info as
           | { id?: string; role?: string; error?: { name?: string; data?: { message?: string } } }
           | undefined;
+        // Bug 修復:記錄每個 opencode messageID 對應的 role(user/assistant),供
+        // handlePartUpdated() 判斷一個 text part 究竟屬於使用者自己的訊息還是
+        // assistant 的回覆——見該方法內的檢查與註解。
+        if (info?.id && info.role) {
+          internal.messageRoles.set(info.id, info.role);
+        }
         if (
           info?.role === "assistant" &&
           info.error &&
@@ -495,6 +502,17 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   private handlePartUpdated(internal: InternalSession, part: OpencodePart): void {
     if (part.type === "text" || part.type === "reasoning") {
+      // Bug 修復:`message.part.updated`/`message.part.delta` 是全域 SSE 事件(不分
+      // user/assistant),使用者自己送出的訊息一樣會建立 text part 並觸發這個事件
+      // ——沒有這道檢查的話,使用者剛輸入的文字會被誤判成 assistant 輸出,原封不動
+      // 轉成 message-delta 疊進回覆泡泡(MessageDeltaEventSchema.role 只允許
+      // "assistant",見 packages/shared/src/events.ts,語意上不該收到 user 的內容)。
+      // role 來自 handleEvent() 的 message.updated 分支記錄的 messageRoles;只在
+      // **確定**是 user 訊息時才跳過——role 尚未知道時維持原行為繼續轉發,避免
+      // message.updated 與 message.part.updated 兩者到達順序萬一不如預期時誤殺真正
+      // 的 assistant 串流(對稱於 ACP adapter 靠協定本身的 agent_message_chunk /
+      // user_message_chunk 區分,見 acp-adapter.ts handleSessionUpdate())。
+      if (part.messageID && internal.messageRoles.get(part.messageID) === "user") return;
       let meta = internal.partMeta.get(part.id);
       if (!meta) {
         meta = { type: part.type, text: "", done: false };
@@ -657,6 +675,9 @@ interface InternalSession {
   toolMeta: Map<string, ToolMeta>;
   pendingPermissions: Map<string, PendingPermission>;
   erroredMessageIds: Set<string>;
+  /** opencode messageID -> role("user"/"assistant"/...),由 message.updated 事件
+   *  填入——見 handlePartUpdated() 用它過濾使用者自己訊息的 part。 */
+  messageRoles: Map<string, string>;
   busy: boolean;
   /** 這一輪是否已經送出過 error(避免 markIdleIfBusy() 額外再送一次 completed)。 */
   turnErrored: boolean;
@@ -668,6 +689,9 @@ interface InternalSession {
 
 interface OpencodePart {
   id: string;
+  /** 這個 part 所屬的 opencode message id——用來反查 InternalSession.messageRoles
+   *  判斷這個 part 是 user 還是 assistant 的訊息,見 handlePartUpdated()。 */
+  messageID?: string;
   type: string;
   text?: string;
   time?: { start?: number; end?: number };
