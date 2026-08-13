@@ -69,6 +69,16 @@ export function ModalPortal({ children }: { children: React.ReactNode }): JSX.El
 
     const previouslyFocused = document.activeElement as HTMLElement | null;
 
+    // 同 ChatView.tsx 的 session 切換焦點修復(見 electron/main.ts 的
+    // `deskmony:focusWindow` handler 註解):彈窗不一定是使用者當下這個
+    // BrowserWindow 直接握有 OS 焦點時開出來的(例如 PermissionModal 由
+    // core 端透過 WS push 觸發,見 PermissionModal.tsx),光靠下面的 DOM
+    // `element.focus()` 只能移動這個視窗**內部**的 focus,收不到真正鍵盤
+    // 事件時使用者得先 alt-tab 切一次視窗才能打字。純瀏覽器 client 沒有
+    // 對應的 OS 視窗可以 focus,`window.deskmony?.focusWindow` 在該情境下
+    // 是 undefined,略過即可。
+    void window.deskmony?.focusWindow?.();
+
     const focusables = getFocusableElements(wrapper);
     (focusables[0] ?? wrapper).focus();
 
