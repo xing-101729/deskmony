@@ -293,6 +293,18 @@ export class AcpAdapter implements AgentAdapter {
     throw new Error('software="acp" 不支援變更 model(model 由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)');
   }
 
+  /**
+   * 比照上面的 `setModel()`:ACP 協議的 `session/new`/`session/prompt` 沒有
+   * effort/reasoning 參數,思考程度完全由被 spawn 出來的外部 agent/CLI 自行
+   * 決定與管理,呼叫端(我們)沒有介面可以介入——明確拋出錯誤,不可靜默
+   * 忽略成功(見 packages/adapters/src/types.ts 的 `AgentAdapter.setEffort()`
+   * 介面註解)。
+   */
+  async setEffort(handle: AgentHandle): Promise<void> {
+    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
+    throw new Error('software="acp" 不支援變更思考程度(思考程度由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)');
+  }
+
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {

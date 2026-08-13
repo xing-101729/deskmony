@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgentSoftwareSchema, SessionPermissionModeSchema } from "./agent-profile.js";
+import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-profile.js";
 
 /**
  * Session 狀態機:idle / busy / waiting(等待權限回覆) / error。
@@ -37,6 +37,18 @@ export const SessionSchema = z.object({
    * 顯示 profile 的 model,或標示「(由 agent 管理)」。
    */
   model: z.string().optional(),
+  /**
+   * session 級別的 effort(思考程度)覆寫,比照上面的 `model` 欄位。建立時預設
+   * 取自 `AgentProfile.effort`(見 `SessionManager.createSession()`);之後可
+   * 透過 `session.setEffort` gateway 方法變更,只有 `adapterType ===
+   * "claude-agent-sdk"` 的 session 支援(見 packages/adapters/src/types.ts 的
+   * `AgentAdapter.setEffort()` 介面註解——呼叫 SDK 的
+   * `Query.applyFlagSettings({ effortLevel })`)。其餘 adapter(含 opencode)
+   * 呼叫這個方法會得到明確錯誤。舊 session(建立於這個欄位存在之前)這個欄位
+   * 可能是 `undefined` —— UI 應 fallback 顯示 profile 的 effort,或視為
+   * 「(未指定,使用 CLI 預設)」。
+   */
+  effort: EffortLevelSchema.optional(),
   /**
    * S7(auto-mode-and-yolo):這個 session 目前的權限模式(auto/YOLO)——**純
    * ephemeral**,只存在 `SessionManager` 記憶體(見 apps/core/src/session/
@@ -106,6 +118,7 @@ export const AgentOverrideSchema = z.object({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
 });
 export type AgentOverride = z.infer<typeof AgentOverrideSchema>;
 

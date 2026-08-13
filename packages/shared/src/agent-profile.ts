@@ -147,6 +147,17 @@ function refineAgentProfileConfig(
 }
 
 /**
+ * Reasoning effort(思考程度)。查證於 sdk.d.ts:`query()` 的 `Options.effort?:
+ * EffortLevel` 欄位與執行中 `Query.applyFlagSettings({ effortLevel })` 都是 SDK
+ * 正式公開 API(非 deprecated)。**只有 `software="claude-agent-sdk"` 驗證得到
+ * 這個能力**——`claude-cli`(PTY 直通同一支 `claude` 執行檔)、`opencode`、
+ * `acp`、`pty` 都沒有查到對應機制,因此其餘 adapter 一律不顯示控制項、呼叫
+ * `setEffort()` 會拋出明確錯誤(比照 `setModel()` 對 acp/pty 的既有作法)。
+ */
+export const EffortLevelSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
+
+/**
  * AgentProfile:一個可被建立 session 的 agent 設定檔。
  * 對應 ARCHITECTURE.md 第 6 節 ERD 的 AGENT_PROFILE。
  *
@@ -178,6 +189,7 @@ const AgentProfileObjectSchema = z.object({
    */
   providerId: z.string().optional(),
   model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
   systemPrompt: z.string().optional(),
   mcpConfig: z.record(z.string(), z.unknown()).optional(),
   permissionLevel: PermissionLevelSchema.default("always-ask"),

@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentProfile, PromptInput, TeamBusPort } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, EffortLevel, PromptInput, TeamBusPort } from "@deskmony/shared";
 import type { AdapterCapabilities } from "@deskmony/shared";
 
 /**
@@ -110,6 +110,23 @@ export interface AgentAdapter {
    * setSessionModel()` 會讓這個錯誤原樣傳給 gateway 呼叫端)。
    */
   setModel(handle: AgentHandle, model: string): Promise<void>;
+  /**
+   * 變更此 session 後續使用的 effort(思考程度)。
+   *
+   * 調查結論(讀取 node_modules 內 `@anthropic-ai/claude-agent-sdk` 的
+   * `sdk.d.ts` 後確認,見 `claude-sdk-adapter.ts` 頂端對接策略註解的延伸
+   * 說明):執行中的 `Query` 物件提供 `applyFlagSettings({ effortLevel })`,
+   * 是 SDK 正式公開(非 deprecated)的 API,`ClaudeAgentSdkAdapter` 直接呼叫
+   * 這個方法,不需要 dispose/respawn,對話上下文完全不受影響地保留。
+   * `'max'` 是 session-scoped(只在這個 session 生效,不會持久化到 settings
+   * 檔案,見 sdk.d.ts 對 `applyFlagSettings()` 的說明)。
+   *
+   * `OpenCodeAdapter`/`AcpAdapter`/`GenericPtyAdapter` 都沒有查到對應的
+   * reasoning-effort 機制(不像 model 那樣 opencode 至少有 per-message 欄位
+   * 可以模擬覆寫)——三者一律丟出明確錯誤,不可靜默忽略成功(呼叫端
+   * `SessionManager.setSessionEffort()` 會讓這個錯誤原樣傳給 gateway 呼叫端)。
+   */
+  setEffort(handle: AgentHandle, effort: EffortLevel): Promise<void>;
   /**
    * 原始 byte/字元級輸入直通(對應 Bug A 修正:xterm.js 的 `term.onData()`)。
    * 與 `sendPrompt()` 的差異——`sendPrompt()` 是「送一整行文字,語意上等同

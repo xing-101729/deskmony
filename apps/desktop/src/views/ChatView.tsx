@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentProfile, Session } from "@deskmony/shared";
+import type { AgentProfile, EffortLevel, Session } from "@deskmony/shared";
 import { useSessionStore, selectProviderModels, selectUsageReporting, type ChatItem } from "../stores/session-store.js";
 import { AutoModeControl } from "./AutoModeControl.js";
 import { IconButton } from "../ui/Button.js";
@@ -76,6 +76,61 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
             {m.label}
           </option>
         ))}
+      </Select>
+      {error && (
+        <span className="text-2xs text-danger" title={error}>
+          切換失敗
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 比照上面的 `ModelControl`,但更簡單:思考程度固定 5 個等級,不需要 provider
+ * 偵測清單(見 packages/shared/src/agent-profile.ts 的 `EffortLevelSchema`
+ * 註解)。只有 `claude-agent-sdk` 驗證支援這個能力——
+ * `session.adapterType !== "claude-agent-sdk"` 時直接 `return null`,不像
+ * `ModelControl` 對 acp/pty 顯示唯讀 badge:「思考程度」對那些 adapter 根本
+ * 不是一個存在的概念,不需要顯示任何東西。
+ */
+function EffortControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element | null {
+  const setSessionEffort = useSessionStore((s) => s.setSessionEffort);
+  const [switching, setSwitching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (session.adapterType !== "claude-agent-sdk") return null;
+
+  const currentEffort = session.effort ?? profile?.effort ?? "";
+
+  const handleChange = async (effort: EffortLevel | ""): Promise<void> => {
+    if (!effort || effort === currentEffort) return;
+    setSwitching(true);
+    setError(null);
+    try {
+      await setSessionEffort(session.id, effort);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <Select
+        aria-label="切換思考程度"
+        value={currentEffort}
+        onChange={(e) => void handleChange(e.target.value as EffortLevel | "")}
+        disabled={switching}
+        className="!h-6 !text-2xs"
+      >
+        {!currentEffort && <option value="">(未指定,使用 CLI 預設)</option>}
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+        <option value="xhigh">xhigh</option>
+        <option value="max">max</option>
       </Select>
       {error && (
         <span className="text-2xs text-danger" title={error}>
@@ -329,6 +384,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
           <CostBudgetBadge session={session} />
           <AutoModeControl session={session} />
           <ModelControl session={session} profile={profile} />
+          <EffortControl session={session} profile={profile} />
           {busy && (
             <IconButton icon="pause" aria-label="中斷" title="中斷" variant="outline" onClick={interrupt} className="hover:!border-danger hover:!text-danger" />
           )}

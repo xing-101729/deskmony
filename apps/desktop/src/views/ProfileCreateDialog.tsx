@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { type AgentSoftware } from "@deskmony/shared";
+import { type AgentSoftware, type EffortLevel } from "@deskmony/shared";
 import { useSessionStore, selectResolvedProviders } from "../stores/session-store.js";
 import { Dialog } from "../ui/Dialog.js";
 import { Button, IconButton } from "../ui/Button.js";
@@ -71,6 +71,7 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
   const [workingDir, setWorkingDir] = useState(defaultWorkingDir);
   const [args, setArgs] = useState("");
   const [model, setModel] = useState("");
+  const [effort, setEffort] = useState<EffortLevel | "">("");
   /** 只在 isSdkTarget 時有意義:每個 profile 各自選要用 `claude login` 的本機
    *  登入憑證,還是這裡直接填一把 API key(存成這個 profile 的
    *  `env.ANTHROPIC_API_KEY`)——見 handleSubmit() 怎麼把 apiKey 併進
@@ -98,6 +99,7 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
   useEffect(() => {
     setArgs("");
     setModel(selectedProvider?.defaultModelId ?? "");
+    setEffort("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectionKey]);
 
@@ -189,6 +191,7 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
         ...(target.providerId ? { providerId: target.providerId } : {}),
         ...(buildEnv() ? { env: buildEnv() } : {}),
         ...(selectedProvider?.supportsModelSelection && model ? { model } : {}),
+        ...(isSdkTarget && effort ? { effort } : {}),
         ...(target.software === "acp" && target.command ? { acpConfig: { command: target.command, args: target.args } } : {}),
         ...(target.software === "pty" && target.command ? { ptyConfig: { command: target.command, args: target.args } } : {}),
         ...(target.software === "opencode" && target.command ? { opencodeConfig: { command: target.command } } : {}),
@@ -328,6 +331,22 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
                   {m.label}
                 </option>
               ))}
+            </Select>
+          </Field>
+        )}
+
+        {isSdkTarget && (
+          <Field
+            label="思考程度(選填)"
+            hint="xhigh/max 僅部分較新 model 支援,其餘 model 由 CLI 自行降級處理(實際降級行為以 CLI 版本為準,不臆測)。"
+          >
+            <Select value={effort} onChange={(e) => setEffort(e.target.value as EffortLevel | "")}>
+              <option value="">(未指定,使用 CLI 預設)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
             </Select>
           </Field>
         )}

@@ -11,7 +11,7 @@ import type {
   SDKUserMessage,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, AgentProfile } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, EffortLevel } from "@deskmony/shared";
 import type { PromptInput } from "@deskmony/shared";
 import type { SubagentPort } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, TeamSpawnContext, Workspace } from "./types.js";
@@ -136,6 +136,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     const options: SdkOptions = {
       cwd: workspace.path,
       model: profile.model,
+      effort: profile.effort,
       includePartialMessages: true,
       permissionMode: "default",
       spawnClaudeCodeProcess: (spawnOptions) => {
@@ -361,6 +362,18 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   async setModel(handle: AgentHandle, model: string): Promise<void> {
     const internal = this.mustGet(handle);
     await internal.sdkQuery.setModel(model);
+  }
+
+  /**
+   * 比照上面的 `setModel()`:直接呼叫 SDK 的
+   * `Query.applyFlagSettings({ effortLevel })`(見 packages/adapters/src/
+   * types.ts 的 `AgentAdapter.setEffort()` 介面註解、`sdk.d.ts` 內
+   * `applyFlagSettings()` 的官方文件)。同樣不需要 dispose 現有連線或重新
+   * spawn,對話上下文原封不動保留。
+   */
+  async setEffort(handle: AgentHandle, effort: EffortLevel): Promise<void> {
+    const internal = this.mustGet(handle);
+    await internal.sdkQuery.applyFlagSettings({ effortLevel: effort });
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {

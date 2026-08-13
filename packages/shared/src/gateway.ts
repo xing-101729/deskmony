@@ -6,6 +6,7 @@ import {
   AgentProfileSchema,
   AgentSoftwareSchema,
   CreateAgentProfileInputSchema,
+  EffortLevelSchema,
   SessionPermissionModeSchema,
 } from "./agent-profile.js";
 import { AdapterCapabilitiesSchema } from "./adapter-capabilities.js";
@@ -149,6 +150,18 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     ...baseRequest,
     method: z.literal("session.setModel"),
     params: z.object({ sessionId: z.string(), model: z.string().min(1) }),
+  }),
+  /**
+   * 比照上面的 `session.setModel`:對話中切換 effort(思考程度,見
+   * apps/core/src/session/session-manager.ts 的
+   * `SessionManager.setSessionEffort()`、packages/adapters/src/types.ts 的
+   * `AgentAdapter.setEffort()` 介面註解)。只有 `software="claude-agent-sdk"`
+   * 的 session 支援;其餘 adapter 呼叫這個方法會得到明確的錯誤。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.setEffort"),
+    params: z.object({ sessionId: z.string(), effort: EffortLevelSchema }),
   }),
   z.object({
     ...baseRequest,
@@ -610,6 +623,8 @@ export const OkResultSchema = z.object({ ok: z.literal(true) });
 /** M5 Round C:`session.setModel` 的回應——回傳更新後的完整 Session,讓呼叫端
  * 不需要等下一次 "session-updated" 推播就能立即拿到新的 `model` 值。 */
 export const SessionSetModelResultSchema = z.object({ session: SessionSchema });
+/** 比照上面的 `SessionSetModelResultSchema`:`session.setEffort` 的回應。 */
+export const SessionSetEffortResultSchema = z.object({ session: SessionSchema });
 /** S7:`session.setPermissionMode` 的回應——回傳套用後的模式與(若為 YOLO)
  *  到期時間戳,讓呼叫端不需要再等一次 "session-updated" 推播就能更新 UI。 */
 export const SessionSetPermissionModeResultSchema = z.object({

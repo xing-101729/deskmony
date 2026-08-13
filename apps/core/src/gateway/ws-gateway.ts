@@ -608,6 +608,8 @@ export class WsGateway {
         return { ok: true };
       case "session.setModel":
         return { session: await this.sessionManager.setSessionModel(request.params.sessionId, request.params.model) };
+      case "session.setEffort":
+        return { session: await this.sessionManager.setSessionEffort(request.params.sessionId, request.params.effort) };
       case "permission.resolve":
         // rememberRule 若帶 escalate-strong 的 requestId,SessionManager 端會
         // 強制忽略(C4 紀律③);遠端連線帶 rememberRule 已在 handleMessage()

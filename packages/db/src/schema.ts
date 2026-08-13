@@ -25,6 +25,13 @@ export const sessions = sqliteTable("sessions", {
    */
   model: text("model"),
   /**
+   * 比照上面的 `model` 欄位:session 級別的 effort(思考程度)覆寫(nullable,
+   * 見 packages/shared/src/session.ts 的 `SessionSchema.effort` 註解)。既有的
+   * 舊 DB 檔案靠 `packages/db/src/client.ts` 的 `ensureSessionsEffortColumn()`
+   * 冪等 `ALTER TABLE` 補上。
+   */
+  effort: text("effort"),
+  /**
    * S6(crash-recovery):對帳標記的時間 / 最後一次狀態變更時間 / 後端持久化
    * session 識別碼(見 packages/shared/src/session.ts 的 `SessionSchema`
    * 對應欄位註解)。既有的舊 DB 檔案靠 `packages/db/src/client.ts` 的
@@ -73,6 +80,7 @@ export const agentProfiles = sqliteTable("agent_profiles", {
    *  `ensureAgentProfilesProviderColumnsColumn()` 冪等 `ALTER TABLE` 補上。 */
   providerId: text("provider_id"),
   model: text("model"),
+  effort: text("effort"),
   systemPrompt: text("system_prompt"),
   mcpConfig: text("mcp_config"),
   permissionLevel: text("permission_level").notNull().default("always-ask"),

@@ -30,6 +30,7 @@ export function createDb(dbFilePath: string): NexusDb {
       working_dir TEXT NOT NULL,
       last_error TEXT,
       model TEXT,
+      effort TEXT,
       interrupted_at INTEGER,
       last_seen_at INTEGER,
       backend_session_id TEXT,
@@ -55,6 +56,7 @@ export function createDb(dbFilePath: string): NexusDb {
       software TEXT NOT NULL,
       provider_id TEXT,
       model TEXT,
+      effort TEXT,
       system_prompt TEXT,
       mcp_config TEXT,
       permission_level TEXT NOT NULL DEFAULT 'always-ask',
@@ -166,10 +168,12 @@ export function createDb(dbFilePath: string): NexusDb {
   `);
 
   ensureSessionsModelColumn(sqlite);
+  ensureSessionsEffortColumn(sqlite);
   ensureSessionsRecoveryColumns(sqlite);
   ensureSessionsParentColumn(sqlite);
   ensureAgentProfilesOpencodeConfigColumn(sqlite);
   ensureAgentProfilesProviderColumns(sqlite);
+  ensureAgentProfilesEffortColumn(sqlite);
   ensureTasksAcceptanceColumn(sqlite);
   ensureTasksAwaitingHumanReviewColumn(sqlite);
   ensureTeamMessagesBudgetColumns(sqlite);
@@ -206,6 +210,21 @@ function ensureSessionsModelColumn(sqlite: Database.Database): void {
   } catch {
     // 欄位已存在(競態)或其他非預期情況——加欄位遷移刻意設計成盡量不讓
     // 啟動流程中斷,見上方函式註解。
+  }
+}
+
+/**
+ * 這輪新增(思考程度):對「已存在的舊 DB 檔案」補上 `sessions.effort` 欄位
+ * ——理由與作法完全比照上面的 `ensureSessionsModelColumn()`。
+ */
+function ensureSessionsEffortColumn(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+  const hasColumn = columns.some((col) => col.name === "effort");
+  if (hasColumn) return;
+  try {
+    sqlite.exec("ALTER TABLE sessions ADD COLUMN effort TEXT");
+  } catch {
+    // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
   }
 }
 
@@ -290,6 +309,21 @@ function ensureAgentProfilesProviderColumns(sqlite: Database.Database): void {
     } catch {
       // 同上。
     }
+  }
+}
+
+/**
+ * 這輪新增(思考程度):對「已存在的舊 DB 檔案」補上 `agent_profiles.effort`
+ * 欄位——理由與作法完全比照上面的 `ensureSessionsModelColumn()`。
+ */
+function ensureAgentProfilesEffortColumn(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(agent_profiles)").all() as { name: string }[];
+  const hasColumn = columns.some((col) => col.name === "effort");
+  if (hasColumn) return;
+  try {
+    sqlite.exec("ALTER TABLE agent_profiles ADD COLUMN effort TEXT");
+  } catch {
+    // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
   }
 }
 

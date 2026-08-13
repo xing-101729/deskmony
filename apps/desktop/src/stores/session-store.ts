@@ -9,6 +9,7 @@ import {
   type ConfigSetFilePatchInput,
   type CreateAgentProfileInput,
   type EffectiveCoreConfig,
+  type EffortLevel,
   type EnforcementNotificationPush,
   type GatewayCapabilities,
   type KnownClaudeModel,
@@ -42,6 +43,7 @@ import {
   SessionCreateResultSchema,
   SessionHistoryResultSchema,
   SessionListResultSchema,
+  SessionSetEffortResultSchema,
   SessionSetModelResultSchema,
   SessionSetPermissionModeResultSchema,
   SettingsGetEnabledModelsResultSchema,
@@ -253,6 +255,13 @@ interface SessionStoreState {
    * 拋錯,不會靜默成功),呼叫端(ChatView)需自行 catch 並顯示錯誤。
    */
   setSessionModel: (sessionId: string, model: string) => Promise<void>;
+  /**
+   * 比照上面的 `setSessionModel()`:對話中切換思考程度,呼叫 gateway 的
+   * `session.setEffort`。只有 `software="claude-agent-sdk"` 的 session 支援,
+   * 其餘 adapter 呼叫這個方法會讓回傳的 Promise reject,呼叫端(ChatView)
+   * 需自行 catch 並顯示錯誤。
+   */
+  setSessionEffort: (sessionId: string, effort: EffortLevel) => Promise<void>;
   /**
    * M5 Round E(需求4):載入目前啟用的 model 偏好(`settings.getEnabledModels`)。
    * `connect()` 會呼叫一次;SettingsDialog 儲存成功後也會呼叫(見
@@ -776,6 +785,30 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
             kind: "system",
             id: crypto.randomUUID(),
             content: `已切換模型至 ${model},後續對話由新模型接續`,
+            createdAt: Date.now(),
+          },
+        ],
+      },
+    }));
+  },
+
+  setSessionEffort: async (sessionId, effort) => {
+    const raw = await client.call("session.setEffort", { sessionId, effort });
+    const { session } = SessionSetEffortResultSchema.parse(raw);
+    set((state) => ({
+      sessions: state.sessions.some((s) => s.id === session.id)
+        ? state.sessions.map((s) => (s.id === session.id ? session : s))
+        : [...state.sessions, session],
+      // 比照上面的 setSessionModel():本地立即補一則系統訊息(後端已經把
+      // 同樣內容的訊息 persist 到 DB,見 SessionManager.setSessionEffort())。
+      itemsBySession: {
+        ...state.itemsBySession,
+        [sessionId]: [
+          ...(state.itemsBySession[sessionId] ?? []),
+          {
+            kind: "system",
+            id: crypto.randomUUID(),
+            content: `已切換思考程度至 ${effort},後續對話由新設定接續`,
             createdAt: Date.now(),
           },
         ],

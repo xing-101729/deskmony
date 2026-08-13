@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { AgentOverride, AgentProfile, Session } from "@deskmony/shared";
+import type { AgentOverride, AgentProfile, EffortLevel, Session } from "@deskmony/shared";
 import { useSessionStore, selectContextReporting, selectResolvedProviders, selectProviderModels } from "../stores/session-store.js";
 import { ProfileCreateDialog } from "./ProfileCreateDialog.js";
 import type { ViewMode } from "../App.js";
@@ -129,6 +129,7 @@ export function SessionList({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [overrideProviderId, setOverrideProviderId] = useState("");
   const [overrideModel, setOverrideModel] = useState("");
+  const [overrideEffort, setOverrideEffort] = useState<EffortLevel | "">("");
 
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId);
   const workspaces = useMemo(() => groupSessionsByWorkspace(sessions), [sessions]);
@@ -138,6 +139,7 @@ export function SessionList({
   useEffect(() => {
     setOverrideProviderId("");
     setOverrideModel("");
+    setOverrideEffort("");
   }, [selectedProfileId]);
 
   /**
@@ -354,6 +356,8 @@ export function SessionList({
               onChangeOverrideProviderId={setOverrideProviderId}
               model={overrideModel}
               onChangeModel={setOverrideModel}
+              effort={overrideEffort}
+              onChangeEffort={setOverrideEffort}
             />
           </div>
         )}
@@ -369,7 +373,7 @@ export function SessionList({
               const overrideProvider = overrideProviderId
                 ? selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === overrideProviderId)
                 : undefined;
-              onCreateSession(buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model));
+              onCreateSession(buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model, overrideEffort, selectedProfile?.effort));
             }}
             title={`新對話(${MOD_LABEL}N)`}
           >
@@ -502,17 +506,19 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
   const [profileId, setProfileId] = useState(session.agentProfileId);
   const [overrideProviderId, setOverrideProviderId] = useState("");
   const [overrideModel, setOverrideModel] = useState("");
+  const [overrideEffort, setOverrideEffort] = useState<EffortLevel | "">("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const selectedProfile = profiles.find((p) => p.id === profileId);
 
-  // 換 profile 時重置 agent/model 覆寫——舊的覆寫是針對舊 profile 選的,換了
-  // base profile 之後繼續沿用容易造成不對應的混淆狀態(比照 ProfileCreateDialog
-  // 換 software 時重置 model 的既有作法)。
+  // 換 profile 時重置 agent/model/effort 覆寫——舊的覆寫是針對舊 profile 選的,
+  // 換了 base profile 之後繼續沿用容易造成不對應的混淆狀態(比照
+  // ProfileCreateDialog 換 software 時重置 model 的既有作法)。
   useEffect(() => {
     setOverrideProviderId("");
     setOverrideModel("");
+    setOverrideEffort("");
   }, [profileId]);
 
   const handleSubmit = async (): Promise<void> => {
@@ -522,7 +528,7 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
       const overrideProvider = overrideProviderId
         ? selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === overrideProviderId)
         : undefined;
-      const agentOverride = buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model);
+      const agentOverride = buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model, overrideEffort, selectedProfile?.effort);
       await spawnChild(session.id, prompt.trim(), profileId, title.trim() || undefined, agentOverride);
       onClose();
     } catch (err) {
@@ -566,6 +572,8 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
           onChangeOverrideProviderId={setOverrideProviderId}
           model={overrideModel}
           onChangeModel={setOverrideModel}
+          effort={overrideEffort}
+          onChangeEffort={setOverrideEffort}
         />
         <Field label="任務 prompt">
           <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={5} placeholder="描述這個子 agent 要執行的任務…" autoFocus />
@@ -596,12 +604,16 @@ function AgentOverrideFields({
   onChangeOverrideProviderId,
   model,
   onChangeModel,
+  effort,
+  onChangeEffort,
 }: {
   baseProfile: AgentProfile | undefined;
   overrideProviderId: string;
   onChangeOverrideProviderId: (id: string) => void;
   model: string;
   onChangeModel: (model: string) => void;
+  effort: EffortLevel | "";
+  onChangeEffort: (effort: EffortLevel | "") => void;
 }): JSX.Element {
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const detectingAgents = useSessionStore((s) => s.detectingAgents);
@@ -630,6 +642,12 @@ function AgentOverrideFields({
     ? overrideProvider.models
     : selectProviderModels(baseProfile, detectedAgents, providerPrefs, enabledModelIds);
 
+  // 思考程度只有 claude-agent-sdk 驗證支援(見 packages/shared/src/
+  // agent-profile.ts 的 EffortLevelSchema 註解)——這裡的「有效 software」要
+  // 先看有沒有覆寫 provider,沒有才落回 baseProfile 原本的 software,比照
+  // ChatView.tsx 的 EffortControl 對 session.adapterType 的既有判斷式。
+  const effectiveSoftware = overrideProvider?.software ?? baseProfile?.software;
+
   return (
     <>
       <Field label="Agent 軟體(選填,預設沿用 Profile)">
@@ -651,6 +669,18 @@ function AgentOverrideFields({
                 {m.label}
               </option>
             ))}
+          </Select>
+        </Field>
+      )}
+      {effectiveSoftware === "claude-agent-sdk" && (
+        <Field label="思考程度(選填)">
+          <Select value={effort} onChange={(e) => onChangeEffort(e.target.value as EffortLevel | "")}>
+            <option value="">(沿用{overrideProvider ? "" : " Profile"}預設)</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
           </Select>
         </Field>
       )}

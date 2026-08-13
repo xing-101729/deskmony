@@ -215,6 +215,17 @@ export class GenericPtyAdapter implements AgentAdapter {
     throw new Error('software="pty" 不支援變更 model(pty 是無結構化的終端直通,不存在「model」概念)');
   }
 
+  /**
+   * 比照上面的 `setModel()`:pty 是無結構化的終端直通,連「思考程度」這個
+   * 概念本身都不存在(終端裡跑的可能根本不是任何 LLM CLI)——明確拋出錯誤,
+   * 不可靜默忽略成功(見 packages/adapters/src/types.ts 的
+   * `AgentAdapter.setEffort()` 介面註解)。
+   */
+  async setEffort(handle: AgentHandle): Promise<void> {
+    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
+    throw new Error('software="pty" 不支援變更思考程度(pty 是無結構化的終端直通,不存在「思考程度」概念)');
+  }
+
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {

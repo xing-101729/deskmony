@@ -1,4 +1,4 @@
-import type { AgentOverride, ResolvedProvider } from "@deskmony/shared";
+import type { AgentOverride, EffortLevel, ResolvedProvider } from "@deskmony/shared";
 
 /**
  * 建立/開子 agent 時,把「使用者在 AgentOverrideFields 選的東西」轉成要送給
@@ -12,16 +12,22 @@ import type { AgentOverride, ResolvedProvider } from "@deskmony/shared";
  *   到、免手動輸入」的已知選項——呼叫端負責只把這類 provider 放進選單)。
  *   claude-cli(pty 直通)比照 ProfileCreateDialog 既有的 resolveTarget()
  *   邏輯:pty 建立後無法事後切換 model,只能在建立當下把 `--model <alias>`
- *   烤進固定的啟動參數。
- * - `overrideProvider` 為 undefined 但 `model` 跟 base profile 原本的
- *   model 不同:只換 model,software 沿用 profile(省略 override.software,
- *   見 core 端 `applyAgentOverride()` 的分流語意)。
+ *   烤進固定的啟動參數。`effort` 沒有等價的 CLI 旗標可烤(查無對應機制,見
+ *   packages/shared/src/agent-profile.ts 的 `EffortLevelSchema` 註解),有值
+ *   就直接放進 override 物件——呼叫端(只有 claude-agent-sdk profile 會顯示
+ *   這個欄位,見 ProfileCreateDialog/AgentOverrideFields 的 isSdkTarget
+ *   gating)負責只在有意義的情境下傳入非空字串。
+ * - `overrideProvider` 為 undefined 但 `model`/`effort` 跟 base profile
+ *   原本的值不同:只換有變動的那個欄位,software 沿用 profile(省略
+ *   override.software,見 core 端 `applyAgentOverride()` 的分流語意)。
  * - 兩者都沒變:回傳 undefined,等同完全不帶 agentOverride(既有行為不變)。
  */
 export function buildAgentOverride(
   overrideProvider: ResolvedProvider | undefined,
   model: string,
   baseModel: string | undefined,
+  effort: EffortLevel | "",
+  baseEffort: EffortLevel | undefined,
 ): AgentOverride | undefined {
   if (overrideProvider) {
     const modelArgs = overrideProvider.id === "claude-cli" && model ? ["--model", model] : [];
@@ -32,10 +38,13 @@ export function buildAgentOverride(
       command: overrideProvider.command,
       args: combinedArgs.length > 0 ? combinedArgs : undefined,
       ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
     };
   }
-  if (model && model !== baseModel) {
-    return { model };
+  const modelChanged = model && model !== baseModel;
+  const effortChanged = effort && effort !== baseEffort;
+  if (modelChanged || effortChanged) {
+    return { ...(modelChanged ? { model } : {}), ...(effortChanged ? { effort } : {}) };
   }
   return undefined;
 }

@@ -12,6 +12,7 @@ import type {
   AgentProfile,
   AgentSoftware,
   CreateSessionInput,
+  EffortLevel,
   MessageRecord,
   PermissionResolvedPush,
   PolicyRule,
@@ -441,6 +442,9 @@ export class SessionManager extends EventEmitter {
       // packages/shared/src/session.ts 的 SessionSchema.model 註解)。這輪起
       // 若有 agentOverride.model 則反映覆寫後的值(overriddenProfile.model)。
       model: overriddenProfile.model,
+      // 比照上面的 model:session 級別的 effort 預設取自 profile.effort,若有
+      // agentOverride.effort 則反映覆寫後的值(overriddenProfile.effort)。
+      effort: overriddenProfile.effort,
       // S9:建立子 session 時帶入 parent id
       parentSessionId: input.parentSessionId,
     };
@@ -646,6 +650,41 @@ export class SessionManager extends EventEmitter {
     // 在聊天串留一則系統訊息,讓使用者(即使是之後重新載入 history)也能
     // 看到「這裡換過 model」的紀錄,呼應 ARCHITECTURE 對話延續性的要求。
     await this.persistMessage(sessionId, "system", `已切換模型至 ${model},後續對話由新模型接續`);
+
+    const session = await this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`session 不存在: ${sessionId}`);
+    }
+    this.emit("session-updated", session);
+    return session;
+  }
+
+  /**
+   * 比照上面的 `setSessionModel()`:對話中切換 effort(思考程度,見
+   * packages/adapters/src/types.ts 的 `AgentAdapter.setEffort()` 介面註解)。
+   * `ClaudeAgentSdkAdapter.setEffort()` 呼叫 SDK 的
+   * `Query.applyFlagSettings({ effortLevel })`,對話上下文原封不動保留,不需要
+   * dispose/respawn。只有 `software="claude-agent-sdk"` 驗證得到這個能力(見
+   * packages/shared/src/agent-profile.ts 的 `EffortLevelSchema` 註解)——其餘
+   * adapter(含 opencode)的 `setEffort()` 會直接丟出明確錯誤,這裡不特別
+   * 攔截、原樣往外傳,呼叫端(gateway)會收到 `ok:false` + 明確的錯誤訊息,
+   * 不會誤以為成功。
+   *
+   * 要求 session 目前必須是「執行中」的(`this.runtime` 有對應的
+   * RuntimeState)——理由同 `setSessionModel()`。
+   */
+  async setSessionEffort(sessionId: string, effort: EffortLevel): Promise<Session> {
+    const runtime = this.runtime.get(sessionId);
+    if (!runtime) {
+      throw new Error(`session 尚未啟動或已結束,無法切換思考程度: ${sessionId}`);
+    }
+
+    await runtime.adapter.setEffort(runtime.handle, effort);
+
+    const updatedAt = Date.now();
+    await this.db.update(sessionsTable).set({ effort, updatedAt }).where(eq(sessionsTable.id, sessionId)).run();
+    // 在聊天串留一則系統訊息,比照 setSessionModel() 的既有作法。
+    await this.persistMessage(sessionId, "system", `已切換思考程度至 ${effort},後續對話由新設定接續`);
 
     const session = await this.getSession(sessionId);
     if (!session) {
@@ -1040,6 +1079,7 @@ export class SessionManager extends EventEmitter {
       software,
       providerId: override.providerId ?? (softwareChanged ? undefined : profile.providerId),
       model: override.model ?? profile.model,
+      effort: override.effort ?? profile.effort,
       acpConfig: software === "acp" ? (softwareChanged ? { command: override.command!, args: override.args } : profile.acpConfig) : undefined,
       ptyConfig: software === "pty" ? (softwareChanged ? { command: override.command!, args: override.args } : profile.ptyConfig) : undefined,
       opencodeConfig: software === "opencode" ? (softwareChanged ? { command: override.command! } : profile.opencodeConfig) : undefined,
@@ -1703,6 +1743,7 @@ function rowToSession(row: typeof sessionsTable.$inferSelect): Session {
     updatedAt: row.updatedAt,
     lastError: row.lastError ?? undefined,
     model: row.model ?? undefined,
+    effort: (row.effort ?? undefined) as Session["effort"],
     interruptedAt: row.interruptedAt ?? undefined,
     lastSeenAt: row.lastSeenAt ?? undefined,
     backendSessionId: row.backendSessionId ?? undefined,
@@ -1722,6 +1763,7 @@ function sessionToRow(session: Session): typeof sessionsTable.$inferInsert {
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     model: session.model ?? null,
+    effort: session.effort ?? null,
     interruptedAt: session.interruptedAt ?? null,
     lastSeenAt: session.lastSeenAt ?? null,
     backendSessionId: session.backendSessionId ?? null,

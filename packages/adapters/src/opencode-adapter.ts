@@ -367,6 +367,20 @@ export class OpenCodeAdapter implements AgentAdapter {
     internal.modelOverride = parsed;
   }
 
+  /**
+   * 思考程度(reasoning effort)——與上面的 `setModel()`**不同**,這裡**不**
+   * 採用「存進 session 覆寫、下一則訊息才生效」的 workaround:沒有查證到
+   * opencode API(`POST /session/{id}/message` 或其他端點)有任何
+   * reasoning-effort 相關欄位或機制可用(見本檔案頂端對接策略「以實際觀察到
+   * 的行為為準,不臆測」的一貫要求),不可臆測一個不存在的能力。明確拋出
+   * 錯誤,不可靜默忽略成功(見 packages/adapters/src/types.ts 的
+   * `AgentAdapter.setEffort()` 介面註解)。
+   */
+  async setEffort(handle: AgentHandle): Promise<void> {
+    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
+    throw new Error('software="opencode" 不支援變更思考程度(未查得到 opencode 有對應的 reasoning-effort 機制)');
+  }
+
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {
