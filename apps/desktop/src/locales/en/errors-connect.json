@@ -1,0 +1,10 @@
+{
+  "gateway": {
+    "invalidUrl": "Invalid server address: {{detail}}",
+    "connectTimeout": "Connection timed out — please check that the server address is correct and the server is running",
+    "connectFailed": "Could not connect to the server — please check that the address is correct",
+    "closedBeforeAuth": "The connection was closed by the server before authentication completed",
+    "connectionLost": "The connection to Deskmony Core was lost",
+    "notConnected": "Not yet connected to Deskmony Core"
+  }
+}

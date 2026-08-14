@@ -1,0 +1,16 @@
+{
+  "yoloEnabledTitle": "YOLO is enabled: bypasses config policy (hard-deny still applies)",
+  "yoloEnabledTitleWithExpiry": "YOLO is enabled: bypasses config policy (hard-deny still applies), turns off automatically in about {{minutes}} min",
+  "autoEnabledTitle": "Auto is enabled: automatically allows uncategorized actions (config's deny rules still apply)",
+  "autoToggleTitle": "Auto: automatically allows uncategorized middle-ground actions, still bound by config's deny rules and hard-deny",
+  "autoOnLabel": "Auto is on",
+  "autoOffLabel": "Turn on Auto",
+  "yoloToggleTitle": "YOLO: bypasses all of config's rules, turns off automatically after 30 minutes; hard-deny is never affected",
+  "yoloOffLabel": "Turn off YOLO",
+  "yoloOnLabel": "Enable YOLO",
+  "confirmDialogTitle": "Enable YOLO?",
+  "risk1": "Bypasses every policy rule set in config (including your own custom deny rules).",
+  "risk2": "Turns off automatically after 30 minutes, returning to normal confirmation mode.",
+  "risk3Bold": "Hard-deny items are not affected",
+  "risk3Rest": " — writes outside the worktree, reads of secret paths, force-push, and similar actions are still denied or require a forced confirmation."
+}

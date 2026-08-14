@@ -1,0 +1,22 @@
+{
+  "task": {
+    "memberNotInTeam": "Member \"{{memberId}}\" does not belong to the team that owns task \"{{taskId}}\"",
+    "teamMissingWorkingDir": "Team \"{{teamName}}\" has no workingDir configured, so a task worktree cannot be created",
+    "sessionControlNotReady": "Internal error: SessionManager is not ready yet, so a session could not be auto-created for the ephemeral member (the assignment has been rolled back)",
+    "memberAlreadyAssigned": "Member \"{{memberName}}\" is already working on another task — a member can only take on one task at a time (session {{sessionId}} is still in use)",
+    "sessionAutoCreateFailed": "Failed to auto-create a session for member \"{{memberName}}\"; the assignment has been fully rolled back (task returned to backlog, workspace removed): {{detail}}",
+    "mergeRequiresMergingStatus": "Only tasks with status \"merging\" can be merged (current status: {{status}}, taskId={{taskId}})",
+    "noWorkspaceToMerge": "Task {{taskId}} has no workspace bound to it, so it cannot be merged",
+    "notAwaitingReview": "Task {{taskId}} is not currently awaiting human approval to enter review (awaitingHumanReview=false)",
+    "acceptanceAlreadyRunning": "Acceptance checks for task {{taskId}} are already running — please try again shortly"
+  },
+  "workspace": {
+    "baseDirDirty": "baseDir ({{baseDir}}) has uncommitted changes. To avoid losing your work during the merge, merging is refused in this state — please commit or clean up manually and try again.\n{{status}}",
+    "mergeConflict": "Merge conflict occurred; reverted to the pre-merge state. Conflicting files: {{conflictFiles}}",
+    "cleanupFailed": "Failed to clean up the worktree ({{worktreePath}} still exists on disk after {{retries}} retries): {{detail}}; the follow-up directory removal also failed: {{rmDetail}}",
+    "mainBranchNotDetected": "Could not detect the main branch name (baseDir={{baseDir}}): no origin remote-tracking branch is configured, and no local main or master branch was found either",
+    "workingDirMissing": "The team's workingDir does not exist, so a task worktree cannot be created for isolation: {{dir}}",
+    "workingDirNotGitRepo": "The team's workingDir is not a git repo, so a task worktree cannot be created for isolation (run `git init` in that directory first): {{dir}} ({{detail}})",
+    "gitCommandFailed": "git {{command}} failed (cwd={{cwd}}): {{detail}}"
+  }
+}

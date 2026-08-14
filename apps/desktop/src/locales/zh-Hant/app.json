@@ -1,0 +1,62 @@
+{
+  "connectionBanner": {
+    "connecting": "正在連線到 Deskmony Core…",
+    "disconnected": "與 Deskmony Core 的連線已中斷,正在自動重試…"
+  },
+  "interruptedBanner": {
+    "message": "上次未被乾淨關閉,有 <strong>{{count}}</strong> 個 session 需要人工分流(繼續 / 接手 / 重跑 / 放棄)",
+    "action": "開始分流"
+  },
+  "sessionDefaultTitle": "對話 {{n}}",
+  "commands": {
+    "groupGoto": "前往",
+    "groupActions": "動作",
+    "groupSessions": "對話",
+    "viewSession": {
+      "title": "Session 視圖",
+      "keywords": "session chat 對話"
+    },
+    "viewTeamChat": {
+      "title": "團隊群聊",
+      "keywords": "team chat 群聊 訊息"
+    },
+    "viewTaskBoard": {
+      "title": "任務看板",
+      "keywords": "task board kanban 任務"
+    },
+    "newSession": {
+      "title": "新對話",
+      "subtitleWithProfile": "使用 Profile:{{name}}",
+      "subtitleNoProfile": "尚無可用的 Agent Profile",
+      "keywords": "new session create 建立 對話"
+    },
+    "newProfile": {
+      "title": "建立 Agent Profile",
+      "keywords": "profile agent provider 建立"
+    },
+    "settings": {
+      "title": "設定",
+      "subtitle": "全域設定 · 通知 · Provider 管理",
+      "keywords": "settings config provider model 設定"
+    },
+    "toggleSidebar": {
+      "show": "顯示側欄",
+      "hide": "收合側欄",
+      "keywords": "sidebar 側欄 collapse"
+    },
+    "toggleTheme": {
+      "toLight": "切換為淺色主題",
+      "toDark": "切換為深色主題",
+      "keywords": "theme dark light 主題 深色 淺色"
+    },
+    "recovery": {
+      "title": "復原中斷的 session({{count}})",
+      "keywords": "recovery crash 中斷 復原"
+    },
+    "logout": {
+      "title": "登出",
+      "subtitle": "清除已儲存的 token 並回到連線畫面",
+      "keywords": "logout signout 登出"
+    }
+  }
+}

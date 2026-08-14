@@ -1,0 +1,66 @@
+{
+  "sidebar": {
+    "openAriaLabel": "サイドバーを開く"
+  },
+  "empty": {
+    "noTeamTitle": "まだ team が作成されていません",
+    "noTeamDescription": "タスクボードを使うにはまず team を作成し、メンバーを 1 人以上加える必要があります。",
+    "createTeam": "team を作成",
+    "selectTeamTitle": "team を選択してください"
+  },
+  "header": {
+    "switchTeamAriaLabel": "team を切り替え",
+    "newTask": "新規タスク",
+    "teamManagement": "team 管理"
+  },
+  "composer": {
+    "titlePlaceholder": "新規タスクのタイトル",
+    "descriptionPlaceholder": "説明(任意)",
+    "acceptancePlaceholder": "受け入れコマンド(任意、複数は {{separator}} 区切り)",
+    "acceptanceTitle": "機械受け入れコマンド(S4):各コマンドを順番に実行し、すべて exit 0 なら合格。空欄 = 機械受け入れなし(人による判定にフォールバック)",
+    "creating": "作成中…",
+    "create": "作成"
+  },
+  "column": {
+    "empty": "タスクなし"
+  },
+  "blockedSection": {
+    "heading": "ブロック中(Blocked)・{{count}}"
+  },
+  "card": {
+    "deleteTaskAriaLabel": "タスクを削除",
+    "blockedFromBadge": "ブロック前:{{status}}",
+    "awaitingApproval": "review への移行についてあなたの承認待ちです",
+    "approveReview": "review への移行を承認",
+    "assignMemberAriaLabel": "メンバーを割り当て",
+    "selectMemberOption": "メンバーを選択…",
+    "assign": "割り当て",
+    "start": "開始",
+    "submitForReview": "review へ提出",
+    "reject": "差し戻し",
+    "approveMergeTransition": "承認してマージへ進む",
+    "approveMerge": "マージを承認",
+    "unblock": "ブロック解除({{status}} に戻す)",
+    "block": "ブロック",
+    "confirmMerge": "ブランチ「{{branch}}」をメインブランチにマージしてタスクを完了しますか?\n実際に git merge --no-ff が実行されます。競合が発生した場合は自動的に元に戻し(git merge --abort)、エラーを表示します。",
+    "confirmDelete": "タスク「{{title}}」を削除しますか?worktree が作成済みの場合は強制的に一緒に削除され、元に戻せません。",
+    "deleteHadUncommittedWarning": "タスク「{{title}}」の worktree に未 commit の変更があったため、削除と同時に強制的にクリアされました。元に戻せません。"
+  },
+  "acceptance": {
+    "countBadge": "受け入れ {{count}} 件",
+    "undefined": "受け入れ条件は未定義です",
+    "edit": "受け入れを設定",
+    "running": "受け入れ実行中",
+    "run": "受け入れを実行",
+    "passed": "合格",
+    "failed": "不合格",
+    "workspaceMissing": "worktree がまだなく、実行できません",
+    "detailsSummary": "受け入れ結果の詳細({{done}}/{{total}} 件実行済み)",
+    "timedOut": "タイムアウト",
+    "exitCode": "exit {{code}}"
+  },
+  "acceptancePrompt": {
+    "message": "機械受け入れコマンドを設定してください(複数は \"{{separator}}\" 区切りで順番に実行し、すべて exit 0 なら合格。空欄にすると受け入れ条件をクリアします):"
+  },
+  "advanceWarning": "タスク「{{title}}」は受け入れに合格しませんでしたが、review へ移動しました(このスライスは助言的なもので、移行自体はブロックしません)。"
+}

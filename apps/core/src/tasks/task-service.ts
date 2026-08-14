@@ -3,16 +3,18 @@ import { EventEmitter } from "node:events";
 import { eq } from "drizzle-orm";
 import type { NexusDb } from "@deskmony/db";
 import { tasks as tasksTable } from "@deskmony/db";
-import type {
-  AcceptanceResult,
-  AssignTaskInput,
-  CreateSessionInput,
-  CreateTaskInput,
-  Session,
-  Task,
-  TaskAcceptance,
-  TaskStatus,
-  Workspace,
+import {
+  DeskmonyError,
+  ErrorCodes,
+  type AcceptanceResult,
+  type AssignTaskInput,
+  type CreateSessionInput,
+  type CreateTaskInput,
+  type Session,
+  type Task,
+  type TaskAcceptance,
+  type TaskStatus,
+  type Workspace,
 } from "@deskmony/shared";
 import type { TeamManager } from "../team/team-manager.js";
 import type { WorkspaceManager } from "../workspace/workspace-manager.js";
@@ -210,7 +212,11 @@ export class TaskService extends EventEmitter {
   async createTask(input: CreateTaskInput): Promise<Task> {
     const team = await this.teamManager.getTeam(input.teamId);
     if (!team) {
-      throw new Error(`找不到 team: ${input.teamId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "team", id: input.teamId },
+        `找不到 team: ${input.teamId}`,
+      );
     }
     const now = Date.now();
     const task: Task = {
@@ -335,20 +341,36 @@ export class TaskService extends EventEmitter {
   async assignTask(input: AssignTaskInput): Promise<{ task: Task; workspace: Workspace }> {
     const task = await this.mustGetTask(input.taskId);
     if (!isValidTransition(task.status, "assigned", task.blockedFrom)) {
-      throw new Error(`不合法的任務狀態轉換: ${task.status} → assigned(taskId=${task.id})`);
+      throw new DeskmonyError(
+        ErrorCodes.TASK_INVALID_TRANSITION,
+        { from: task.status, to: "assigned", taskId: task.id },
+        `不合法的任務狀態轉換: ${task.status} → assigned(taskId=${task.id})`,
+      );
     }
 
     const member = await this.teamManager.getMember(input.memberId);
     if (!member || member.teamId !== task.teamId) {
-      throw new Error(`成員 ${input.memberId} 不屬於任務 ${task.id} 所在的 team`);
+      throw new DeskmonyError(
+        "task.memberNotInTeam",
+        { memberId: input.memberId, taskId: task.id },
+        `成員 ${input.memberId} 不屬於任務 ${task.id} 所在的 team`,
+      );
     }
 
     const team = await this.teamManager.getTeam(task.teamId);
     if (!team) {
-      throw new Error(`找不到 team: ${task.teamId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "team", id: task.teamId },
+        `找不到 team: ${task.teamId}`,
+      );
     }
     if (!team.workingDir) {
-      throw new Error(`team "${team.name}" 未設定 workingDir,無法建立任務 worktree 隔離`);
+      throw new DeskmonyError(
+        "task.teamMissingWorkingDir",
+        { teamId: team.id, teamName: team.name },
+        `team "${team.name}" 未設定 workingDir,無法建立任務 worktree 隔離`,
+      );
     }
 
     const workspace = await this.workspaceManager.createWorkspaceForTask({
@@ -368,14 +390,20 @@ export class TaskService extends EventEmitter {
         // 視為錯誤並回滾,而不是靜默略過自動 spawn(那會留下「已指派但沒有
         // agent」的半狀態,正是 §2.1 要避免的)。
         await this.rollbackWorkspace(workspace);
-        throw new Error("內部錯誤:SessionManager 尚未就緒,無法為 ephemeral 成員自動建立 session(指派已回滾)");
+        throw new DeskmonyError(
+          "task.sessionControlNotReady",
+          undefined,
+          "內部錯誤:SessionManager 尚未就緒,無法為 ephemeral 成員自動建立 session(指派已回滾)",
+        );
       }
 
       const existingSessionId = this.sessionControl.getSessionIdForMember(member.id);
       if (existingSessionId) {
         await this.rollbackWorkspace(workspace);
         const existingTask = await this.getActiveTaskForMember(member.id);
-        throw new Error(
+        throw new DeskmonyError(
+          "task.memberAlreadyAssigned",
+          { memberName: member.name, existingTaskTitle: existingTask?.title, sessionId: existingSessionId },
           `成員 "${member.name}" 目前已在任務${existingTask ? ` "${existingTask.title}"` : ""}上,一個成員同時只能承接一個任務` +
             `(session ${existingSessionId} 仍在使用中)`,
         );
@@ -390,9 +418,11 @@ export class TaskService extends EventEmitter {
         });
       } catch (err) {
         await this.rollbackWorkspace(workspace);
-        throw new Error(
-          `成員 "${member.name}" 的 session 自動建立失敗,指派已整個回滾(任務退回 backlog、workspace 已清除): ` +
-            `${err instanceof Error ? err.message : String(err)}`,
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new DeskmonyError(
+          "task.sessionAutoCreateFailed",
+          { memberName: member.name, detail },
+          `成員 "${member.name}" 的 session 自動建立失敗,指派已整個回滾(任務退回 backlog、workspace 已清除): ${detail}`,
         );
       }
     }
@@ -428,7 +458,11 @@ export class TaskService extends EventEmitter {
   async updateStatus(taskId: string, newStatus: TaskStatus): Promise<Task> {
     const task = await this.mustGetTask(taskId);
     if (!isValidTransition(task.status, newStatus, task.blockedFrom)) {
-      throw new Error(`不合法的任務狀態轉換: ${task.status} → ${newStatus}(taskId=${task.id})`);
+      throw new DeskmonyError(
+        ErrorCodes.TASK_INVALID_TRANSITION,
+        { from: task.status, to: newStatus, taskId: task.id },
+        `不合法的任務狀態轉換: ${task.status} → ${newStatus}(taskId=${task.id})`,
+      );
     }
     const updated: Task = {
       ...task,
@@ -526,14 +560,22 @@ export class TaskService extends EventEmitter {
   async mergeAndComplete(taskId: string): Promise<Task> {
     const task = await this.mustGetTask(taskId);
     if (task.status !== "merging") {
-      throw new Error(`只有狀態為 merging 的任務才能執行合併(目前狀態: ${task.status}, taskId=${task.id})`);
+      throw new DeskmonyError(
+        "task.mergeRequiresMergingStatus",
+        { status: task.status, taskId: task.id },
+        `只有狀態為 merging 的任務才能執行合併(目前狀態: ${task.status}, taskId=${task.id})`,
+      );
     }
     if (!task.workspaceId) {
-      throw new Error(`任務 ${task.id} 沒有綁定 workspace,無法合併`);
+      throw new DeskmonyError("task.noWorkspaceToMerge", { taskId: task.id }, `任務 ${task.id} 沒有綁定 workspace,無法合併`);
     }
     const workspace = await this.workspaceManager.getWorkspace(task.workspaceId);
     if (!workspace) {
-      throw new Error(`找不到任務 ${task.id} 綁定的 workspace: ${task.workspaceId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "workspace", id: task.workspaceId },
+        `找不到任務 ${task.id} 綁定的 workspace: ${task.workspaceId}`,
+      );
     }
     await this.workspaceManager.mergeWorkspace(workspace);
     return this.updateStatus(taskId, "done");
@@ -733,7 +775,11 @@ export class TaskService extends EventEmitter {
   async approveReview(taskId: string): Promise<Task> {
     const task = await this.mustGetTask(taskId);
     if (!task.awaitingHumanReview) {
-      throw new Error(`任務 ${task.id} 目前沒有在等待人類核可進入 review(awaitingHumanReview=false)`);
+      throw new DeskmonyError(
+        "task.notAwaitingReview",
+        { taskId: task.id },
+        `任務 ${task.id} 目前沒有在等待人類核可進入 review(awaitingHumanReview=false)`,
+      );
     }
     const cleared: Task = { ...task, awaitingHumanReview: false, updatedAt: Date.now() };
     await this.db.update(tasksTable).set(taskToRow(cleared)).where(eq(tasksTable.id, task.id)).run();
@@ -743,7 +789,7 @@ export class TaskService extends EventEmitter {
   private async mustGetTask(taskId: string): Promise<Task> {
     const task = await this.getTask(taskId);
     if (!task) {
-      throw new Error(`找不到任務: ${taskId}`);
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "task", id: taskId }, `找不到任務: ${taskId}`);
     }
     return task;
   }

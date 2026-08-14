@@ -1,0 +1,13 @@
+{
+  "adapterProcess": {
+    "spawnFailed": "Failed to launch the {{software}} subprocess (command={{command}}): {{detail}}"
+  },
+  "opencode": {
+    "sessionCreateFailed": "Failed to create the OpenCode session: {{detail}}",
+    "listenTimeout": "Timed out waiting for the OpenCode server to print its listening address ({{timeoutMs}} ms)",
+    "healthTimeout": "Timed out waiting for the OpenCode server's /global/health to become ready ({{timeoutMs}} ms)",
+    "invalidModelFormat": "The opencode model must be in \"providerID/modelID\" form; the value \"{{model}}\" could not be parsed",
+    "eventStreamMissingBody": "The OpenCode /event response has no body, so the SSE stream cannot be read",
+    "requestFailed": "POST {{url}} failed (status={{status}}): {{detail}}"
+  }
+}

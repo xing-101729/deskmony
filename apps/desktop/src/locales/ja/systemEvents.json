@@ -1,0 +1,13 @@
+{
+  "session": {
+    "modelSwitched": "モデルを {{model}} に切り替えました。以降の会話は新しいモデルで続行されます",
+    "effortSwitched": "思考の深さを {{effort}} に切り替えました。以降の会話は新しい設定で続行されます",
+    "continuedAfterInterrupt": "「継続」によりバックエンドセッションに再接続しました(これまでの記憶を保持)。core 側の前回の中断はこれで終了しました",
+    "yoloExpired": "YOLO(30分)が期限切れになったため、自動的に通常の権限確認モードに戻りました",
+    "adapterError": {
+      "label": "[エラー]"
+    },
+    "contextCheckpointRestarted": "[S8] context 使用率が閾値に達したため、自動的にチェックポイント再起動しました(これまでの会話の要約を読み込んで継続、同じセッションを使用)",
+    "permissionTimeoutDenied": "権限リクエストがタイムアウトしたため、自動的に拒否されました"
+  }
+}

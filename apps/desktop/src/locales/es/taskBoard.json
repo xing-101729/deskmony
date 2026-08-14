@@ -1,0 +1,66 @@
+{
+  "sidebar": {
+    "openAriaLabel": "Abrir barra lateral"
+  },
+  "empty": {
+    "noTeamTitle": "Aún no se ha creado ningún team",
+    "noTeamDescription": "El tablero de tareas necesita un team con al menos un miembro antes de poder crear y asignar tareas.",
+    "createTeam": "Crear team",
+    "selectTeamTitle": "Selecciona un team"
+  },
+  "header": {
+    "switchTeamAriaLabel": "Cambiar de team",
+    "newTask": "Nueva tarea",
+    "teamManagement": "Gestión del team"
+  },
+  "composer": {
+    "titlePlaceholder": "Título de la nueva tarea",
+    "descriptionPlaceholder": "Descripción (opcional)",
+    "acceptancePlaceholder": "Comandos de aceptación (opcional, separa varios con {{separator}})",
+    "acceptanceTitle": "Comandos de aceptación automática (S4): cada comando se ejecuta en orden y todos deben salir con exit 0 para aprobar; déjalo vacío = sin aceptación automática (se recurre al criterio humano)",
+    "creating": "Creando…",
+    "create": "Crear"
+  },
+  "column": {
+    "empty": "Sin tareas"
+  },
+  "blockedSection": {
+    "heading": "Bloqueadas (Blocked) · {{count}}"
+  },
+  "card": {
+    "deleteTaskAriaLabel": "Eliminar tarea",
+    "blockedFromBadge": "Bloqueada desde: {{status}}",
+    "awaitingApproval": "Esperando tu aprobación para pasar a review",
+    "approveReview": "Aprobar el paso a review",
+    "assignMemberAriaLabel": "Asignar miembro",
+    "selectMemberOption": "Selecciona un miembro…",
+    "assign": "Asignar",
+    "start": "Iniciar",
+    "submitForReview": "Enviar a review",
+    "reject": "Rechazar",
+    "approveMergeTransition": "Aprobar y pasar a fusión",
+    "approveMerge": "Aprobar fusión",
+    "unblock": "Desbloquear (volver a {{status}})",
+    "block": "Bloquear",
+    "confirmMerge": "¿Fusionar la rama \"{{branch}}\" de vuelta a la rama principal y completar la tarea?\nEsto ejecutará realmente git merge --no-ff; si hay un conflicto, se revertirá automáticamente (git merge --abort) y se mostrará un error.",
+    "confirmDelete": "¿Eliminar la tarea \"{{title}}\"? Si ya se creó un worktree, también se eliminará por la fuerza; esta acción no se puede deshacer.",
+    "deleteHadUncommittedWarning": "El worktree de la tarea \"{{title}}\" tenía cambios sin commit, que se eliminaron por la fuerza junto con la tarea. Esta acción no se puede deshacer."
+  },
+  "acceptance": {
+    "countBadge": "{{count}} comando(s) de aceptación",
+    "undefined": "No hay criterios de aceptación definidos",
+    "edit": "Configurar aceptación",
+    "running": "Ejecutando aceptación",
+    "run": "Ejecutar aceptación",
+    "passed": "Aprobado",
+    "failed": "No aprobado",
+    "workspaceMissing": "Aún no hay worktree, no se puede ejecutar",
+    "detailsSummary": "Detalles del resultado de aceptación ({{done}}/{{total}} ejecutados)",
+    "timedOut": "Tiempo agotado",
+    "exitCode": "exit {{code}}"
+  },
+  "acceptancePrompt": {
+    "message": "Configura los comandos de aceptación automática (separa varios con \"{{separator}}\", se ejecutan en orden y todos deben salir con exit 0 para aprobar; déjalo vacío para borrar los criterios de aceptación):"
+  },
+  "advanceWarning": "La tarea \"{{title}}\" no superó la aceptación, pero se movió a review de todos modos (esta slice es solo informativa y no bloquea la transición)."
+}

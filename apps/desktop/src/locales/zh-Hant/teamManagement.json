@@ -1,0 +1,47 @@
+{
+  "dialog": {
+    "title": "團隊管理",
+    "description": "建立團隊、加入/移除成員、檢視成員 session 狀態"
+  },
+  "lifecycle": {
+    "persistent": "長命(persistent)",
+    "ephemeral": "短命(ephemeral)"
+  },
+  "lifecycleHint": "S8:長命(persistent)= 為了在線可達,由人/團隊啟動時建立;短命(ephemeral)= 指派任務時自動建立、任務完成自動釋放",
+  "teamPanel": {
+    "sectionLabel": "團隊",
+    "noTeams": "尚無團隊",
+    "newTeamNamePlaceholder": "新團隊名稱",
+    "newTeamWorkingDirPlaceholder": "工作目錄(選填)",
+    "creating": "建立中…",
+    "createTeam": "建立團隊"
+  },
+  "memberPanel": {
+    "emptyTitle": "請先在左側選擇或建立一個團隊",
+    "sectionLabel": "成員({{count}})",
+    "noMembers": "尚無成員",
+    "canInterruptBadge": "可中斷",
+    "contextUnsupportedTitle": "此後端無法自動偵測 context 上限——這個長命成員的 session 不會自動 checkpoint 重啟,context 撐爆前需要人工手動重啟(dispose + 重新建立 session)。",
+    "contextUnsupportedBadge": "此後端無法自動偵測 context 上限,需手動重啟",
+    "noSession": "尚無 session",
+    "createSession": "建立 session",
+    "remove": "移除"
+  },
+  "addMember": {
+    "sectionLabel": "加入成員",
+    "noProfileOption": "(尚無 Profile)",
+    "namePlaceholder": "顯示名稱(選填,預設沿用 profile)",
+    "rolePlaceholder": "角色(選填)",
+    "canInterruptLabel": "可中斷隊友(canInterrupt)",
+    "autoLifecycleOption": "自動(依角色推導)",
+    "derivedPreview": "→ 將推導為「{{label}}」",
+    "adding": "加入中…",
+    "submit": "+ 加入成員"
+  },
+  "errors": {
+    "teamNameRequired": "請輸入團隊名稱",
+    "selectTeamFirst": "請先選擇一個團隊",
+    "selectProfileFirst": "請選擇一個 Agent Profile",
+    "workingDirNotFound": "找不到可用的工作目錄,請確認團隊或 Profile 有設定 workingDir"
+  }
+}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { AgentProfile, EffortLevel, Session } from "@deskmony/shared";
 import { useSessionStore, selectProviderModels, selectUsageReporting, type ChatItem } from "../stores/session-store.js";
 import { AutoModeControl } from "./AutoModeControl.js";
@@ -8,6 +9,7 @@ import { Badge, Meta } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
 import { Meter } from "../ui/Feedback.js";
 import { shortenPath } from "../lib/workspaces.js";
+import { resolveSystemEventText } from "../lib/system-events.js";
 
 /**
  * 顯示目前 session 的 model,並(`software="claude-agent-sdk"` 或
@@ -19,6 +21,7 @@ import { shortenPath } from "../lib/workspaces.js";
  * 資訊,不提供切換控制。
  */
 function ModelControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element {
+  const { t } = useTranslation(["chat"]);
   const setSessionModel = useSessionStore((s) => s.setSessionModel);
   const enabledModelIds = useSessionStore((s) => s.enabledModelIds);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
@@ -52,7 +55,11 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
   };
 
   if (!supportsModelSwitch) {
-    return <Badge tone="neutral" mono title="model 由 agent/CLI 自行管理">{currentModel || "由 agent 管理"}</Badge>;
+    return (
+      <Badge tone="neutral" mono title={t("chat:model.managedByAgentTitle")}>
+        {currentModel || t("chat:model.managedByAgentLabel")}
+      </Badge>
+    );
   }
 
   const knownIds = new Set(availableModels.map((m) => m.id));
@@ -64,13 +71,13 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
   return (
     <div className="flex items-center gap-1.5">
       <Select
-        aria-label="切換 model"
+        aria-label={t("chat:model.switchAriaLabel")}
         value={currentModel}
         onChange={(e) => void handleChange(e.target.value)}
         disabled={switching}
         className="!h-6 !text-2xs"
       >
-        {!currentModel && <option value="">(未指定,使用 CLI 預設)</option>}
+        {!currentModel && <option value="">{t("chat:control.notSpecifiedOption")}</option>}
         {options.map((m) => (
           <option key={m.id} value={m.id}>
             {m.label}
@@ -79,7 +86,7 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
       </Select>
       {error && (
         <span className="text-2xs text-danger" title={error}>
-          切換失敗
+          {t("chat:control.switchFailed")}
         </span>
       )}
     </div>
@@ -95,6 +102,7 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
  * 不是一個存在的概念,不需要顯示任何東西。
  */
 function EffortControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element | null {
+  const { t } = useTranslation(["chat"]);
   const setSessionEffort = useSessionStore((s) => s.setSessionEffort);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,13 +127,13 @@ function EffortControl({ session, profile }: { session: Session; profile: AgentP
   return (
     <div className="flex items-center gap-1.5">
       <Select
-        aria-label="切換思考程度"
+        aria-label={t("chat:effort.switchAriaLabel")}
         value={currentEffort}
         onChange={(e) => void handleChange(e.target.value as EffortLevel | "")}
         disabled={switching}
         className="!h-6 !text-2xs"
       >
-        {!currentEffort && <option value="">(未指定,使用 CLI 預設)</option>}
+        {!currentEffort && <option value="">{t("chat:control.notSpecifiedOption")}</option>}
         <option value="low">low</option>
         <option value="medium">medium</option>
         <option value="high">high</option>
@@ -134,7 +142,7 @@ function EffortControl({ session, profile }: { session: Session; profile: AgentP
       </Select>
       {error && (
         <span className="text-2xs text-danger" title={error}>
-          切換失敗
+          {t("chat:control.switchFailed")}
         </span>
       )}
     </div>
@@ -142,6 +150,7 @@ function EffortControl({ session, profile }: { session: Session; profile: AgentP
 }
 
 function ToolCallBubble({ item }: { item: Extract<ChatItem, { kind: "tool" }> }): JSX.Element {
+  const { t } = useTranslation(["chat"]);
   const tone = item.status === "running" ? "accent" : item.isError ? "danger" : "ok";
   return (
     <details className="group my-1.5 rounded-md border border-line-subtle bg-surface/60 text-xs">
@@ -158,13 +167,13 @@ function ToolCallBubble({ item }: { item: Extract<ChatItem, { kind: "tool" }> })
         />
         <span className="font-mono text-fg-soft">{item.toolName || "tool"}</span>
         <Badge tone={tone} className="ml-auto">
-          {item.status === "running" ? "執行中" : item.isError ? "失敗" : "完成"}
+          {item.status === "running" ? t("chat:tool.statusRunning") : item.isError ? t("chat:tool.statusFailed") : t("chat:tool.statusDone")}
         </Badge>
       </summary>
       <div className="space-y-2 border-t border-line-subtle px-2.5 py-2">
         {item.input !== undefined && (
           <div>
-            <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-fg-faint">輸入</div>
+            <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-fg-faint">{t("chat:tool.inputLabel")}</div>
             <pre className="whitespace-pre-wrap break-all rounded bg-canvas px-2 py-1.5 font-mono text-2xs text-fg-muted">
               {JSON.stringify(item.input, null, 2)}
             </pre>
@@ -172,7 +181,7 @@ function ToolCallBubble({ item }: { item: Extract<ChatItem, { kind: "tool" }> })
         )}
         {item.output !== undefined && (
           <div>
-            <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-fg-faint">輸出</div>
+            <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-fg-faint">{t("chat:tool.outputLabel")}</div>
             <pre className="whitespace-pre-wrap break-all rounded bg-canvas px-2 py-1.5 font-mono text-2xs text-fg-muted">
               {typeof item.output === "string" ? item.output : JSON.stringify(item.output, null, 2)}
             </pre>
@@ -189,17 +198,14 @@ function ToolCallBubble({ item }: { item: Extract<ChatItem, { kind: "tool" }> })
  * 明確的警示徽章,而非整個沉默——見 S3b §0.2 的誠實揭露要求。
  */
 function UsageBadge({ session }: { session: Session }): JSX.Element | null {
+  const { t } = useTranslation(["chat"]);
   const usage = useSessionStore((s) => s.sessionUsage[session.id]);
   const capabilities = useSessionStore((s) => s.capabilitiesBySoftware[session.adapterType]);
   const support = selectUsageReporting(capabilities, usage);
   if (support !== "supported") {
     return (
-      <Badge
-        tone="warn"
-        icon="alert"
-        title="此後端無法量測花費(或尚未確認會不會回報)——任務/每日成本預算對這個 session 不會生效,只有回合時間/工具呼叫次數上限仍在保護。"
-      >
-        {support === "unknown" ? "花費未知" : "無法量測花費"}
+      <Badge tone="warn" icon="alert" title={t("chat:usage.cannotMeasureTitle")}>
+        {support === "unknown" ? t("chat:usage.unknownLabel") : t("chat:usage.cannotMeasureLabel")}
       </Badge>
     );
   }
@@ -208,7 +214,7 @@ function UsageBadge({ session }: { session: Session }): JSX.Element | null {
     <Badge
       tone={hasValue ? "neutral" : "neutral"}
       mono
-      title={hasValue ? "累計花費(此後端有回報 cost,S3a usage-metering)" : "此後端會回報累計花費,但這個 session 尚未收到第一筆(回合結束時才發)"}
+      title={hasValue ? t("chat:usage.hasValueTitle") : t("chat:usage.noValueYetTitle")}
     >
       {hasValue ? `${usage?.costCurrency ?? ""} ${usage?.costAmount?.toFixed(4)}` : "$ —"}
     </Badge>
@@ -234,6 +240,7 @@ function budgetPercentForDisplay(
  * 預算)與 `dailyTripped`(今日 kill-switch 已觸發)兩種情況會渲染。
  */
 function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null {
+  const { t } = useTranslation(["chat"]);
   const summary = useSessionStore((s) => s.costSummaryBySession[session.id]);
   const effectiveConfig = useSessionStore((s) => s.effectiveConfig);
   const fetchCostSummary = useSessionStore((s) => s.fetchCostSummary);
@@ -249,19 +256,19 @@ function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null 
   const parts: Array<{ label: string; tripped: boolean; percent?: number }> = [];
   if (summary.task) {
     if (summary.task.tripped) {
-      parts.push({ label: `任務「${summary.task.title}」預算已達上限,新 prompt 已擋下`, tripped: true });
+      parts.push({ label: t("chat:cost.taskTrippedLabel", { title: summary.task.title }), tripped: true });
     } else {
       const percent = budgetPercentForDisplay(summary.task.rollup, {
         maxCostUsd: budget.task.maxCostUsd.value,
         maxTokens: budget.task.maxTokens.value,
       });
       if (percent !== undefined) {
-        parts.push({ label: `任務預算 ${Math.min(100, Math.round(percent))}%`, tripped: false, percent });
+        parts.push({ label: t("chat:cost.taskBudgetPercentLabel", { percent: Math.min(100, Math.round(percent)) }), tripped: false, percent });
       }
     }
   }
   if (summary.dailyTripped) {
-    parts.push({ label: "今日成本 kill-switch 已觸發,所有 session 已暫停", tripped: true });
+    parts.push({ label: t("chat:cost.dailyTrippedLabel"), tripped: true });
   }
 
   if (parts.length === 0) return null;
@@ -273,7 +280,7 @@ function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null 
           {part.percent !== undefined && <Meter percent={part.percent} className="w-10" />}
           <Badge
             tone={part.tripped ? "danger" : "neutral"}
-            title={part.tripped ? "此 session/任務已被成本斷路器擋下(worktree/任務保留,可調整預算並重啟 core 續行)" : "任務層級累計花費/token 佔預算比例"}
+            title={part.tripped ? t("chat:cost.trippedTitle") : t("chat:cost.percentTitle")}
           >
             {part.label}
           </Badge>
@@ -312,6 +319,7 @@ function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
 }
 
 export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
+  const { t } = useTranslation(["chat"]);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const profiles = useSessionStore((s) => s.profiles);
@@ -360,7 +368,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
       <main className="flex h-full flex-1 flex-col bg-canvas">
         <MobileHeaderBar onOpenSidebar={onOpenSidebar} />
         <div className="flex flex-1 items-center justify-center text-fg-subtle">
-          <p className="text-sm">從左側選擇或建立一個對話開始</p>
+          <p className="text-sm">{t("chat:empty.selectOrCreateSession")}</p>
         </div>
       </main>
     );
@@ -372,7 +380,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   return (
     <main className="flex h-full flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line-subtle px-3 py-2 sm:px-4">
-        <IconButton icon="menu" aria-label="開啟側欄" onClick={onOpenSidebar} className="sm:hidden" />
+        <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
           <p className="truncate text-2xs text-fg-faint" title={session.workingDir}>
@@ -386,13 +394,20 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
           <ModelControl session={session} profile={profile} />
           <EffortControl session={session} profile={profile} />
           {busy && (
-            <IconButton icon="pause" aria-label="中斷" title="中斷" variant="outline" onClick={interrupt} className="hover:!border-danger hover:!text-danger" />
+            <IconButton
+              icon="pause"
+              aria-label={t("chat:session.interrupt")}
+              title={t("chat:session.interrupt")}
+              variant="outline"
+              onClick={interrupt}
+              className="hover:!border-danger hover:!text-danger"
+            />
           )}
         </div>
       </header>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 sm:px-4">
-        {items.length === 0 && <p className="mt-6 text-center text-xs text-fg-faint">開始輸入訊息與 agent 對話</p>}
+        {items.length === 0 && <p className="mt-6 text-center text-xs text-fg-faint">{t("chat:empty.startTyping")}</p>}
         {items.map((item) => (
           <ChatBubble key={item.id} item={item} />
         ))}
@@ -411,12 +426,12 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
               }
             }}
             rows={2}
-            placeholder="輸入訊息給 agent…(Enter 送出,Shift+Enter 換行)"
+            placeholder={t("chat:composer.placeholder")}
             className="flex-1 resize-none bg-transparent px-2 py-1 text-sm text-fg outline-none placeholder:text-fg-faint"
           />
           <IconButton
             icon="play"
-            aria-label="送出"
+            aria-label={t("chat:composer.sendAriaLabel")}
             variant="primary"
             size="md"
             disabled={!draft.trim()}
@@ -430,9 +445,10 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
 
 /** 手機版頂列的側欄開關——空狀態(尚無選取 session)也要能開側欄選一個。 */
 function MobileHeaderBar({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
+  const { t } = useTranslation(["chat"]);
   return (
     <div className="flex flex-shrink-0 items-center border-b border-line-subtle px-2 py-1.5 sm:hidden">
-      <IconButton icon="menu" aria-label="開啟側欄" onClick={onOpenSidebar} />
+      <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} />
     </div>
   );
 }

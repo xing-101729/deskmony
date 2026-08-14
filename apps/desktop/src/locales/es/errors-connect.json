@@ -1,0 +1,10 @@
+{
+  "gateway": {
+    "invalidUrl": "Dirección del servidor no válida: {{detail}}",
+    "connectTimeout": "Se agotó el tiempo de conexión; comprueba que la dirección del servidor sea correcta y que el servidor esté en ejecución",
+    "connectFailed": "No se pudo conectar con el servidor; comprueba que la dirección sea correcta",
+    "closedBeforeAuth": "El servidor cerró la conexión antes de completar la autenticación",
+    "connectionLost": "Se perdió la conexión con Deskmony Core",
+    "notConnected": "Aún no se ha conectado con Deskmony Core"
+  }
+}

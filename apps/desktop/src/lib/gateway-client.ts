@@ -1,4 +1,11 @@
-import type { ClientRequest, ClientRequestMethod, ServerMessage, ServerPush } from "@deskmony/shared";
+import {
+  DeskmonyError,
+  ErrorCodes,
+  type ClientRequest,
+  type ClientRequestMethod,
+  type ServerMessage,
+  type ServerPush,
+} from "@deskmony/shared";
 
 type ParamsOf<M extends ClientRequestMethod> = Extract<ClientRequest, { method: M }>["params"];
 
@@ -94,7 +101,7 @@ export class GatewayClient {
     ws.addEventListener("close", () => {
       this.ready = false;
       this.emitStatus("closed");
-      const err = new Error("與 Deskmony Core 的連線已中斷");
+      const err = new DeskmonyError("gateway.connectionLost", undefined, "與 Deskmony Core 的連線已中斷");
       this.rejectAllPending(err);
       this.rejectQueuedCalls(err);
       if (!this.closedByUser) this.scheduleReconnect();
@@ -133,7 +140,7 @@ export class GatewayClient {
    */
   call<M extends ClientRequestMethod>(method: M, params: ParamsOf<M>): Promise<unknown> {
     if (!this.ws) {
-      return Promise.reject(new Error("尚未連線到 Deskmony Core"));
+      return Promise.reject(new DeskmonyError("gateway.notConnected", undefined, "尚未連線到 Deskmony Core"));
     }
     if (!this.ready) {
       return new Promise((resolve, reject) => {
@@ -178,7 +185,9 @@ export class GatewayClient {
       if (message.ok) {
         pending.resolve(message.result);
       } else {
-        pending.reject(new Error(message.error ?? "未知錯誤"));
+        pending.reject(
+          new DeskmonyError(message.errorCode ?? ErrorCodes.INTERNAL_UNEXPECTED, message.errorParams, message.error ?? "未知錯誤"),
+        );
       }
       return;
     }
@@ -214,10 +223,12 @@ export class GatewayClient {
   }
 }
 
-/** 連線畫面用來區分「連不上伺服器」的錯誤(見 probeGatewayConnection())。 */
-export class GatewayNetworkError extends Error {}
+/** 連線畫面用來區分「連不上伺服器」的錯誤(見 probeGatewayConnection())。
+ *  i18n 專案新增:改 extends DeskmonyError,讓連線失敗的原因也能有 code(見
+ *  下方 probeGatewayConnection() 各個建構呼叫)。 */
+export class GatewayNetworkError extends DeskmonyError {}
 /** 連線畫面用來區分「token 不正確」的錯誤(見 probeGatewayConnection())。 */
-export class GatewayAuthError extends Error {}
+export class GatewayAuthError extends DeskmonyError {}
 
 /**
  * M5 Round B(任務2):瀏覽器連線畫面(views/ConnectScreen.tsx)用來「測試」
@@ -247,7 +258,8 @@ export function probeGatewayConnection(url: string, token: string, timeoutMs = 8
     try {
       ws = new WebSocket(url);
     } catch (err) {
-      reject(new GatewayNetworkError(`無效的伺服器位址:${err instanceof Error ? err.message : String(err)}`));
+      const detail = err instanceof Error ? err.message : String(err);
+      reject(new GatewayNetworkError("gateway.invalidUrl", { detail }, `無效的伺服器位址:${detail}`));
       return;
     }
 
@@ -258,7 +270,7 @@ export function probeGatewayConnection(url: string, token: string, timeoutMs = 8
         } catch {
           // ignore
         }
-        reject(new GatewayNetworkError("連線逾時,請確認伺服器位址是否正確、伺服器是否正在執行"));
+        reject(new GatewayNetworkError("gateway.connectTimeout", undefined, "連線逾時,請確認伺服器位址是否正確、伺服器是否正在執行"));
       });
     }, timeoutMs);
 
@@ -279,7 +291,16 @@ export function probeGatewayConnection(url: string, token: string, timeoutMs = 8
           if (msg.kind === "response" && msg.ok) {
             resolve();
           } else {
-            reject(new GatewayAuthError(msg.kind === "response" ? (msg.error ?? "認證失敗") : "認證失敗"));
+            // 優先沿用伺服器自己回報的 errorCode(見 packages/shared/src/
+            // gateway.ts 的 ServerResponseSchema)——只有連到尚未升級到 i18n
+            // 版本的舊 core 時才會缺這個欄位,這時退回一個合理的預設值。
+            reject(
+              new GatewayAuthError(
+                msg.kind === "response" ? (msg.errorCode ?? "auth.invalidToken") : "auth.invalidToken",
+                msg.kind === "response" ? msg.errorParams : undefined,
+                msg.kind === "response" ? (msg.error ?? "認證失敗") : "認證失敗",
+              ),
+            );
           }
         });
       };
@@ -290,14 +311,14 @@ export function probeGatewayConnection(url: string, token: string, timeoutMs = 8
     ws.addEventListener("error", () => {
       finish(() => {
         clearTimeout(overallTimer);
-        reject(new GatewayNetworkError("無法連線到伺服器,請確認位址是否正確"));
+        reject(new GatewayNetworkError("gateway.connectFailed", undefined, "無法連線到伺服器,請確認位址是否正確"));
       });
     });
 
     ws.addEventListener("close", () => {
       finish(() => {
         clearTimeout(overallTimer);
-        reject(new GatewayNetworkError("連線在完成認證前被伺服器關閉"));
+        reject(new GatewayNetworkError("gateway.closedBeforeAuth", undefined, "連線在完成認證前被伺服器關閉"));
       });
     });
   });

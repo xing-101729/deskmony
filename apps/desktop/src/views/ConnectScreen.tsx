@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { GatewayAuthError, GatewayNetworkError, probeGatewayConnection } from "../lib/gateway-client.js";
 import { defaultGatewayUrl, loadSavedConnection, saveConnection } from "../lib/connection-config.js";
+import { translateError } from "../lib/error-i18n.js";
 import { Button } from "../ui/Button.js";
 import { Field, Input } from "../ui/Field.js";
 import { Alert } from "../ui/Feedback.js";
@@ -20,6 +22,7 @@ type ErrorKind = "auth" | "network";
  * 產品識別)。
  */
 export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element {
+  const { t } = useTranslation(["connect", "common"]);
   const [url, setUrl] = useState<string>(() => loadSavedConnection()?.url ?? defaultGatewayUrl());
   const [token, setToken] = useState<string>(() => loadSavedConnection()?.token ?? "");
   const [status, setStatus] = useState<Status>("idle");
@@ -32,7 +35,7 @@ export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element 
     if (!trimmedUrl) {
       setStatus("error");
       setErrorKind("network");
-      setErrorMessage("請輸入伺服器位址");
+      setErrorMessage(t("connect:urlRequired"));
       return;
     }
     setStatus("connecting");
@@ -44,15 +47,20 @@ export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element 
       onConnected(trimmedUrl, attemptToken);
     } catch (err) {
       setStatus("error");
+      // i18n 專案新增:三個分支的訊息一律改用 translateError()(見
+      // lib/error-i18n.ts)——GatewayAuthError/GatewayNetworkError 都
+      // extends DeskmonyError,translateError 會依 err.code 查
+      // errors:<code> 翻譯,查不到時退回 err.message。instanceof 分支
+      // 本身維持原樣,只是用來決定 errorKind(影響 Alert 的 tone)。
       if (err instanceof GatewayAuthError) {
         setErrorKind("auth");
-        setErrorMessage("認證失敗:token 不正確,請確認後重試。");
+        setErrorMessage(translateError(err, t));
       } else if (err instanceof GatewayNetworkError) {
         setErrorKind("network");
-        setErrorMessage(err.message);
+        setErrorMessage(translateError(err, t));
       } else {
         setErrorKind("network");
-        setErrorMessage(err instanceof Error ? err.message : String(err));
+        setErrorMessage(translateError(err, t));
       }
     }
   };
@@ -75,13 +83,11 @@ export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element 
             <Icon name="sparkle" size={16} />
           </span>
           <div>
-            <h1 className="text-md font-semibold tracking-tight text-fg">連線到 Deskmony Core</h1>
-            <p className="text-2xs text-fg-faint">Agent Team 管理平台</p>
+            <h1 className="text-md font-semibold tracking-tight text-fg">{t("connect:heading")}</h1>
+            <p className="text-2xs text-fg-faint">{t("connect:tagline")}</p>
           </div>
         </div>
-        <p className="mb-4 text-xs leading-relaxed text-fg-muted">
-          在瀏覽器中使用 Deskmony 需要先連線到一個正在執行的 Deskmony Core 伺服器。
-        </p>
+        <p className="mb-4 text-xs leading-relaxed text-fg-muted">{t("connect:description")}</p>
 
         <form
           onSubmit={(e) => {
@@ -90,24 +96,21 @@ export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element 
           }}
           className="space-y-3"
         >
-          <Field label="伺服器位址">
+          <Field label={t("connect:serverUrlLabel")}>
             <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="ws://localhost:4317" autoComplete="off" spellCheck={false} fieldSize="md" mono />
           </Field>
-          <Field label="認證 Token(伺服器未啟用認證則留空)">
+          <Field label={t("connect:tokenLabel")}>
             <Input value={token} onChange={(e) => setToken(e.target.value)} type="password" autoComplete="off" spellCheck={false} placeholder="token" fieldSize="md" />
           </Field>
 
           {status === "error" && <Alert tone={errorKind === "auth" ? "danger" : "warn"}>{errorMessage}</Alert>}
 
           <Button type="submit" variant="primary" size="md" block loading={connecting}>
-            {connecting ? "連線中…" : "連線"}
+            {connecting ? t("connect:connecting") : t("connect:connect")}
           </Button>
         </form>
 
-        <p className="mt-4 text-2xs leading-relaxed text-fg-faint">
-          Token 僅保存在本分頁的 sessionStorage,關閉分頁即自動清除,不會寫入網址列或瀏覽器紀錄。
-          若在共用電腦上使用,請在結束後於主介面按「登出」或直接關閉此分頁。
-        </p>
+        <p className="mt-4 text-2xs leading-relaxed text-fg-faint">{t("connect:tokenStorageNote")}</p>
       </div>
     </div>
   );

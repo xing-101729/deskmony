@@ -1,0 +1,8 @@
+{
+  "openSidebar": "Open sidebar",
+  "selectOrCreate": "Select or create a conversation on the left to get started",
+  "directTerminal": "Direct terminal",
+  "interrupt": "Interrupt (Ctrl+C)",
+  "inputPlaceholder": "Type a line to send to the terminal (Enter to send, same as typing it on a keyboard and pressing Enter)…",
+  "send": "Send"
+}

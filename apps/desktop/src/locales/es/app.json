@@ -1,0 +1,62 @@
+{
+  "connectionBanner": {
+    "connecting": "Conectando a Deskmony Core…",
+    "disconnected": "Se perdió la conexión con Deskmony Core; reintentando automáticamente…"
+  },
+  "interruptedBanner": {
+    "message": "La última vez no se cerró correctamente: <strong>{{count}}</strong> session(es) necesitan clasificación manual (continuar / retomar / volver a ejecutar / abandonar)",
+    "action": "Iniciar clasificación"
+  },
+  "sessionDefaultTitle": "Conversación {{n}}",
+  "commands": {
+    "groupGoto": "Ir a",
+    "groupActions": "Acciones",
+    "groupSessions": "Conversaciones",
+    "viewSession": {
+      "title": "Vista de session",
+      "keywords": "session chat sesión conversación"
+    },
+    "viewTeamChat": {
+      "title": "Chat del team",
+      "keywords": "team chat equipo grupo mensaje"
+    },
+    "viewTaskBoard": {
+      "title": "Tablero de tareas",
+      "keywords": "task board kanban tarea tablero"
+    },
+    "newSession": {
+      "title": "Nueva conversación",
+      "subtitleWithProfile": "Usando el profile: {{name}}",
+      "subtitleNoProfile": "Aún no hay ningún Agent Profile disponible",
+      "keywords": "new session create nueva conversación sesión"
+    },
+    "newProfile": {
+      "title": "Crear Agent Profile",
+      "keywords": "profile agent provider crear"
+    },
+    "settings": {
+      "title": "Configuración",
+      "subtitle": "Configuración global · Notificaciones · Gestión de provider",
+      "keywords": "settings config provider model configuración ajustes"
+    },
+    "toggleSidebar": {
+      "show": "Mostrar barra lateral",
+      "hide": "Contraer barra lateral",
+      "keywords": "sidebar collapse barra lateral"
+    },
+    "toggleTheme": {
+      "toLight": "Cambiar a tema claro",
+      "toDark": "Cambiar a tema oscuro",
+      "keywords": "theme dark light tema oscuro claro"
+    },
+    "recovery": {
+      "title": "Recuperar sessions interrumpidas ({{count}})",
+      "keywords": "recovery crash interrumpida recuperar reanudar"
+    },
+    "logout": {
+      "title": "Cerrar sesión",
+      "subtitle": "Borra el token guardado y vuelve a la pantalla de conexión",
+      "keywords": "logout signout cerrar sesión"
+    }
+  }
+}

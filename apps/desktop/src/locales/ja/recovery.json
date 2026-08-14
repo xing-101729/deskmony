@@ -1,0 +1,33 @@
+{
+  "title": "復旧:前回正常に終了しなかった session",
+  "description": "子プロセスは前回の core の中断とともに消えており、agent には自動再開できる記憶がありません——1 件ずつ「続行」「引き継ぎ」「再実行」「破棄」のいずれかを選んでください",
+  "emptyTitle": "現在、中断された session はありません",
+  "unknownProfile": "(profile 不明)",
+  "sessionMetaLine": "{{profile}} · 中断:{{interruptedAt}} · 最終アクティビティ:{{lastSeenAt}}",
+  "taskLine": "タスク:{{title}}(状態:{{status}})",
+  "crashedWhileMerging": "マージ中にクラッシュ——git が中間状態の可能性があります",
+  "worktreeLine": "worktree:{{branch}}",
+  "missing": "(消失)",
+  "hasUncommittedChanges": "(未コミットの変更あり)",
+  "clean": "(クリーン)",
+  "continueTitle": "バックエンドの session に再接続——agent は以前の文脈を覚えています",
+  "continueLabel": "続行(記憶を保持)",
+  "takeoverTitle": "要約を注入して新しい session を開始——agent の記憶は真っさらで、ノートを読んだだけの状態です",
+  "takeoverLabel": "引き継ぎ(要約から再開)",
+  "rerunTitle": "再実行するには worktree がクリーンである必要があります",
+  "rerunLabel": "再実行…",
+  "abandonLabel": "破棄",
+  "checkingStatus": "確認中…",
+  "checkGitStatus": "git 状態を確認",
+  "noStatusOutputClean": "(git status の出力なし、おそらく既にクリーンな状態です)",
+  "confirmDiscard": "「{{title}}」の worktree 内の未コミットの変更をすべて破棄しますか?この操作は元に戻せません(git reset --hard + git clean -fd)。",
+  "confirmAbandon": "「{{title}}」を破棄しますか?session は終了済みとしてマークされますが、タスクと worktree は保持され、後でタスクボードから手動対応できます。",
+  "dirtyResolver": {
+    "heading": "worktree に未コミットの変更があります。再実行の前に対応が必要です:",
+    "loadingDiff": "diff を読み込み中…",
+    "noStatusOutput": "(git status の出力なし)",
+    "noDiffOutput": "(git diff の出力なし——未追跡の新規ファイルのみの可能性があります)",
+    "keep": "保持(wip ブランチを作成して commit)",
+    "discard": "変更を破棄"
+  }
+}

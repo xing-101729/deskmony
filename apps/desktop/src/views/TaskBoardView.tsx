@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { AcceptanceResult, Task, TaskStatus } from "@deskmony/shared";
 import { useTeamStore } from "../stores/team-store.js";
 import { useTaskStore } from "../stores/task-store.js";
@@ -9,6 +11,10 @@ import { Badge, Meta } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
 import { Icon } from "../ui/icons.js";
 import { taskStatusMeta } from "../ui/status.js";
+import { useLocale } from "../ui/locale.js";
+import { formatDateTime } from "../lib/format-datetime.js";
+import type { Locale } from "../lib/locale-storage.js";
+import { translateError } from "../lib/error-i18n.js";
 
 /**
  * TaskBoardView(M4 Round B):任務看板 —— 欄位對應 TaskService 的狀態機:
@@ -25,8 +31,11 @@ const COLUMN_ORDER: TaskStatus[] = ["backlog", "assigned", "in-progress", "revie
 
 const BLOCKABLE_STATUSES: TaskStatus[] = ["backlog", "assigned", "in-progress", "review", "merging"];
 
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleString("zh-TW", { hour12: false });
+/** i18n 專案新增:改用 formatDateTime()(見 lib/format-datetime.ts)取代原本
+ *  硬編 "zh-TW" 的 `.toLocaleString()`——這是全 app 3 處硬編 locale 呼叫點之一
+ *  (另兩處分別在 TeamChatView.tsx 與已由前一批次處理的 RecoveryView.tsx)。 */
+function formatTime(ts: number, locale: Locale): string {
+  return formatDateTime(ts, locale, { hour12: false });
 }
 
 /**
@@ -46,11 +55,15 @@ function splitAcceptanceCommandsInput(text: string): string[] {
 /**
  * 「設定驗收指令」用原生 `window.prompt()`——比照既有風格,這是一個低頻、單一
  * 欄位的輸入動作,不值得為它新增一個 dialog 元件。
+ *
+ * i18n 專案新增:這是模組層級的純函式(非 React 元件),沒有 hook 可用——`t`
+ * 由呼叫端(TaskBoardView 元件本體的 handleEditAcceptance())傳入,比照
+ * lib/error-i18n.ts 的 translateError() 慣例。
  */
-function promptForAcceptanceCommands(existing: Task["acceptance"]): string[] | null {
+function promptForAcceptanceCommands(existing: Task["acceptance"], t: TFunction): string[] | null {
   const existingText = existing?.commands.join(ACCEPTANCE_COMMAND_SEPARATOR) ?? "";
   const input = window.prompt(
-    `設定機器驗收指令(多條用 "${ACCEPTANCE_COMMAND_SEPARATOR}" 分隔,依序執行,全部 exit 0 才算通過;留空清除驗收條件):`,
+    t("taskBoard:acceptancePrompt.message", { separator: ACCEPTANCE_COMMAND_SEPARATOR }),
     existingText,
   );
   if (input === null) return null;
@@ -71,40 +84,44 @@ function AcceptancePanel({
   onRun: () => Promise<void>;
   onEdit: () => Promise<void>;
 }): JSX.Element {
+  const { t } = useTranslation(["taskBoard"]);
   return (
     <div className="mt-2 border-t border-line-subtle pt-2">
       <div className="flex flex-wrap items-center gap-1.5">
         {task.acceptance ? (
           <Badge icon="checklist" title={task.acceptance.commands.join("\n")}>
-            驗收 {task.acceptance.commands.length} 條
+            {t("taskBoard:acceptance.countBadge", { count: task.acceptance.commands.length })}
           </Badge>
         ) : (
-          <span className="text-2xs text-fg-faint">未定義驗收條件</span>
+          <span className="text-2xs text-fg-faint">{t("taskBoard:acceptance.undefined")}</span>
         )}
         <Button size="xs" variant="ghost" onClick={() => void onEdit()}>
-          設定驗收
+          {t("taskBoard:acceptance.edit")}
         </Button>
         <Button size="xs" variant="ghost" icon="play" loading={running} disabled={!task.acceptance} onClick={() => void onRun()}>
-          {running ? "驗收執行中" : "跑驗收"}
+          {running ? t("taskBoard:acceptance.running") : t("taskBoard:acceptance.run")}
         </Button>
         {result && !result.skippedReason && (
           <Badge tone={result.passed ? "ok" : "danger"} icon={result.passed ? "check" : "x"}>
-            {result.passed ? "通過" : "未通過"}
+            {result.passed ? t("taskBoard:acceptance.passed") : t("taskBoard:acceptance.failed")}
           </Badge>
         )}
-        {result?.skippedReason === "workspace-missing" && <Badge tone="warn">尚無 worktree,無法執行</Badge>}
+        {result?.skippedReason === "workspace-missing" && <Badge tone="warn">{t("taskBoard:acceptance.workspaceMissing")}</Badge>}
       </div>
       {result && result.perCommand.length > 0 && (
         <details className="mt-1.5 rounded-md border border-line-subtle bg-canvas/60 text-2xs">
           <summary className="cursor-pointer select-none px-2 py-1 text-fg-muted">
-            驗收結果詳情({result.perCommand.length}/{task.acceptance?.commands.length ?? result.perCommand.length} 條已執行)
+            {t("taskBoard:acceptance.detailsSummary", {
+              done: result.perCommand.length,
+              total: task.acceptance?.commands.length ?? result.perCommand.length,
+            })}
           </summary>
           <div className="max-h-48 space-y-1.5 overflow-y-auto border-t border-line-subtle px-2 py-1.5">
             {result.perCommand.map((cmd, idx) => (
               <div key={idx} className="rounded border border-line-subtle p-1.5">
                 <div className="flex flex-wrap items-center gap-1.5 font-mono tabular text-fg-soft">
                   <span className={cmd.timedOut || cmd.exitCode !== 0 ? "text-danger" : "text-ok"}>
-                    {cmd.timedOut ? "TIMEOUT" : `exit ${cmd.exitCode}`}
+                    {cmd.timedOut ? t("taskBoard:acceptance.timedOut") : t("taskBoard:acceptance.exitCode", { code: cmd.exitCode })}
                   </span>
                   <span className="text-fg-faint">{cmd.durationMs}ms</span>
                   <span className="truncate text-fg-muted">{cmd.command}</span>
@@ -156,6 +173,8 @@ function TaskCard({
   onEditAcceptance,
   onApproveReview,
 }: TaskCardProps): JSX.Element {
+  const { t } = useTranslation(["taskBoard", "common"]);
+  const locale = useLocale((s) => s.locale);
   const [assignMemberId, setAssignMemberId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,7 +186,7 @@ function TaskCard({
     try {
       await fn();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setBusy(false);
     }
@@ -178,14 +197,24 @@ function TaskCard({
       <span className={`absolute inset-y-0 left-0 w-[3px] ${meta.rail}`} aria-hidden="true" />
       <div className="mb-1 flex items-start justify-between gap-2">
         <span className="font-medium leading-snug text-fg">{task.title}</span>
-        <IconButton icon="trash" aria-label="刪除任務" title="刪除任務" size="xs" disabled={busy} className="-mr-1 -mt-0.5 hover:!text-danger" onClick={() => void run(onDelete)} />
+        <IconButton
+          icon="trash"
+          aria-label={t("taskBoard:card.deleteTaskAriaLabel")}
+          title={t("taskBoard:card.deleteTaskAriaLabel")}
+          size="xs"
+          disabled={busy}
+          className="-mr-1 -mt-0.5 hover:!text-danger"
+          onClick={() => void run(onDelete)}
+        />
       </div>
       {task.description && <p className="mb-1.5 whitespace-pre-wrap text-2xs leading-relaxed text-fg-muted">{task.description}</p>}
       <div className="flex flex-wrap items-center gap-1.5">
         {assigneeName && <Meta icon="user">{assigneeName}</Meta>}
         {branch && <Meta icon="branch" mono>{branch}</Meta>}
-        {task.status === "blocked" && task.blockedFrom && <Badge tone="warn">封鎖前:{task.blockedFrom}</Badge>}
-        <span className="ml-auto tabular text-2xs text-fg-faint">{formatTime(task.updatedAt)}</span>
+        {task.status === "blocked" && task.blockedFrom && (
+          <Badge tone="warn">{t("taskBoard:card.blockedFromBadge", { status: task.blockedFrom })}</Badge>
+        )}
+        <span className="ml-auto tabular text-2xs text-fg-faint">{formatTime(task.updatedAt, locale)}</span>
       </div>
 
       {/* S5(dispose-gate)L4 §4:agent 請求送審但沒有機器驗收條件(或連續驗收
@@ -194,10 +223,10 @@ function TaskCard({
       {task.awaitingHumanReview && (
         <div className="mt-1.5 flex items-center justify-between gap-2 rounded-md bg-accent/10 px-2 py-1.5">
           <span className="flex items-center gap-1 text-2xs text-accent">
-            <Icon name="clock" size={12} /> 等待你核可進入 review
+            <Icon name="clock" size={12} /> {t("taskBoard:card.awaitingApproval")}
           </span>
           <Button size="xs" variant="accentSoft" disabled={busy} onClick={() => void run(onApproveReview)}>
-            核准進入 review
+            {t("taskBoard:card.approveReview")}
           </Button>
         </div>
       )}
@@ -207,8 +236,13 @@ function TaskCard({
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {task.status === "backlog" && (
           <>
-            <Select aria-label="指派成員" value={assignMemberId} onChange={(e) => setAssignMemberId(e.target.value)} className="!h-6 w-28 !text-2xs">
-              <option value="">選擇成員…</option>
+            <Select
+              aria-label={t("taskBoard:card.assignMemberAriaLabel")}
+              value={assignMemberId}
+              onChange={(e) => setAssignMemberId(e.target.value)}
+              className="!h-6 w-28 !text-2xs"
+            >
+              <option value="">{t("taskBoard:card.selectMemberOption")}</option>
               {memberOptions.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
@@ -216,27 +250,33 @@ function TaskCard({
               ))}
             </Select>
             <Button size="xs" variant="accentSoft" disabled={!assignMemberId || busy} onClick={() => void run(() => onAssign(assignMemberId))}>
-              指派
+              {t("taskBoard:card.assign")}
             </Button>
           </>
         )}
         {task.status === "assigned" && (
           <Button size="xs" variant="accentSoft" disabled={busy} onClick={() => void run(() => onUpdateStatus("in-progress"))}>
-            開始
+            {t("taskBoard:card.start")}
           </Button>
         )}
         {task.status === "in-progress" && (
           <Button size="xs" variant="accentSoft" disabled={busy} onClick={() => void run(onAdvanceToReview)}>
-            送審
+            {t("taskBoard:card.submitForReview")}
           </Button>
         )}
         {task.status === "review" && (
           <>
-            <Button size="xs" variant="outline" disabled={busy} onClick={() => void run(() => onUpdateStatus("in-progress"))} className="hover:!border-warn hover:!text-warn">
-              退回
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy}
+              onClick={() => void run(() => onUpdateStatus("in-progress"))}
+              className="hover:!border-warn hover:!text-warn"
+            >
+              {t("taskBoard:card.reject")}
             </Button>
             <Button size="xs" variant="accentSoft" disabled={busy} onClick={() => void run(() => onUpdateStatus("merging"))}>
-              通過,進入合併
+              {t("taskBoard:card.approveMergeTransition")}
             </Button>
           </>
         )}
@@ -247,24 +287,22 @@ function TaskCard({
             className="!bg-ok/12 !text-ok hover:!bg-ok/20"
             disabled={busy}
             onClick={() => {
-              const ok = window.confirm(
-                `確定要把分支 "${branch ?? task.workspaceId ?? "?"}" 合併回主幹並完成任務嗎?\n這會實際執行 git merge --no-ff,若有衝突會自動還原(git merge --abort)並顯示錯誤。`,
-              );
+              const ok = window.confirm(t("taskBoard:card.confirmMerge", { branch: branch ?? task.workspaceId ?? "?" }));
               if (!ok) return;
               void run(onMerge);
             }}
           >
-            批准合併
+            {t("taskBoard:card.approveMerge")}
           </Button>
         )}
         {task.status === "blocked" && task.blockedFrom && (
           <Button size="xs" variant="accentSoft" disabled={busy} onClick={() => void run(() => onUpdateStatus(task.blockedFrom as TaskStatus))}>
-            解除封鎖(回到 {task.blockedFrom})
+            {t("taskBoard:card.unblock", { status: task.blockedFrom })}
           </Button>
         )}
         {BLOCKABLE_STATUSES.includes(task.status) && (
           <Button size="xs" variant="outline" disabled={busy} onClick={() => void run(() => onUpdateStatus("blocked"))} className="hover:!border-warn hover:!text-warn">
-            封鎖
+            {t("taskBoard:card.block")}
           </Button>
         )}
       </div>
@@ -275,6 +313,7 @@ function TaskCard({
 }
 
 export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
+  const { t } = useTranslation(["taskBoard", "common"]);
   const teams = useTeamStore((s) => s.teams);
   const currentTeamId = useTeamStore((s) => s.currentTeamId);
   const selectTeam = useTeamStore((s) => s.selectTeam);
@@ -311,7 +350,7 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
     if (currentTeamId) void loadTasks(currentTeamId);
   }, [currentTeamId, loadTasks]);
 
-  const team = teams.find((t) => t.id === currentTeamId);
+  const team = teams.find((t2) => t2.id === currentTeamId);
   const tasks = currentTeamId ? (tasksByTeam[currentTeamId] ?? []) : [];
 
   const memberOptions = useMemo(
@@ -355,7 +394,7 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
       setNewAcceptanceText("");
       setComposerOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setCreating(false);
     }
@@ -369,26 +408,29 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
     try {
       const result = await runAcceptance(task.id);
       if (!result.skippedReason && !result.passed) {
-        setWarning(`任務「${task.title}」驗收未通過,仍已移至 review(切片為諮詢性,不阻擋轉換)。`);
+        setWarning(t("taskBoard:advanceWarning", { title: task.title }));
       }
     } catch (err) {
+      // i18n 專案新增:這是開發者向 console 輸出的除錯訊息,不是使用者看到的
+      // UI 文字——比照 lib/gateway-client.ts 既有 console.error 的既有慣例,
+      // 維持中文、不納入這批次的翻譯範圍。
       console.warn(`[acceptance] 送審前跑驗收失敗(忽略,不擋轉換): ${err instanceof Error ? err.message : String(err)}`);
     }
     await updateStatus(task.id, "review");
   };
 
   const handleEditAcceptance = async (task: Task): Promise<void> => {
-    const commands = promptForAcceptanceCommands(task.acceptance);
+    const commands = promptForAcceptanceCommands(task.acceptance, t);
     if (commands === null) return;
     await setAcceptance(task.id, commands.length > 0 ? { commands } : undefined);
   };
 
   const handleDelete = async (task: Task): Promise<void> => {
-    const ok = window.confirm(`確定要刪除任務「${task.title}」嗎?若已建立 worktree,會一併強制刪除,無法復原。`);
+    const ok = window.confirm(t("taskBoard:card.confirmDelete", { title: task.title }));
     if (!ok) return;
     const result = await deleteTask(task.id);
     if (result.hadUncommittedChanges) {
-      setWarning(`任務「${task.title}」的 worktree 內有未 commit 的變更,已隨刪除操作一併強制清除,無法復原。`);
+      setWarning(t("taskBoard:card.deleteHadUncommittedWarning", { title: task.title }));
     }
   };
 
@@ -398,11 +440,11 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
         <MobileBar onOpenSidebar={onOpenSidebar} />
         <EmptyState
           icon="board"
-          title="尚未建立任何團隊"
-          description="任務看板需要先建立一個團隊、加入至少一位成員,才能建立與指派任務。"
+          title={t("taskBoard:empty.noTeamTitle")}
+          description={t("taskBoard:empty.noTeamDescription")}
           action={
             <Button variant="primary" icon="plus" onClick={() => setManagementOpen(true)}>
-              建立團隊
+              {t("taskBoard:empty.createTeam")}
             </Button>
           }
         />
@@ -417,12 +459,12 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
         <MobileBar onOpenSidebar={onOpenSidebar} />
         <EmptyState
           icon="board"
-          title="請選擇一個團隊"
+          title={t("taskBoard:empty.selectTeamTitle")}
           action={
             <div className="flex flex-wrap justify-center gap-2">
-              {teams.map((t) => (
-                <Button key={t.id} variant="outline" onClick={() => void selectTeam(t.id)}>
-                  {t.name}
+              {teams.map((teamOption) => (
+                <Button key={teamOption.id} variant="outline" onClick={() => void selectTeam(teamOption.id)}>
+                  {teamOption.name}
                 </Button>
               ))}
             </div>
@@ -436,22 +478,22 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
     <main className="flex h-full flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-line-subtle px-3 py-2 sm:px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <IconButton icon="menu" aria-label="開啟側欄" onClick={onOpenSidebar} className="sm:hidden" />
+          <IconButton icon="menu" aria-label={t("taskBoard:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
           <h1 className="truncate text-sm font-semibold text-fg">{team.name}</h1>
-          <Select aria-label="切換團隊" value={team.id} onChange={(e) => void selectTeam(e.target.value)} className="!h-6 !text-2xs">
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
+          <Select aria-label={t("taskBoard:header.switchTeamAriaLabel")} value={team.id} onChange={(e) => void selectTeam(e.target.value)} className="!h-6 !text-2xs">
+            {teams.map((teamOption) => (
+              <option key={teamOption.id} value={teamOption.id}>
+                {teamOption.name}
               </option>
             ))}
           </Select>
         </div>
         <div className="flex flex-shrink-0 items-center gap-1.5">
           <Button size="sm" variant="primary" icon="plus" onClick={() => setComposerOpen((open) => !open)}>
-            新任務
+            {t("taskBoard:header.newTask")}
           </Button>
           <Button size="sm" variant="outline" icon="users" onClick={() => setManagementOpen(true)}>
-            團隊管理
+            {t("taskBoard:header.teamManagement")}
           </Button>
         </div>
       </header>
@@ -466,21 +508,26 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
           )}
           {composerOpen && (
             <div className="flex flex-wrap items-center gap-2">
-              <Input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="新任務標題" className="w-56" />
-              <Input value={newDescription} onChange={(e) => setNewDescription(e.target.value)} placeholder="描述(選填)" className="w-64" />
+              <Input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder={t("taskBoard:composer.titlePlaceholder")} className="w-56" />
+              <Input
+                value={newDescription}
+                onChange={(e) => setNewDescription(e.target.value)}
+                placeholder={t("taskBoard:composer.descriptionPlaceholder")}
+                className="w-64"
+              />
               <Input
                 value={newAcceptanceText}
                 onChange={(e) => setNewAcceptanceText(e.target.value)}
-                placeholder="驗收指令(選填,多條用 ; 分隔)"
+                placeholder={t("taskBoard:composer.acceptancePlaceholder", { separator: ACCEPTANCE_COMMAND_SEPARATOR })}
                 mono
-                title="機器驗收指令(S4):每條指令依序執行,全部 exit 0 才算通過,留空 = 無機器驗收(退回人類判定)"
+                title={t("taskBoard:composer.acceptanceTitle")}
                 className="w-56"
               />
               <Button variant="primary" size="sm" loading={creating} disabled={!newTitle.trim()} onClick={() => void handleCreate()}>
-                {creating ? "建立中…" : "建立"}
+                {creating ? t("taskBoard:composer.creating") : t("taskBoard:composer.create")}
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setComposerOpen(false)}>
-                取消
+                {t("common:cancel")}
               </Button>
             </div>
           )}
@@ -498,7 +545,7 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
                 <span className="tabular text-2xs text-fg-faint">{tasksByStatus[status].length}</span>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-surface/40 p-1.5">
-                {tasksByStatus[status].length === 0 && <p className="mt-3 text-center text-2xs text-fg-faint">無任務</p>}
+                {tasksByStatus[status].length === 0 && <p className="mt-3 text-center text-2xs text-fg-faint">{t("taskBoard:column.empty")}</p>}
                 {tasksByStatus[status].map((task) => (
                   <TaskCard
                     key={task.id}
@@ -528,7 +575,7 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
         <div className="flex-shrink-0 border-t border-line-subtle bg-danger/[0.04] p-3">
           <div className="mb-1.5 flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-[0.06em] text-danger">
             <Icon name="alert" size={12} />
-            封鎖(Blocked) · {tasksByStatus.blocked.length}
+            {t("taskBoard:blockedSection.heading", { count: tasksByStatus.blocked.length })}
           </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {tasksByStatus.blocked.map((task) => (
@@ -560,9 +607,10 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
 }
 
 function MobileBar({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
+  const { t } = useTranslation(["taskBoard"]);
   return (
     <div className="flex flex-shrink-0 items-center border-b border-line-subtle px-2 py-1.5 sm:hidden">
-      <IconButton icon="menu" aria-label="開啟側欄" onClick={onOpenSidebar} />
+      <IconButton icon="menu" aria-label={t("taskBoard:sidebar.openAriaLabel")} onClick={onOpenSidebar} />
     </div>
   );
 }

@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type Server as NodeHttpServer, type
 import { WebSocketServer, WebSocket } from "ws";
 import {
   ClientRequestSchema,
+  DeskmonyError,
+  ErrorCodes,
   type ChildResultPush,
   type ClientRequest,
   type ClientRequestMethod,
@@ -424,11 +426,14 @@ export class WsGateway {
       requestId = typeof json?.id === "string" ? json.id : randomUUID();
       parsed = ClientRequestSchema.parse(json);
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
       this.send(socket, {
         kind: "response",
         id: requestId,
         ok: false,
-        error: `無效的請求格式: ${err instanceof Error ? err.message : String(err)}`,
+        error: `無效的請求格式: ${detail}`,
+        errorCode: ErrorCodes.GATEWAY_INVALID_REQUEST,
+        errorParams: { detail },
       });
       return;
     }
@@ -450,6 +455,7 @@ export class WsGateway {
             id: parsed.id,
             ok: false,
             error: "尚未完成認證:第一則訊息必須是帶正確 token 的 auth 請求",
+            errorCode: ErrorCodes.AUTH_NOT_YET_AUTHENTICATED,
           });
           return;
         }
@@ -462,6 +468,7 @@ export class WsGateway {
             id: parsed.id,
             ok: false,
             error: "認證嘗試次數過多,請稍後再試",
+            errorCode: ErrorCodes.AUTH_RATE_LIMITED,
           });
           socket.close(1008, "認證嘗試次數過多");
           return;
@@ -486,6 +493,7 @@ export class WsGateway {
             id: parsed.id,
             ok: false,
             error: "認證失敗:token 不正確",
+            errorCode: ErrorCodes.AUTH_INVALID_TOKEN,
           });
           socket.close(1008, "認證失敗");
         }
@@ -526,6 +534,8 @@ export class WsGateway {
         id: parsed.id,
         ok: false,
         error: `此操作僅限本機連線呼叫:${parsed.method}`,
+        errorCode: ErrorCodes.GATEWAY_LOCAL_ONLY_METHOD,
+        errorParams: { method: parsed.method },
       });
       return;
     }
@@ -545,6 +555,7 @@ export class WsGateway {
         id: parsed.id,
         ok: false,
         error: "「永遠允許」規則僅限本機連線設定",
+        errorCode: "gateway.rememberRuleLocalOnly",
       });
       return;
     }
@@ -553,12 +564,7 @@ export class WsGateway {
       const result = await this.dispatch(parsed, connState?.isLocal ?? false);
       this.send(socket, { kind: "response", id: parsed.id, ok: true, result });
     } catch (err) {
-      this.send(socket, {
-        kind: "response",
-        id: parsed.id,
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      this.send(socket, toErrorResponse(parsed.id, err));
     }
   }
 
@@ -736,7 +742,11 @@ export class WsGateway {
       case "task.get": {
         const task = await this.taskService.getTask(request.params.taskId);
         if (!task) {
-          throw new Error(`找不到任務: ${request.params.taskId}`);
+          throw new DeskmonyError(
+            ErrorCodes.ENTITY_NOT_FOUND,
+            { entityType: "task", id: request.params.taskId },
+            `找不到任務: ${request.params.taskId}`,
+          );
         }
         return { task };
       }
@@ -753,7 +763,11 @@ export class WsGateway {
       case "workspace.get": {
         const workspace = await this.workspaceManager.getWorkspace(request.params.workspaceId);
         if (!workspace) {
-          throw new Error(`找不到 workspace: ${request.params.workspaceId}`);
+          throw new DeskmonyError(
+            ErrorCodes.ENTITY_NOT_FOUND,
+            { entityType: "workspace", id: request.params.workspaceId },
+            `找不到 workspace: ${request.params.workspaceId}`,
+          );
         }
         return { workspace };
       }
@@ -846,4 +860,20 @@ function maskEffectiveConfigForClient(effective: EffectiveCoreConfig): Effective
       },
     },
   };
+}
+
+/**
+ * i18n 專案新增:把 `dispatch()` 拋出的例外轉成 WS response——`DeskmonyError`
+ * (見 packages/shared/src/errors.ts)帶有 `code`/`params`,原樣搬進
+ * `errorCode`/`errorParams`(見 packages/shared/src/gateway.ts 的
+ * `ServerResponseSchema` 對應欄位註解),讓前端可以查 `errors` namespace 翻譯;
+ * 其餘未預期的例外(不是 `DeskmonyError`,例如真正的 bug 或第三方套件拋出的
+ * 例外)維持原本只有純文字 `error` 的行為,不硬塞一個猜測的 code——查不到
+ * code 時前端一律退回顯示這個 `error` 純文字訊息(見 error-i18n.ts)。
+ */
+function toErrorResponse(id: string, err: unknown): GatewayServerResponse {
+  if (err instanceof DeskmonyError) {
+    return { kind: "response", id, ok: false, error: err.message, errorCode: err.code, errorParams: err.params };
+  }
+  return { kind: "response", id, ok: false, error: err instanceof Error ? err.message : String(err) };
 }

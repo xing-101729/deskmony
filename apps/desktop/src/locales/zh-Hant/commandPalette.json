@@ -1,0 +1,9 @@
+{
+  "dialogLabel": "命令面板",
+  "searchPlaceholder": "搜尋指令、對話、專案…",
+  "searchAriaLabel": "搜尋指令",
+  "noResults": "沒有符合「{{query}}」的指令",
+  "selectHint": "選擇",
+  "runHint": "執行",
+  "resultsCount": "{{count}} 項"
+}

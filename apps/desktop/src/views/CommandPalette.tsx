@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ModalPortal } from "./ModalPortal.js";
 import { Icon, type IconName } from "../ui/icons.js";
 import { Kbd } from "../ui/Button.js";
@@ -63,6 +64,7 @@ export function CommandPalette({
   commands: Command[];
   onClose: () => void;
 }): JSX.Element {
+  const { t } = useTranslation(["commandPalette", "common"]);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -129,7 +131,7 @@ export function CommandPalette({
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="命令面板"
+          aria-label={t("commandPalette:dialogLabel")}
           className="flex w-[min(620px,calc(100vw-32px))] animate-pop-in flex-col overflow-hidden rounded-xl bg-panel shadow-overlay"
         >
           <div className="flex items-center gap-2 border-b border-line-subtle px-3">
@@ -139,8 +141,8 @@ export function CommandPalette({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="搜尋指令、對話、專案…"
-              aria-label="搜尋指令"
+              placeholder={t("commandPalette:searchPlaceholder")}
+              aria-label={t("commandPalette:searchAriaLabel")}
               className="h-11 flex-1 bg-transparent text-md text-fg outline-none placeholder:text-fg-faint"
             />
             <Kbd>Esc</Kbd>
@@ -148,7 +150,7 @@ export function CommandPalette({
 
           <div ref={listRef} className="max-h-[min(52vh,420px)] overflow-y-auto p-1.5">
             {results.length === 0 && (
-              <p className="px-3 py-8 text-center text-xs text-fg-subtle">沒有符合「{query}」的指令</p>
+              <p className="px-3 py-8 text-center text-xs text-fg-subtle">{t("commandPalette:noResults", { query })}</p>
             )}
             {results.map((command, index) => {
               flatIndex = index;
@@ -209,12 +211,12 @@ export function CommandPalette({
           <div className="flex select-chrome items-center gap-3 border-t border-line-subtle bg-surface/40 px-3 py-2 text-2xs text-fg-faint">
             <span className="flex items-center gap-1">
               <Kbd>↑</Kbd>
-              <Kbd>↓</Kbd> 選擇
+              <Kbd>↓</Kbd> {t("commandPalette:selectHint")}
             </span>
             <span className="flex items-center gap-1">
-              <Kbd>↵</Kbd> 執行
+              <Kbd>↵</Kbd> {t("commandPalette:runHint")}
             </span>
-            <span className="ml-auto tabular">{results.length} 項</span>
+            <span className="ml-auto tabular">{t("commandPalette:resultsCount", { count: results.length })}</span>
           </div>
         </div>
       </div>

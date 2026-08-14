@@ -1,0 +1,8 @@
+{
+  "openSidebar": "サイドバーを開く",
+  "selectOrCreate": "左側から会話を選択するか、新しく作成して開始してください",
+  "directTerminal": "ターミナル直結",
+  "interrupt": "中断(Ctrl+C)",
+  "inputPlaceholder": "ターミナルに送る 1 行を入力(Enter で送信、キーボードで入力して Enter を押すのと同じ動作です)…",
+  "send": "送信"
+}

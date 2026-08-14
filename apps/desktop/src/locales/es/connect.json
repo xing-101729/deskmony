@@ -1,0 +1,11 @@
+{
+  "urlRequired": "Introduce una dirección de servidor",
+  "heading": "Conectar a Deskmony Core",
+  "tagline": "Plataforma de gestión de Agent Team",
+  "description": "Para usar Deskmony en un navegador primero debes conectarte a un servidor Deskmony Core en ejecución.",
+  "serverUrlLabel": "Dirección del servidor",
+  "tokenLabel": "Token de autenticación (déjalo en blanco si el servidor no tiene la autenticación activada)",
+  "connecting": "Conectando…",
+  "connect": "Conectar",
+  "tokenStorageNote": "El token solo se guarda en el sessionStorage de esta pestaña y se borra automáticamente al cerrarla; nunca se escribe en la barra de direcciones ni en el historial del navegador. Si usas un ordenador compartido, pulsa \"Cerrar sesión\" en la interfaz principal o simplemente cierra esta pestaña al terminar."
+}

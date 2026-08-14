@@ -22,6 +22,20 @@ import { z } from "zod";
  * 訊息全文、任何 config/env 值——只帶元資料(工具名、session 顯示名、筆數、
  * 事件種類、trip 的原因分類)。`RealNotifier`(apps/core/src/enforcement/
  * notifier.ts)是唯一產生這個 payload 的地方,務必維持這條邊界。
+ *
+ * ---- i18n 專案新增:翻譯字串從哪裡來 ----
+ * `formatEnforcementNotificationText()` 這輪起改收一個 `t` 回呼參數(型別見
+ * 下方 `TranslateFn`),不再自己內建寫死的中文字串——但這個檔案本身**仍然**
+ * 完全不 import `node:*`,也**不**新增 `i18next`/`react-i18next` 依賴(維持
+ * 檔案頂端「可以被 apps/desktop 的瀏覽器 bundle 安全引入」的限制不變):它
+ * 只是拿呼叫端已經準備好的翻譯函式來用,不需要知道那個函式背後是什麼套件。
+ * 唯一呼叫端(apps/desktop/src/stores/session-store.ts 的
+ * `handleEnforcementNotification()`)是 zustand store 內的一次性 side
+ * effect、不是 React component,沒有 `useTranslation()` hook 可拿,改傳入
+ * i18next 的裸 `t`——那是整個 i18n 專案唯一允許這樣做的地方,其餘所有 UI
+ * 元件一律透過 `useTranslation()` 拿 `t`(見該檔案呼叫處的完整說明)。翻譯
+ * 字串本身收在 `notifications` namespace
+ * (apps/desktop/src/locales/{locale}/notifications.json)。
  */
 
 /**
@@ -74,26 +88,38 @@ export const EnforcementNotificationPushSchema = z
   .strict();
 export type EnforcementNotificationPush = z.infer<typeof EnforcementNotificationPushSchema>;
 
-const TRIP_REASON_LABEL: Record<NotificationTripReason, string> = {
-  "task-budget": "任務預算上限",
-  "daily-limit": "每日成本上限",
-  "waiting-ttl": "等待逾時上限",
-  "message-budget": "訊息數上限",
-  "turn-limit": "回合時間/工具呼叫次數上限",
-};
+/**
+ * i18n 專案:翻譯函式的最小介面——刻意不是 `i18next` 的 `TFunction` 型別
+ * (那會逼這個檔案 import `i18next` 當型別依賴,即使只是 type-only import 也
+ * 違反檔案頂端「完全不 import node:* 或 i18next」的限制),只描述呼叫端真正會
+ * 用到的形狀:key + 可選的插值參數,回傳字串。`i18next.t`/`useTranslation()`
+ * 拿到的 `t` 都滿足這個形狀,呼叫端不需要額外轉接或包裝。
+ */
+type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
 
-/** 桌面原生通知的 title/body(見檔案頂端說明,webhook 不使用這個函式)。 */
-export function formatEnforcementNotificationText(payload: EnforcementNotificationPush): {
+/** 桌面原生通知的 title/body(見檔案頂端說明,webhook 不使用這個函式)。
+ *  `t` 見上方 `TranslateFn` 型別註解——由呼叫端提供,這個檔案本身不 import
+ *  任何 i18n 套件。翻譯字串收在 `notifications` namespace,見
+ *  apps/desktop/src/locales/{locale}/notifications.json。 */
+export function formatEnforcementNotificationText(
+  payload: EnforcementNotificationPush,
+  t: TranslateFn,
+): {
   title: string;
   body: string;
 } {
-  const who = payload.sessionNames.length > 0 ? payload.sessionNames.join("、") : "Deskmony";
+  // 見 notifications.json 的 `listSeparator`——zh-Hant/ja 沿用「、」,en/es
+  // 用 ", "(哪個語言讀起來自然由該語言的翻譯決定,這裡完全不假設分隔符號)。
+  const listSeparator = t("notifications:listSeparator", { defaultValue: "、" });
+  const who = payload.sessionNames.length > 0 ? payload.sessionNames.join(listSeparator) : "Deskmony";
 
   if (payload.kind === "trip") {
-    const reason = payload.tripReason ? TRIP_REASON_LABEL[payload.tripReason] : "已被熔斷叫停";
+    const reason = payload.tripReason
+      ? t(`notifications:tripReason.${payload.tripReason}`)
+      : t("notifications:trip.reasonFallback");
     return {
-      title: "Deskmony:任務已熔斷",
-      body: `${who}:${reason}`,
+      title: t("notifications:trip.title"),
+      body: t("notifications:trip.body", { who, reason }),
     };
   }
 
@@ -102,23 +128,34 @@ export function formatEnforcementNotificationText(payload: EnforcementNotificati
     // ReminderEnforcementEventSchema 註解),不可套用「已熔斷」字樣。
     if (payload.reminderReason === "budget-warning") {
       return {
-        title: "Deskmony:預算即將用盡",
-        body: `${who}:花費/token 已達到警戒線,尚未 halt,建議關注或調整預算上限`,
+        title: t("notifications:reminder.budgetWarning.title"),
+        body: t("notifications:reminder.budgetWarning.body", { who }),
       };
     }
     return {
-      title: "Deskmony:任務閒置提醒",
-      body: `${who}:已等待回應超過 6 小時,尚未被中斷,worktree/任務仍保留,請確認是否需要回來處理`,
+      title: t("notifications:reminder.idle.title"),
+      body: t("notifications:reminder.idle.body", { who }),
     };
   }
 
   // escalation:count/toolNames 只有去重後的工具名清單與總筆數,沒有「每個
   // 工具各幾筆」的細分(schema 本身沒有帶這個粒度,見檔案頂端「內容最小化」
   // 的欄位形狀)——body 只能表達「共 N 筆,涉及哪些工具」,不做逐工具計數。
-  const tools = payload.toolNames.length > 0 ? payload.toolNames.join("、") : "操作";
-  const title = payload.count > 1 ? `Deskmony:${payload.count} 個操作等待核可` : "Deskmony:等待核可";
+  const tools =
+    payload.toolNames.length > 0 ? payload.toolNames.join(listSeparator) : t("notifications:escalation.defaultToolLabel");
+  // i18n 專案:count===1 vs count>1 兩種文案手動分流呼叫不同的 key(而不是
+  // 依賴 i18next 內建的 `_one`/`_other` 複數字尾自動選字)——後者的選字規則
+  // 是 CLDR 的 plural category,而 zh/ja 的 CLDR 規則只有 "other" 一類(沒有
+  // "one"),count===1 時仍會落到 `_other`,等於永遠選不到 `_one` 那個變體,
+  // 反而讓 4 個語言檔的行為不一致。手動分流則每個語言檔都能各自決定 singular
+  // 文案要不要出現數字(比照原本 zh-Hant 版本的既有措辭:count===1 時不特別
+  // 顯示「1」這個數字)。
+  const title =
+    payload.count > 1
+      ? t("notifications:escalation.titlePlural", { count: payload.count })
+      : t("notifications:escalation.titleSingle");
   return {
     title,
-    body: `${who}:等待核可 ${tools}`,
+    body: t("notifications:escalation.body", { who, tools }),
   };
 }

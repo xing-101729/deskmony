@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -37,6 +38,7 @@ function resolveTerminalTheme(): NonNullable<ConstructorParameters<typeof Termin
  *     apps/core/src/session/session-manager.ts 的 PTY_IDLE_TIMEOUT_MS 說明)。
  */
 export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
+  const { t } = useTranslation(["terminal", "common"]);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const sendTerminalInput = useSessionStore((s) => s.sendTerminalInput);
@@ -171,10 +173,10 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
     return (
       <main className="flex h-full flex-1 flex-col bg-canvas">
         <div className="flex flex-shrink-0 items-center border-b border-line-subtle px-2 py-1.5 sm:hidden">
-          <IconButton icon="menu" aria-label="開啟側欄" onClick={onOpenSidebar} />
+          <IconButton icon="menu" aria-label={t("terminal:openSidebar")} onClick={onOpenSidebar} />
         </div>
         <div className="flex flex-1 items-center justify-center text-fg-subtle">
-          <p className="text-sm">從左側選擇或建立一個對話開始</p>
+          <p className="text-sm">{t("terminal:selectOrCreate")}</p>
         </div>
       </main>
     );
@@ -185,18 +187,18 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   return (
     <main className="flex h-full flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-line-subtle px-3 py-2 sm:px-4">
-        <IconButton icon="menu" aria-label="開啟側欄" onClick={onOpenSidebar} className="sm:hidden" />
+        <IconButton icon="menu" aria-label={t("terminal:openSidebar")} onClick={onOpenSidebar} className="sm:hidden" />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
           <p className="mt-0.5 flex items-center gap-1.5 text-2xs text-fg-faint" title={session.workingDir}>
-            <Badge tone="accent" icon="terminal">終端直通</Badge>
+            <Badge tone="accent" icon="terminal">{t("terminal:directTerminal")}</Badge>
             <span className="truncate">{session.workingDir}</span>
           </p>
         </div>
         <IconButton
           icon="pause"
-          aria-label="中斷(Ctrl+C)"
-          title="中斷(Ctrl+C)"
+          aria-label={t("terminal:interrupt")}
+          title={t("terminal:interrupt")}
           variant="outline"
           disabled={!busy}
           onClick={interrupt}
@@ -223,10 +225,10 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
                 handleSend();
               }
             }}
-            placeholder="輸入一行文字送進終端(Enter 送出,等同鍵盤輸入後按下 Enter)…"
+            placeholder={t("terminal:inputPlaceholder")}
             className="flex-1 bg-transparent px-1 py-1 font-mono text-sm text-fg outline-none placeholder:text-fg-faint"
           />
-          <IconButton icon="play" aria-label="送出" variant="primary" size="md" onClick={handleSend} />
+          <IconButton icon="play" aria-label={t("terminal:send")} variant="primary" size="md" onClick={handleSend} />
         </div>
       </div>
     </main>

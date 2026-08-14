@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { deriveLifecycleFromRole, type Lifecycle } from "@deskmony/shared";
 import { useSessionStore } from "../stores/session-store.js";
 import { useTeamStore } from "../stores/team-store.js";
@@ -7,13 +9,22 @@ import { Button } from "../ui/Button.js";
 import { Input, Select, Checkbox } from "../ui/Field.js";
 import { Badge, StatusDot, SectionLabel } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
-import { sessionStatusMeta, softwareLabel, OFFLINE_STATUS } from "../ui/status.js";
+import { sessionStatusMeta, softwareLabel, offlineStatus } from "../ui/status.js";
+import { translateError } from "../lib/error-i18n.js";
 
-/** S8(agent-lifecycle):"" = 自動(依角色推導,見 deriveLifecycleFromRole())。 */
-const lifecycleLabel: Record<Lifecycle, string> = {
-  persistent: "長命(persistent)",
-  ephemeral: "短命(ephemeral)",
-};
+/**
+ * S8(agent-lifecycle):"" = 自動(依角色推導,見 deriveLifecycleFromRole())。
+ *
+ * i18n 專案新增:改成函式而非模組層級就算好的 `Record<Lifecycle, string>`——
+ * `label` 要在每次呼叫時才即時查表(比照 ui/status.ts 的 sessionStatusMeta()/
+ * taskStatusMeta() 慣例),否則語言切換後這個標籤會永遠停在第一次載入時的
+ * 語言。這個檔案是 React 元件(不是像 ui/status.ts 那樣的純 TS 模組),`t`
+ * 由呼叫端(元件本體 `useTranslation()` 拿到的)傳入,不直接 import i18next
+ * 單例(比照 lib/error-i18n.ts 的 translateError() 慣例)。
+ */
+function lifecycleLabel(lifecycle: Lifecycle, t: TFunction): string {
+  return t(`teamManagement:lifecycle.${lifecycle}`);
+}
 
 interface TeamManagementDialogProps {
   onClose: () => void;
@@ -25,6 +36,7 @@ interface TeamManagementDialogProps {
  * 完全不變。
  */
 export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JSX.Element {
+  const { t } = useTranslation(["teamManagement", "common"]);
   const teams = useTeamStore((s) => s.teams);
   const currentTeamId = useTeamStore((s) => s.currentTeamId);
   const teammatesByTeam = useTeamStore((s) => s.teammatesByTeam);
@@ -57,7 +69,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
     if (profiles.length > 0 && !memberProfileId) setMemberProfileId(profiles[0].id);
   }, [profiles, memberProfileId]);
 
-  const selectedTeam = teams.find((t) => t.id === selectedTeamId);
+  const selectedTeam = teams.find((tm) => tm.id === selectedTeamId);
   const teammates = selectedTeamId ? (teammatesByTeam[selectedTeamId] ?? []) : [];
   const selectedMemberProfile = profiles.find((p) => p.id === memberProfileId);
   const effectiveRoleForPreview = memberRole.trim() || selectedMemberProfile?.role || "";
@@ -71,7 +83,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
   const handleCreateTeam = async (): Promise<void> => {
     setError(null);
     if (!newTeamName.trim()) {
-      setError("請輸入團隊名稱");
+      setError(t("teamManagement:errors.teamNameRequired"));
       return;
     }
     setCreatingTeam(true);
@@ -80,7 +92,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
       setNewTeamName("");
       setNewTeamWorkingDir("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setCreatingTeam(false);
     }
@@ -89,11 +101,11 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
   const handleAddMember = async (): Promise<void> => {
     setError(null);
     if (!selectedTeamId) {
-      setError("請先選擇一個團隊");
+      setError(t("teamManagement:errors.selectTeamFirst"));
       return;
     }
     if (!memberProfileId) {
-      setError("請選擇一個 Agent Profile");
+      setError(t("teamManagement:errors.selectProfileFirst"));
       return;
     }
     setAddingMember(true);
@@ -111,7 +123,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
       setMemberCanInterrupt(false);
       setMemberLifecycle("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setAddingMember(false);
     }
@@ -122,7 +134,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
     try {
       await removeMember(selectedTeamId, memberId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     }
   };
 
@@ -130,24 +142,24 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
     const profile = profiles.find((p) => p.id === agentProfileId);
     const workingDir = selectedTeam?.workingDir || profile?.workingDir;
     if (!workingDir) {
-      setError("找不到可用的工作目錄,請確認團隊或 Profile 有設定 workingDir");
+      setError(t("teamManagement:errors.workingDirNotFound"));
       return;
     }
     try {
       await createSession(agentProfileId, workingDir, undefined, memberId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     }
   };
 
   return (
-    <Dialog title="團隊管理" description="建立團隊、加入/移除成員、檢視成員 session 狀態" icon="users" size="xl" onClose={onClose} bare>
+    <Dialog title={t("teamManagement:dialog.title")} description={t("teamManagement:dialog.description")} icon="users" size="xl" onClose={onClose} bare>
       <div className="flex h-[68vh] min-h-0 max-h-full">
         {/* ---- 左側:team 清單 + 建立 team ---- */}
         <div className="w-52 flex-shrink-0 overflow-y-auto border-r border-line-subtle p-3">
-          <SectionLabel>團隊</SectionLabel>
+          <SectionLabel>{t("teamManagement:teamPanel.sectionLabel")}</SectionLabel>
           <div className="mb-3 mt-1 space-y-0.5">
-            {teams.length === 0 && <p className="text-xs text-fg-faint">尚無團隊</p>}
+            {teams.length === 0 && <p className="text-xs text-fg-faint">{t("teamManagement:teamPanel.noTeams")}</p>}
             {teams.map((team) => (
               <button
                 key={team.id}
@@ -163,10 +175,15 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
             ))}
           </div>
           <div className="space-y-1.5 border-t border-line-subtle pt-2">
-            <Input value={newTeamName} onChange={(e) => setNewTeamName(e.target.value)} placeholder="新團隊名稱" />
-            <Input mono value={newTeamWorkingDir} onChange={(e) => setNewTeamWorkingDir(e.target.value)} placeholder="工作目錄(選填)" />
+            <Input value={newTeamName} onChange={(e) => setNewTeamName(e.target.value)} placeholder={t("teamManagement:teamPanel.newTeamNamePlaceholder")} />
+            <Input
+              mono
+              value={newTeamWorkingDir}
+              onChange={(e) => setNewTeamWorkingDir(e.target.value)}
+              placeholder={t("teamManagement:teamPanel.newTeamWorkingDirPlaceholder")}
+            />
             <Button variant="primary" size="sm" icon="plus" block loading={creatingTeam} onClick={() => void handleCreateTeam()}>
-              {creatingTeam ? "建立中…" : "建立團隊"}
+              {creatingTeam ? t("teamManagement:teamPanel.creating") : t("teamManagement:teamPanel.createTeam")}
             </Button>
           </div>
         </div>
@@ -174,16 +191,16 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
         {/* ---- 右側:成員清單 + 加入成員 ---- */}
         <div className="flex min-h-0 flex-1 flex-col p-3">
           {!selectedTeam ? (
-            <EmptyState icon="users" title="請先在左側選擇或建立一個團隊" compact />
+            <EmptyState icon="users" title={t("teamManagement:memberPanel.emptyTitle")} compact />
           ) : (
             <>
-              <SectionLabel>成員({selectedTeam.members.length})</SectionLabel>
+              <SectionLabel>{t("teamManagement:memberPanel.sectionLabel", { count: selectedTeam.members.length })}</SectionLabel>
               <div className="mb-3 mt-1 flex-1 space-y-1.5 overflow-y-auto">
-                {selectedTeam.members.length === 0 && <p className="text-xs text-fg-faint">尚無成員</p>}
+                {selectedTeam.members.length === 0 && <p className="text-xs text-fg-faint">{t("teamManagement:memberPanel.noMembers")}</p>}
                 {selectedTeam.members.map((member) => {
-                  const teammate = teammates.find((t) => t.memberId === member.id);
+                  const teammate = teammates.find((tm) => tm.memberId === member.id);
                   const profile = profiles.find((p) => p.id === member.agentProfileId);
-                  const meta = teammate?.hasActiveSession ? sessionStatusMeta(teammate.status) : OFFLINE_STATUS;
+                  const meta = teammate?.hasActiveSession ? sessionStatusMeta(teammate.status) : offlineStatus();
                   const contextUnsupported =
                     member.lifecycle === "persistent" &&
                     (() => {
@@ -197,12 +214,12 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
                         <StatusDot meta={meta} />
                         <span className="font-medium text-fg">{member.name}</span>
                         <span className="text-fg-faint">· {member.role}</span>
-                        {member.canInterrupt && <Badge tone="warn">可中斷</Badge>}
+                        {member.canInterrupt && <Badge tone="warn">{t("teamManagement:memberPanel.canInterruptBadge")}</Badge>}
                         <Badge
                           tone={member.lifecycle === "persistent" ? "accent" : "neutral"}
-                          title="S8:長命(persistent)= 為了在線可達,由人/團隊啟動時建立;短命(ephemeral)= 指派任務時自動建立、任務完成自動釋放"
+                          title={t("teamManagement:lifecycleHint")}
                         >
-                          {lifecycleLabel[member.lifecycle]}
+                          {lifecycleLabel(member.lifecycle, t)}
                         </Badge>
                         <Badge mono className="ml-auto">
                           {softwareLabel(teammate?.software ?? profile?.software)}
@@ -213,21 +230,21 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
                           tone="warn"
                           icon="alert"
                           className="mt-1 ml-3.5"
-                          title="此後端無法自動偵測 context 上限——這個長命成員的 session 不會自動 checkpoint 重啟,context 撐爆前需要人工手動重啟(dispose + 重新建立 session)。"
+                          title={t("teamManagement:memberPanel.contextUnsupportedTitle")}
                         >
-                          此後端無法自動偵測 context 上限,需手動重啟
+                          {t("teamManagement:memberPanel.contextUnsupportedBadge")}
                         </Badge>
                       )}
                       <div className="mt-1 flex items-center justify-between pl-3.5 text-2xs text-fg-faint">
-                        <span>{teammate?.hasActiveSession ? meta.label : "尚無 session"}</span>
+                        <span>{teammate?.hasActiveSession ? meta.label : t("teamManagement:memberPanel.noSession")}</span>
                         <div className="flex gap-2">
                           {!teammate?.hasActiveSession && (
                             <button type="button" onClick={() => void handleCreateMemberSession(member.id, member.agentProfileId)} className="text-accent hover:underline">
-                              建立 session
+                              {t("teamManagement:memberPanel.createSession")}
                             </button>
                           )}
                           <button type="button" onClick={() => void handleRemoveMember(member.id)} className="hover:text-danger">
-                            移除
+                            {t("teamManagement:memberPanel.remove")}
                           </button>
                         </div>
                       </div>
@@ -237,9 +254,9 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
               </div>
 
               <div className="space-y-1.5 border-t border-line-subtle pt-2">
-                <SectionLabel>加入成員</SectionLabel>
+                <SectionLabel>{t("teamManagement:addMember.sectionLabel")}</SectionLabel>
                 <Select value={memberProfileId} onChange={(e) => setMemberProfileId(e.target.value)}>
-                  {profiles.length === 0 && <option value="">(尚無 Profile)</option>}
+                  {profiles.length === 0 && <option value="">{t("teamManagement:addMember.noProfileOption")}</option>}
                   {profiles.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}({softwareLabel(p.software)})
@@ -247,22 +264,29 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
                   ))}
                 </Select>
                 <div className="flex gap-1.5">
-                  <Input value={memberName} onChange={(e) => setMemberName(e.target.value)} placeholder="顯示名稱(選填,預設沿用 profile)" className="w-1/2" />
-                  <Input value={memberRole} onChange={(e) => setMemberRole(e.target.value)} placeholder="角色(選填)" className="w-1/2" />
+                  <Input
+                    value={memberName}
+                    onChange={(e) => setMemberName(e.target.value)}
+                    placeholder={t("teamManagement:addMember.namePlaceholder")}
+                    className="w-1/2"
+                  />
+                  <Input value={memberRole} onChange={(e) => setMemberRole(e.target.value)} placeholder={t("teamManagement:addMember.rolePlaceholder")} className="w-1/2" />
                 </div>
-                <Checkbox checked={memberCanInterrupt} onChange={(e) => setMemberCanInterrupt(e.target.checked)} label="可中斷隊友(canInterrupt)" />
+                <Checkbox checked={memberCanInterrupt} onChange={(e) => setMemberCanInterrupt(e.target.checked)} label={t("teamManagement:addMember.canInterruptLabel")} />
                 <div className="flex items-center gap-1.5">
                   <Select value={memberLifecycle} onChange={(e) => setMemberLifecycle(e.target.value as "" | Lifecycle)} className="w-auto">
-                    <option value="">自動(依角色推導)</option>
-                    <option value="persistent">長命(persistent)</option>
-                    <option value="ephemeral">短命(ephemeral)</option>
+                    <option value="">{t("teamManagement:addMember.autoLifecycleOption")}</option>
+                    <option value="persistent">{lifecycleLabel("persistent", t)}</option>
+                    <option value="ephemeral">{lifecycleLabel("ephemeral", t)}</option>
                   </Select>
                   {memberLifecycle === "" && derivedLifecyclePreview && (
-                    <span className="text-2xs text-fg-faint">→ 將推導為「{lifecycleLabel[derivedLifecyclePreview]}」</span>
+                    <span className="text-2xs text-fg-faint">
+                      {t("teamManagement:addMember.derivedPreview", { label: lifecycleLabel(derivedLifecyclePreview, t) })}
+                    </span>
                   )}
                 </div>
                 <Button variant="outline" size="sm" block loading={addingMember} disabled={!profiles.length} onClick={() => void handleAddMember()}>
-                  {addingMember ? "加入中…" : "+ 加入成員"}
+                  {addingMember ? t("teamManagement:addMember.adding") : t("teamManagement:addMember.submit")}
                 </Button>
               </div>
             </>

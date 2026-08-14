@@ -1,0 +1,33 @@
+{
+  "title": "復原:上次未被乾淨關閉的 session",
+  "description": "子程序已隨 core 上次的中斷消失,agent 沒有記憶可自動續接——請逐一決定要繼續、接手、重跑,還是放棄",
+  "emptyTitle": "目前沒有中斷的 session",
+  "unknownProfile": "(未知 profile)",
+  "sessionMetaLine": "{{profile}} · 中斷於 {{interruptedAt}} · 最後活動 {{lastSeenAt}}",
+  "taskLine": "任務:{{title}}(狀態:{{status}})",
+  "crashedWhileMerging": "崩潰於合併中,git 可能處於中間狀態",
+  "worktreeLine": "worktree:{{branch}}",
+  "missing": "(已遺失)",
+  "hasUncommittedChanges": "(有未提交的變更)",
+  "clean": "(乾淨)",
+  "continueTitle": "重連後端 session,agent 記得先前脈絡",
+  "continueLabel": "繼續(保有記憶)",
+  "takeoverTitle": "開新 session,注入摘要——agent 的腦是新的,只讀過筆記",
+  "takeoverLabel": "接手(讀摘要重啟)",
+  "rerunTitle": "worktree 必須乾淨才能重跑",
+  "rerunLabel": "重跑…",
+  "abandonLabel": "放棄",
+  "checkingStatus": "查詢中…",
+  "checkGitStatus": "檢查 git 狀態",
+  "noStatusOutputClean": "(git status 無輸出,可能已經是乾淨狀態)",
+  "confirmDiscard": "確定要丟棄「{{title}}」worktree 內所有未提交的變更嗎?此操作無法復原(git reset --hard + git clean -fd)。",
+  "confirmAbandon": "確定要放棄「{{title}}」嗎?session 會標記為已關閉,但任務與 worktree 都會保留,之後仍可從任務看板手動處理。",
+  "dirtyResolver": {
+    "heading": "worktree 有未提交的變更,重跑前必須先處理:",
+    "loadingDiff": "載入 diff 中…",
+    "noStatusOutput": "(git status 無輸出)",
+    "noDiffOutput": "(git diff 無輸出——可能只有未追蹤的新檔案)",
+    "keep": "保留(建 wip 分支並 commit)",
+    "discard": "丟棄變更"
+  }
+}

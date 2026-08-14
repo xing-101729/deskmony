@@ -1,0 +1,7 @@
+{
+  "recovery": {
+    "worktreeDirty": "worktree({{worktreePath}})に未コミットの変更があります。先に diff を確認し、「保持」(wip ブランチを作成)または「破棄」を選んでクリーンにしてから再実行してください。変更が残ったままの worktree で黙って再実行することは決してありません",
+    "sessionMissingWorkspace": "Session {{sessionId}} には workspace が紐付けられていません",
+    "sessionNotInterrupted": "Session {{sessionId}} の現在のステータスは「{{status}}」であり、「interrupted」ではありません"
+  }
+}

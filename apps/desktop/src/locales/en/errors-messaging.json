@@ -1,0 +1,12 @@
+{
+  "message": {
+    "memberTeamMismatch": "Team member {{memberId}} does not belong to team {{teamId}}"
+  },
+  "team": {
+    "memberNameTaken": "Team \"{{teamName}}\" already has a member named \"{{memberName}}\" (member names must be unique within a team so they can be matched via @mention)"
+  },
+  "config": {
+    "patchWriteFailed": "The config file ({{configPath}}) could not be parsed; refusing to write in order to avoid overwriting its existing content: {{detail}}",
+    "policyRuleWriteFailed": "The config file ({{configPath}}) could not be parsed; refusing to write the rule in order to avoid overwriting its existing content: {{detail}}"
+  }
+}

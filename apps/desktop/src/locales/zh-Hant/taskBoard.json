@@ -1,0 +1,66 @@
+{
+  "sidebar": {
+    "openAriaLabel": "開啟側欄"
+  },
+  "empty": {
+    "noTeamTitle": "尚未建立任何團隊",
+    "noTeamDescription": "任務看板需要先建立一個團隊、加入至少一位成員,才能建立與指派任務。",
+    "createTeam": "建立團隊",
+    "selectTeamTitle": "請選擇一個團隊"
+  },
+  "header": {
+    "switchTeamAriaLabel": "切換團隊",
+    "newTask": "新任務",
+    "teamManagement": "團隊管理"
+  },
+  "composer": {
+    "titlePlaceholder": "新任務標題",
+    "descriptionPlaceholder": "描述(選填)",
+    "acceptancePlaceholder": "驗收指令(選填,多條用 {{separator}} 分隔)",
+    "acceptanceTitle": "機器驗收指令(S4):每條指令依序執行,全部 exit 0 才算通過,留空 = 無機器驗收(退回人類判定)",
+    "creating": "建立中…",
+    "create": "建立"
+  },
+  "column": {
+    "empty": "無任務"
+  },
+  "blockedSection": {
+    "heading": "封鎖(Blocked) · {{count}}"
+  },
+  "card": {
+    "deleteTaskAriaLabel": "刪除任務",
+    "blockedFromBadge": "封鎖前:{{status}}",
+    "awaitingApproval": "等待你核可進入 review",
+    "approveReview": "核准進入 review",
+    "assignMemberAriaLabel": "指派成員",
+    "selectMemberOption": "選擇成員…",
+    "assign": "指派",
+    "start": "開始",
+    "submitForReview": "送審",
+    "reject": "退回",
+    "approveMergeTransition": "通過,進入合併",
+    "approveMerge": "批准合併",
+    "unblock": "解除封鎖(回到 {{status}})",
+    "block": "封鎖",
+    "confirmMerge": "確定要把分支 \"{{branch}}\" 合併回主幹並完成任務嗎?\n這會實際執行 git merge --no-ff,若有衝突會自動還原(git merge --abort)並顯示錯誤。",
+    "confirmDelete": "確定要刪除任務「{{title}}」嗎?若已建立 worktree,會一併強制刪除,無法復原。",
+    "deleteHadUncommittedWarning": "任務「{{title}}」的 worktree 內有未 commit 的變更,已隨刪除操作一併強制清除,無法復原。"
+  },
+  "acceptance": {
+    "countBadge": "驗收 {{count}} 條",
+    "undefined": "未定義驗收條件",
+    "edit": "設定驗收",
+    "running": "驗收執行中",
+    "run": "跑驗收",
+    "passed": "通過",
+    "failed": "未通過",
+    "workspaceMissing": "尚無 worktree,無法執行",
+    "detailsSummary": "驗收結果詳情({{done}}/{{total}} 條已執行)",
+    "timedOut": "逾時",
+    "exitCode": "exit {{code}}"
+  },
+  "acceptancePrompt": {
+    "message": "設定機器驗收指令(多條用 \"{{separator}}\" 分隔,依序執行,全部 exit 0 才算通過;留空清除驗收條件):"
+  },
+  "advanceWarning": "任務「{{title}}」驗收未通過,仍已移至 review(切片為諮詢性,不阻擋轉換)。"
+}

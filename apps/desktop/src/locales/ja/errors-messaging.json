@@ -1,0 +1,12 @@
+{
+  "message": {
+    "memberTeamMismatch": "team member {{memberId}} は team {{teamId}} に所属していません"
+  },
+  "team": {
+    "memberNameTaken": "team「{{teamName}}」には既に同名のメンバー「{{memberName}}」が存在します(メンバー名は同じ team 内で一意である必要があります。@mention の照合に使われます)"
+  },
+  "config": {
+    "patchWriteFailed": "設定ファイル({{configPath}})を解析できないため、既存の内容を上書きしないよう書き込みを拒否しました: {{detail}}",
+    "policyRuleWriteFailed": "設定ファイル({{configPath}})を解析できないため、既存の内容を上書きしないようルールの書き込みを拒否しました: {{detail}}"
+  }
+}

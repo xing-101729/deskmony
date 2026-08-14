@@ -1,0 +1,29 @@
+{
+  "titleNormal": "El agent solicita permiso de ejecución",
+  "titleStrong": "Esta acción está denegada de forma estricta",
+  "descriptionStrong": "Este tipo de acción se deniega de forma predeterminada. Incluso en un equipo local y con alguien presente, solo se puede forzar la confirmación de forma individual; nunca se puede configurar como \"permitir siempre\".",
+  "toolLabel": "Herramienta",
+  "queuedCount": "{{count}} más en cola",
+  "denyRecommended": "Denegar (recomendado)",
+  "understandRisk": "Entiendo el riesgo, permitir de todos modos…",
+  "confirmAllowOnce": "Haz clic de nuevo para confirmar: permitir esta acción una vez",
+  "deny": "Denegar",
+  "alwaysAllow": "Permitir siempre…",
+  "allow": "Permitir",
+  "hardDenyBadge": "Las escrituras fuera del worktree, la lectura de rutas con secretos, force-push y acciones similares siempre se deniegan de forma estricta",
+  "remember": {
+    "chooseScope": "Elige el alcance que quieres recordar (se selecciona el más estrecho de forma predeterminada):",
+    "willAlwaysAllow": "Vas a permitir siempre: ",
+    "effectiveNote": "Se aplica de inmediato al guardar (sin reiniciar). Más tarde puedes eliminarlo desde las reglas de política en los ajustes.",
+    "confirm": "Confirmar permitir siempre",
+    "commandExactLabel": "Permitir solo este comando exacto (más estrecho, recomendado)",
+    "commandExactDescription": "La herramienta \"{{toolName}}\" y el comando es exactamente igual a: {{command}}",
+    "commandPrefixLabel": "Permitir todos los comandos que empiecen por \"{{firstWord}}\" (más amplio)",
+    "commandPrefixDescription": "La herramienta \"{{toolName}}\" y el comando coincide con: {{pattern}}",
+    "pathExactLabel": "Permitir solo los archivos de este directorio (más estrecho, recomendado)",
+    "pathWorkdirLabel": "Permitir archivos en todo el worktree (más amplio)",
+    "pathScopeDescription": "La herramienta \"{{toolName}}\" y la ruta está dentro de: {{path}}",
+    "toolExactLabel": "Permitir solo esta herramienta (coincidencia exacta)",
+    "toolExactDescription": "La herramienta es exactamente igual a: {{toolName}}"
+  }
+}

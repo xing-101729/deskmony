@@ -1,0 +1,9 @@
+{
+  "dialogLabel": "コマンドパレット",
+  "searchPlaceholder": "コマンド、会話、プロジェクトを検索…",
+  "searchAriaLabel": "コマンドを検索",
+  "noResults": "「{{query}}」に一致するコマンドはありません",
+  "selectHint": "選択",
+  "runHint": "実行",
+  "resultsCount": "{{count}} 件"
+}

@@ -1,0 +1,7 @@
+{
+  "recovery": {
+    "worktreeDirty": "El worktree ({{worktreePath}}) tiene cambios sin confirmar: revisa primero el diff y elige \"conservar\" (crear una rama wip) o \"descartar\" para dejarlo limpio antes de volver a ejecutar; nunca se vuelve a ejecutar silenciosamente sobre un worktree sucio",
+    "sessionMissingWorkspace": "La session {{sessionId}} no tiene un workspace vinculado",
+    "sessionNotInterrupted": "La session {{sessionId}} tiene actualmente el estado \"{{status}}\", no \"interrupted\""
+  }
+}

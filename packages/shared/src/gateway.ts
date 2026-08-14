@@ -516,6 +516,16 @@ export const ServerResponseSchema = z.object({
   ok: z.boolean(),
   result: z.unknown().optional(),
   error: z.string().optional(),
+  /**
+   * i18n 專案新增(見 packages/shared/src/errors.ts 的 `DeskmonyError`):
+   * `error` 欄位維持原樣(既有慣例,失敗時一律有值的純文字訊息,向下相容不動)
+   * ——`errorCode`/`errorParams` 是額外疊加的結構化資訊,只有拋出端是
+   * `DeskmonyError` 時才會有值。舊版 core(尚未升級)回傳的 response 天生不帶
+   * 這兩個欄位,前端(見 apps/desktop/src/lib/error-i18n.ts)在缺值時一律退回
+   * 顯示 `error` 這個純文字訊息,不會壞掉。
+   */
+  errorCode: z.string().optional(),
+  errorParams: z.record(z.unknown()).optional(),
 });
 export type ServerResponse = z.infer<typeof ServerResponseSchema>;
 

@@ -1,0 +1,16 @@
+{
+  "yoloEnabledTitle": "YOLO está activado: omite la política de config (hard-deny sigue aplicándose)",
+  "yoloEnabledTitleWithExpiry": "YOLO está activado: omite la política de config (hard-deny sigue aplicándose); se desactivará automáticamente en unos {{minutes}} min",
+  "autoEnabledTitle": "Auto está activado: permite automáticamente las acciones sin clasificar (las reglas deny de config siguen aplicándose)",
+  "autoToggleTitle": "Auto: permite automáticamente las acciones intermedias sin clasificar, sigue sujeto a las reglas deny de config y a hard-deny",
+  "autoOnLabel": "Auto activado",
+  "autoOffLabel": "Activar Auto",
+  "yoloToggleTitle": "YOLO: omite todas las reglas de config, se desactiva automáticamente después de 30 minutos; hard-deny nunca se ve afectado",
+  "yoloOffLabel": "Desactivar YOLO",
+  "yoloOnLabel": "Activar YOLO",
+  "confirmDialogTitle": "¿Activar YOLO?",
+  "risk1": "Omitirá todas las reglas de política definidas en config (incluidas tus reglas deny personalizadas).",
+  "risk2": "Se desactivará automáticamente después de 30 minutos, volviendo al modo de confirmación normal.",
+  "risk3Bold": "Los elementos hard-deny no se ven afectados",
+  "risk3Rest": " — las escrituras fuera del worktree, la lectura de rutas con secretos, force-push y acciones similares se seguirán denegando o requerirán confirmación forzada."
+}

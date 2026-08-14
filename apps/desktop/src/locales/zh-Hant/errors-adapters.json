@@ -1,0 +1,13 @@
+{
+  "adapterProcess": {
+    "spawnFailed": "{{software}} 子程序啟動失敗(command={{command}}):{{detail}}"
+  },
+  "opencode": {
+    "sessionCreateFailed": "OpenCode session 建立失敗:{{detail}}",
+    "listenTimeout": "等待 OpenCode server 印出監聽位址逾時({{timeoutMs}} 毫秒)",
+    "healthTimeout": "等待 OpenCode server /global/health 就緒逾時({{timeoutMs}} 毫秒)",
+    "invalidModelFormat": "software=\"opencode\" 的 model 必須是「providerID/modelID」形式,收到的值「{{model}}」無法解析",
+    "eventStreamMissingBody": "OpenCode /event 回應沒有 body,無法讀取 SSE 串流",
+    "requestFailed": "POST {{url}} 失敗(status={{status}}):{{detail}}"
+  }
+}

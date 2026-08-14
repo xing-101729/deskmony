@@ -1,0 +1,18 @@
+{
+  "session": {
+    "idle": "Inactivo",
+    "busy": "En ejecución",
+    "waiting": "Esperando aprobación",
+    "error": "Error",
+    "offline": "Sin sesión"
+  },
+  "task": {
+    "backlog": "Pendiente",
+    "assigned": "Asignada",
+    "inProgress": "En curso",
+    "review": "En revisión",
+    "merging": "Fusionando",
+    "done": "Completada",
+    "blocked": "Bloqueada"
+  }
+}

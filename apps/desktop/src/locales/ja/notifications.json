@@ -1,0 +1,31 @@
+{
+  "tripReason": {
+    "task-budget": "タスク予算の上限",
+    "daily-limit": "1日のコスト上限",
+    "waiting-ttl": "待機タイムアウトの上限",
+    "message-budget": "メッセージ数の上限",
+    "turn-limit": "ターンの時間/ツール呼び出し回数の上限"
+  },
+  "trip": {
+    "reasonFallback": "サーキットブレーカーにより停止されました",
+    "title": "Deskmony:タスクが停止しました",
+    "body": "{{who}}:{{reason}}"
+  },
+  "reminder": {
+    "budgetWarning": {
+      "title": "Deskmony:予算がまもなく上限に達します",
+      "body": "{{who}}:費用/トークン使用量が警戒ラインに達しました。まだ halt されていません。予算上限の確認・調整をご検討ください"
+    },
+    "idle": {
+      "title": "Deskmony:タスク待機のお知らせ",
+      "body": "{{who}}:応答を6時間以上待機中で、まだ中断されていません。worktree/タスクは保持されています。対応が必要か確認してください"
+    }
+  },
+  "escalation": {
+    "defaultToolLabel": "操作",
+    "titleSingle": "Deskmony:承認待ち",
+    "titlePlural": "Deskmony:{{count}} 件の操作が承認待ちです",
+    "body": "{{who}}:{{tools}} の承認待ち"
+  },
+  "listSeparator": "、"
+}

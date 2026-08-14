@@ -1,0 +1,12 @@
+{
+  "message": {
+    "memberTeamMismatch": "El team member {{memberId}} no pertenece al team {{teamId}}"
+  },
+  "team": {
+    "memberNameTaken": "El team \"{{teamName}}\" ya tiene un miembro llamado \"{{memberName}}\" (los nombres de los miembros deben ser únicos dentro de un mismo team para poder usarse en las menciones con @mention)"
+  },
+  "config": {
+    "patchWriteFailed": "No se pudo analizar el archivo de configuración ({{configPath}}); se rechaza la escritura para no sobrescribir su contenido actual: {{detail}}",
+    "policyRuleWriteFailed": "No se pudo analizar el archivo de configuración ({{configPath}}); se rechaza la escritura de la regla para no sobrescribir su contenido actual: {{detail}}"
+  }
+}

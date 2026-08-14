@@ -3,6 +3,7 @@ import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import path from "node:path";
 import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 
@@ -157,7 +158,11 @@ export class OpenCodeAdapter implements AgentAdapter {
   async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
     const config = profile.opencodeConfig;
     if (!config) {
-      throw new Error(`AgentProfile "${profile.id}" 的 software="opencode" 缺少 opencodeConfig(command)`);
+      throw new DeskmonyError(
+        ErrorCodes.ADAPTER_MISSING_CONFIG,
+        { profileId: profile.id, software: "opencode", configField: "command" },
+        `AgentProfile "${profile.id}" 的 software="opencode" 缺少 opencodeConfig(command)`,
+      );
     }
 
     const defaultServeArgs = ["serve", "--port", "0", "--hostname", "127.0.0.1"];
@@ -175,7 +180,13 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     const spawnFailure = new Promise<never>((_, reject) => {
       child.once("error", (err) => {
-        reject(new Error(`OpenCode server 子程序啟動失敗(command=${command}): ${err.message}`));
+        reject(
+          new DeskmonyError(
+            "adapterProcess.spawnFailed",
+            { software: "opencode", command, detail: err.message },
+            `OpenCode server 子程序啟動失敗(command=${command}): ${err.message}`,
+          ),
+        );
       });
     });
     spawnFailure.catch(() => {
@@ -191,12 +202,22 @@ export class OpenCodeAdapter implements AgentAdapter {
       baseUrl = await Promise.race([
         waitForListeningLine(child),
         spawnFailure,
-        rejectAfter(SERVE_READY_TIMEOUT_MS, "等待 OpenCode server 印出監聽位址逾時"),
+        rejectAfter(
+          SERVE_READY_TIMEOUT_MS,
+          "opencode.listenTimeout",
+          { timeoutMs: SERVE_READY_TIMEOUT_MS },
+          "等待 OpenCode server 印出監聽位址逾時",
+        ),
       ]);
       await Promise.race([
         waitForHealthy(baseUrl),
         spawnFailure,
-        rejectAfter(HEALTH_POLL_TIMEOUT_MS, "等待 OpenCode server /global/health 就緒逾時"),
+        rejectAfter(
+          HEALTH_POLL_TIMEOUT_MS,
+          "opencode.healthTimeout",
+          { timeoutMs: HEALTH_POLL_TIMEOUT_MS },
+          "等待 OpenCode server /global/health 就緒逾時",
+        ),
       ]);
     } catch (err) {
       this.killChild(child);
@@ -209,7 +230,11 @@ export class OpenCodeAdapter implements AgentAdapter {
       opencodeSessionId = created.id;
     } catch (err) {
       this.killChild(child);
-      throw new Error(`OpenCode session 建立失敗: ${err instanceof Error ? err.message : String(err)}`);
+      throw new DeskmonyError(
+        "opencode.sessionCreateFailed",
+        { detail: err instanceof Error ? err.message : String(err) },
+        `OpenCode session 建立失敗: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     const outputQueue = new AsyncQueue<AgentEvent>();
@@ -359,7 +384,9 @@ export class OpenCodeAdapter implements AgentAdapter {
     const internal = this.mustGet(handle);
     const parsed = parseModelString(model);
     if (!parsed) {
-      throw new Error(
+      throw new DeskmonyError(
+        "opencode.invalidModelFormat",
+        { model },
         `software="opencode" 的 model 必須是 "providerID/modelID" 形式(例如 ` +
           `"anthropic/claude-sonnet-4-20250514"),收到的值 "${model}" 無法解析`,
       );
@@ -378,13 +405,21 @@ export class OpenCodeAdapter implements AgentAdapter {
    */
   async setEffort(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new Error('software="opencode" 不支援變更思考程度(未查得到 opencode 有對應的 reasoning-effort 機制)');
+    throw new DeskmonyError(
+      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
+      { software: "opencode", operation: "setEffort" },
+      'software="opencode" 不支援變更思考程度(未查得到 opencode 有對應的 reasoning-effort 機制)',
+    );
   }
 
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {
-      throw new Error(`未知的 agent handle: ${handle.id}`);
+      throw new DeskmonyError(
+        ErrorCodes.ADAPTER_UNKNOWN_HANDLE,
+        { handleId: handle.id },
+        `未知的 agent handle: ${handle.id}`,
+      );
     }
     return internal;
   }
@@ -407,7 +442,11 @@ export class OpenCodeAdapter implements AgentAdapter {
   private async consumeEvents(internal: InternalSession): Promise<void> {
     const res = await fetch(`${internal.baseUrl}/event`, { signal: internal.sseController.signal });
     if (!res.body) {
-      throw new Error("OpenCode /event 回應沒有 body,無法讀取 SSE 串流");
+      throw new DeskmonyError(
+        "opencode.eventStreamMissingBody",
+        undefined,
+        "OpenCode /event 回應沒有 body,無法讀取 SSE 串流",
+      );
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -757,9 +796,14 @@ function parseModelString(model: string | undefined): { providerID: string; mode
   return { providerID: model.slice(0, slashIndex), modelID: model.slice(slashIndex + 1) };
 }
 
-function rejectAfter(ms: number, message: string): Promise<never> {
+function rejectAfter(
+  ms: number,
+  code: string,
+  params: Record<string, unknown> | undefined,
+  fallbackMessage: string,
+): Promise<never> {
   return new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(message)), ms);
+    setTimeout(() => reject(new DeskmonyError(code, params, fallbackMessage)), ms);
   });
 }
 
@@ -800,7 +844,11 @@ async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`POST ${url} 失敗(status=${res.status}): ${text.slice(0, 500)}`);
+    throw new DeskmonyError(
+      "opencode.requestFailed",
+      { url, status: res.status, detail: text.slice(0, 500) },
+      `POST ${url} 失敗(status=${res.status}): ${text.slice(0, 500)}`,
+    );
   }
   return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
 }

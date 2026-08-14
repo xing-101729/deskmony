@@ -1,0 +1,11 @@
+{
+  "urlRequired": "Please enter a server address",
+  "heading": "Connect to Deskmony Core",
+  "tagline": "Agent Team management platform",
+  "description": "Using Deskmony in a browser requires connecting to a running Deskmony Core server first.",
+  "serverUrlLabel": "Server address",
+  "tokenLabel": "Auth token (leave blank if the server has authentication disabled)",
+  "connecting": "Connecting…",
+  "connect": "Connect",
+  "tokenStorageNote": "The token is kept only in this tab's sessionStorage and is cleared automatically when the tab is closed — it is never written to the address bar or browser history. On a shared computer, click \"Log out\" in the main interface or simply close this tab when you're done."
+}

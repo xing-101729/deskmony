@@ -1,0 +1,36 @@
+{
+  "sidebar": {
+    "openAriaLabel": "Open sidebar"
+  },
+  "message": {
+    "broadcastTarget": "Everyone (broadcast)",
+    "interruptBadge": "interrupt",
+    "downgradedBadge": "Downgraded",
+    "contextPrefix": "context: {{contextId}}",
+    "contextBudgetSuffix": "(message quota {{count}}/{{max}}{{trippedSuffix}})",
+    "contextTrippedSuffix": ", tripped",
+    "systemNote": "[System note] {{note}}"
+  },
+  "empty": {
+    "noTeamTitle": "No team created yet",
+    "noTeamDescription": "The team chat view needs a team with at least one member before you can watch agents message each other or jump in.",
+    "createTeam": "Create team",
+    "selectTeamTitle": "Select a team"
+  },
+  "header": {
+    "switchTeamAriaLabel": "Switch team",
+    "teamManagement": "Team management"
+  },
+  "messageList": {
+    "empty": "No messages yet — messages between agents, and anything you say, will show up here"
+  },
+  "composer": {
+    "toAriaLabel": "Recipient",
+    "broadcastOption": "[Broadcast] Everyone",
+    "priorityAriaLabel": "Priority",
+    "normalOption": "Normal",
+    "interruptOption": "Interrupt (interrupt)",
+    "placeholder": "Chime in as a human… (Enter to send, Shift+Enter for a new line)",
+    "sendAriaLabel": "Send"
+  }
+}

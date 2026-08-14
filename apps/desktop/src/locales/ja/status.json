@@ -1,0 +1,18 @@
+{
+  "session": {
+    "idle": "待機中",
+    "busy": "実行中",
+    "waiting": "承認待ち",
+    "error": "エラー",
+    "offline": "セッションなし"
+  },
+  "task": {
+    "backlog": "未着手",
+    "assigned": "割り当て済み",
+    "inProgress": "進行中",
+    "review": "レビュー中",
+    "merging": "マージ中",
+    "done": "完了",
+    "blocked": "ブロック中"
+  }
+}

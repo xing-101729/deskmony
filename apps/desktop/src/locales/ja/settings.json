@@ -1,0 +1,63 @@
+{
+  "dialogTitle": "設定 · Provider 管理",
+  "dialogDescription": "内蔵 provider カタログを管理(有効/無効、並び替え、利用可能な model、環境変数)——インストール状況はローカルの検出結果から自動反映されます",
+  "providerCountFooter": "全 {{count}} 件",
+  "redetect": "再検出",
+  "sections": {
+    "global": "全体設定",
+    "notification": "通知設定",
+    "provider": "Provider 管理"
+  },
+  "source": {
+    "default": "デフォルト値",
+    "file": "設定ファイル",
+    "env": "環境変数"
+  },
+  "provider": {
+    "installed": "インストール済み/利用可能",
+    "notDetected": "未検出",
+    "orderLabel": "並び順",
+    "enableLabel": "{{name}} を有効化",
+    "disableLabel": "{{name}} を無効化",
+    "collapseModelsEnv": "折りたたむ(model / 環境変数)",
+    "expandModelsEnv": "展開(model / 環境変数)",
+    "modelsHint": "有効な model(チェックを外した model は「Profile 作成」や会話中の「model 切り替え」のドロップダウンに表示されません)",
+    "addUpdate": "追加/更新",
+    "envHint": "環境変数(例:ANTHROPIC_API_KEY)——値は常に *** でマスクして表示されます。ここに表示されるのは「どの key が設定されているか」だけで、平文で読み出すことはできません。",
+    "envKeyPlaceholder": "KEY",
+    "envValuePlaceholder": "値"
+  },
+  "global": {
+    "description": "core の階層設定(defaults → <configPath/> → 環境変数)——「環境変数」が source の項目はロックされています(設定ファイルを変更しても反映されません。環境変数が常に優先されます)。変更後は core の再起動が必要です。",
+    "bindHostLabel": "バインドアドレス",
+    "noInterfaceEditReason": "リモートからの調整範囲を広げないため、この画面からは変更できません。設定ファイルを直接編集するか {{envVarName}} を使用してください",
+    "permissionTimeoutLabel": "権限タイムアウト(ms)",
+    "lockedByEnvVar": "現在 {{envVarName}} によって決定されています。設定ファイルを変更しても反映されません",
+    "authRateLimitMaxLabel": "認証失敗のしきい値(回)",
+    "authRateLimitCooldownLabel": "認証のクールダウン期間(ms)",
+    "defaultWorkingDirLabel": "デフォルトの作業ディレクトリ",
+    "taskWorktreesRootLabel": "タスク worktree のルート",
+    "taskWorktreesRootPlaceholder": "省略 = 既定のロジックを維持(team ごとに隣接する .deskmony-worktrees)",
+    "staticDirLabel": "ブラウザ UI の静的ディレクトリ",
+    "logLevelLabel": "Log レベル",
+    "dataDirLabel": "SQLite データディレクトリ(読み取り専用)",
+    "dataDirLockedReason": "gateway 経由で変更できる安全なサブセットに含まれていません。設定ファイルを直接編集するか {{envVarName}} を使用してください",
+    "saveButton": "全体設定を保存",
+    "noChanges": "変更はありません",
+    "written": "書き込み済み:{{fields}}",
+    "requiresRestart": "(反映には core の再起動が必要です)",
+    "saveFailedWithReason": "保存に失敗しました:{{error}}"
+  },
+  "notification": {
+    "description": "エスカレーション/サーキットブレーカーの帯域外通知(読み取り専用)——webhook url は認証情報と同等に扱われ、ローカル接続であってもリモート/UI からの書き込み経路は提供されません。変更するには <configPath/> の <notificationBlock/> ブロックを直接編集し、core を再起動してください。",
+    "readOnlyReason": "読み取り専用、上記の説明を参照してください",
+    "desktopLabel": "デスクトップ システム通知",
+    "webhookMinSeverityLabel": "Webhook の最低深刻度",
+    "webhookUrlLockedReason": "認証情報と同等のため常にマスクされ、読み取り専用です",
+    "batchIntervalLabel": "バッチ間隔(分)",
+    "quietHoursLabel": "静音時間帯",
+    "enabledValue": "有効",
+    "disabledValue": "無効",
+    "notSet": "(未設定)"
+  }
+}

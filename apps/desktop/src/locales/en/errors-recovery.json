@@ -1,0 +1,7 @@
+{
+  "recovery": {
+    "worktreeDirty": "The worktree ({{worktreePath}}) has uncommitted changes — check the diff first, then choose \"keep\" (create a wip branch) or \"discard\" to clean it up before rerunning; rerunning silently on a dirty worktree is never allowed",
+    "sessionMissingWorkspace": "Session {{sessionId}} has no workspace bound to it",
+    "sessionNotInterrupted": "Session {{sessionId}} currently has status \"{{status}}\", not \"interrupted\""
+  }
+}

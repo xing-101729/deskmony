@@ -1,0 +1,11 @@
+{
+  "sessionManager": {
+    "abandonRequiresInterrupted": "La sesión {{sessionId}} está actualmente en estado \"{{status}}\", no \"interrupted\" — no se puede abandonar",
+    "promptBlockedByBudget": "{{reason}}",
+    "notYourChild": "La sesión {{sessionId}} no es tu sesión hija, no se le puede enviar un mensaje",
+    "continueRequiresInterrupted": "La sesión {{sessionId}} está actualmente en estado \"{{status}}\", no \"interrupted\" — no se puede continuar",
+    "continueUnsupportedBackend": "El backend de la sesión {{sessionId}} ({{adapterType}}) no admite \"continuar (conservar memoria)\", o no se capturó el ID de sesión del backend antes de la interrupción — usa \"retomar\" en su lugar",
+    "vanishedDuringContinue": "La sesión {{sessionId}} desapareció inesperadamente durante el proceso de \"continuar\"",
+    "agentOverrideMissingCommand": "agentOverride.software=\"{{software}}\" también requiere que se proporcione un command"
+  }
+}

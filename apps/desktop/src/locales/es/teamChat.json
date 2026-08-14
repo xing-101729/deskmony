@@ -1,0 +1,36 @@
+{
+  "sidebar": {
+    "openAriaLabel": "Abrir barra lateral"
+  },
+  "message": {
+    "broadcastTarget": "Todos (difusión)",
+    "interruptBadge": "interrupt",
+    "downgradedBadge": "Degradado",
+    "contextPrefix": "context: {{contextId}}",
+    "contextBudgetSuffix": "(cuota de mensajes {{count}}/{{max}}{{trippedSuffix}})",
+    "contextTrippedSuffix": ", límite alcanzado",
+    "systemNote": "[Nota del sistema] {{note}}"
+  },
+  "empty": {
+    "noTeamTitle": "Aún no se ha creado ningún team",
+    "noTeamDescription": "El chat del team necesita un team con al menos un miembro antes de que puedas ver los mensajes entre agents o intervenir.",
+    "createTeam": "Crear team",
+    "selectTeamTitle": "Selecciona un team"
+  },
+  "header": {
+    "switchTeamAriaLabel": "Cambiar de team",
+    "teamManagement": "Gestión del team"
+  },
+  "messageList": {
+    "empty": "Aún no hay mensajes — aquí aparecerán los mensajes entre agents y todo lo que tú digas"
+  },
+  "composer": {
+    "toAriaLabel": "Destinatario",
+    "broadcastOption": "[Difusión] Todos",
+    "priorityAriaLabel": "Prioridad",
+    "normalOption": "Normal",
+    "interruptOption": "Interrumpir (interrupt)",
+    "placeholder": "Interviene como humano… (Enter para enviar, Shift+Enter para salto de línea)",
+    "sendAriaLabel": "Enviar"
+  }
+}

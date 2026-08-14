@@ -1,0 +1,22 @@
+{
+  "task": {
+    "memberNotInTeam": "メンバー「{{memberId}}」はタスク「{{taskId}}」が属する team に所属していません",
+    "teamMissingWorkingDir": "Team「{{teamName}}」に workingDir が設定されていないため、タスクの worktree を作成できません",
+    "sessionControlNotReady": "内部エラー:SessionManager がまだ準備できていないため、ephemeral メンバー用の session を自動作成できませんでした(アサインはロールバックされました)",
+    "memberAlreadyAssigned": "メンバー「{{memberName}}」はすでに別のタスクに取り組んでいます。1 人のメンバーが同時に担当できるタスクは 1 件までです(session {{sessionId}} はまだ使用中です)",
+    "sessionAutoCreateFailed": "メンバー「{{memberName}}」の session 自動作成に失敗したため、アサインは完全にロールバックされました(タスクは backlog に戻り、workspace は削除されました):{{detail}}",
+    "mergeRequiresMergingStatus": "ステータスが merging のタスクのみマージできます(現在のステータス: {{status}}, taskId={{taskId}})",
+    "noWorkspaceToMerge": "タスク {{taskId}} には workspace が紐付けられていないため、マージできません",
+    "notAwaitingReview": "タスク {{taskId}} は現在、review への移行について人による承認待ちではありません(awaitingHumanReview=false)",
+    "acceptanceAlreadyRunning": "タスク {{taskId}} の受け入れ確認は現在実行中です。しばらくしてから再度お試しください"
+  },
+  "workspace": {
+    "baseDirDirty": "baseDir({{baseDir}})に未 commit の変更があります。マージ処理でユーザーの作業内容が失われるのを防ぐため、この状態でのマージは拒否されました。先に手動で commit するか、変更を整理してから再度お試しください。\n{{status}}",
+    "mergeConflict": "マージで競合が発生したため、マージ前の状態に戻しました。競合ファイル: {{conflictFiles}}",
+    "cleanupFailed": "worktree のクリーンアップに失敗しました({{worktreePath}} は {{retries}} 回再試行してもディスク上に残っています):{{detail}};その後のディレクトリ削除にも失敗しました:{{rmDetail}}",
+    "mainBranchNotDetected": "メインブランチ名を検出できませんでした(baseDir={{baseDir}}):origin のリモート追跡ブランチが設定されておらず、ローカルにも main または master ブランチが見つかりませんでした",
+    "workingDirMissing": "team の workingDir が存在しないため、タスク用の worktree を作成して分離できません: {{dir}}",
+    "workingDirNotGitRepo": "team の workingDir が git repo ではないため、タスク用の worktree を作成して分離できません(先にそのディレクトリで `git init` を実行してください): {{dir}}({{detail}})",
+    "gitCommandFailed": "git {{command}} が失敗しました(cwd={{cwd}}):{{detail}}"
+  }
+}

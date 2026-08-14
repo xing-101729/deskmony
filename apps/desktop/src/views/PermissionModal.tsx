@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { PolicyRule } from "@deskmony/shared";
 import { useSessionStore } from "../stores/session-store.js";
 import { Dialog } from "../ui/Dialog.js";
@@ -66,22 +68,26 @@ interface RememberCandidate {
   rule: PolicyRule;
 }
 
-function buildRememberCandidates(toolName: string, input: unknown, workingDir: string | undefined): RememberCandidate[] {
+/** 純函式,在 useMemo 裡呼叫(非元件本身)——`t` 比照 lib/error-i18n.ts 的
+ *  translateError() 慣例,由呼叫端的 useTranslation() 傳入,不直接 import
+ *  i18next 單例。 */
+function buildRememberCandidates(toolName: string, input: unknown, workingDir: string | undefined, t: TFunction): RememberCandidate[] {
   const command = extractCommand(input);
   if (command !== undefined) {
     const candidates: RememberCandidate[] = [
       {
-        label: "只允許這個確切指令(最窄,建議)",
-        description: `工具「${toolName}」且指令完全等於:${command}`,
+        label: t("permission:remember.commandExactLabel"),
+        description: t("permission:remember.commandExactDescription", { toolName, command }),
         rule: { tool: toolName, when: { commandEquals: command }, effect: "allow" },
       },
     ];
     const firstWord = command.trim().split(/\s+/)[0];
     if (firstWord) {
+      const pattern = `^${escapeRegExp(firstWord)}\\b.*`;
       candidates.push({
-        label: `允許所有以「${firstWord}」開頭的指令(較寬)`,
-        description: `工具「${toolName}」且指令符合:^${firstWord}\\b.*`,
-        rule: { tool: toolName, when: { commandMatches: `^${escapeRegExp(firstWord)}\\b.*` }, effect: "allow" },
+        label: t("permission:remember.commandPrefixLabel", { firstWord }),
+        description: t("permission:remember.commandPrefixDescription", { toolName, pattern }),
+        rule: { tool: toolName, when: { commandMatches: pattern }, effect: "allow" },
       });
     }
     return candidates;
@@ -92,15 +98,15 @@ function buildRememberCandidates(toolName: string, input: unknown, workingDir: s
     const dir = dirnameOf(path);
     const candidates: RememberCandidate[] = [
       {
-        label: "只允許這個目錄下的檔案(最窄,建議)",
-        description: `工具「${toolName}」且路徑位於:${dir}`,
+        label: t("permission:remember.pathExactLabel"),
+        description: t("permission:remember.pathScopeDescription", { toolName, path: dir }),
         rule: { tool: toolName, when: { pathUnder: dir }, effect: "allow" },
       },
     ];
     if (workingDir && workingDir !== dir) {
       candidates.push({
-        label: "允許整個 worktree 下的檔案(較寬)",
-        description: `工具「${toolName}」且路徑位於:${workingDir}`,
+        label: t("permission:remember.pathWorkdirLabel"),
+        description: t("permission:remember.pathScopeDescription", { toolName, path: workingDir }),
         rule: { tool: toolName, when: { pathUnder: workingDir }, effect: "allow" },
       });
     }
@@ -109,8 +115,8 @@ function buildRememberCandidates(toolName: string, input: unknown, workingDir: s
 
   return [
     {
-      label: "只允許這個工具(精確比對)",
-      description: `工具精確等於:${toolName}`,
+      label: t("permission:remember.toolExactLabel"),
+      description: t("permission:remember.toolExactDescription", { toolName }),
       rule: { tool: toolName, effect: "allow" },
     },
   ];
@@ -129,13 +135,14 @@ function RememberRuleSection({
   onConfirm: (rule: PolicyRule) => void;
   onCancel: () => void;
 }): JSX.Element {
-  const candidates = useMemo(() => buildRememberCandidates(toolName, input, workingDir), [toolName, input, workingDir]);
+  const { t } = useTranslation(["permission", "common"]);
+  const candidates = useMemo(() => buildRememberCandidates(toolName, input, workingDir, t), [toolName, input, workingDir, t]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const selected = candidates[selectedIdx];
 
   return (
     <div className="mt-3 space-y-2 rounded-md border border-accent/30 bg-accent/[0.05] px-3 py-2.5">
-      <p className="text-xs font-medium text-fg">選擇要記住的範圍(預設選最窄):</p>
+      <p className="text-xs font-medium text-fg">{t("permission:remember.chooseScope")}</p>
       {candidates.map((c, idx) => (
         <label key={c.label} className="flex cursor-pointer items-start gap-2 text-xs text-fg-soft">
           <input
@@ -150,16 +157,17 @@ function RememberRuleSection({
       ))}
       {selected && (
         <p className="rounded bg-canvas px-2 py-1.5 text-2xs text-fg-muted">
-          你將永遠允許:<span className="text-fg-soft">{selected.description}</span>
+          {t("permission:remember.willAlwaysAllow")}
+          <span className="text-fg-soft">{selected.description}</span>
         </p>
       )}
-      <p className="text-2xs text-fg-faint">寫入後立即生效(不需重啟),之後可在設定裡的政策規則移除。</p>
+      <p className="text-2xs text-fg-faint">{t("permission:remember.effectiveNote")}</p>
       <div className="flex justify-end gap-2 pt-1">
         <Button variant="secondary" size="sm" onClick={onCancel}>
-          取消
+          {t("common:cancel")}
         </Button>
         <Button variant="primary" size="sm" onClick={() => selected && onConfirm(selected.rule)}>
-          確認永遠允許
+          {t("permission:remember.confirm")}
         </Button>
       </div>
     </div>
@@ -167,6 +175,7 @@ function RememberRuleSection({
 }
 
 export function PermissionModal(): JSX.Element | null {
+  const { t } = useTranslation(["permission", "common"]);
   const pendingPermissions = useSessionStore((s) => s.pendingPermissions);
   const resolvePermission = useSessionStore((s) => s.resolvePermission);
   const sessions = useSessionStore((s) => s.sessions);
@@ -195,12 +204,8 @@ export function PermissionModal(): JSX.Element | null {
 
   return (
     <Dialog
-      title={strong ? "此操作屬於硬性禁止項" : "Agent 請求執行權限"}
-      description={
-        strong
-          ? "這類操作預設一律拒絕,即使目前是本機、有人盯著也僅能個別強制確認——無法設為永遠允許。"
-          : (session?.title ?? current.sessionId)
-      }
+      title={strong ? t("permission:titleStrong") : t("permission:titleNormal")}
+      description={strong ? t("permission:descriptionStrong") : (session?.title ?? current.sessionId)}
       icon={strong ? "shield" : "zap"}
       tone={strong ? "danger" : "default"}
       size="sm"
@@ -209,37 +214,37 @@ export function PermissionModal(): JSX.Element | null {
         strong ? (
           <div className="flex w-full flex-col gap-2">
             <Button variant="danger" block autoFocus onClick={handleDeny}>
-              拒絕(建議)
+              {t("permission:denyRecommended")}
             </Button>
             {!strongConfirmArmed ? (
               <Button variant="ghost" size="xs" block onClick={() => setStrongConfirmArmed(true)}>
-                我了解風險,仍要允許…
+                {t("permission:understandRisk")}
               </Button>
             ) : (
               <Button variant="outline" size="xs" block className="!border-danger/50 !text-danger" onClick={() => handleAllow(undefined)}>
-                再次點擊確認:仍要允許此次操作
+                {t("permission:confirmAllowOnce")}
               </Button>
             )}
           </div>
         ) : (
           <div className="flex w-full justify-end gap-2">
             <Button variant="outline" onClick={handleDeny} className="hover:!border-danger hover:!text-danger">
-              拒絕
+              {t("permission:deny")}
             </Button>
             {!showRemember && (
               <Button variant="outline" onClick={() => setShowRemember(true)}>
-                永遠允許…
+                {t("permission:alwaysAllow")}
               </Button>
             )}
             <Button variant="primary" onClick={() => handleAllow(undefined)}>
-              允許
+              {t("permission:allow")}
             </Button>
           </div>
         )
       }
     >
       <div className="rounded-md bg-surface px-3 py-2">
-        <div className="text-2xs text-fg-faint">工具</div>
+        <div className="text-2xs text-fg-faint">{t("permission:toolLabel")}</div>
         <div className="font-mono text-sm text-accent">{current.toolName}</div>
       </div>
       {current.description && <p className="mt-2 text-sm text-fg-soft">{current.description}</p>}
@@ -251,7 +256,7 @@ export function PermissionModal(): JSX.Element | null {
       {pendingPermissions.length > 1 && (
         <p className="mt-2 flex items-center gap-1 text-2xs text-fg-faint">
           <Icon name="clock" size={11} />
-          還有 {pendingPermissions.length - 1} 筆請求排隊中
+          {t("permission:queuedCount", { count: pendingPermissions.length - 1 })}
         </p>
       )}
       {!strong && showRemember && (
@@ -265,7 +270,7 @@ export function PermissionModal(): JSX.Element | null {
       )}
       {strong && (
         <Badge tone="danger" icon="alert" className="mt-2">
-          worktree 外寫入、讀取密鑰路徑、force-push 等操作一律列為硬性禁止
+          {t("permission:hardDenyBadge")}
         </Badge>
       )}
     </Dialog>

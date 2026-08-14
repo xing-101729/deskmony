@@ -1,0 +1,49 @@
+{
+  "model": {
+    "managedByAgentTitle": "model は agent/CLI 側で管理されています",
+    "managedByAgentLabel": "agent が管理",
+    "switchAriaLabel": "model を切り替え"
+  },
+  "effort": {
+    "switchAriaLabel": "思考の深さを切り替え"
+  },
+  "control": {
+    "notSpecifiedOption": "(未指定、CLI のデフォルトを使用)",
+    "switchFailed": "切り替えに失敗しました"
+  },
+  "tool": {
+    "statusRunning": "実行中",
+    "statusFailed": "失敗",
+    "statusDone": "完了",
+    "inputLabel": "入力",
+    "outputLabel": "出力"
+  },
+  "usage": {
+    "cannotMeasureTitle": "このバックエンドは費用を計測できません(または報告されるかまだ未確認です)。このセッションにはタスク/1日ごとのコスト予算は適用されません。ターンの時間/ツール呼び出し回数の上限のみが引き続き保護します。",
+    "unknownLabel": "費用不明",
+    "cannotMeasureLabel": "費用を計測不可",
+    "hasValueTitle": "累計費用(このバックエンドは cost を報告します、S3a usage-metering)",
+    "noValueYetTitle": "このバックエンドは累計費用を報告しますが、このセッションはまだ最初の値を受信していません(ターン終了時に送信されます)"
+  },
+  "cost": {
+    "taskTrippedLabel": "タスク「{{title}}」の予算が上限に達したため、新しい prompt はブロックされました",
+    "taskBudgetPercentLabel": "タスク予算 {{percent}}%",
+    "dailyTrippedLabel": "本日のコスト kill-switch が発動し、すべてのセッションが一時停止しました",
+    "trippedTitle": "この session/タスクはコストのサーキットブレーカーにより停止されました(worktree/タスクは保持されます。予算を調整して core を再起動すると続行できます)",
+    "percentTitle": "タスク単位の累計費用/token 使用量が予算に占める割合"
+  },
+  "empty": {
+    "selectOrCreateSession": "左側から会話を選択するか、新しく作成して始めてください",
+    "startTyping": "メッセージを入力して agent と会話を始めましょう"
+  },
+  "sidebar": {
+    "openAriaLabel": "サイドバーを開く"
+  },
+  "session": {
+    "interrupt": "中断"
+  },
+  "composer": {
+    "placeholder": "agent にメッセージを送る…(Enter で送信、Shift+Enter で改行)",
+    "sendAriaLabel": "送信"
+  }
+}

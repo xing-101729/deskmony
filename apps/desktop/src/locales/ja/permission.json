@@ -1,0 +1,29 @@
+{
+  "titleNormal": "Agent が実行権限をリクエストしています",
+  "titleStrong": "この操作はハードデナイ(禁止)対象です",
+  "descriptionStrong": "このカテゴリの操作はデフォルトで常に拒否されます。ローカル環境で人が見ている場合でも、個別に強制確認できるだけです——「常に許可」に設定することはできません。",
+  "toolLabel": "ツール",
+  "queuedCount": "他に {{count}} 件が待機中",
+  "denyRecommended": "拒否(推奨)",
+  "understandRisk": "リスクを理解した上で許可する…",
+  "confirmAllowOnce": "もう一度クリックして確認:今回だけ許可する",
+  "deny": "拒否",
+  "alwaysAllow": "常に許可…",
+  "allow": "許可",
+  "hardDenyBadge": "worktree 外への書き込み、シークレットパスの読み取り、force-push などの操作は常にハードデナイ対象です",
+  "remember": {
+    "chooseScope": "記憶する範囲を選択してください(デフォルトで最も狭い範囲を選択):",
+    "willAlwaysAllow": "常に許可する内容:",
+    "effectiveNote": "保存後すぐに反映されます(再起動不要)。後で設定内のポリシールールから削除できます。",
+    "confirm": "常に許可を確定",
+    "commandExactLabel": "この正確なコマンドのみ許可(最も狭い、推奨)",
+    "commandExactDescription": "ツール「{{toolName}}」かつコマンドが完全に一致:{{command}}",
+    "commandPrefixLabel": "「{{firstWord}}」で始まるすべてのコマンドを許可(広め)",
+    "commandPrefixDescription": "ツール「{{toolName}}」かつコマンドが一致:{{pattern}}",
+    "pathExactLabel": "このディレクトリ配下のファイルのみ許可(最も狭い、推奨)",
+    "pathWorkdirLabel": "worktree 全体のファイルを許可(広め)",
+    "pathScopeDescription": "ツール「{{toolName}}」かつパスが以下の配下:{{path}}",
+    "toolExactLabel": "このツールのみ許可(完全一致)",
+    "toolExactDescription": "ツールが完全に一致:{{toolName}}"
+  }
+}

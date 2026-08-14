@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { CORE_CONFIG_VERSION, type ConfigSetFilePatchInput, type PolicyRule } from "@deskmony/shared";
+import { CORE_CONFIG_VERSION, DeskmonyError, type ConfigSetFilePatchInput, type PolicyRule } from "@deskmony/shared";
 
 /**
  * config-file-writer.ts(M6 Round A 新增):`config.setFile` gateway 方法的
@@ -82,7 +82,9 @@ export function applyConfigFilePatch(configPath: string, patch: ConfigSetFilePat
       // 檔案存在但目前解析不出來——理論上 core 啟動時的 readConfigFile() 早就
       // 因為 ConfigLoadError 拒絕啟動了,執行期不該走到這裡;保守起見仍明確
       // 報錯、拒絕寫入,避免用一份可能不完整的資料覆蓋使用者原本的檔案內容。
-      throw new Error(
+      throw new DeskmonyError(
+        "config.patchWriteFailed",
+        { configPath, detail: err instanceof Error ? err.message : String(err) },
         `設定檔(${configPath})目前無法解析,拒絕寫入以避免覆蓋既有內容: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
@@ -122,7 +124,9 @@ export function appendPolicyRule(configPath: string, rule: PolicyRule): void {
     existing = JSON.parse(raw) as Record<string, unknown>;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new Error(
+      throw new DeskmonyError(
+        "config.policyRuleWriteFailed",
+        { configPath, detail: err instanceof Error ? err.message : String(err) },
         `設定檔(${configPath})目前無法解析,拒絕寫入 rememberRule 以避免覆蓋既有內容: ${err instanceof Error ? err.message : String(err)}`,
       );
     }

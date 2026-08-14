@@ -1,0 +1,29 @@
+{
+  "titleNormal": "Agent 請求執行權限",
+  "titleStrong": "此操作屬於硬性禁止項",
+  "descriptionStrong": "這類操作預設一律拒絕,即使目前是本機、有人盯著也僅能個別強制確認——無法設為永遠允許。",
+  "toolLabel": "工具",
+  "queuedCount": "還有 {{count}} 筆請求排隊中",
+  "denyRecommended": "拒絕(建議)",
+  "understandRisk": "我了解風險,仍要允許…",
+  "confirmAllowOnce": "再次點擊確認:仍要允許此次操作",
+  "deny": "拒絕",
+  "alwaysAllow": "永遠允許…",
+  "allow": "允許",
+  "hardDenyBadge": "worktree 外寫入、讀取密鑰路徑、force-push 等操作一律列為硬性禁止",
+  "remember": {
+    "chooseScope": "選擇要記住的範圍(預設選最窄):",
+    "willAlwaysAllow": "你將永遠允許:",
+    "effectiveNote": "寫入後立即生效(不需重啟),之後可在設定裡的政策規則移除。",
+    "confirm": "確認永遠允許",
+    "commandExactLabel": "只允許這個確切指令(最窄,建議)",
+    "commandExactDescription": "工具「{{toolName}}」且指令完全等於:{{command}}",
+    "commandPrefixLabel": "允許所有以「{{firstWord}}」開頭的指令(較寬)",
+    "commandPrefixDescription": "工具「{{toolName}}」且指令符合:{{pattern}}",
+    "pathExactLabel": "只允許這個目錄下的檔案(最窄,建議)",
+    "pathWorkdirLabel": "允許整個 worktree 下的檔案(較寬)",
+    "pathScopeDescription": "工具「{{toolName}}」且路徑位於:{{path}}",
+    "toolExactLabel": "只允許這個工具(精確比對)",
+    "toolExactDescription": "工具精確等於:{{toolName}}"
+  }
+}

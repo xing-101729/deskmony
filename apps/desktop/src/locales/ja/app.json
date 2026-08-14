@@ -1,0 +1,62 @@
+{
+  "connectionBanner": {
+    "connecting": "Deskmony Core に接続中…",
+    "disconnected": "Deskmony Core との接続が切れました。自動的に再試行しています…"
+  },
+  "interruptedBanner": {
+    "message": "前回正常に終了しなかったため、<strong>{{count}}</strong> 件の session に人による仕分け(続行 / 引き継ぎ / 再実行 / 放棄)が必要です",
+    "action": "仕分けを開始"
+  },
+  "sessionDefaultTitle": "会話 {{n}}",
+  "commands": {
+    "groupGoto": "移動",
+    "groupActions": "アクション",
+    "groupSessions": "会話",
+    "viewSession": {
+      "title": "Session ビュー",
+      "keywords": "session chat セッション 会話"
+    },
+    "viewTeamChat": {
+      "title": "team チャット",
+      "keywords": "team chat チーム チャット メッセージ"
+    },
+    "viewTaskBoard": {
+      "title": "タスクボード",
+      "keywords": "task board kanban タスク ボード"
+    },
+    "newSession": {
+      "title": "新規会話",
+      "subtitleWithProfile": "使用する profile:{{name}}",
+      "subtitleNoProfile": "利用できる Agent Profile がありません",
+      "keywords": "new session create 新規 セッション 会話"
+    },
+    "newProfile": {
+      "title": "Agent Profile を作成",
+      "keywords": "profile agent provider 作成"
+    },
+    "settings": {
+      "title": "設定",
+      "subtitle": "全体設定 · 通知 · Provider 管理",
+      "keywords": "settings config provider model 設定"
+    },
+    "toggleSidebar": {
+      "show": "サイドバーを表示",
+      "hide": "サイドバーを折りたたむ",
+      "keywords": "sidebar collapse サイドバー"
+    },
+    "toggleTheme": {
+      "toLight": "ライトテーマに切り替え",
+      "toDark": "ダークテーマに切り替え",
+      "keywords": "theme dark light テーマ ダーク ライト"
+    },
+    "recovery": {
+      "title": "中断された session を復旧({{count}})",
+      "keywords": "recovery crash 復旧 中断"
+    },
+    "logout": {
+      "title": "ログアウト",
+      "subtitle": "保存された token を消去して接続画面に戻ります",
+      "keywords": "logout signout ログアウト"
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "dialogTitle": "Configuración · Gestión de provider",
+  "dialogDescription": "Gestiona el catálogo de provider integrados (activar/desactivar, orden, models disponibles, variables de entorno); el estado de instalación se completa automáticamente según la detección local",
+  "providerCountFooter": "{{count}} en total",
+  "redetect": "Redetectar",
+  "sections": {
+    "global": "Configuración global",
+    "notification": "Configuración de notificaciones",
+    "provider": "Gestión de provider"
+  },
+  "source": {
+    "default": "Valor por defecto",
+    "file": "Archivo de configuración",
+    "env": "Variable de entorno"
+  },
+  "provider": {
+    "installed": "Instalado/disponible",
+    "notDetected": "No detectado",
+    "orderLabel": "Orden",
+    "enableLabel": "Activar {{name}}",
+    "disableLabel": "Desactivar {{name}}",
+    "collapseModelsEnv": "Contraer (models / variables de entorno)",
+    "expandModelsEnv": "Expandir (models / variables de entorno)",
+    "modelsHint": "Models activados (los que no estén marcados no aparecerán en el desplegable de \"Crear Profile\" ni en el de \"cambiar model\" durante la conversación)",
+    "addUpdate": "Añadir/actualizar",
+    "envHint": "Variables de entorno (por ejemplo, ANTHROPIC_API_KEY): los valores siempre se muestran enmascarados como ***; esta lista solo indica qué keys están configuradas y no se puede leer el texto plano.",
+    "envKeyPlaceholder": "KEY",
+    "envValuePlaceholder": "Valor"
+  },
+  "global": {
+    "description": "Configuración por capas de core (defaults → <configPath/> → variables de entorno) — los campos cuyo origen es una variable de entorno están bloqueados (editar el archivo de configuración no tiene efecto; las variables de entorno siempre tienen prioridad); los cambios requieren reiniciar core para aplicarse.",
+    "bindHostLabel": "Dirección de enlace",
+    "noInterfaceEditReason": "No se puede modificar desde esta interfaz, para evitar ampliar la superficie de ajuste remoto — edita el archivo de configuración manualmente o define {{envVarName}}",
+    "permissionTimeoutLabel": "Tiempo de espera de permisos (ms)",
+    "lockedByEnvVar": "Actualmente determinado por {{envVarName}}; editar el archivo de configuración no tiene efecto",
+    "authRateLimitMaxLabel": "Umbral de fallos de autenticación (intentos)",
+    "authRateLimitCooldownLabel": "Periodo de enfriamiento de autenticación (ms)",
+    "defaultWorkingDirLabel": "Directorio de trabajo por defecto",
+    "taskWorktreesRootLabel": "Raíz de worktrees de tareas",
+    "taskWorktreesRootPlaceholder": "Omitir = mantener el cálculo por defecto (el .deskmony-worktrees propio de cada team, junto a él)",
+    "staticDirLabel": "Directorio estático de la UI del navegador",
+    "logLevelLabel": "Nivel de Log",
+    "dataDirLabel": "Directorio de datos SQLite (solo lectura)",
+    "dataDirLockedReason": "No forma parte del subconjunto seguro editable vía gateway — edita el archivo de configuración manualmente o define {{envVarName}}",
+    "saveButton": "Guardar configuración global",
+    "noChanges": "Sin cambios",
+    "written": "Escrito: {{fields}}",
+    "requiresRestart": "(requiere reiniciar core para aplicarse)",
+    "saveFailedWithReason": "Error al guardar: {{error}}"
+  },
+  "notification": {
+    "description": "Notificaciones fuera de banda para escaladas/disyuntor (solo lectura) — la URL del webhook se trata como una credencial, por lo que no se ofrece ninguna vía de escritura remota/UI ni siquiera en una conexión local; para cambiarlas, edita directamente el bloque <notificationBlock/> en <configPath/> y reinicia core para que surta efecto.",
+    "readOnlyReason": "Solo lectura, ver la nota anterior",
+    "desktopLabel": "Notificaciones del sistema de escritorio",
+    "webhookMinSeverityLabel": "Severidad mínima del webhook",
+    "webhookUrlLockedReason": "Se trata como una credencial, siempre enmascarada, solo lectura",
+    "batchIntervalLabel": "Intervalo de lote (minutos)",
+    "quietHoursLabel": "Horas de silencio",
+    "enabledValue": "Activado",
+    "disabledValue": "Desactivado",
+    "notSet": "(no configurado)"
+  }
+}

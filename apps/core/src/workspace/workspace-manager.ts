@@ -5,7 +5,7 @@ import path from "node:path";
 import { eq } from "drizzle-orm";
 import type { NexusDb } from "@deskmony/db";
 import { workspaces as workspacesTable } from "@deskmony/db";
-import type { Workspace } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes, type Workspace } from "@deskmony/shared";
 
 /**
  * WorkspaceManager(ARCHITECTURE.md 3.3 節):
@@ -57,14 +57,22 @@ export interface RemoveWorkspaceResult {
   hadUncommittedChanges: boolean;
 }
 
-/** mergeWorkspace() 合併衝突時丟出的錯誤 —— 帶上衝突檔案清單,供呼叫端組出人類可讀的訊息。 */
-export class MergeConflictError extends Error {
-  constructor(
-    message: string,
-    public readonly conflictFiles: string[],
-  ) {
-    super(message);
+/**
+ * mergeWorkspace() 合併衝突時丟出的錯誤 —— 帶上衝突檔案清單,供呼叫端組出人類
+ * 可讀的訊息。i18n 專案新增:改為繼承 `DeskmonyError`,`conflictFiles` 搬進
+ * `params`(隨 WS response 的 `errorParams` 原樣序列化過網路給前端),不再是
+ * 「碰到 WS gateway 的 generic catch-all 就被靜默丟掉」的 subclass-only 欄位
+ * ——同時保留 `conflictFiles` 這個公開存取器,維持既有呼叫端(若有)的存取方式
+ * 不需要改成 `err.params?.conflictFiles`。
+ */
+export class MergeConflictError extends DeskmonyError {
+  constructor(fallbackMessage: string, conflictFiles: string[]) {
+    super("workspace.mergeConflict", { conflictFiles }, fallbackMessage);
     this.name = "MergeConflictError";
+  }
+
+  get conflictFiles(): string[] {
+    return (this.params?.conflictFiles as string[] | undefined) ?? [];
   }
 }
 
@@ -217,7 +225,9 @@ export class WorkspaceManager {
 
     const dirtyStatus = await this.git(["status", "--porcelain"], workspace.baseDir);
     if (dirtyStatus.stdout.trim().length > 0) {
-      throw new Error(
+      throw new DeskmonyError(
+        "workspace.baseDirDirty",
+        { baseDir: workspace.baseDir, status: dirtyStatus.stdout },
         `baseDir(${workspace.baseDir})有未 commit 的變更,為避免合併過程弄丟使用者的工作,拒絕在此狀態下執行合併,` +
           `請先手動 commit 或處理乾淨後再試一次。\n${dirtyStatus.stdout}`,
       );
@@ -254,7 +264,7 @@ export class WorkspaceManager {
           `衝突檔案: ${conflictFiles.length > 0 ? conflictFiles.join(", ") : "(無法從 git status 判讀,見原始錯誤)"}\n` +
           `原始錯誤: ${err instanceof Error ? err.message : String(err)}`,
         conflictFiles,
-      );
+      ); // 見上方 MergeConflictError 類別註解——conflictFiles 已隨 params 帶到前端。
     }
 
     return { mainBranch };
@@ -331,9 +341,13 @@ export class WorkspaceManager {
         if (rmErr && fs.existsSync(workspace.worktreePath)) {
           // 重試用盡後路徑仍然存在,代表是真正的清理失敗(例如檔案被長期鎖住),
           // 原樣往外丟明確錯誤,不靜默吞掉。
-          throw new Error(
+          const detail = err instanceof Error ? err.message : String(err);
+          const rmDetail = rmErr instanceof Error ? rmErr.message : String(rmErr);
+          throw new DeskmonyError(
+            "workspace.cleanupFailed",
+            { worktreePath: workspace.worktreePath, retries: REMOVE_RETRY_ATTEMPTS, detail, rmDetail },
             `清理 worktree 失敗(${workspace.worktreePath} 仍存在於磁碟上,已重試 ${REMOVE_RETRY_ATTEMPTS} 次): ` +
-              `${err instanceof Error ? err.message : String(err)}; 後續刪除目錄也失敗: ${rmErr instanceof Error ? rmErr.message : String(rmErr)}`,
+              `${detail}; 後續刪除目錄也失敗: ${rmDetail}`,
           );
         }
       }
@@ -379,7 +393,9 @@ export class WorkspaceManager {
       }
     }
 
-    throw new Error(
+    throw new DeskmonyError(
+      "workspace.mainBranchNotDetected",
+      { baseDir },
       `無法偵測主幹分支名稱(baseDir=${baseDir}):沒有設定 origin 遠端追蹤分支,本機也找不到 main 或 master 分支。`,
     );
   }
@@ -387,14 +403,20 @@ export class WorkspaceManager {
   /** baseDir 必須是一個 git repo,否則丟出明確錯誤(不靜默失敗,見 README 說明)。 */
   private async assertIsGitRepo(dir: string): Promise<void> {
     if (!fs.existsSync(dir)) {
-      throw new Error(`team workingDir 不存在,無法建立任務 worktree 隔離: ${dir}`);
+      throw new DeskmonyError(
+        "workspace.workingDirMissing",
+        { dir },
+        `team workingDir 不存在,無法建立任務 worktree 隔離: ${dir}`,
+      );
     }
     try {
       await this.git(["rev-parse", "--is-inside-work-tree"], dir);
     } catch (err) {
-      throw new Error(
-        `team workingDir 不是 git repo,無法建立任務 worktree 隔離(需要先在該目錄 \`git init\`): ${dir}` +
-          `(${err instanceof Error ? err.message : String(err)})`,
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new DeskmonyError(
+        "workspace.workingDirNotGitRepo",
+        { dir, detail },
+        `team workingDir 不是 git repo,無法建立任務 worktree 隔離(需要先在該目錄 \`git init\`): ${dir}(${detail})`,
       );
     }
   }
@@ -404,7 +426,14 @@ export class WorkspaceManager {
     return new Promise((resolve, reject) => {
       execFile("git", args, { cwd }, (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(`git ${args.join(" ")} 失敗(cwd=${cwd}): ${(stderr || error.message).trim()}`));
+          const detail = (stderr || error.message).trim();
+          reject(
+            new DeskmonyError(
+              "workspace.gitCommandFailed",
+              { command: args.join(" "), cwd, detail },
+              `git ${args.join(" ")} 失敗(cwd=${cwd}): ${detail}`,
+            ),
+          );
           return;
         }
         resolve({ stdout, stderr });

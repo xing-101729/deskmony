@@ -1,0 +1,36 @@
+{
+  "entity": {
+    "notFound": "{{entityType}} が見つかりません: {{id}}"
+  },
+  "session": {
+    "notRunning": "セッションは現在実行されていません: {{sessionId}}"
+  },
+  "adapter": {
+    "unsupportedOperation": "{{software}} はこの操作に対応していません: {{operation}}",
+    "unknownHandle": "実行中のセッションが見つかりません: {{handleId}}",
+    "missingConfig": "プロファイル「{{profileId}}」に {{software}} が必要とする設定がありません: {{configField}}"
+  },
+  "task": {
+    "invalidTransition": "タスク「{{taskId}}」は {{from}} から {{to}} に変更できません"
+  },
+  "auth": {
+    "notYetAuthenticated": "認証がまだ完了していません。最初のメッセージは正しいトークンを含む auth リクエストである必要があります",
+    "invalidToken": "認証に失敗しました:トークンが正しくありません",
+    "rateLimited": "認証の試行回数が多すぎます。しばらくしてから再試行してください"
+  },
+  "gateway": {
+    "localOnlyMethod": "この操作はローカル接続でのみ実行できます: {{method}}",
+    "invalidRequest": "無効なリクエストです: {{detail}}"
+  },
+  "budget": {
+    "dailyLimitReached": "1日の予算上限に達しました",
+    "taskLimitReached": "タスク「{{taskTitle}}」は予算上限に達しました"
+  },
+  "recovery": {
+    "discardConfirmRequired": "変更を破棄する前に確認が必要です",
+    "worktreeLost": "worktree が見つかりません: {{worktreePath}}"
+  },
+  "internal": {
+    "unexpected": "予期しないエラーが発生しました"
+  }
+}

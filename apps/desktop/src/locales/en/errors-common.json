@@ -1,0 +1,36 @@
+{
+  "entity": {
+    "notFound": "{{entityType}} not found: {{id}}"
+  },
+  "session": {
+    "notRunning": "Session is not currently running: {{sessionId}}"
+  },
+  "adapter": {
+    "unsupportedOperation": "{{software}} does not support this operation: {{operation}}",
+    "unknownHandle": "No running session found for: {{handleId}}",
+    "missingConfig": "Profile \"{{profileId}}\" is missing configuration required by {{software}}: {{configField}}"
+  },
+  "task": {
+    "invalidTransition": "Task \"{{taskId}}\" cannot transition from {{from}} to {{to}}"
+  },
+  "auth": {
+    "notYetAuthenticated": "Not yet authenticated: the first message must be an auth request with a valid token",
+    "invalidToken": "Authentication failed: incorrect token",
+    "rateLimited": "Too many authentication attempts, please try again later"
+  },
+  "gateway": {
+    "localOnlyMethod": "This operation is only available on a local connection: {{method}}",
+    "invalidRequest": "Invalid request: {{detail}}"
+  },
+  "budget": {
+    "dailyLimitReached": "Daily budget limit reached",
+    "taskLimitReached": "Task \"{{taskTitle}}\" has reached its budget limit"
+  },
+  "recovery": {
+    "discardConfirmRequired": "Confirmation is required before discarding changes",
+    "worktreeLost": "Worktree not found: {{worktreePath}}"
+  },
+  "internal": {
+    "unexpected": "An unexpected error occurred"
+  }
+}

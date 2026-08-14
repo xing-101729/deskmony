@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { type AgentSoftware, type EffortLevel } from "@deskmony/shared";
 import { useSessionStore, selectResolvedProviders } from "../stores/session-store.js";
 import { Dialog } from "../ui/Dialog.js";
 import { Button, IconButton } from "../ui/Button.js";
 import { Field, Input, Select, Textarea } from "../ui/Field.js";
 import { Alert } from "../ui/Feedback.js";
+import { translateError } from "../lib/error-i18n.js";
 // S5(dispose-gate-and-lead)L4 §2.2:Lead 的 systemPrompt 範本是一份可編輯的
 // 檔案(docs/lead-prompt-template.md),不寫死在程式碼——這裡用 Vite 的 `?raw`
 // 匯入直接取得該檔案的原始文字,單一份內容,改文件就改了預填內容。
@@ -48,6 +50,7 @@ interface ProfileCreateDialogProps {
  * 不變。
  */
 export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: ProfileCreateDialogProps): JSX.Element {
+  const { t } = useTranslation(["profileCreate", "common"]);
   const createProfile = useSessionStore((s) => s.createProfile);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const detectingAgents = useSessionStore((s) => s.detectingAgents);
@@ -138,15 +141,15 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
     | { error: string } {
     if (selectionKey === CUSTOM_KEY) {
       if (!customCommand.trim()) {
-        return { error: `software="${customSoftware}" 必須提供 command` };
+        return { error: t("profileCreate:errors.customCommandRequired", { software: customSoftware }) };
       }
       return { software: customSoftware, command: customCommand.trim(), args: parseArgs(customArgs) };
     }
     if (!selectedProvider) {
-      return { error: "請選擇一個 agent 軟體" };
+      return { error: t("profileCreate:errors.selectSoftware") };
     }
     if (selectedProvider.software !== "claude-agent-sdk" && !selectedProvider.command) {
-      return { error: "找不到這個 CLI 的完整路徑(偵測不到 path),請改用「自訂…」手動輸入" };
+      return { error: t("profileCreate:errors.cliPathNotFound") };
     }
     // claude-cli(pty 直通)「支援 model 選擇」的實際做法:pty 建立後不能像
     // SDK 一樣中途切換 model(見 packages/adapters/src/pty-adapter.ts 的
@@ -167,11 +170,11 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
   const handleSubmit = async (): Promise<void> => {
     setError(null);
     if (!name.trim()) {
-      setError("請輸入 Profile 名稱");
+      setError(t("profileCreate:errors.nameRequired"));
       return;
     }
     if (!workingDir.trim()) {
-      setError("請輸入工作目錄");
+      setError(t("profileCreate:errors.workingDirRequired"));
       return;
     }
     const target = resolveTarget();
@@ -199,7 +202,7 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
       onCreated(profile.id);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setSubmitting(false);
     }
@@ -207,33 +210,33 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
 
   return (
     <Dialog
-      title="建立 Agent Profile"
-      description="設定一個可用來建立 session 的 agent 設定檔"
+      title={t("profileCreate:dialogTitle")}
+      description={t("profileCreate:dialogDescription")}
       icon="sparkle"
       size="md"
       onClose={onClose}
       footer={
         <div className="flex w-full justify-end gap-2">
           <Button variant="secondary" disabled={submitting} onClick={onClose}>
-            取消
+            {t("common:cancel")}
           </Button>
           <Button variant="primary" loading={submitting} onClick={() => void handleSubmit()}>
-            {submitting ? "建立中…" : "建立"}
+            {submitting ? t("profileCreate:creating") : t("profileCreate:createButton")}
           </Button>
         </div>
       }
     >
       <div className="space-y-3">
-        <Field label="名稱">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如:My Gemini Agent" />
+        <Field label={t("profileCreate:nameLabel")}>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("profileCreate:namePlaceholder")} />
         </Field>
 
-        <Field label="角色(role,選填,預設 Coder)" hint="role 含「lead」時,下方 systemPrompt 會自動預填協調者範本(可再修改)。">
-          <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder="例如:Lead、Coder、Reviewer" />
+        <Field label={t("profileCreate:roleLabel")} hint={t("profileCreate:roleHint")}>
+          <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder={t("profileCreate:rolePlaceholder")} />
         </Field>
 
         <Field
-          label="systemPrompt(選填)"
+          label={t("profileCreate:systemPromptLabel")}
           action={
             isLeadRole && (
               <button
@@ -241,17 +244,17 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
                 onClick={() => setSystemPrompt(LEAD_PROMPT_TEMPLATE_BODY)}
                 className="text-2xs text-fg-faint underline decoration-dotted hover:text-accent"
               >
-                套用 Lead 範本
+                {t("profileCreate:applyLeadTemplate")}
               </button>
             )
           }
-          hint="範本來源:docs/lead-prompt-template.md(可編輯該檔案調整之後新建 Lead profile 的預填內容)。"
+          hint={t("profileCreate:systemPromptHint")}
         >
-          <Textarea mono value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={5} placeholder="留空 = 使用 agent 軟體本身的預設行為" />
+          <Textarea mono value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={5} placeholder={t("profileCreate:systemPromptPlaceholder")} />
         </Field>
 
         <Field
-          label="Agent 軟體(provider 目錄,依本機偵測結果)"
+          label={t("profileCreate:agentSoftwareLabel")}
           action={
             <button
               type="button"
@@ -259,7 +262,7 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
               disabled={detectingAgents}
               className="text-2xs text-fg-faint underline decoration-dotted hover:text-accent disabled:opacity-40"
             >
-              {detectingAgents ? "偵測中…" : "重新偵測"}
+              {detectingAgents ? t("common:detecting") : t("profileCreate:redetect")}
             </button>
           }
         >
@@ -268,29 +271,33 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
               <option key={p.id} value={p.id} disabled={p.software !== "claude-agent-sdk" && !p.installed}>
                 {p.label}
                 {p.detectedVersion ? ` (v${p.detectedVersion})` : ""}
-                {p.software !== "claude-agent-sdk" && !p.installed ? "(未偵測到)" : ""}
+                {p.software !== "claude-agent-sdk" && !p.installed ? t("profileCreate:notDetectedSuffix") : ""}
               </option>
             ))}
-            <option value={CUSTOM_KEY}>自訂…(進階,手動輸入 command)</option>
+            <option value={CUSTOM_KEY}>{t("profileCreate:customOption")}</option>
           </Select>
 
-          {isSdkTarget && <p className="mt-1 text-2xs text-fg-faint">深度整合 Claude Code(需要本機登入憑證或 ANTHROPIC_API_KEY)</p>}
+          {isSdkTarget && <p className="mt-1 text-2xs text-fg-faint">{t("profileCreate:sdkTargetHint")}</p>}
 
           {selectedProvider && !isSdkTarget && (
             <div className="mt-1.5 space-y-1">
               <p className="text-2xs text-fg-faint">
-                將以 <span className="font-mono text-fg-muted">{selectedProvider.software}</span> 建立,command 自動帶入偵測到的路徑:
+                <Trans
+                  i18nKey="profileCreate:willCreateWith"
+                  values={{ software: selectedProvider.software }}
+                  components={{ mono: <span className="font-mono text-fg-muted" /> }}
+                />
               </p>
               <p className="truncate rounded bg-canvas px-2 py-1 font-mono text-2xs text-fg-muted" title={selectedProvider.command}>
-                {selectedProvider.command ?? "(未偵測到完整路徑)"}
+                {selectedProvider.command ?? t("profileCreate:commandNotDetected")}
               </p>
               {selectedProvider.defaultArgs && selectedProvider.defaultArgs.length > 0 && (
                 <p className="text-2xs text-fg-faint">
-                  固定參數:<span className="font-mono text-fg-muted">{selectedProvider.defaultArgs.join(" ")}</span>
+                  {t("profileCreate:fixedArgsLabel")}<span className="font-mono text-fg-muted">{selectedProvider.defaultArgs.join(" ")}</span>
                 </p>
               )}
               {isOpencodeTarget && (
-                <p className="text-2xs text-fg-faint">對接 opencode 的 HTTP + SSE headless server API(非終端直通),支援串流訊息、工具呼叫與權限請求。</p>
+                <p className="text-2xs text-fg-faint">{t("profileCreate:opencodeHint")}</p>
               )}
             </div>
           )}
@@ -298,15 +305,11 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
 
         {isSdkTarget && (
           <Field
-            label="認證方式"
-            hint={
-              authMode === "login"
-                ? "沿用本機 claude login 的登入憑證,這裡不需要填任何東西。Model 清單只會有固定的別名(opus/sonnet/haiku/fable),因為沒有 API key 沒辦法即時查詢完整清單。"
-                : "這裡填的金鑰只存成這個 profile 的 env.ANTHROPIC_API_KEY,不影響其他 profile,也不會寫進其他地方(見下方環境變數區的既有處理方式)。"
-            }
+            label={t("profileCreate:authModeLabel")}
+            hint={authMode === "login" ? t("profileCreate:authModeLoginHint") : t("profileCreate:authModeApiKeyHint")}
           >
             <Select value={authMode} onChange={(e) => setAuthMode(e.target.value as "login" | "apikey")}>
-              <option value="login">本機登入(claude login)</option>
+              <option value="login">{t("profileCreate:authModeLoginOption")}</option>
               <option value="apikey">API Key</option>
             </Select>
             {authMode === "apikey" && (
@@ -323,9 +326,9 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
         )}
 
         {selectedProvider?.supportsModelSelection && selectedProvider.models.length > 0 && (
-          <Field label="Model(選填)" hint="只列出「設定」介面啟用的 model(見設定 · Provider 管理);全部停用視為全部啟用。">
+          <Field label={t("profileCreate:modelLabel")} hint={t("profileCreate:modelHint")}>
             <Select value={model} onChange={(e) => setModel(e.target.value)}>
-              <option value="">(未指定,使用 CLI 預設)</option>
+              <option value="">{t("profileCreate:unspecifiedCliDefaultOption")}</option>
               {selectedProvider.models.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.label}
@@ -337,11 +340,11 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
 
         {isSdkTarget && (
           <Field
-            label="思考程度(選填)"
-            hint="xhigh/max 僅部分較新 model 支援,其餘 model 由 CLI 自行降級處理(實際降級行為以 CLI 版本為準,不臆測)。"
+            label={t("profileCreate:effortLabel")}
+            hint={t("profileCreate:effortHint")}
           >
             <Select value={effort} onChange={(e) => setEffort(e.target.value as EffortLevel | "")}>
-              <option value="">(未指定,使用 CLI 預設)</option>
+              <option value="">{t("profileCreate:unspecifiedCliDefaultOption")}</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
@@ -352,54 +355,54 @@ export function ProfileCreateDialog({ onClose, onCreated, defaultWorkingDir }: P
         )}
 
         {showArgsInput && (
-          <Field label={`args(選填,以空白分隔${selectedProvider?.defaultArgs?.length ? ",附加在固定參數之後" : ""})`}>
-            <Input mono value={args} onChange={(e) => setArgs(e.target.value)} placeholder="例如:--flag value" />
+          <Field label={t(selectedProvider?.defaultArgs?.length ? "profileCreate:argsLabelWithDefaults" : "profileCreate:argsLabel")}>
+            <Input mono value={args} onChange={(e) => setArgs(e.target.value)} placeholder={t("profileCreate:argsPlaceholder")} />
           </Field>
         )}
 
         {selectionKey === CUSTOM_KEY && (
           <>
-            <Field label="software(自訂)">
+            <Field label={t("profileCreate:customSoftwareLabel")}>
               <Select value={customSoftware} onChange={(e) => setCustomSoftware(e.target.value as AgentSoftware)}>
-                <option value="pty">PTY(終端直通)</option>
+                <option value="pty">{t("profileCreate:customSoftwarePtyOption")}</option>
                 <option value="acp">ACP(Agent Client Protocol)</option>
               </Select>
             </Field>
             <Field label="command">
-              <Input mono value={customCommand} onChange={(e) => setCustomCommand(e.target.value)} placeholder="例如:cmd.exe 或 claude-code-acp" />
+              <Input mono value={customCommand} onChange={(e) => setCustomCommand(e.target.value)} placeholder={t("profileCreate:customCommandPlaceholder")} />
             </Field>
-            <Field label="args(選填,以空白分隔)">
-              <Input mono value={customArgs} onChange={(e) => setCustomArgs(e.target.value)} placeholder="例如:--flag value" />
+            <Field label={t("profileCreate:argsLabel")}>
+              <Input mono value={customArgs} onChange={(e) => setCustomArgs(e.target.value)} placeholder={t("profileCreate:argsPlaceholder")} />
             </Field>
           </>
         )}
 
         <Field
-          label="環境變數(選填,對應 AgentProfile.env——同一 provider 建立多組不同憑證用,例如不同的 ANTHROPIC_API_KEY)"
+          label={t("profileCreate:envLabel")}
           action={
             <button type="button" onClick={addEnvRow} className="text-2xs text-fg-faint underline decoration-dotted hover:text-accent">
-              + 新增
+              {t("profileCreate:addEnvRowButton")}
             </button>
           }
         >
           <div className="space-y-1.5">
             {envRows.map((row, idx) => (
               <div key={idx} className="flex gap-1.5">
-                <Input mono value={row.key} onChange={(e) => updateEnvRow(idx, { key: e.target.value })} placeholder="例如:ANTHROPIC_API_KEY" className="w-2/5" />
-                <Input mono type="password" value={row.value} onChange={(e) => updateEnvRow(idx, { value: e.target.value })} placeholder="值" className="flex-1" />
-                <IconButton icon="x" aria-label="移除這個環境變數" onClick={() => removeEnvRow(idx)} className="hover:!text-danger" />
+                <Input mono value={row.key} onChange={(e) => updateEnvRow(idx, { key: e.target.value })} placeholder={t("profileCreate:envKeyExamplePlaceholder")} className="w-2/5" />
+                <Input mono type="password" value={row.value} onChange={(e) => updateEnvRow(idx, { value: e.target.value })} placeholder={t("profileCreate:envValuePlaceholder")} className="flex-1" />
+                <IconButton icon="x" aria-label={t("profileCreate:removeEnvRowAriaLabel")} onClick={() => removeEnvRow(idx)} className="hover:!text-danger" />
               </div>
             ))}
-            {envRows.length === 0 && <p className="text-2xs text-fg-faint">尚未新增任何環境變數。</p>}
+            {envRows.length === 0 && <p className="text-2xs text-fg-faint">{t("profileCreate:noEnvRowsYet")}</p>}
           </div>
         </Field>
 
-        <Field label="工作目錄(workingDir)">
+        <Field label={t("profileCreate:workingDirLabel")}>
           <div className="flex gap-1.5">
-            <Input mono value={workingDir} onChange={(e) => setWorkingDir(e.target.value)} placeholder="例如:D:\project 或 /home/user/project" className="flex-1" />
+            <Input mono value={workingDir} onChange={(e) => setWorkingDir(e.target.value)} placeholder={t("profileCreate:workingDirPlaceholder")} className="flex-1" />
             {canPickDirectory && (
               <Button variant="outline" onClick={() => void handlePickDirectory()}>
-                瀏覽…
+                {t("profileCreate:browseButton")}
               </Button>
             )}
           </div>

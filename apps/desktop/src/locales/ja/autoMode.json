@@ -1,0 +1,16 @@
+{
+  "yoloEnabledTitle": "YOLO 有効:config のポリシーをバイパスします(hard-deny は引き続き適用されます)",
+  "yoloEnabledTitleWithExpiry": "YOLO 有効:config のポリシーをバイパスします(hard-deny は引き続き適用されます)。約 {{minutes}} 分後に自動的にオフになります",
+  "autoEnabledTitle": "Auto 有効:未分類の操作を自動的に許可します(config の deny ルールは引き続き適用されます)",
+  "autoToggleTitle": "Auto:未分類の中間的な操作を自動的に許可しますが、config の deny ルールと hard-deny には引き続き従います",
+  "autoOnLabel": "Auto 有効中",
+  "autoOffLabel": "Auto を有効にする",
+  "yoloToggleTitle": "YOLO:config のすべてのルールをバイパスし、30 分後に自動的にオフになります。hard-deny には一切影響しません",
+  "yoloOffLabel": "YOLO をオフにする",
+  "yoloOnLabel": "YOLO を有効にする",
+  "confirmDialogTitle": "YOLO を有効にしますか?",
+  "risk1": "config に設定されたすべてのポリシールール(自分で追加した deny ルールを含む)をバイパスします。",
+  "risk2": "30 分後に自動的にオフになり、通常の確認モードに戻ります。",
+  "risk3Bold": "ハードデナイ(hard-deny)項目には影響しません",
+  "risk3Rest": "——worktree 外への書き込み、シークレットパスの読み取り、force-push などの操作は引き続き拒否されるか、強制確認が必要です。"
+}

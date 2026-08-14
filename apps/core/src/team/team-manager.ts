@@ -4,6 +4,8 @@ import type { NexusDb } from "@deskmony/db";
 import { teamMembers as teamMembersTable, teams as teamsTable } from "@deskmony/db";
 import {
   deriveLifecycleFromRole,
+  DeskmonyError,
+  ErrorCodes,
   type AddTeamMemberInput,
   type CreateTeamInput,
   type Team,
@@ -59,11 +61,19 @@ export class TeamManager {
   async addMember(input: AddTeamMemberInput): Promise<TeamMember> {
     const team = await this.getTeam(input.teamId);
     if (!team) {
-      throw new Error(`找不到 team: ${input.teamId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "team", id: input.teamId },
+        `找不到 team: ${input.teamId}`,
+      );
     }
     const profile = await this.profiles.get(input.agentProfileId);
     if (!profile) {
-      throw new Error(`找不到 agent profile: ${input.agentProfileId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "agentProfile", id: input.agentProfileId },
+        `找不到 agent profile: ${input.agentProfileId}`,
+      );
     }
 
     const now = Date.now();
@@ -85,7 +95,9 @@ export class TeamManager {
 
     const nameTaken = await this.findMemberByName(input.teamId, member.name);
     if (nameTaken) {
-      throw new Error(
+      throw new DeskmonyError(
+        "team.memberNameTaken",
+        { teamName: team.name, memberName: member.name },
         `team "${team.name}" 內已存在同名成員: "${member.name}"(成員名在同一 team 內必須唯一,MessageBus 靠它比對 @mention)`,
       );
     }

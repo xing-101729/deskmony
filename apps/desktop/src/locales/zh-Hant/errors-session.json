@@ -1,0 +1,11 @@
+{
+  "sessionManager": {
+    "abandonRequiresInterrupted": "Session {{sessionId}} 目前狀態是「{{status}}」,不是「interrupted」,無法「放棄」",
+    "promptBlockedByBudget": "{{reason}}",
+    "notYourChild": "Session {{sessionId}} 不是你的子 session,無法送出訊息",
+    "continueRequiresInterrupted": "Session {{sessionId}} 目前狀態是「{{status}}」,不是「interrupted」,無法「繼續」",
+    "continueUnsupportedBackend": "Session {{sessionId}} 的後端({{adapterType}})不支援「繼續(保有記憶)」,或這條 session 崩潰前還沒捕捉到後端 session 識別碼,請改用「接手」",
+    "vanishedDuringContinue": "Session {{sessionId}} 於「繼續」流程中意外消失",
+    "agentOverrideMissingCommand": "agentOverride.software=\"{{software}}\" 需要一併提供 command"
+  }
+}

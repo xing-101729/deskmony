@@ -1,12 +1,14 @@
-import type {
-  CreateSessionInput,
-  RecoveryGitStatusResult,
-  RecoveryResolveDirtyWorktreeInput,
-  RecoveryResolveDirtyWorktreeResult,
-  RecoverySessionInfo,
-  Session,
-  Task,
-  Workspace,
+import {
+  DeskmonyError,
+  ErrorCodes,
+  type CreateSessionInput,
+  type RecoveryGitStatusResult,
+  type RecoveryResolveDirtyWorktreeInput,
+  type RecoveryResolveDirtyWorktreeResult,
+  type RecoverySessionInfo,
+  type Session,
+  type Task,
+  type Workspace,
 } from "@deskmony/shared";
 import type { SessionManager } from "../session/session-manager.js";
 import type { ProfileStore } from "../profiles.js";
@@ -127,11 +129,17 @@ export class RecoveryService {
 
     if (workspace) {
       if (!this.workspaceManager.worktreeExists(workspace)) {
-        throw new Error(`worktree 已遺失(${workspace.worktreePath}),無法重跑,請改用「放棄」`);
+        throw new DeskmonyError(
+          ErrorCodes.RECOVERY_WORKTREE_LOST,
+          { worktreePath: workspace.worktreePath },
+          `worktree 已遺失(${workspace.worktreePath}),無法重跑,請改用「放棄」`,
+        );
       }
       const dirty = await this.workspaceManager.isDirty(workspace);
       if (dirty) {
-        throw new Error(
+        throw new DeskmonyError(
+          "recovery.worktreeDirty",
+          { worktreePath: workspace.worktreePath },
           `worktree(${workspace.worktreePath})有未提交的變更,請先呼叫「檢查變更」查看 diff,並選擇「保留」(建 wip 分支)或「丟棄」處理乾淨後再重跑——絕不默默在髒 worktree 上重跑`,
         );
       }
@@ -162,12 +170,20 @@ export class RecoveryService {
     const session = await this.mustGetInterrupted(sessionId);
     const { task, workspace } = await this.resolveContext(session);
     if (!workspace) {
-      throw new Error(`session ${sessionId} 沒有綁定 workspace,沒有 git 狀態可查`);
+      throw new DeskmonyError(
+        "recovery.sessionMissingWorkspace",
+        { sessionId },
+        `session ${sessionId} 沒有綁定 workspace,沒有 git 狀態可查`,
+      );
     }
     const target: "worktree" | "baseDir" = task?.status === "merging" ? "baseDir" : "worktree";
     const dir = target === "baseDir" ? workspace.baseDir : workspace.worktreePath;
     if (target === "worktree" && !this.workspaceManager.worktreeExists(workspace)) {
-      throw new Error(`worktree 已遺失(${workspace.worktreePath})`);
+      throw new DeskmonyError(
+        ErrorCodes.RECOVERY_WORKTREE_LOST,
+        { worktreePath: workspace.worktreePath },
+        `worktree 已遺失(${workspace.worktreePath})`,
+      );
     }
     const { status, diff } = await this.workspaceManager.statusAndDiff(dir);
     return { target, status, diff };
@@ -178,10 +194,18 @@ export class RecoveryService {
     const session = await this.mustGetInterrupted(input.sessionId);
     const { task, workspace } = await this.resolveContext(session);
     if (!workspace) {
-      throw new Error(`session ${input.sessionId} 沒有綁定 workspace`);
+      throw new DeskmonyError(
+        "recovery.sessionMissingWorkspace",
+        { sessionId: input.sessionId },
+        `session ${input.sessionId} 沒有綁定 workspace`,
+      );
     }
     if (!this.workspaceManager.worktreeExists(workspace)) {
-      throw new Error(`worktree 已遺失(${workspace.worktreePath})`);
+      throw new DeskmonyError(
+        ErrorCodes.RECOVERY_WORKTREE_LOST,
+        { worktreePath: workspace.worktreePath },
+        `worktree 已遺失(${workspace.worktreePath})`,
+      );
     }
 
     if (input.action === "keep") {
@@ -192,7 +216,11 @@ export class RecoveryService {
 
     // action === "discard":需要明確二次確認,這個動作會永久刪除未 commit 的變更。
     if (!input.confirmDiscard) {
-      throw new Error("丟棄變更需要明確二次確認(confirmDiscard: true)——這個動作會永久刪除 worktree 內未提交的變更,不可還原");
+      throw new DeskmonyError(
+        ErrorCodes.RECOVERY_DISCARD_CONFIRM_REQUIRED,
+        undefined,
+        "丟棄變更需要明確二次確認(confirmDiscard: true)——這個動作會永久刪除 worktree 內未提交的變更,不可還原",
+      );
     }
     await this.workspaceManager.discardDirty(workspace);
     return { ok: true, action: "discard" };
@@ -211,10 +239,14 @@ export class RecoveryService {
   private async mustGetInterrupted(sessionId: string): Promise<Session> {
     const session = await this.sessionManager.getSession(sessionId);
     if (!session) {
-      throw new Error(`找不到 session: ${sessionId}`);
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
     }
     if (session.status !== "interrupted") {
-      throw new Error(`session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted"`);
+      throw new DeskmonyError(
+        "recovery.sessionNotInterrupted",
+        { sessionId, status: session.status },
+        `session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted"`,
+      );
     }
     return session;
   }

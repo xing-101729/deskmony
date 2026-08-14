@@ -1,0 +1,63 @@
+{
+  "dialogTitle": "Settings · Provider management",
+  "dialogDescription": "Manage the built-in provider catalog (enable/disable, ordering, available models, environment variables) — installed status is auto-filled from local detection",
+  "providerCountFooter": "{{count}} total",
+  "redetect": "Redetect",
+  "sections": {
+    "global": "Global settings",
+    "notification": "Notification settings",
+    "provider": "Provider management"
+  },
+  "source": {
+    "default": "Default",
+    "file": "Config file",
+    "env": "Env var"
+  },
+  "provider": {
+    "installed": "Installed / available",
+    "notDetected": "Not detected",
+    "orderLabel": "Order",
+    "enableLabel": "Enable {{name}}",
+    "disableLabel": "Disable {{name}}",
+    "collapseModelsEnv": "Collapse (models / env vars)",
+    "expandModelsEnv": "Expand (models / env vars)",
+    "modelsHint": "Enabled models (unchecked ones won't appear in the \"Create Profile\" dropdown or the in-conversation \"switch model\" dropdown)",
+    "addUpdate": "Add / update",
+    "envHint": "Environment variables (e.g. ANTHROPIC_API_KEY) — values are always shown masked as ***; this list only shows which keys are set and can't be read back in plaintext.",
+    "envKeyPlaceholder": "KEY",
+    "envValuePlaceholder": "Value"
+  },
+  "global": {
+    "description": "core's layered settings (defaults → <configPath/> → environment variables) — fields sourced from an env var are locked (editing the config file has no effect; env vars always win); changes require restarting core to take effect.",
+    "bindHostLabel": "Bind address",
+    "noInterfaceEditReason": "Cannot be changed from this interface, to avoid expanding the remote-adjustment surface — edit the config file manually or set {{envVarName}}",
+    "permissionTimeoutLabel": "Permission timeout (ms)",
+    "lockedByEnvVar": "Currently determined by {{envVarName}} — editing the config file has no effect",
+    "authRateLimitMaxLabel": "Auth failure threshold (attempts)",
+    "authRateLimitCooldownLabel": "Auth cooldown period (ms)",
+    "defaultWorkingDirLabel": "Default working directory",
+    "taskWorktreesRootLabel": "Task worktree root",
+    "taskWorktreesRootPlaceholder": "Omit = keep the existing default (each team's own .deskmony-worktrees next to it)",
+    "staticDirLabel": "Browser UI static directory",
+    "logLevelLabel": "Log level",
+    "dataDirLabel": "SQLite data directory (read-only)",
+    "dataDirLockedReason": "Not in the safe subset editable via the gateway — edit the config file manually or set {{envVarName}}",
+    "saveButton": "Save global settings",
+    "noChanges": "No changes",
+    "written": "Written: {{fields}}",
+    "requiresRestart": "(requires restarting core to take effect)",
+    "saveFailedWithReason": "Save failed: {{error}}"
+  },
+  "notification": {
+    "description": "Out-of-band notifications for escalations/circuit-breaker trips (read-only) — the webhook URL is treated as a credential, so no remote/UI write path is provided even over a local connection; to change these, edit the <notificationBlock/> block in <configPath/> directly and restart core for it to take effect.",
+    "readOnlyReason": "Read-only, see the note above",
+    "desktopLabel": "Desktop system notifications",
+    "webhookMinSeverityLabel": "Webhook minimum severity",
+    "webhookUrlLockedReason": "Treated as a credential, always masked, read-only",
+    "batchIntervalLabel": "Batch interval (minutes)",
+    "quietHoursLabel": "Quiet hours",
+    "enabledValue": "Enabled",
+    "disabledValue": "Disabled",
+    "notSet": "(not set)"
+  }
+}

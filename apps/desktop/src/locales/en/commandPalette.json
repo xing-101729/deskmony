@@ -1,0 +1,9 @@
+{
+  "dialogLabel": "Command palette",
+  "searchPlaceholder": "Search commands, conversations, projects…",
+  "searchAriaLabel": "Search commands",
+  "noResults": "No commands match \"{{query}}\"",
+  "selectHint": "Select",
+  "runHint": "Run",
+  "resultsCount": "{{count}} items"
+}

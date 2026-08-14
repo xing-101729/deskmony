@@ -1,0 +1,36 @@
+{
+  "entity": {
+    "notFound": "No se encontró {{entityType}}: {{id}}"
+  },
+  "session": {
+    "notRunning": "La sesión no se está ejecutando actualmente: {{sessionId}}"
+  },
+  "adapter": {
+    "unsupportedOperation": "{{software}} no admite esta operación: {{operation}}",
+    "unknownHandle": "No se encontró ninguna sesión en ejecución para: {{handleId}}",
+    "missingConfig": "Al perfil \"{{profileId}}\" le falta la configuración requerida por {{software}}: {{configField}}"
+  },
+  "task": {
+    "invalidTransition": "La tarea \"{{taskId}}\" no puede pasar de {{from}} a {{to}}"
+  },
+  "auth": {
+    "notYetAuthenticated": "Aún no se ha autenticado: el primer mensaje debe ser una solicitud auth con un token válido",
+    "invalidToken": "Error de autenticación: token incorrecto",
+    "rateLimited": "Demasiados intentos de autenticación, inténtalo de nuevo más tarde"
+  },
+  "gateway": {
+    "localOnlyMethod": "Esta operación solo está disponible en una conexión local: {{method}}",
+    "invalidRequest": "Solicitud no válida: {{detail}}"
+  },
+  "budget": {
+    "dailyLimitReached": "Se alcanzó el límite de presupuesto diario",
+    "taskLimitReached": "La tarea \"{{taskTitle}}\" alcanzó su límite de presupuesto"
+  },
+  "recovery": {
+    "discardConfirmRequired": "Se requiere confirmación antes de descartar los cambios",
+    "worktreeLost": "No se encontró el worktree: {{worktreePath}}"
+  },
+  "internal": {
+    "unexpected": "Se produjo un error inesperado"
+  }
+}

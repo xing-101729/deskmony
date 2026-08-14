@@ -1,0 +1,47 @@
+{
+  "dialog": {
+    "title": "Team management",
+    "description": "Create teams, add/remove members, and view members' session status"
+  },
+  "lifecycle": {
+    "persistent": "Persistent (persistent)",
+    "ephemeral": "Ephemeral (ephemeral)"
+  },
+  "lifecycleHint": "S8: Persistent (persistent) = created when a human/team starts it, to stay reachable online; Ephemeral (ephemeral) = auto-created when a task is assigned, and auto-released when the task completes",
+  "teamPanel": {
+    "sectionLabel": "Team",
+    "noTeams": "No teams yet",
+    "newTeamNamePlaceholder": "New team name",
+    "newTeamWorkingDirPlaceholder": "Working directory (optional)",
+    "creating": "Creating…",
+    "createTeam": "Create team"
+  },
+  "memberPanel": {
+    "emptyTitle": "Select or create a team on the left first",
+    "sectionLabel": "Members ({{count}})",
+    "noMembers": "No members yet",
+    "canInterruptBadge": "Can interrupt",
+    "contextUnsupportedTitle": "This backend cannot automatically detect the context limit — this persistent member's session won't auto-checkpoint and restart, so it needs a manual restart (dispose + recreate the session) before context fills up.",
+    "contextUnsupportedBadge": "This backend cannot auto-detect the context limit; needs a manual restart",
+    "noSession": "No session yet",
+    "createSession": "Create session",
+    "remove": "Remove"
+  },
+  "addMember": {
+    "sectionLabel": "Add member",
+    "noProfileOption": "(No profile yet)",
+    "namePlaceholder": "Display name (optional, defaults to the profile's)",
+    "rolePlaceholder": "Role (optional)",
+    "canInterruptLabel": "Can interrupt teammates (canInterrupt)",
+    "autoLifecycleOption": "Auto (derived from role)",
+    "derivedPreview": "→ Will be derived as \"{{label}}\"",
+    "adding": "Adding…",
+    "submit": "+ Add member"
+  },
+  "errors": {
+    "teamNameRequired": "Please enter a team name",
+    "selectTeamFirst": "Please select a team first",
+    "selectProfileFirst": "Please select an Agent Profile",
+    "workingDirNotFound": "No available working directory found — please make sure the team or the Profile has a workingDir configured"
+  }
+}

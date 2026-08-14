@@ -1,0 +1,33 @@
+{
+  "title": "Recovery: sessions not cleanly closed last time",
+  "description": "The child process disappeared along with core's last interruption, and the agent has no memory to auto-resume from — decide one by one whether to continue, take over, rerun, or abandon",
+  "emptyTitle": "No interrupted sessions right now",
+  "unknownProfile": "(unknown profile)",
+  "sessionMetaLine": "{{profile}} · interrupted at {{interruptedAt}} · last seen {{lastSeenAt}}",
+  "taskLine": "Task: {{title}} (status: {{status}})",
+  "crashedWhileMerging": "Crashed while merging — git may be in an intermediate state",
+  "worktreeLine": "worktree: {{branch}}",
+  "missing": "(lost)",
+  "hasUncommittedChanges": "(has uncommitted changes)",
+  "clean": "(clean)",
+  "continueTitle": "Reconnect the backend session — the agent remembers prior context",
+  "continueLabel": "Continue (keep memory)",
+  "takeoverTitle": "Start a new session with a summary injected — the agent's mind is fresh, it has only read the notes",
+  "takeoverLabel": "Take over (restart from summary)",
+  "rerunTitle": "The worktree must be clean before rerunning",
+  "rerunLabel": "Rerun…",
+  "abandonLabel": "Abandon",
+  "checkingStatus": "Checking…",
+  "checkGitStatus": "Check git status",
+  "noStatusOutputClean": "(no git status output, likely already clean)",
+  "confirmDiscard": "Discard all uncommitted changes in \"{{title}}\"'s worktree? This cannot be undone (git reset --hard + git clean -fd).",
+  "confirmAbandon": "Abandon \"{{title}}\"? The session will be marked closed, but the task and worktree are kept and can still be handled manually from the task board.",
+  "dirtyResolver": {
+    "heading": "The worktree has uncommitted changes — this must be resolved before rerunning:",
+    "loadingDiff": "Loading diff…",
+    "noStatusOutput": "(no git status output)",
+    "noDiffOutput": "(no git diff output — there may only be untracked new files)",
+    "keep": "Keep (create a wip branch and commit)",
+    "discard": "Discard changes"
+  }
+}

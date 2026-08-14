@@ -1,0 +1,47 @@
+{
+  "dialog": {
+    "title": "team 管理",
+    "description": "team の作成、メンバーの追加/削除、メンバーの session 状態の確認"
+  },
+  "lifecycle": {
+    "persistent": "長命(persistent)",
+    "ephemeral": "短命(ephemeral)"
+  },
+  "lifecycleHint": "S8:長命(persistent)= オンラインで到達可能であるために、人 / team が起動したときに作成される;短命(ephemeral)= タスクをアサインしたときに自動作成され、タスク完了時に自動解放される",
+  "teamPanel": {
+    "sectionLabel": "team",
+    "noTeams": "まだ team がありません",
+    "newTeamNamePlaceholder": "新しい team 名",
+    "newTeamWorkingDirPlaceholder": "作業ディレクトリ(任意)",
+    "creating": "作成中…",
+    "createTeam": "team を作成"
+  },
+  "memberPanel": {
+    "emptyTitle": "まず左側で team を選択するか作成してください",
+    "sectionLabel": "メンバー({{count}})",
+    "noMembers": "まだメンバーがいません",
+    "canInterruptBadge": "中断可能",
+    "contextUnsupportedTitle": "このバックエンドは context の上限を自動検出できません——この長命メンバーの session は自動で checkpoint 再起動されないため、context が溢れる前に手動で再起動する必要があります(dispose + session の再作成)。",
+    "contextUnsupportedBadge": "このバックエンドは context 上限を自動検出できません。手動での再起動が必要です",
+    "noSession": "まだ session がありません",
+    "createSession": "session を作成",
+    "remove": "削除"
+  },
+  "addMember": {
+    "sectionLabel": "メンバーを追加",
+    "noProfileOption": "(profile がまだありません)",
+    "namePlaceholder": "表示名(任意、既定では profile の名前を使用)",
+    "rolePlaceholder": "役割(任意)",
+    "canInterruptLabel": "他のメンバーを中断可能(canInterrupt)",
+    "autoLifecycleOption": "自動(役割から推定)",
+    "derivedPreview": "→「{{label}}」と推定されます",
+    "adding": "追加中…",
+    "submit": "+ メンバーを追加"
+  },
+  "errors": {
+    "teamNameRequired": "team 名を入力してください",
+    "selectTeamFirst": "先に team を選択してください",
+    "selectProfileFirst": "Agent Profile を選択してください",
+    "workingDirNotFound": "利用可能な作業ディレクトリが見つかりません。team または Profile に workingDir が設定されているか確認してください"
+  }
+}

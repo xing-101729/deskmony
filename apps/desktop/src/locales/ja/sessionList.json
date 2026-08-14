@@ -1,0 +1,65 @@
+{
+  "nav": {
+    "session": "Session",
+    "teamChat": "team チャット",
+    "taskBoard": "タスクボード"
+  },
+  "connection": {
+    "open": "接続済み",
+    "connecting": "接続中…",
+    "closed": "切断済み"
+  },
+  "confirmDeleteSession": "「{{title}}」を削除しますか?この操作は元に戻せません。",
+  "confirmDeleteProfile": "Agent Profile「{{name}}」を削除しますか?この操作は元に戻せません。{{usageNote}}",
+  "confirmDeleteProfileUsageNote": "\n\n現在、この profile で作成された既存の会話が {{count}} 件あります。削除してもそれらの会話には影響しませんが、以後この profile で新しい会話を作成することはできなくなります。",
+  "contextUsageTitle": "context ウィンドウの使用率(S3a usage-metering)",
+  "spawnChildAriaLabel": "子 agent を起動",
+  "spawnChildTitle": "子 agent を起動してサブタスクを実行",
+  "deleteSessionAriaLabel": "会話を削除",
+  "expandSidebarAriaLabel": "サイドバーを展開",
+  "commandPaletteAriaLabel": "コマンドパレット",
+  "collapseSidebarAriaLabel": "サイドバーを折りたたむ",
+  "closeSidebarAriaLabel": "サイドバーを閉じる",
+  "paletteTriggerLabel": "コマンドを検索または実行…",
+  "selectProfileAriaLabel": "Agent Profile を選択",
+  "noProfileOption": "(profile がまだありません)",
+  "advancedToggle": "詳細設定(agent/model を選択)",
+  "newSessionButton": "新規会話",
+  "creating": "作成中…",
+  "createProfileAriaLabel": "Agent Profile を作成",
+  "deleteProfileAriaLabel": "Agent Profile を削除",
+  "emptyTitle": "まだ会話がありません",
+  "emptyDescription": "上の「新規会話」をクリックして agent とのやり取りを始めましょう。",
+  "waitingForAuthTitle": "承認待ちの session があります",
+  "theme": {
+    "system": "テーマ:システムに従う(クリックで切り替え)",
+    "darkClickForLight": "ダークテーマ(クリックでライトに切り替え)",
+    "lightClickForDark": "ライトテーマ(クリックでダークに切り替え)"
+  },
+  "toggleThemeAriaLabel": "テーマを切り替え",
+  "languageSwitcher": {
+    "toggleLabel": "言語を切り替え",
+    "menuLabel": "言語を選択"
+  },
+  "settingsAriaLabel": "設定",
+  "logoutAriaLabel": "ログアウト",
+  "unnamedWorkspace": "(ディレクトリ未指定)",
+  "spawnChildDialog": {
+    "title": "「{{title}}」の下で子 agent を起動",
+    "description": "子 agent にタスク prompt を与え、どの agent profile で作成するかを選択します(デフォルトはこの session の profile ですが、自由に変更できます)。さらに agent ソフトウェア/model を上書きすることもできます。",
+    "profileSelectAriaLabel": "子 agent の profile を選択",
+    "promptLabel": "タスク prompt",
+    "promptPlaceholder": "この子 agent に実行させたいタスクを記述してください…",
+    "titleFieldLabel": "タイトル(任意)",
+    "titlePlaceholder": "例:この UI slice の受け入れ確認を再実行",
+    "submit": "子 agent を起動"
+  },
+  "overrideFields": {
+    "softwareLabel": "Agent ソフトウェア(任意、デフォルトで Profile を使用)",
+    "useProfileDefault": "(Profile の設定を使用)",
+    "modelLabel": "Model(任意)",
+    "useDefaultPlain": "(デフォルトを使用)",
+    "useDefaultProfile": "(Profile のデフォルトを使用)",
+    "effortLabel": "思考の深さ(任意)"
+  }
+}

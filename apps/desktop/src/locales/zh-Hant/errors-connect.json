@@ -1,0 +1,10 @@
+{
+  "gateway": {
+    "invalidUrl": "無效的伺服器位址:{{detail}}",
+    "connectTimeout": "連線逾時,請確認伺服器位址是否正確、伺服器是否正在執行",
+    "connectFailed": "無法連線到伺服器,請確認位址是否正確",
+    "closedBeforeAuth": "連線在完成認證前被伺服器關閉",
+    "connectionLost": "與 Deskmony Core 的連線已中斷",
+    "notConnected": "尚未連線到 Deskmony Core"
+  }
+}

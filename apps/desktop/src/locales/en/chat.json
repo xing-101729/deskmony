@@ -1,0 +1,49 @@
+{
+  "model": {
+    "managedByAgentTitle": "The model is managed by the agent/CLI itself",
+    "managedByAgentLabel": "Managed by agent",
+    "switchAriaLabel": "Switch model"
+  },
+  "effort": {
+    "switchAriaLabel": "Switch thinking effort"
+  },
+  "control": {
+    "notSpecifiedOption": "(Not specified, uses the CLI default)",
+    "switchFailed": "Switch failed"
+  },
+  "tool": {
+    "statusRunning": "Running",
+    "statusFailed": "Failed",
+    "statusDone": "Done",
+    "inputLabel": "Input",
+    "outputLabel": "Output"
+  },
+  "usage": {
+    "cannotMeasureTitle": "This backend cannot measure cost (or it isn't yet confirmed whether it will report it) — the task/daily cost budget doesn't apply to this session; only the turn time/tool-call count limit still protects it.",
+    "unknownLabel": "Cost unknown",
+    "cannotMeasureLabel": "Cannot measure cost",
+    "hasValueTitle": "Accumulated cost (this backend reports cost, S3a usage-metering)",
+    "noValueYetTitle": "This backend reports accumulated cost, but this session hasn't received its first value yet (sent when a turn ends)"
+  },
+  "cost": {
+    "taskTrippedLabel": "Task \"{{title}}\" has reached its budget limit — new prompts are blocked",
+    "taskBudgetPercentLabel": "Task budget {{percent}}%",
+    "dailyTrippedLabel": "Today's cost kill-switch has been triggered — all sessions are paused",
+    "trippedTitle": "This session/task has been halted by the cost circuit breaker (the worktree/task is preserved — adjust the budget and restart core to continue)",
+    "percentTitle": "Task-level accumulated cost/token usage as a percentage of budget"
+  },
+  "empty": {
+    "selectOrCreateSession": "Select or create a conversation on the left to get started",
+    "startTyping": "Start typing a message to chat with the agent"
+  },
+  "sidebar": {
+    "openAriaLabel": "Open sidebar"
+  },
+  "session": {
+    "interrupt": "Interrupt"
+  },
+  "composer": {
+    "placeholder": "Message the agent… (Enter to send, Shift+Enter for a new line)",
+    "sendAriaLabel": "Send"
+  }
+}

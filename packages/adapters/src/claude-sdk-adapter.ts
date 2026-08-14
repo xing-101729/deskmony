@@ -14,6 +14,7 @@ import type {
 import type { AgentEvent, AgentProfile, EffortLevel } from "@deskmony/shared";
 import type { PromptInput } from "@deskmony/shared";
 import type { SubagentPort } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, TeamSpawnContext, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
@@ -396,7 +397,11 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {
-      throw new Error(`未知的 agent handle: ${handle.id}`);
+      throw new DeskmonyError(
+        ErrorCodes.ADAPTER_UNKNOWN_HANDLE,
+        { handleId: handle.id },
+        `未知的 agent handle: ${handle.id}`,
+      );
     }
     return internal;
   }

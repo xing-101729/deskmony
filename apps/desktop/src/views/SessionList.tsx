@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { AgentOverride, AgentProfile, EffortLevel, Session } from "@deskmony/shared";
 import { useSessionStore, selectContextReporting, selectResolvedProviders, selectProviderModels } from "../stores/session-store.js";
 import { ProfileCreateDialog } from "./ProfileCreateDialog.js";
@@ -12,8 +14,11 @@ import { Dialog } from "../ui/Dialog.js";
 import { sessionStatusMeta, softwareLabel } from "../ui/status.js";
 import { MOD_LABEL } from "../ui/hotkeys.js";
 import type { ThemePreference, ResolvedTheme } from "../ui/theme.js";
+import { useLocale } from "../ui/locale.js";
+import { LOCALES, type Locale } from "../lib/locale-storage.js";
 import { groupSessionsByWorkspace } from "../lib/workspaces.js";
 import { buildAgentOverride } from "../lib/agent-override.js";
+import { translateError } from "../lib/error-i18n.js";
 
 /**
  * S3a(usage-metering)L4 §4:「SessionList 每列顯示 context 使用率(如 32%)」。
@@ -27,22 +32,37 @@ function formatContextUsage(usage: { contextUsed?: number; contextSize?: number 
 
 interface NavItem {
   mode: ViewMode;
-  label: string;
+  /** i18n 專案新增:模組層級常數不能再直接放算好的中文字串(語言切換後不會
+   *  更新)——改存 i18next key 的字尾,渲染時由呼叫端組 `sessionList:nav.${labelKey}`
+   *  查表。比照下面 connectionMeta() 的作法。 */
+  labelKey: string;
   icon: IconName;
   hint: string;
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { mode: "session", label: "Session", icon: "message", hint: `${MOD_LABEL}1` },
-  { mode: "team-chat", label: "團隊群聊", icon: "users", hint: `${MOD_LABEL}2` },
-  { mode: "task-board", label: "任務看板", icon: "board", hint: `${MOD_LABEL}3` },
+  { mode: "session", labelKey: "session", icon: "message", hint: `${MOD_LABEL}1` },
+  { mode: "team-chat", labelKey: "teamChat", icon: "users", hint: `${MOD_LABEL}2` },
+  { mode: "task-board", labelKey: "taskBoard", icon: "board", hint: `${MOD_LABEL}3` },
 ];
 
-const connectionMeta: Record<string, { label: string; dot: string }> = {
-  open: { label: "已連線", dot: "bg-ok" },
-  connecting: { label: "連線中…", dot: "bg-warn" },
-  closed: { label: "已斷線", dot: "bg-danger" },
+/** 非文字樣式——`label` 拆出去用 i18next 動態查,這裡只留圓點顏色。 */
+const CONNECTION_DOT: Record<string, string> = {
+  open: "bg-ok",
+  connecting: "bg-warn",
+  closed: "bg-danger",
 };
+
+/** i18n 專案新增:比照 ui/status.ts 的 sessionStatusMeta() 作法——`label` 不能
+ *  再是模組載入當下就算好的靜態字串(否則語言切換後永遠停在第一次載入時的
+ *  語言),改成純函式,由呼叫端(SessionList 元件本體)把 useTranslation() 拿
+ *  到的 `t` 傳進來,在使用當下才查表(比照 lib/error-i18n.ts 的
+ *  translateError() 慣例,不直接 import i18next 單例——這個檔案是元件檔,
+ *  有 hook 可用)。 */
+function connectionMeta(status: string, t: TFunction): { label: string; dot: string } {
+  const key = status in CONNECTION_DOT ? status : "closed";
+  return { label: t(`sessionList:connection.${key}`), dot: CONNECTION_DOT[key] };
+}
 
 interface SessionListProps {
   mobileOpen: boolean;
@@ -112,6 +132,7 @@ export function SessionList({
   onToggleTheme,
   onLogout,
 }: SessionListProps): JSX.Element {
+  const { t } = useTranslation(["sessionList", "common"]);
   const sessions = useSessionStore((s) => s.sessions);
   const profiles = useSessionStore((s) => s.profiles);
   const sessionUsage = useSessionStore((s) => s.sessionUsage);
@@ -132,8 +153,11 @@ export function SessionList({
   const [overrideEffort, setOverrideEffort] = useState<EffortLevel | "">("");
 
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId);
-  const workspaces = useMemo(() => groupSessionsByWorkspace(sessions), [sessions]);
-  const conn = connectionMeta[connectionStatus] ?? connectionMeta.closed;
+  const workspaces = useMemo(
+    () => groupSessionsByWorkspace(sessions, t("sessionList:unnamedWorkspace")),
+    [sessions, t],
+  );
+  const conn = connectionMeta(connectionStatus, t);
 
   // 換 profile 時重置覆寫——理由同 SpawnChildDialog 的同名 effect。
   useEffect(() => {
@@ -148,7 +172,7 @@ export function SessionList({
    * 外層的 selectSession()。
    */
   const handleDelete = (sessionId: string, title: string): void => {
-    if (!window.confirm(`確定要刪除對話「${title}」嗎?此操作無法復原。`)) return;
+    if (!window.confirm(t("sessionList:confirmDeleteSession", { title }))) return;
     void deleteSession(sessionId);
   };
 
@@ -160,8 +184,9 @@ export function SessionList({
    */
   const handleDeleteProfile = (profile: AgentProfile): void => {
     const inUseCount = sessions.filter((s) => s.agentProfileId === profile.id).length;
-    const usageNote = inUseCount > 0 ? `\n\n目前有 ${inUseCount} 個既有對話是用這個 profile 建立的,刪除不影響那些對話,但之後無法再用這個 profile 建立新對話。` : "";
-    if (!window.confirm(`確定要刪除 Agent Profile「${profile.name}」嗎?此操作無法復原。${usageNote}`)) return;
+    const usageNote =
+      inUseCount > 0 ? t("sessionList:confirmDeleteProfileUsageNote", { count: inUseCount }) : "";
+    if (!window.confirm(t("sessionList:confirmDeleteProfile", { name: profile.name, usageNote }))) return;
     void deleteProfile(profile.id);
   };
 
@@ -212,7 +237,7 @@ export function SessionList({
             {contextPct && (
               <>
                 <span className="text-fg-faint">·</span>
-                <Meta mono title="context 窗口使用率(S3a usage-metering)">
+                <Meta mono title={t("sessionList:contextUsageTitle")}>
                   ctx {contextPct}
                 </Meta>
               </>
@@ -221,8 +246,8 @@ export function SessionList({
         </button>
         <IconButton
           icon="branch"
-          aria-label="開子 agent"
-          title="開一個子 agent 執行子任務"
+          aria-label={t("sessionList:spawnChildAriaLabel")}
+          title={t("sessionList:spawnChildTitle")}
           size="xs"
           className="my-auto opacity-0 focus-visible:opacity-100 group-hover:opacity-100"
           onClick={(e) => {
@@ -232,8 +257,8 @@ export function SessionList({
         />
         <IconButton
           icon="trash"
-          aria-label="刪除對話"
-          title="刪除對話"
+          aria-label={t("sessionList:deleteSessionAriaLabel")}
+          title={t("sessionList:deleteSessionAriaLabel")}
           size="xs"
           className="my-auto mr-1 opacity-0 hover:!text-danger focus-visible:opacity-100 group-hover:opacity-100"
           onClick={(e) => {
@@ -248,23 +273,31 @@ export function SessionList({
   if (collapsed) {
     return (
       <aside className="hidden w-13 flex-shrink-0 flex-col items-center border-r border-line-subtle bg-panel py-2 sm:flex">
-        <IconButton icon="sidebar" aria-label="展開側欄" onClick={onToggleCollapsed} className="mb-2" />
+        <IconButton icon="sidebar" aria-label={t("sessionList:expandSidebarAriaLabel")} onClick={onToggleCollapsed} className="mb-2" />
         <div className="flex flex-1 flex-col items-center gap-1">
-          {NAV_ITEMS.map((item) => (
-            <IconButton
-              key={item.mode}
-              icon={item.icon}
-              aria-label={`${item.label}(${item.hint})`}
-              title={`${item.label}(${item.hint})`}
-              active={viewMode === item.mode}
-              size="md"
-              onClick={() => onChangeView(item.mode)}
-            />
-          ))}
+          {NAV_ITEMS.map((item) => {
+            const label = t(`sessionList:nav.${item.labelKey}`);
+            return (
+              <IconButton
+                key={item.mode}
+                icon={item.icon}
+                aria-label={`${label}(${item.hint})`}
+                title={`${label}(${item.hint})`}
+                active={viewMode === item.mode}
+                size="md"
+                onClick={() => onChangeView(item.mode)}
+              />
+            );
+          })}
         </div>
         <div className="flex flex-col items-center gap-1">
-          <IconButton icon="search" aria-label="命令面板" title={`命令面板(${MOD_LABEL}K)`} onClick={onOpenPalette} />
-          <IconButton icon="settings" aria-label="設定" onClick={onOpenSettings} />
+          <IconButton
+            icon="search"
+            aria-label={t("sessionList:commandPaletteAriaLabel")}
+            title={`${t("sessionList:commandPaletteAriaLabel")}(${MOD_LABEL}K)`}
+            onClick={onOpenPalette}
+          />
+          <IconButton icon="settings" aria-label={t("sessionList:settingsAriaLabel")} onClick={onOpenSettings} />
           <span className={`h-1.5 w-1.5 rounded-full ${conn.dot}`} title={conn.label} />
         </div>
       </aside>
@@ -282,8 +315,14 @@ export function SessionList({
         <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${conn.dot}`} title={conn.label} />
         <span className="truncate text-sm font-semibold tracking-tight text-fg">Deskmony</span>
         <div className="ml-auto flex items-center gap-0.5">
-          <IconButton icon="sidebar" aria-label="收合側欄" title={`收合側欄(${MOD_LABEL}B)`} onClick={onToggleCollapsed} className="hidden sm:inline-flex" />
-          <IconButton icon="x" aria-label="關閉側欄" onClick={onCloseMobile} className="sm:hidden" />
+          <IconButton
+            icon="sidebar"
+            aria-label={t("sessionList:collapseSidebarAriaLabel")}
+            title={`${t("sessionList:collapseSidebarAriaLabel")}(${MOD_LABEL}B)`}
+            onClick={onToggleCollapsed}
+            className="hidden sm:inline-flex"
+          />
+          <IconButton icon="x" aria-label={t("sessionList:closeSidebarAriaLabel")} onClick={onCloseMobile} className="sm:hidden" />
         </div>
       </div>
 
@@ -295,7 +334,7 @@ export function SessionList({
           className="focus-ring flex h-7 w-full items-center gap-1.5 rounded-md border border-line bg-surface px-2 text-xs text-fg-faint transition hover:border-line-strong hover:text-fg-subtle"
         >
           <Icon name="search" size={12} />
-          <span className="flex-1 text-left">搜尋或執行指令…</span>
+          <span className="flex-1 text-left">{t("sessionList:paletteTriggerLabel")}</span>
           <Kbd>{MOD_LABEL}K</Kbd>
         </button>
       </div>
@@ -315,7 +354,7 @@ export function SessionList({
             }`}
           >
             <Icon name={item.icon} size={14} />
-            <span className="flex-1 text-left">{item.label}</span>
+            <span className="flex-1 text-left">{t(`sessionList:nav.${item.labelKey}`)}</span>
             {item.mode === "session" && sessions.length > 0 && (
               <span className="tabular text-2xs text-fg-faint">{sessions.length}</span>
             )}
@@ -328,12 +367,12 @@ export function SessionList({
       {/* ---- Profile + 新對話 ---- */}
       <div className="flex-shrink-0 space-y-1.5 px-2 pb-2">
         <Select
-          aria-label="選擇 Agent Profile"
+          aria-label={t("sessionList:selectProfileAriaLabel")}
           value={selectedProfileId}
           onChange={(e) => onSelectProfile(e.target.value)}
           disabled={profiles.length === 0}
         >
-          {profiles.length === 0 && <option value="">(尚無 Profile)</option>}
+          {profiles.length === 0 && <option value="">{t("sessionList:noProfileOption")}</option>}
           {profiles.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}({softwareLabel(p.software)})
@@ -346,7 +385,7 @@ export function SessionList({
           className="focus-ring flex h-5 items-center gap-1 text-2xs text-fg-faint underline decoration-dotted hover:text-accent"
         >
           <Icon name="chevron-right" size={10} className={`flex-shrink-0 transition-transform ${advancedOpen ? "rotate-90" : ""}`} />
-          進階(自選 agent / model)
+          {t("sessionList:advancedToggle")}
         </button>
         {advancedOpen && (
           <div className="space-y-1.5 rounded-md border border-line-subtle bg-surface p-2">
@@ -375,21 +414,21 @@ export function SessionList({
                 : undefined;
               onCreateSession(buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model, overrideEffort, selectedProfile?.effort));
             }}
-            title={`新對話(${MOD_LABEL}N)`}
+            title={`${t("sessionList:newSessionButton")}(${MOD_LABEL}N)`}
           >
-            {creatingSession ? "建立中…" : "新對話"}
+            {creatingSession ? t("sessionList:creating") : t("sessionList:newSessionButton")}
           </Button>
           <IconButton
             icon="sparkle"
-            aria-label="建立 Agent Profile"
-            title="建立 Agent Profile"
+            aria-label={t("sessionList:createProfileAriaLabel")}
+            title={t("sessionList:createProfileAriaLabel")}
             variant="outline"
             onClick={() => onSetProfileDialogOpen(true)}
           />
           <IconButton
             icon="trash"
-            aria-label="刪除 Agent Profile"
-            title="刪除 Agent Profile"
+            aria-label={t("sessionList:deleteProfileAriaLabel")}
+            title={t("sessionList:deleteProfileAriaLabel")}
             variant="outline"
             className="hover:!text-danger"
             disabled={!selectedProfile}
@@ -401,7 +440,12 @@ export function SessionList({
       {/* ---- 工作區分組的 session 清單 ---- */}
       <div className="flex-1 space-y-2.5 overflow-y-auto px-2 pb-2 pt-1">
         {sessions.length === 0 && (
-          <EmptyState icon="message" title="尚無任何對話" description="點擊上方「新對話」開始與 agent 互動。" compact />
+          <EmptyState
+            icon="message"
+            title={t("sessionList:emptyTitle")}
+            description={t("sessionList:emptyDescription")}
+            compact
+          />
         )}
         {workspaces.map((workspace) => {
           const isCollapsed = collapsedWorkspaces.has(workspace.key);
@@ -426,7 +470,10 @@ export function SessionList({
                     {workspace.name}
                   </span>
                   {workspace.waitingCount > 0 && (
-                    <span className="h-1.5 w-1.5 flex-shrink-0 animate-breathe rounded-full bg-warn" title="有 session 等待授權" />
+                    <span
+                      className="h-1.5 w-1.5 flex-shrink-0 animate-breathe rounded-full bg-warn"
+                      title={t("sessionList:waitingForAuthTitle")}
+                    />
                   )}
                   <span className="tabular flex-shrink-0 text-2xs text-fg-faint">{workspace.sessions.length}</span>
                 </button>
@@ -467,13 +514,31 @@ export function SessionList({
       <div className="flex flex-shrink-0 items-center gap-0.5 border-t border-line-subtle px-2 py-1.5">
         <IconButton
           icon={resolvedTheme === "dark" ? "moon" : "sun"}
-          aria-label="切換主題"
-          title={themePreference === "system" ? "主題:跟隨系統(點擊切換)" : resolvedTheme === "dark" ? "深色主題(點擊切換為淺色)" : "淺色主題(點擊切換為深色)"}
+          aria-label={t("sessionList:toggleThemeAriaLabel")}
+          title={
+            themePreference === "system"
+              ? t("sessionList:theme.system")
+              : resolvedTheme === "dark"
+                ? t("sessionList:theme.darkClickForLight")
+                : t("sessionList:theme.lightClickForDark")
+          }
           onClick={onToggleTheme}
         />
-        <IconButton icon="settings" aria-label="設定" title={`設定(${MOD_LABEL},)`} onClick={onOpenSettings} />
+        <LanguageSwitcher />
+        <IconButton
+          icon="settings"
+          aria-label={t("sessionList:settingsAriaLabel")}
+          title={`${t("sessionList:settingsAriaLabel")}(${MOD_LABEL},)`}
+          onClick={onOpenSettings}
+        />
         {onLogout && (
-          <IconButton icon="logout" aria-label="登出" title="登出" className="ml-auto hover:!text-danger" onClick={onLogout} />
+          <IconButton
+            icon="logout"
+            aria-label={t("sessionList:logoutAriaLabel")}
+            title={t("sessionList:logoutAriaLabel")}
+            className="ml-auto hover:!text-danger"
+            onClick={onLogout}
+          />
         )}
       </div>
 
@@ -490,6 +555,76 @@ export function SessionList({
   );
 }
 
+/** 4 個語言各自的顯示名稱——用該語言自己的文字寫(中文/English/日本語/
+ *  Español),這是專有名詞(語言名稱本身),不透過 i18next 翻譯。 */
+const LANGUAGE_NAMES: Record<Locale, string> = {
+  "zh-Hant": "中文",
+  en: "English",
+  ja: "日本語",
+  es: "Español",
+};
+
+/**
+ * 語言切換器——底部工具列的一顆 IconButton,點擊展開一個極簡的清單選單。
+ *
+ * 這裡沒有沿用 CommandPalette.tsx(全螢幕 modal + ModalPortal)或
+ * Dialog.tsx(置中對話框)的樣式,兩者都是給「有明確標題/內容」的較重量級
+ * 彈窗用的;這只是 4 個選項的小選單,比照一般 UI 慣例做成錨定在按鈕旁的
+ * absolute 定位小面板,搭配一個鋪滿全螢幕的透明按鈕當「點外面關閉」的判定
+ * (寫法上與 CommandPalette 的背景 `onMouseDown` 關閉判斷同樣目的,只是這裡
+ * 不需要真的畫一層背景遮罩)。
+ */
+function LanguageSwitcher(): JSX.Element {
+  const { t } = useTranslation(["sessionList"]);
+  const locale = useLocale((s) => s.locale);
+  const setLocale = useLocale((s) => s.setLocale);
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="relative">
+      <IconButton
+        icon="command"
+        aria-label={t("sessionList:languageSwitcher.toggleLabel")}
+        title={t("sessionList:languageSwitcher.toggleLabel")}
+        active={open}
+        onClick={() => setOpen((v) => !v)}
+      />
+      {open && (
+        <>
+          {/* 點外面關閉——這裡不需要 CommandPalette 那種 target===currentTarget
+              判斷,因為選單本身是這層的手足節點而非子節點,這一層背後沒有
+              任何東西可點。 */}
+          <div className="fixed inset-0 z-40" onMouseDown={() => setOpen(false)} />
+          <div
+            role="menu"
+            aria-label={t("sessionList:languageSwitcher.menuLabel")}
+            className="absolute bottom-full left-0 z-50 mb-1 w-28 overflow-hidden rounded-md border border-line-subtle bg-panel py-1 shadow-overlay"
+          >
+            {LOCALES.map((l) => (
+              <button
+                key={l}
+                type="button"
+                role="menuitemradio"
+                aria-checked={l === locale}
+                onClick={() => {
+                  setLocale(l);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs transition hover:bg-surface ${
+                  l === locale ? "font-medium text-fg" : "text-fg-soft"
+                }`}
+              >
+                {LANGUAGE_NAMES[l]}
+                {l === locale && <Icon name="check" size={11} className="text-accent" />}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /**
  * S12 Phase2 R3:從選定的 session 開一個子 agent 的極簡對話框。
  * 這輪新增:Profile 預設帶入父 session 自己的 agentProfileId(維持原本「順手就是
@@ -497,6 +632,7 @@ export function SessionList({
  * agent 自己呼叫 spawn_subagent 時也能透過 list_profiles 自行決定的對稱設計)。
  */
 function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () => void }): JSX.Element {
+  const { t } = useTranslation(["sessionList", "common"]);
   const spawnChild = useSessionStore((s) => s.spawnChild);
   const profiles = useSessionStore((s) => s.profiles);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
@@ -532,7 +668,7 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
       await spawnChild(session.id, prompt.trim(), profileId, title.trim() || undefined, agentOverride);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setSubmitting(false);
     }
@@ -540,25 +676,29 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
 
   return (
     <Dialog
-      title={`在「${session.title}」底下開子 agent`}
-      description="給子 agent 一段任務 prompt,並選擇要用哪個 agent profile 建立(預設沿用這個 session 的 profile,可自行改選);也可以再進一步覆寫 agent 軟體/model。"
+      title={t("sessionList:spawnChildDialog.title", { title: session.title })}
+      description={t("sessionList:spawnChildDialog.description")}
       icon="branch"
       size="md"
       onClose={onClose}
       footer={
         <div className="flex w-full justify-end gap-2">
           <Button variant="secondary" disabled={submitting} onClick={onClose}>
-            取消
+            {t("common:cancel")}
           </Button>
           <Button variant="primary" disabled={!prompt.trim() || !profileId || submitting} loading={submitting} onClick={() => void handleSubmit()}>
-            {submitting ? "建立中…" : "開子 agent"}
+            {submitting ? t("sessionList:creating") : t("sessionList:spawnChildDialog.submit")}
           </Button>
         </div>
       }
     >
       <div className="space-y-3">
         <Field label="Agent Profile">
-          <Select aria-label="選擇子 agent 的 Profile" value={profileId} onChange={(e) => setProfileId(e.target.value)}>
+          <Select
+            aria-label={t("sessionList:spawnChildDialog.profileSelectAriaLabel")}
+            value={profileId}
+            onChange={(e) => setProfileId(e.target.value)}
+          >
             {profiles.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}({softwareLabel(p.software)})
@@ -575,11 +715,17 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
           effort={overrideEffort}
           onChangeEffort={setOverrideEffort}
         />
-        <Field label="任務 prompt">
-          <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={5} placeholder="描述這個子 agent 要執行的任務…" autoFocus />
+        <Field label={t("sessionList:spawnChildDialog.promptLabel")}>
+          <Textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={5}
+            placeholder={t("sessionList:spawnChildDialog.promptPlaceholder")}
+            autoFocus
+          />
         </Field>
-        <Field label="標題(選填)">
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如:Rerun 這個 UI slice 的驗收" />
+        <Field label={t("sessionList:spawnChildDialog.titleFieldLabel")}>
+          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("sessionList:spawnChildDialog.titlePlaceholder")} />
         </Field>
         {error && <Alert tone="danger">{error}</Alert>}
       </div>
@@ -615,6 +761,7 @@ function AgentOverrideFields({
   effort: EffortLevel | "";
   onChangeEffort: (effort: EffortLevel | "") => void;
 }): JSX.Element {
+  const { t } = useTranslation(["sessionList", "common"]);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const detectingAgents = useSessionStore((s) => s.detectingAgents);
   const detectAgents = useSessionStore((s) => s.detectAgents);
@@ -650,9 +797,9 @@ function AgentOverrideFields({
 
   return (
     <>
-      <Field label="Agent 軟體(選填,預設沿用 Profile)">
+      <Field label={t("sessionList:overrideFields.softwareLabel")}>
         <Select value={overrideProviderId} onChange={(e) => onChangeOverrideProviderId(e.target.value)}>
-          <option value="">(沿用 Profile 設定)</option>
+          <option value="">{t("sessionList:overrideFields.useProfileDefault")}</option>
           {selectableProviders.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
@@ -661,9 +808,11 @@ function AgentOverrideFields({
         </Select>
       </Field>
       {models.length > 0 && (
-        <Field label="Model(選填)">
+        <Field label={t("sessionList:overrideFields.modelLabel")}>
           <Select value={model} onChange={(e) => onChangeModel(e.target.value)}>
-            <option value="">(沿用{overrideProvider ? "" : " Profile"}預設)</option>
+            <option value="">
+              {overrideProvider ? t("sessionList:overrideFields.useDefaultPlain") : t("sessionList:overrideFields.useDefaultProfile")}
+            </option>
             {models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
@@ -673,9 +822,11 @@ function AgentOverrideFields({
         </Field>
       )}
       {effectiveSoftware === "claude-agent-sdk" && (
-        <Field label="思考程度(選填)">
+        <Field label={t("sessionList:overrideFields.effortLabel")}>
           <Select value={effort} onChange={(e) => onChangeEffort(e.target.value as EffortLevel | "")}>
-            <option value="">(沿用{overrideProvider ? "" : " Profile"}預設)</option>
+            <option value="">
+              {overrideProvider ? t("sessionList:overrideFields.useDefaultPlain") : t("sessionList:overrideFields.useDefaultProfile")}
+            </option>
             <option value="low">low</option>
             <option value="medium">medium</option>
             <option value="high">high</option>

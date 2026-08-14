@@ -4,6 +4,7 @@ import { Readable, Writable } from "node:stream";
 import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
@@ -87,7 +88,11 @@ export class AcpAdapter implements AgentAdapter {
   async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
     const acpConfig = profile.acpConfig;
     if (!acpConfig) {
-      throw new Error(`AgentProfile "${profile.id}" 的 software="acp" 缺少 acpConfig(command)`);
+      throw new DeskmonyError(
+        ErrorCodes.ADAPTER_MISSING_CONFIG,
+        { profileId: profile.id, software: "acp", configField: "command" },
+        `AgentProfile "${profile.id}" 的 software="acp" 缺少 acpConfig(command)`,
+      );
     }
 
     const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
@@ -108,7 +113,13 @@ export class AcpAdapter implements AgentAdapter {
     // 用 Promise.race 賽跑,避免無限期卡在等待子程序回應。
     const spawnFailure = new Promise<never>((_, reject) => {
       child.once("error", (err) => {
-        reject(new Error(`ACP agent 子程序啟動失敗(command=${command}): ${err.message}`));
+        reject(
+          new DeskmonyError(
+            "adapterProcess.spawnFailed",
+            { software: "acp", command, detail: err.message },
+            `ACP agent 子程序啟動失敗(command=${command}): ${err.message}`,
+          ),
+        );
       });
     });
     spawnFailure.catch(() => {
@@ -290,7 +301,11 @@ export class AcpAdapter implements AgentAdapter {
    */
   async setModel(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new Error('software="acp" 不支援變更 model(model 由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)');
+    throw new DeskmonyError(
+      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
+      { software: "acp", operation: "setModel" },
+      'software="acp" 不支援變更 model(model 由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
+    );
   }
 
   /**
@@ -302,13 +317,21 @@ export class AcpAdapter implements AgentAdapter {
    */
   async setEffort(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new Error('software="acp" 不支援變更思考程度(思考程度由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)');
+    throw new DeskmonyError(
+      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
+      { software: "acp", operation: "setEffort" },
+      'software="acp" 不支援變更思考程度(思考程度由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
+    );
   }
 
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {
-      throw new Error(`未知的 agent handle: ${handle.id}`);
+      throw new DeskmonyError(
+        ErrorCodes.ADAPTER_UNKNOWN_HANDLE,
+        { handleId: handle.id },
+        `未知的 agent handle: ${handle.id}`,
+      );
     }
     return internal;
   }

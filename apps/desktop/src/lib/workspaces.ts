@@ -41,11 +41,15 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
-/** 取路徑最後一段當工作區名稱;根目錄(例如 `D:/`)則保留原樣。 */
-export function workspaceName(path: string): string {
+/** 取路徑最後一段當工作區名稱;根目錄(例如 `D:/`)則保留原樣。
+ *  i18n 專案新增:「(未指定目錄)」的翻譯結果改由呼叫端(SessionList.tsx,
+ *  唯一呼叫點)透過 `unnamedLabel` 傳入——這個檔案維持不 import i18next,
+ *  純函式不依賴 React context,呼叫端自己用 useTranslation() 的 t() 產生
+ *  字串再傳進來(比照 lib/error-i18n.ts 的 translateError() 慣例)。 */
+export function workspaceName(path: string, unnamedLabel: string): string {
   const cleaned = path.replace(/\\/g, "/").replace(/\/+$/, "");
   const segment = cleaned.slice(cleaned.lastIndexOf("/") + 1);
-  return segment || cleaned || "(未指定目錄)";
+  return segment || cleaned || unnamedLabel;
 }
 
 /**
@@ -60,7 +64,7 @@ export function shortenPath(path: string, maxSegments = 3): string {
   return `…/${segments.slice(-maxSegments).join("/")}`;
 }
 
-export function groupSessionsByWorkspace(sessions: Session[]): WorkspaceGroup[] {
+export function groupSessionsByWorkspace(sessions: Session[], unnamedLabel: string): WorkspaceGroup[] {
   const groups = new Map<string, WorkspaceGroup>();
 
   for (const session of sessions) {
@@ -70,7 +74,7 @@ export function groupSessionsByWorkspace(sessions: Session[]): WorkspaceGroup[] 
     if (!group) {
       group = {
         key,
-        name: workspaceName(path),
+        name: workspaceName(path, unnamedLabel),
         path,
         sessions: [],
         lastActivity: 0,

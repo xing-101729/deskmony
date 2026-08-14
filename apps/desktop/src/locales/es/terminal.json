@@ -1,0 +1,8 @@
+{
+  "openSidebar": "Abrir barra lateral",
+  "selectOrCreate": "Selecciona o crea una conversación a la izquierda para empezar",
+  "directTerminal": "Terminal directa",
+  "interrupt": "Interrumpir (Ctrl+C)",
+  "inputPlaceholder": "Escribe una línea para enviarla a la terminal (Enter para enviar, igual que escribirla en un teclado y pulsar Enter)…",
+  "send": "Enviar"
+}

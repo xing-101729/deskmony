@@ -1,0 +1,63 @@
+{
+  "dialogTitle": "設定 · Provider 管理",
+  "dialogDescription": "管理內建 provider 目錄(啟用/停用、排序、可用 model、環境變數),見本機偵測結果自動帶入的安裝狀態",
+  "providerCountFooter": "共 {{count}} 項",
+  "redetect": "重新偵測",
+  "sections": {
+    "global": "全域設定",
+    "notification": "通知設定",
+    "provider": "Provider 管理"
+  },
+  "source": {
+    "default": "預設值",
+    "file": "設定檔",
+    "env": "環境變數"
+  },
+  "provider": {
+    "installed": "已安裝/可用",
+    "notDetected": "未偵測到",
+    "orderLabel": "排序",
+    "enableLabel": "啟用 {{name}}",
+    "disableLabel": "停用 {{name}}",
+    "collapseModelsEnv": "收合(模型 / 環境變數)",
+    "expandModelsEnv": "展開(模型 / 環境變數)",
+    "modelsHint": "啟用的 model(未勾選的不會出現在「建立 Profile」或對話中「切換 model」的下拉選單)",
+    "addUpdate": "新增/更新",
+    "envHint": "環境變數(例如 ANTHROPIC_API_KEY)——值一律加密顯示為 ***,這裡看到的清單只是「已設定哪些 key」,無法讀回明文。",
+    "envKeyPlaceholder": "KEY",
+    "envValuePlaceholder": "值"
+  },
+  "global": {
+    "description": "core 的分層設定(defaults → <configPath/> → 環境變數)——標示「環境變數」來源的欄位已鎖定(改設定檔不會生效,環境變數永遠優先);修改後需要重啟 core 才會生效。",
+    "bindHostLabel": "綁定位址",
+    "noInterfaceEditReason": "不可經此介面修改,避免遠端調整曝露面,需手動編輯設定檔或 {{envVarName}}",
+    "permissionTimeoutLabel": "權限逾時(ms)",
+    "lockedByEnvVar": "目前由 {{envVarName}} 決定,改設定檔不會生效",
+    "authRateLimitMaxLabel": "認證失敗門檻(次)",
+    "authRateLimitCooldownLabel": "認證冷卻期(ms)",
+    "defaultWorkingDirLabel": "預設工作目錄",
+    "taskWorktreesRootLabel": "任務 worktree 根目錄",
+    "taskWorktreesRootPlaceholder": "省略 = 維持既有算法(每個 team 各自旁邊的 .deskmony-worktrees)",
+    "staticDirLabel": "瀏覽器 UI 靜態目錄",
+    "logLevelLabel": "Log 等級",
+    "dataDirLabel": "SQLite 資料目錄(唯讀)",
+    "dataDirLockedReason": "不在可經 gateway 修改的安全子集內,需手動編輯設定檔或 {{envVarName}}",
+    "saveButton": "儲存全域設定",
+    "noChanges": "沒有變更",
+    "written": "已寫入:{{fields}}",
+    "requiresRestart": "(需重啟 core 才會生效)",
+    "saveFailedWithReason": "儲存失敗:{{error}}"
+  },
+  "notification": {
+    "description": "升級/熔斷的帶外通知(唯讀)——webhook url 視同憑證,即使本機連線也不提供任何遠端/UI 寫入路徑;要修改請直接編輯 <configPath/> 的 <notificationBlock/> 區塊,並重啟 core 才會生效。",
+    "readOnlyReason": "唯讀,見上方說明",
+    "desktopLabel": "桌面系統通知",
+    "webhookMinSeverityLabel": "Webhook 最低嚴重度",
+    "webhookUrlLockedReason": "視同憑證,一律遮罩,唯讀",
+    "batchIntervalLabel": "批次間隔(分鐘)",
+    "quietHoursLabel": "靜音時段",
+    "enabledValue": "已啟用",
+    "disabledValue": "已停用",
+    "notSet": "(未設定)"
+  }
+}

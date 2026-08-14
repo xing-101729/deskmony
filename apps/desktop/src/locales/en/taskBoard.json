@@ -1,0 +1,66 @@
+{
+  "sidebar": {
+    "openAriaLabel": "Open sidebar"
+  },
+  "empty": {
+    "noTeamTitle": "No team created yet",
+    "noTeamDescription": "The task board needs a team with at least one member before you can create and assign tasks.",
+    "createTeam": "Create team",
+    "selectTeamTitle": "Select a team"
+  },
+  "header": {
+    "switchTeamAriaLabel": "Switch team",
+    "newTask": "New task",
+    "teamManagement": "Team management"
+  },
+  "composer": {
+    "titlePlaceholder": "New task title",
+    "descriptionPlaceholder": "Description (optional)",
+    "acceptancePlaceholder": "Acceptance commands (optional, separate multiple with {{separator}})",
+    "acceptanceTitle": "Machine acceptance commands (S4): each command runs in order, all must exit 0 to pass; leave empty = no machine acceptance (falls back to human judgment)",
+    "creating": "Creating…",
+    "create": "Create"
+  },
+  "column": {
+    "empty": "No tasks"
+  },
+  "blockedSection": {
+    "heading": "Blocked · {{count}}"
+  },
+  "card": {
+    "deleteTaskAriaLabel": "Delete task",
+    "blockedFromBadge": "Blocked from: {{status}}",
+    "awaitingApproval": "Waiting for your approval to enter review",
+    "approveReview": "Approve entry to review",
+    "assignMemberAriaLabel": "Assign member",
+    "selectMemberOption": "Select a member…",
+    "assign": "Assign",
+    "start": "Start",
+    "submitForReview": "Submit for review",
+    "reject": "Reject",
+    "approveMergeTransition": "Pass, proceed to merge",
+    "approveMerge": "Approve merge",
+    "unblock": "Unblock (back to {{status}})",
+    "block": "Block",
+    "confirmMerge": "Merge branch \"{{branch}}\" back into the main branch and complete the task?\nThis will actually run git merge --no-ff — if there's a conflict, it will automatically revert (git merge --abort) and show an error.",
+    "confirmDelete": "Delete task \"{{title}}\"? If a worktree has been created, it will be force-deleted too — this cannot be undone.",
+    "deleteHadUncommittedWarning": "Task \"{{title}}\"'s worktree had uncommitted changes, which were force-cleared along with the delete — this cannot be undone."
+  },
+  "acceptance": {
+    "countBadge": "{{count}} acceptance command(s)",
+    "undefined": "No acceptance criteria defined",
+    "edit": "Set acceptance",
+    "running": "Running acceptance",
+    "run": "Run acceptance",
+    "passed": "Passed",
+    "failed": "Failed",
+    "workspaceMissing": "No worktree yet, cannot run",
+    "detailsSummary": "Acceptance result details ({{done}}/{{total}} run)",
+    "timedOut": "Timed out",
+    "exitCode": "exit {{code}}"
+  },
+  "acceptancePrompt": {
+    "message": "Set machine acceptance commands (separate multiple with \"{{separator}}\", run in order, all must exit 0 to pass; leave empty to clear the acceptance criteria):"
+  },
+  "advanceWarning": "Task \"{{title}}\" did not pass acceptance, but was still moved to review (this slice is advisory-only and doesn't block the transition)."
+}

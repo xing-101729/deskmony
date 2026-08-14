@@ -1,0 +1,11 @@
+{
+  "sessionManager": {
+    "abandonRequiresInterrupted": "セッション {{sessionId}} は現在「{{status}}」の状態で「interrupted」ではないため、「破棄」できません",
+    "promptBlockedByBudget": "{{reason}}",
+    "notYourChild": "セッション {{sessionId}} はあなたの子セッションではないため、メッセージを送信できません",
+    "continueRequiresInterrupted": "セッション {{sessionId}} は現在「{{status}}」の状態で「interrupted」ではないため、「継続」できません",
+    "continueUnsupportedBackend": "セッション {{sessionId}} のバックエンド({{adapterType}})は「継続(記憶を保持)」に対応していないか、クラッシュ前にバックエンドのセッション ID を捕捉できていません。「引き継ぎ」を使用してください",
+    "vanishedDuringContinue": "セッション {{sessionId}} は「継続」処理の途中で予期せず消失しました",
+    "agentOverrideMissingCommand": "agentOverride.software=\"{{software}}\" を指定する場合は command も併せて指定する必要があります"
+  }
+}

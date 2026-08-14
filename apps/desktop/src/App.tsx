@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import type { AgentOverride } from "@deskmony/shared";
 import { client, useSessionStore } from "./stores/session-store.js";
 import { useTeamStore } from "./stores/team-store.js";
@@ -52,6 +53,7 @@ const hasElectronBridge = typeof window !== "undefined" && Boolean(window.deskmo
  * session、三個視圖與所有彈窗的觸發條件都與改版前一致。
  */
 export default function App(): JSX.Element {
+  const { t } = useTranslation(["app", "common"]);
   const connect = useSessionStore((s) => s.connect);
   const status = useSessionStore((s) => s.status);
   const sessions = useSessionStore((s) => s.sessions);
@@ -124,13 +126,13 @@ export default function App(): JSX.Element {
       if (!profile) return;
       setCreatingSession(true);
       try {
-        await createSession(profile.id, profile.workingDir, `對話 ${sessions.length + 1}`, undefined, agentOverride);
+        await createSession(profile.id, profile.workingDir, t("app:sessionDefaultTitle", { n: sessions.length + 1 }), undefined, agentOverride);
         setViewMode("session");
       } finally {
         setCreatingSession(false);
       }
     },
-    [createSession, profiles, selectedProfile, sessions.length],
+    [createSession, profiles, selectedProfile, sessions.length, t],
   );
 
   const handleConnected = (url: string, token: string): void => {
@@ -179,79 +181,84 @@ export default function App(): JSX.Element {
     ),
   );
 
-  /** 命令面板的指令清單——每一項都對應畫面上原本就存在的入口,不新增能力。 */
+  /** 命令面板的指令清單——每一項都對應畫面上原本就存在的入口,不新增能力。
+   *  i18n 專案新增:`t` 進入依賴陣列(比照 PermissionModal.tsx 的
+   *  buildRememberCandidates() 慣例)——語言切換時 useTranslation() 回傳的 `t`
+   *  參考會變,連帶讓這個 useMemo 重新計算,指令清單才會即時換語言。 */
   const commands = useMemo<Command[]>(() => {
     const list: Command[] = [
       {
         id: "view:session",
-        group: "前往",
-        title: "Session 視圖",
+        group: t("app:commands.groupGoto"),
+        title: t("app:commands.viewSession.title"),
         icon: "message",
         hint: `${MOD_LABEL}1`,
-        keywords: "session chat 對話",
+        keywords: t("app:commands.viewSession.keywords"),
         run: () => setViewMode("session"),
       },
       {
         id: "view:team-chat",
-        group: "前往",
-        title: "團隊群聊",
+        group: t("app:commands.groupGoto"),
+        title: t("app:commands.viewTeamChat.title"),
         icon: "users",
         hint: `${MOD_LABEL}2`,
-        keywords: "team chat 群聊 訊息",
+        keywords: t("app:commands.viewTeamChat.keywords"),
         run: () => setViewMode("team-chat"),
       },
       {
         id: "view:task-board",
-        group: "前往",
-        title: "任務看板",
+        group: t("app:commands.groupGoto"),
+        title: t("app:commands.viewTaskBoard.title"),
         icon: "board",
         hint: `${MOD_LABEL}3`,
-        keywords: "task board kanban 任務",
+        keywords: t("app:commands.viewTaskBoard.keywords"),
         run: () => setViewMode("task-board"),
       },
       {
         id: "action:new-session",
-        group: "動作",
-        title: "新對話",
-        subtitle: selectedProfile ? `使用 Profile:${selectedProfile.name}` : "尚無可用的 Agent Profile",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.newSession.title"),
+        subtitle: selectedProfile
+          ? t("app:commands.newSession.subtitleWithProfile", { name: selectedProfile.name })
+          : t("app:commands.newSession.subtitleNoProfile"),
         icon: "plus",
         hint: `${MOD_LABEL}N`,
-        keywords: "new session create 建立 對話",
+        keywords: t("app:commands.newSession.keywords"),
         run: () => void handleCreateSession(),
       },
       {
         id: "action:new-profile",
-        group: "動作",
-        title: "建立 Agent Profile",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.newProfile.title"),
         icon: "sparkle",
-        keywords: "profile agent provider 建立",
+        keywords: t("app:commands.newProfile.keywords"),
         run: () => setProfileDialogOpen(true),
       },
       {
         id: "action:settings",
-        group: "動作",
-        title: "設定",
-        subtitle: "全域設定 · 通知 · Provider 管理",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.settings.title"),
+        subtitle: t("app:commands.settings.subtitle"),
         icon: "settings",
         hint: `${MOD_LABEL},`,
-        keywords: "settings config provider model 設定",
+        keywords: t("app:commands.settings.keywords"),
         run: () => setSettingsOpen(true),
       },
       {
         id: "action:toggle-sidebar",
-        group: "動作",
-        title: sidebarCollapsed ? "顯示側欄" : "收合側欄",
+        group: t("app:commands.groupActions"),
+        title: sidebarCollapsed ? t("app:commands.toggleSidebar.show") : t("app:commands.toggleSidebar.hide"),
         icon: "sidebar",
         hint: `${MOD_LABEL}B`,
-        keywords: "sidebar 側欄 collapse",
+        keywords: t("app:commands.toggleSidebar.keywords"),
         run: () => setSidebarCollapsed((collapsed) => !collapsed),
       },
       {
         id: "action:toggle-theme",
-        group: "動作",
-        title: resolvedTheme === "dark" ? "切換為淺色主題" : "切換為深色主題",
+        group: t("app:commands.groupActions"),
+        title: resolvedTheme === "dark" ? t("app:commands.toggleTheme.toLight") : t("app:commands.toggleTheme.toDark"),
         icon: resolvedTheme === "dark" ? "sun" : "moon",
-        keywords: "theme dark light 主題 深色 淺色",
+        keywords: t("app:commands.toggleTheme.keywords"),
         run: () => toggleTheme(),
       },
     ];
@@ -259,10 +266,10 @@ export default function App(): JSX.Element {
     if (interruptedSessions.length > 0) {
       list.push({
         id: "action:recovery",
-        group: "動作",
-        title: `復原中斷的 session(${interruptedSessions.length})`,
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.recovery.title", { count: interruptedSessions.length }),
         icon: "alert",
-        keywords: "recovery crash 中斷 復原",
+        keywords: t("app:commands.recovery.keywords"),
         run: () => setRecoveryOpen(true),
       });
     }
@@ -270,12 +277,12 @@ export default function App(): JSX.Element {
     if (!hasElectronBridge) {
       list.push({
         id: "action:logout",
-        group: "動作",
-        title: "登出",
-        subtitle: "清除已儲存的 token 並回到連線畫面",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.logout.title"),
+        subtitle: t("app:commands.logout.subtitle"),
         icon: "logout",
         tone: "danger",
-        keywords: "logout signout 登出",
+        keywords: t("app:commands.logout.keywords"),
         run: handleLogout,
       });
     }
@@ -283,7 +290,7 @@ export default function App(): JSX.Element {
     for (const session of sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)) {
       list.push({
         id: `session:${session.id}`,
-        group: "對話",
+        group: t("app:commands.groupSessions"),
         title: session.title,
         subtitle: shortenPath(session.workingDir ?? ""),
         status: sessionStatusMeta(session.status),
@@ -305,6 +312,7 @@ export default function App(): JSX.Element {
     sessions,
     sidebarCollapsed,
     toggleTheme,
+    t,
   ]);
 
   if (!hasElectronBridge && !browserReady) {
@@ -325,7 +333,7 @@ export default function App(): JSX.Element {
           role="status"
         >
           {status === "connecting" ? <Spinner size={12} /> : <Icon name="alert" size={13} />}
-          {status === "connecting" ? "正在連線到 Deskmony Core…" : "與 Deskmony Core 的連線已中斷,正在自動重試…"}
+          {status === "connecting" ? t("app:connectionBanner.connecting") : t("app:connectionBanner.disconnected")}
         </div>
       )}
 
@@ -339,11 +347,18 @@ export default function App(): JSX.Element {
         <div className="flex flex-shrink-0 animate-slide-down items-center gap-2 bg-warn/12 px-3 py-1.5 text-xs text-warn">
           <Icon name="alert" size={13} />
           <span className="min-w-0 flex-1 truncate">
-            上次未被乾淨關閉,有 <span className="tabular font-semibold">{interruptedSessions.length}</span>{" "}
-            個 session 需要人工分流(繼續 / 接手 / 重跑 / 放棄)
+            {/* i18n 專案新增:用 Trans 而非 t() 字串——原本的視覺設計要求數字
+                本身用 tabular/半粗體樣式跟句子其餘部分區隔開,Trans 讓翻譯後的
+                句子仍能把 <strong> 包住的片段對應回這個樣式節點,不必為了改用
+                t() 而犧牲既有視覺效果(見 react-i18next 官方 Trans 用法)。 */}
+            <Trans
+              i18nKey="app:interruptedBanner.message"
+              values={{ count: interruptedSessions.length }}
+              components={{ strong: <span className="tabular font-semibold" /> }}
+            />
           </span>
           <Button size="xs" variant="secondary" onClick={() => setRecoveryOpen(true)}>
-            開始分流
+            {t("app:interruptedBanner.action")}
           </Button>
         </div>
       )}

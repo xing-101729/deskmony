@@ -1,0 +1,49 @@
+{
+  "model": {
+    "managedByAgentTitle": "El model lo gestiona el propio agent/CLI",
+    "managedByAgentLabel": "Gestionado por el agent",
+    "switchAriaLabel": "Cambiar model"
+  },
+  "effort": {
+    "switchAriaLabel": "Cambiar nivel de razonamiento"
+  },
+  "control": {
+    "notSpecifiedOption": "(No especificado, usa el valor predeterminado del CLI)",
+    "switchFailed": "Error al cambiar"
+  },
+  "tool": {
+    "statusRunning": "En ejecución",
+    "statusFailed": "Fallido",
+    "statusDone": "Completado",
+    "inputLabel": "Entrada",
+    "outputLabel": "Salida"
+  },
+  "usage": {
+    "cannotMeasureTitle": "Este backend no puede medir el costo (o aún no se ha confirmado si lo reportará) — el presupuesto de costo diario/de la tarea no aplica a esta sesión; solo el límite de tiempo por turno/número de llamadas a herramientas sigue protegiendo.",
+    "unknownLabel": "Costo desconocido",
+    "cannotMeasureLabel": "No se puede medir el costo",
+    "hasValueTitle": "Costo acumulado (este backend reporta el costo, S3a usage-metering)",
+    "noValueYetTitle": "Este backend reporta el costo acumulado, pero esta sesión aún no ha recibido el primer valor (se envía al finalizar un turno)"
+  },
+  "cost": {
+    "taskTrippedLabel": "La tarea \"{{title}}\" alcanzó su límite de presupuesto — los nuevos prompts están bloqueados",
+    "taskBudgetPercentLabel": "Presupuesto de la tarea {{percent}}%",
+    "dailyTrippedLabel": "El kill-switch de costo diario se activó — todas las sesiones están en pausa",
+    "trippedTitle": "Esta sesión/tarea fue detenida por el disyuntor de costo (el worktree/tarea se conserva — ajusta el presupuesto y reinicia core para continuar)",
+    "percentTitle": "Costo acumulado/uso de tokens a nivel de tarea como porcentaje del presupuesto"
+  },
+  "empty": {
+    "selectOrCreateSession": "Selecciona o crea una conversación en el panel izquierdo para comenzar",
+    "startTyping": "Empieza a escribir un mensaje para conversar con el agent"
+  },
+  "sidebar": {
+    "openAriaLabel": "Abrir barra lateral"
+  },
+  "session": {
+    "interrupt": "Interrumpir"
+  },
+  "composer": {
+    "placeholder": "Escribe un mensaje para el agent… (Enter para enviar, Shift+Enter para salto de línea)",
+    "sendAriaLabel": "Enviar"
+  }
+}

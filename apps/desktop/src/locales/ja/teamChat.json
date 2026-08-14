@@ -1,0 +1,36 @@
+{
+  "sidebar": {
+    "openAriaLabel": "サイドバーを開く"
+  },
+  "message": {
+    "broadcastTarget": "全体(ブロードキャスト)",
+    "interruptBadge": "interrupt",
+    "downgradedBadge": "降格済み",
+    "contextPrefix": "context: {{contextId}}",
+    "contextBudgetSuffix": "(メッセージ枠 {{count}}/{{max}}{{trippedSuffix}})",
+    "contextTrippedSuffix": "、上限到達",
+    "systemNote": "[システム注記] {{note}}"
+  },
+  "empty": {
+    "noTeamTitle": "まだ team が作成されていません",
+    "noTeamDescription": "team チャットを使うにはまず team を作成し、メンバーを 1 人以上加える必要があります。",
+    "createTeam": "team を作成",
+    "selectTeamTitle": "team を選択してください"
+  },
+  "header": {
+    "switchTeamAriaLabel": "team を切り替え",
+    "teamManagement": "team 管理"
+  },
+  "messageList": {
+    "empty": "まだメッセージがありません —— agent 同士がやり取りするメッセージや、あなたの割り込み発言がここに表示されます"
+  },
+  "composer": {
+    "toAriaLabel": "宛先",
+    "broadcastOption": "[ブロードキャスト] 全体",
+    "priorityAriaLabel": "優先度",
+    "normalOption": "通常",
+    "interruptOption": "中断(interrupt)",
+    "placeholder": "人として割り込み発言…(Enter で送信、Shift+Enter で改行)",
+    "sendAriaLabel": "送信"
+  }
+}

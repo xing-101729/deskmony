@@ -1,0 +1,29 @@
+{
+  "titleNormal": "Agent is requesting permission",
+  "titleStrong": "This action is hard-denied",
+  "descriptionStrong": "This category of action is denied by default. Even on a local machine with someone watching, it can only be force-confirmed individually — it can never be set to always allow.",
+  "toolLabel": "Tool",
+  "queuedCount": "{{count}} more waiting in queue",
+  "denyRecommended": "Deny (recommended)",
+  "understandRisk": "I understand the risk, allow anyway…",
+  "confirmAllowOnce": "Click again to confirm: allow this action once",
+  "deny": "Deny",
+  "alwaysAllow": "Always allow…",
+  "allow": "Allow",
+  "hardDenyBadge": "Writes outside the worktree, reads of secret paths, force-push, and similar actions are always hard-denied",
+  "remember": {
+    "chooseScope": "Choose the scope to remember (narrowest selected by default):",
+    "willAlwaysAllow": "You will always allow: ",
+    "effectiveNote": "Takes effect immediately after saving (no restart needed) — you can remove it later from the policy rules in settings.",
+    "confirm": "Confirm always allow",
+    "commandExactLabel": "Allow only this exact command (narrowest, recommended)",
+    "commandExactDescription": "Tool \"{{toolName}}\" and command equals exactly: {{command}}",
+    "commandPrefixLabel": "Allow all commands starting with \"{{firstWord}}\" (broader)",
+    "commandPrefixDescription": "Tool \"{{toolName}}\" and command matches: {{pattern}}",
+    "pathExactLabel": "Allow only files under this directory (narrowest, recommended)",
+    "pathWorkdirLabel": "Allow files anywhere under the worktree (broader)",
+    "pathScopeDescription": "Tool \"{{toolName}}\" and path is under: {{path}}",
+    "toolExactLabel": "Allow only this tool (exact match)",
+    "toolExactDescription": "Tool equals exactly: {{toolName}}"
+  }
+}

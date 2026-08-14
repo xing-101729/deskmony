@@ -1,0 +1,13 @@
+{
+  "adapterProcess": {
+    "spawnFailed": "No se pudo iniciar el subproceso de {{software}} (command={{command}}): {{detail}}"
+  },
+  "opencode": {
+    "sessionCreateFailed": "No se pudo crear la sesión de OpenCode: {{detail}}",
+    "listenTimeout": "Se agotó el tiempo de espera para que el servidor de OpenCode indique su dirección de escucha ({{timeoutMs}} ms)",
+    "healthTimeout": "Se agotó el tiempo de espera para que /global/health del servidor de OpenCode esté listo ({{timeoutMs}} ms)",
+    "invalidModelFormat": "El model de opencode debe tener el formato \"providerID/modelID\"; no se pudo interpretar el valor \"{{model}}\"",
+    "eventStreamMissingBody": "La respuesta de OpenCode /event no tiene body, por lo que no se puede leer el flujo SSE",
+    "requestFailed": "POST {{url}} falló (status={{status}}): {{detail}}"
+  }
+}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import type { ConfigSetFilePatchInput, ConfigSource, EffectiveCoreConfig, ResolvedProvider } from "@deskmony/shared";
 import { useSessionStore, selectResolvedProviders } from "../stores/session-store.js";
 import { Dialog } from "../ui/Dialog.js";
@@ -7,6 +8,7 @@ import { Field, Input, Select, Checkbox, Switch } from "../ui/Field.js";
 import { Badge, SectionLabel } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
 import { softwareLabel } from "../ui/status.js";
+import { translateError } from "../lib/error-i18n.js";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -18,6 +20,7 @@ interface SettingsDialogProps {
  * 不變(見 packages/shared/src/provider-catalog.ts 的註解)。
  */
 function ModelsEditor({ provider }: { provider: ResolvedProvider }): JSX.Element {
+  const { t } = useTranslation(["settings", "common"]);
   const setProviderPrefs = useSessionStore((s) => s.setProviderPrefs);
   const [draft, setDraft] = useState<Set<string>>(new Set(provider.models.map((m) => m.id)));
   const [saving, setSaving] = useState(false);
@@ -49,7 +52,7 @@ function ModelsEditor({ provider }: { provider: ResolvedProvider }): JSX.Element
       await setProviderPrefs(provider.id, { enabledModelIds: allSelected ? [] : [...draft] });
       setSaved(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setSaving(false);
     }
@@ -57,7 +60,7 @@ function ModelsEditor({ provider }: { provider: ResolvedProvider }): JSX.Element
 
   return (
     <div className="mt-1.5 rounded-md bg-canvas px-3 py-2.5">
-      <p className="text-2xs text-fg-faint">啟用的 model(未勾選的不會出現在「建立 Profile」或對話中「切換 model」的下拉選單)</p>
+      <p className="text-2xs text-fg-faint">{t("settings:provider.modelsHint")}</p>
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
         {provider.models.map((m) => (
           <Checkbox key={m.id} checked={draft.has(m.id)} onChange={() => toggle(m.id)} label={m.label} />
@@ -65,10 +68,10 @@ function ModelsEditor({ provider }: { provider: ResolvedProvider }): JSX.Element
       </div>
       <div className="mt-2 flex items-center gap-2">
         <Button size="xs" variant="outline" loading={saving} onClick={() => void handleSave()}>
-          {saving ? "儲存中…" : "儲存"}
+          {saving ? t("common:saving") : t("common:save")}
         </Button>
-        {saved && <Badge tone="ok">已儲存</Badge>}
-        {error && <Badge tone="danger" title={error}>儲存失敗</Badge>}
+        {saved && <Badge tone="ok">{t("common:saved")}</Badge>}
+        {error && <Badge tone="danger" title={error}>{t("common:saveFailed")}</Badge>}
       </div>
     </div>
   );
@@ -80,6 +83,7 @@ function ModelsEditor({ provider }: { provider: ResolvedProvider }): JSX.Element
  * 真正的 env 值使用。
  */
 function EnvEditor({ provider, maskedEnvKeys }: { provider: ResolvedProvider; maskedEnvKeys: string[] }): JSX.Element {
+  const { t } = useTranslation(["settings", "common"]);
   const setProviderPrefs = useSessionStore((s) => s.setProviderPrefs);
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
@@ -99,7 +103,7 @@ function EnvEditor({ provider, maskedEnvKeys }: { provider: ResolvedProvider; ma
       setNewValue("");
       setSaved(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setSaving(false);
     }
@@ -107,7 +111,7 @@ function EnvEditor({ provider, maskedEnvKeys }: { provider: ResolvedProvider; ma
 
   return (
     <div className="mt-1.5 rounded-md bg-canvas px-3 py-2.5">
-      <p className="text-2xs text-fg-faint">環境變數(例如 ANTHROPIC_API_KEY)——值一律加密顯示為 ***,這裡看到的清單只是「已設定哪些 key」,無法讀回明文。</p>
+      <p className="text-2xs text-fg-faint">{t("settings:provider.envHint")}</p>
       {maskedEnvKeys.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1">
           {maskedEnvKeys.map((key) => (
@@ -116,20 +120,21 @@ function EnvEditor({ provider, maskedEnvKeys }: { provider: ResolvedProvider; ma
         </div>
       )}
       <div className="mt-1.5 flex gap-1.5">
-        <Input mono value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder="KEY" className="w-2/5" />
-        <Input mono type="password" value={newValue} onChange={(e) => setNewValue(e.target.value)} placeholder="值" className="flex-1" />
+        <Input mono value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder={t("settings:provider.envKeyPlaceholder")} className="w-2/5" />
+        <Input mono type="password" value={newValue} onChange={(e) => setNewValue(e.target.value)} placeholder={t("settings:provider.envValuePlaceholder")} className="flex-1" />
         <Button size="sm" variant="outline" loading={saving} disabled={!newKey.trim()} onClick={() => void handleAdd()}>
-          {saving ? "儲存中…" : "新增/更新"}
+          {saving ? t("common:saving") : t("settings:provider.addUpdate")}
         </Button>
       </div>
-      {saved && <p className="mt-1 text-2xs text-ok">已儲存</p>}
-      {error && <p className="mt-1 text-2xs text-danger" title={error}>儲存失敗</p>}
+      {saved && <p className="mt-1 text-2xs text-ok">{t("common:saved")}</p>}
+      {error && <p className="mt-1 text-2xs text-danger" title={error}>{t("common:saveFailed")}</p>}
     </div>
   );
 }
 
 /** 單一 provider 的管理卡片:啟用開關 + 排序 + 展開後的模型/環境變數編輯。 */
 function ProviderCard({ provider, maskedEnvKeys }: { provider: ResolvedProvider; maskedEnvKeys: string[] }): JSX.Element {
+  const { t } = useTranslation(["settings"]);
   const setProviderPrefs = useSessionStore((s) => s.setProviderPrefs);
   const [expanded, setExpanded] = useState(false);
   const [orderDraft, setOrderDraft] = useState(String(provider.order));
@@ -148,17 +153,21 @@ function ProviderCard({ provider, maskedEnvKeys }: { provider: ResolvedProvider;
       <div className="flex items-center gap-2">
         <span
           className={`h-2 w-2 flex-shrink-0 rounded-full ${provider.software === "claude-agent-sdk" || provider.installed ? "bg-ok" : "bg-line-strong"}`}
-          title={provider.installed ? "已安裝/可用" : "未偵測到"}
+          title={provider.installed ? t("settings:provider.installed") : t("settings:provider.notDetected")}
         />
         <span className="text-sm font-medium text-fg">{provider.label}</span>
         <Badge mono>{softwareLabel(provider.software)}</Badge>
         {provider.detectedVersion && <Badge mono>v{provider.detectedVersion}</Badge>}
         <div className="ml-auto flex flex-shrink-0 items-center gap-3">
           <label className="flex items-center gap-1.5 text-2xs text-fg-muted">
-            排序
+            {t("settings:provider.orderLabel")}
             <Input value={orderDraft} onChange={(e) => setOrderDraft(e.target.value)} onBlur={handleOrderCommit} className="!h-6 w-12" />
           </label>
-          <Switch checked={provider.enabled} onChange={(next) => void setProviderPrefs(provider.id, { enabled: next })} label={`${provider.enabled ? "停用" : "啟用"} ${provider.label}`} />
+          <Switch
+            checked={provider.enabled}
+            onChange={(next) => void setProviderPrefs(provider.id, { enabled: next })}
+            label={t(provider.enabled ? "settings:provider.disableLabel" : "settings:provider.enableLabel", { name: provider.label })}
+          />
         </div>
       </div>
 
@@ -172,7 +181,7 @@ function ProviderCard({ provider, maskedEnvKeys }: { provider: ResolvedProvider;
       <div className="mt-1.5 pl-4">
         <button type="button" onClick={() => setExpanded((v) => !v)} className="flex items-center gap-1 text-2xs text-fg-faint hover:text-accent">
           <Icon name="chevron-right" size={11} className={`transition-transform ${expanded ? "rotate-90" : ""}`} />
-          {expanded ? "收合" : "展開"}(模型 / 環境變數)
+          {expanded ? t("settings:provider.collapseModelsEnv") : t("settings:provider.expandModelsEnv")}
         </button>
       </div>
 
@@ -186,11 +195,14 @@ function ProviderCard({ provider, maskedEnvKeys }: { provider: ResolvedProvider;
   );
 }
 
-const sourceBadgeText: Record<ConfigSource, string> = { default: "預設值", file: "設定檔", env: "環境變數" };
 const sourceBadgeTone: Record<ConfigSource, "neutral" | "info" | "warn"> = { default: "neutral", file: "info", env: "warn" };
 
+/** i18n 專案新增:`sourceBadgeText` 原本是模組載入當下就算好的靜態 Record,
+ *  改成在這個元件內即時查表(比照 ui/status.ts 的 sessionStatusMeta() 慣例)
+ *  ——純樣式的 `sourceBadgeTone` 不含文字,維持靜態 Record 即可。 */
 function SourceBadge({ source }: { source: ConfigSource }): JSX.Element {
-  return <Badge tone={sourceBadgeTone[source]}>{sourceBadgeText[source]}</Badge>;
+  const { t } = useTranslation(["settings"]);
+  return <Badge tone={sourceBadgeTone[source]}>{t(`settings:source.${source}`)}</Badge>;
 }
 
 /**
@@ -229,6 +241,7 @@ function ConfigFieldRow({
  * 的編輯 UI。
  */
 function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.Element {
+  const { t } = useTranslation(["settings", "common"]);
   const setConfigFile = useSessionStore((s) => s.setConfigFile);
   const [permissionTimeoutMs, setPermissionTimeoutMs] = useState(String(config.daemon.permissionTimeoutMs.value));
   const [rateLimitMax, setRateLimitMax] = useState(String(config.daemon.authRateLimit.max.value));
@@ -281,7 +294,7 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
       const saveResult = await setConfigFile(patch);
       setResult(saveResult);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setSaving(false);
     }
@@ -290,67 +303,69 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
   return (
     <div className="rounded-md bg-surface px-3 py-2.5">
       <p className="text-2xs leading-relaxed text-fg-faint">
-        core 的分層設定(defaults → <code className="text-fg-muted">&lt;DESKMONY_HOME&gt;/config.json</code> → 環境變數)——標示「環境變數」來源的欄位已鎖定
-        (改設定檔不會生效,環境變數永遠優先);修改後需要重啟 core 才會生效。
+        <Trans
+          i18nKey="settings:global.description"
+          components={{ configPath: <code className="text-fg-muted">{"<DESKMONY_HOME>/config.json"}</code> }}
+        />
       </p>
 
-      <ConfigFieldRow label="Gateway Port" source={config.daemon.port.source} locked lockedReason="不可經此介面修改,避免遠端調整曝露面,需手動編輯設定檔或 DESKMONY_CORE_PORT">
+      <ConfigFieldRow label="Gateway Port" source={config.daemon.port.source} locked lockedReason={t("settings:global.noInterfaceEditReason", { envVarName: "DESKMONY_CORE_PORT" })}>
         <span className="font-mono text-2xs text-fg-muted">{config.daemon.port.value}</span>
       </ConfigFieldRow>
-      <ConfigFieldRow label="綁定位址" source={config.daemon.bindHost.source} locked lockedReason="不可經此介面修改,避免遠端調整曝露面,需手動編輯設定檔或 DESKMONY_BIND_HOST">
+      <ConfigFieldRow label={t("settings:global.bindHostLabel")} source={config.daemon.bindHost.source} locked lockedReason={t("settings:global.noInterfaceEditReason", { envVarName: "DESKMONY_BIND_HOST" })}>
         <span className="font-mono text-2xs text-fg-muted">{config.daemon.bindHost.value}</span>
       </ConfigFieldRow>
       <ConfigFieldRow
-        label="權限逾時(ms)"
+        label={t("settings:global.permissionTimeoutLabel")}
         source={config.daemon.permissionTimeoutMs.source}
         locked={config.daemon.permissionTimeoutMs.source === "env"}
-        lockedReason="目前由 DESKMONY_PERMISSION_TIMEOUT_MS 決定,改設定檔不會生效"
+        lockedReason={t("settings:global.lockedByEnvVar", { envVarName: "DESKMONY_PERMISSION_TIMEOUT_MS" })}
       >
         <Input value={permissionTimeoutMs} onChange={(e) => setPermissionTimeoutMs(e.target.value)} disabled={config.daemon.permissionTimeoutMs.source === "env"} />
       </ConfigFieldRow>
       <ConfigFieldRow
-        label="認證失敗門檻(次)"
+        label={t("settings:global.authRateLimitMaxLabel")}
         source={config.daemon.authRateLimit.max.source}
         locked={config.daemon.authRateLimit.max.source === "env"}
-        lockedReason="目前由 DESKMONY_AUTH_RATE_LIMIT_MAX 決定,改設定檔不會生效"
+        lockedReason={t("settings:global.lockedByEnvVar", { envVarName: "DESKMONY_AUTH_RATE_LIMIT_MAX" })}
       >
         <Input value={rateLimitMax} onChange={(e) => setRateLimitMax(e.target.value)} disabled={config.daemon.authRateLimit.max.source === "env"} />
       </ConfigFieldRow>
       <ConfigFieldRow
-        label="認證冷卻期(ms)"
+        label={t("settings:global.authRateLimitCooldownLabel")}
         source={config.daemon.authRateLimit.cooldownMs.source}
         locked={config.daemon.authRateLimit.cooldownMs.source === "env"}
-        lockedReason="目前由 DESKMONY_AUTH_RATE_LIMIT_COOLDOWN_MS 決定,改設定檔不會生效"
+        lockedReason={t("settings:global.lockedByEnvVar", { envVarName: "DESKMONY_AUTH_RATE_LIMIT_COOLDOWN_MS" })}
       >
         <Input value={rateLimitCooldownMs} onChange={(e) => setRateLimitCooldownMs(e.target.value)} disabled={config.daemon.authRateLimit.cooldownMs.source === "env"} />
       </ConfigFieldRow>
       <ConfigFieldRow
-        label="預設工作目錄"
+        label={t("settings:global.defaultWorkingDirLabel")}
         source={config.workspace.defaultWorkingDir.source}
         locked={config.workspace.defaultWorkingDir.source === "env"}
-        lockedReason="目前由 DESKMONY_WORKSPACE 決定,改設定檔不會生效"
+        lockedReason={t("settings:global.lockedByEnvVar", { envVarName: "DESKMONY_WORKSPACE" })}
       >
         <Input mono value={defaultWorkingDir} onChange={(e) => setDefaultWorkingDir(e.target.value)} disabled={config.workspace.defaultWorkingDir.source === "env"} />
       </ConfigFieldRow>
-      <ConfigFieldRow label="任務 worktree 根目錄" source={config.workspace.worktreesRoot.source} locked={false}>
-        <Input mono value={worktreesRoot} onChange={(e) => setWorktreesRoot(e.target.value)} placeholder="省略 = 維持既有算法(每個 team 各自旁邊的 .deskmony-worktrees)" />
+      <ConfigFieldRow label={t("settings:global.taskWorktreesRootLabel")} source={config.workspace.worktreesRoot.source} locked={false}>
+        <Input mono value={worktreesRoot} onChange={(e) => setWorktreesRoot(e.target.value)} placeholder={t("settings:global.taskWorktreesRootPlaceholder")} />
       </ConfigFieldRow>
       <ConfigFieldRow
-        label="瀏覽器 UI 靜態目錄"
+        label={t("settings:global.staticDirLabel")}
         source={config.features.staticDir.source}
         locked={config.features.staticDir.source === "env"}
-        lockedReason="目前由 DESKMONY_STATIC_DIR 決定,改設定檔不會生效"
+        lockedReason={t("settings:global.lockedByEnvVar", { envVarName: "DESKMONY_STATIC_DIR" })}
       >
         <Input mono value={staticDir} onChange={(e) => setStaticDir(e.target.value)} disabled={config.features.staticDir.source === "env"} />
       </ConfigFieldRow>
-      <ConfigFieldRow label="Log 等級" source={config.log.level.source} locked={config.log.level.source === "env"}>
+      <ConfigFieldRow label={t("settings:global.logLevelLabel")} source={config.log.level.source} locked={config.log.level.source === "env"}>
         <Select value={logLevel} onChange={(e) => setLogLevel(e.target.value as "info" | "warn" | "error")} disabled={config.log.level.source === "env"}>
           <option value="info">info</option>
           <option value="warn">warn</option>
           <option value="error">error</option>
         </Select>
       </ConfigFieldRow>
-      <ConfigFieldRow label="SQLite 資料目錄(唯讀)" source={config.data.dataDir.source} locked lockedReason="不在可經 gateway 修改的安全子集內,需手動編輯設定檔或 DESKMONY_DATA_DIR">
+      <ConfigFieldRow label={t("settings:global.dataDirLabel")} source={config.data.dataDir.source} locked lockedReason={t("settings:global.dataDirLockedReason", { envVarName: "DESKMONY_DATA_DIR" })}>
         <span className="truncate font-mono text-2xs text-fg-muted" title={config.data.dataDir.value}>
           {config.data.dataDir.value}
         </span>
@@ -358,16 +373,16 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
 
       <div className="mt-2 flex items-center gap-2">
         <Button size="sm" variant="outline" loading={saving} onClick={() => void handleSave()}>
-          {saving ? "儲存中…" : "儲存全域設定"}
+          {saving ? t("common:saving") : t("settings:global.saveButton")}
         </Button>
-        {result && result.changedFields.length === 0 && <span className="text-2xs text-fg-faint">沒有變更</span>}
+        {result && result.changedFields.length === 0 && <span className="text-2xs text-fg-faint">{t("settings:global.noChanges")}</span>}
         {result && result.changedFields.length > 0 && (
           <Badge tone="warn">
-            已寫入:{result.changedFields.join(", ")}
-            {result.requiresRestart ? "(需重啟 core 才會生效)" : ""}
+            {t("settings:global.written", { fields: result.changedFields.join(", ") })}
+            {result.requiresRestart ? t("settings:global.requiresRestart") : ""}
           </Badge>
         )}
-        {error && <Badge tone="danger" title={error}>儲存失敗:{error}</Badge>}
+        {error && <Badge tone="danger" title={error}>{t("settings:global.saveFailedWithReason", { error })}</Badge>}
       </div>
     </div>
   );
@@ -378,30 +393,36 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
  * ——`notification` 整區都不在 `config.setFile` 的安全子集內。
  */
 function NotificationConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.Element {
+  const { t } = useTranslation(["settings"]);
   const n = config.notification;
   return (
     <div className="rounded-md bg-surface px-3 py-2.5">
       <p className="text-2xs leading-relaxed text-fg-faint">
-        升級/熔斷的帶外通知(唯讀)——webhook url 視同憑證,即使本機連線也不提供任何遠端/UI 寫入路徑;要修改請直接編輯{" "}
-        <code className="text-fg-muted">&lt;DESKMONY_HOME&gt;/config.json</code> 的 <code className="text-fg-muted">notification</code> 區塊,並重啟 core 才會生效。
+        <Trans
+          i18nKey="settings:notification.description"
+          components={{
+            configPath: <code className="text-fg-muted">{"<DESKMONY_HOME>/config.json"}</code>,
+            notificationBlock: <code className="text-fg-muted">notification</code>,
+          }}
+        />
       </p>
-      <ConfigFieldRow label="桌面系統通知" source={n.desktop.enabled.source} locked lockedReason="唯讀,見上方說明">
-        <span className="text-2xs text-fg-muted">{n.desktop.enabled.value ? "已啟用" : "已停用"}</span>
+      <ConfigFieldRow label={t("settings:notification.desktopLabel")} source={n.desktop.enabled.source} locked lockedReason={t("settings:notification.readOnlyReason")}>
+        <span className="text-2xs text-fg-muted">{n.desktop.enabled.value ? t("settings:notification.enabledValue") : t("settings:notification.disabledValue")}</span>
       </ConfigFieldRow>
-      <ConfigFieldRow label="Webhook" source={n.webhook.enabled.source} locked lockedReason="唯讀,見上方說明">
-        <span className="text-2xs text-fg-muted">{n.webhook.enabled.value ? "已啟用" : "已停用"}</span>
+      <ConfigFieldRow label="Webhook" source={n.webhook.enabled.source} locked lockedReason={t("settings:notification.readOnlyReason")}>
+        <span className="text-2xs text-fg-muted">{n.webhook.enabled.value ? t("settings:notification.enabledValue") : t("settings:notification.disabledValue")}</span>
       </ConfigFieldRow>
-      <ConfigFieldRow label="Webhook URL" source={n.webhook.url.source} locked lockedReason="視同憑證,一律遮罩,唯讀">
-        <span className="font-mono text-2xs text-fg-muted">{n.webhook.url.value || "(未設定)"}</span>
+      <ConfigFieldRow label="Webhook URL" source={n.webhook.url.source} locked lockedReason={t("settings:notification.webhookUrlLockedReason")}>
+        <span className="font-mono text-2xs text-fg-muted">{n.webhook.url.value || t("settings:notification.notSet")}</span>
       </ConfigFieldRow>
-      <ConfigFieldRow label="Webhook 最低嚴重度" source={n.webhook.minSeverity.source} locked lockedReason="唯讀,見上方說明">
+      <ConfigFieldRow label={t("settings:notification.webhookMinSeverityLabel")} source={n.webhook.minSeverity.source} locked lockedReason={t("settings:notification.readOnlyReason")}>
         <span className="text-2xs text-fg-muted">{n.webhook.minSeverity.value}</span>
       </ConfigFieldRow>
-      <ConfigFieldRow label="批次間隔(分鐘)" source={n.batchIntervalMinutes.source} locked lockedReason="唯讀,見上方說明">
+      <ConfigFieldRow label={t("settings:notification.batchIntervalLabel")} source={n.batchIntervalMinutes.source} locked lockedReason={t("settings:notification.readOnlyReason")}>
         <span className="text-2xs text-fg-muted">{n.batchIntervalMinutes.value}</span>
       </ConfigFieldRow>
-      <ConfigFieldRow label="靜音時段" source={n.quietHours.source} locked lockedReason="唯讀,見上方說明">
-        <span className="text-2xs text-fg-muted">{n.quietHours.value ? `${n.quietHours.value.from} – ${n.quietHours.value.to}` : "(未設定)"}</span>
+      <ConfigFieldRow label={t("settings:notification.quietHoursLabel")} source={n.quietHours.source} locked lockedReason={t("settings:notification.readOnlyReason")}>
+        <span className="text-2xs text-fg-muted">{n.quietHours.value ? `${n.quietHours.value.from} – ${n.quietHours.value.to}` : t("settings:notification.notSet")}</span>
       </ConfigFieldRow>
     </div>
   );
@@ -413,6 +434,7 @@ function NotificationConfigSection({ config }: { config: EffectiveCoreConfig }):
  * ChatView 共用同一份計算結果,不會漂移。
  */
 export function SettingsDialog({ onClose }: SettingsDialogProps): JSX.Element {
+  const { t } = useTranslation(["settings", "common"]);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const detectingAgents = useSessionStore((s) => s.detectingAgents);
   const detectAgents = useSessionStore((s) => s.detectAgents);
@@ -439,34 +461,34 @@ export function SettingsDialog({ onClose }: SettingsDialogProps): JSX.Element {
 
   return (
     <Dialog
-      title="設定 · Provider 管理"
-      description="管理內建 provider 目錄(啟用/停用、排序、可用 model、環境變數),見本機偵測結果自動帶入的安裝狀態"
+      title={t("settings:dialogTitle")}
+      description={t("settings:dialogDescription")}
       icon="settings"
       size="lg"
       onClose={onClose}
       footer={
         <>
-          <p className="text-2xs text-fg-faint">{detectingAgents ? "偵測中…" : `共 ${resolvedProviders.length} 項`}</p>
+          <p className="text-2xs text-fg-faint">{detectingAgents ? t("common:detecting") : t("settings:providerCountFooter", { count: resolvedProviders.length })}</p>
           <div className="flex gap-2">
             <Button variant="outline" loading={detectingAgents} onClick={() => void detectAgents()}>
-              {detectingAgents ? "偵測中…" : "重新偵測"}
+              {detectingAgents ? t("common:detecting") : t("settings:redetect")}
             </Button>
             <Button variant="primary" onClick={onClose}>
-              關閉
+              {t("common:close")}
             </Button>
           </div>
         </>
       }
     >
       <div className="space-y-2">
-        <SectionLabel>全域設定</SectionLabel>
-        {effectiveConfig ? <GlobalConfigSection config={effectiveConfig} /> : <p className="py-2 text-center text-2xs text-fg-faint">載入中…</p>}
+        <SectionLabel>{t("settings:sections.global")}</SectionLabel>
+        {effectiveConfig ? <GlobalConfigSection config={effectiveConfig} /> : <p className="py-2 text-center text-2xs text-fg-faint">{t("common:loading")}</p>}
 
-        <SectionLabel className="pt-1">通知設定</SectionLabel>
-        {effectiveConfig ? <NotificationConfigSection config={effectiveConfig} /> : <p className="py-2 text-center text-2xs text-fg-faint">載入中…</p>}
+        <SectionLabel className="pt-1">{t("settings:sections.notification")}</SectionLabel>
+        {effectiveConfig ? <NotificationConfigSection config={effectiveConfig} /> : <p className="py-2 text-center text-2xs text-fg-faint">{t("common:loading")}</p>}
 
-        <SectionLabel className="pt-1">Provider 管理</SectionLabel>
-        {resolvedProviders.length === 0 && detectingAgents && <p className="py-6 text-center text-xs text-fg-faint">偵測中…</p>}
+        <SectionLabel className="pt-1">{t("settings:sections.provider")}</SectionLabel>
+        {resolvedProviders.length === 0 && detectingAgents && <p className="py-6 text-center text-xs text-fg-faint">{t("common:detecting")}</p>}
         <div className="space-y-2">
           {resolvedProviders.map((provider) => (
             <ProviderCard key={provider.id} provider={provider} maskedEnvKeys={Object.keys(providerPrefs[provider.id]?.env ?? {})} />

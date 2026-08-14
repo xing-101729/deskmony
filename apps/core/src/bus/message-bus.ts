@@ -15,6 +15,7 @@ import type {
   TeamMessage,
   TeammateInfo,
 } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { ProfileStore } from "../profiles.js";
 import type { TeamManager } from "../team/team-manager.js";
 import type { SessionManager } from "../session/session-manager.js";
@@ -197,7 +198,11 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
 
     const targetMember = await this.teamManager.findMemberByName(input.teamId, input.to);
     if (!targetMember) {
-      throw new Error(`team 內找不到成員 "${input.to}"`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "teamMember", id: input.to },
+        `team 內找不到成員 "${input.to}"`,
+      );
     }
 
     const contextId = await this.deriveContextId(fromMember.id);
@@ -335,7 +340,11 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
     const fromMember = await this.mustGetMember(input.fromMemberId, input.teamId);
     const targetMember = await this.teamManager.findMemberByName(input.teamId, input.to);
     if (!targetMember) {
-      throw new Error(`team 內找不到成員 "${input.to}"`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "teamMember", id: input.to },
+        `team 內找不到成員 "${input.to}"`,
+      );
     }
 
     const contextId = await this.deriveContextIdForRequestReview(fromMember.id, input.taskId);
@@ -395,7 +404,11 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
   }): Promise<TeamBusSendOutcome> {
     const team = await this.teamManager.getTeam(input.teamId);
     if (!team) {
-      throw new Error(`找不到 team: ${input.teamId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "team", id: input.teamId },
+        `找不到 team: ${input.teamId}`,
+      );
     }
     const fromName = input.fromName?.trim() || "Human";
     const requested = input.priority ?? "normal";
@@ -449,7 +462,11 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
 
     const targetMember = await this.teamManager.findMemberByName(input.teamId, input.to);
     if (!targetMember) {
-      throw new Error(`team 內找不到成員 "${input.to}"`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "teamMember", id: input.to },
+        `team 內找不到成員 "${input.to}"`,
+      );
     }
     const message = await this.persistAndPush({
       teamId: input.teamId,
@@ -488,10 +505,18 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
   private async mustGetMember(memberId: string, teamId: string): Promise<TeamMember> {
     const member = await this.teamManager.getMember(memberId);
     if (!member) {
-      throw new Error(`未知的 team member: ${memberId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "teamMember", id: memberId },
+        `未知的 team member: ${memberId}`,
+      );
     }
     if (member.teamId !== teamId) {
-      throw new Error(`team member ${memberId} 不屬於 team ${teamId}`);
+      throw new DeskmonyError(
+        "message.memberTeamMismatch",
+        { memberId, teamId },
+        `team member ${memberId} 不屬於 team ${teamId}`,
+      );
     }
     return member;
   }

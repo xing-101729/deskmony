@@ -1,0 +1,36 @@
+{
+  "sidebar": {
+    "openAriaLabel": "開啟側欄"
+  },
+  "message": {
+    "broadcastTarget": "全體(廣播)",
+    "interruptBadge": "interrupt",
+    "downgradedBadge": "已降級",
+    "contextPrefix": "context: {{contextId}}",
+    "contextBudgetSuffix": "(訊息額度 {{count}}/{{max}}{{trippedSuffix}})",
+    "contextTrippedSuffix": "，已熔斷",
+    "systemNote": "[系統標註] {{note}}"
+  },
+  "empty": {
+    "noTeamTitle": "尚未建立任何團隊",
+    "noTeamDescription": "團隊群聊視圖需要先建立一個團隊、加入至少一位成員,才能觀察 agent 互傳訊息或插話。",
+    "createTeam": "建立團隊",
+    "selectTeamTitle": "請選擇一個團隊"
+  },
+  "header": {
+    "switchTeamAriaLabel": "切換團隊",
+    "teamManagement": "團隊管理"
+  },
+  "messageList": {
+    "empty": "尚無訊息 —— agent 之間互傳的訊息、以及你的插話都會顯示在這裡"
+  },
+  "composer": {
+    "toAriaLabel": "收件對象",
+    "broadcastOption": "[廣播] 全體",
+    "priorityAriaLabel": "優先度",
+    "normalOption": "一般",
+    "interruptOption": "中斷(interrupt)",
+    "placeholder": "以人類身分插話…(Enter 送出,Shift+Enter 換行)",
+    "sendAriaLabel": "送出"
+  }
+}

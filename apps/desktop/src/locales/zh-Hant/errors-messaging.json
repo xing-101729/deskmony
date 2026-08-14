@@ -1,0 +1,12 @@
+{
+  "message": {
+    "memberTeamMismatch": "team member {{memberId}} 不屬於 team {{teamId}}"
+  },
+  "team": {
+    "memberNameTaken": "team「{{teamName}}」內已有同名成員:「{{memberName}}」(成員名稱在同一個 team 內必須唯一,用於 @mention 比對)"
+  },
+  "config": {
+    "patchWriteFailed": "設定檔({{configPath}})目前無法解析,拒絕寫入以避免覆蓋既有內容:{{detail}}",
+    "policyRuleWriteFailed": "設定檔({{configPath}})目前無法解析,拒絕寫入規則以避免覆蓋既有內容:{{detail}}"
+  }
+}

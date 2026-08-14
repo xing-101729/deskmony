@@ -1,0 +1,65 @@
+{
+  "nav": {
+    "session": "Session",
+    "teamChat": "團隊群聊",
+    "taskBoard": "任務看板"
+  },
+  "connection": {
+    "open": "已連線",
+    "connecting": "連線中…",
+    "closed": "已斷線"
+  },
+  "confirmDeleteSession": "確定要刪除對話「{{title}}」嗎?此操作無法復原。",
+  "confirmDeleteProfile": "確定要刪除 Agent Profile「{{name}}」嗎?此操作無法復原。{{usageNote}}",
+  "confirmDeleteProfileUsageNote": "\n\n目前有 {{count}} 個既有對話是用這個 profile 建立的,刪除不影響那些對話,但之後無法再用這個 profile 建立新對話。",
+  "contextUsageTitle": "context 窗口使用率(S3a usage-metering)",
+  "spawnChildAriaLabel": "開子 agent",
+  "spawnChildTitle": "開一個子 agent 執行子任務",
+  "deleteSessionAriaLabel": "刪除對話",
+  "expandSidebarAriaLabel": "展開側欄",
+  "commandPaletteAriaLabel": "命令面板",
+  "collapseSidebarAriaLabel": "收合側欄",
+  "closeSidebarAriaLabel": "關閉側欄",
+  "paletteTriggerLabel": "搜尋或執行指令…",
+  "selectProfileAriaLabel": "選擇 Agent Profile",
+  "noProfileOption": "(尚無 Profile)",
+  "advancedToggle": "進階(自選 agent / model)",
+  "newSessionButton": "新對話",
+  "creating": "建立中…",
+  "createProfileAriaLabel": "建立 Agent Profile",
+  "deleteProfileAriaLabel": "刪除 Agent Profile",
+  "emptyTitle": "尚無任何對話",
+  "emptyDescription": "點擊上方「新對話」開始與 agent 互動。",
+  "waitingForAuthTitle": "有 session 等待授權",
+  "theme": {
+    "system": "主題:跟隨系統(點擊切換)",
+    "darkClickForLight": "深色主題(點擊切換為淺色)",
+    "lightClickForDark": "淺色主題(點擊切換為深色)"
+  },
+  "toggleThemeAriaLabel": "切換主題",
+  "languageSwitcher": {
+    "toggleLabel": "切換語言",
+    "menuLabel": "選擇語言"
+  },
+  "settingsAriaLabel": "設定",
+  "logoutAriaLabel": "登出",
+  "unnamedWorkspace": "(未指定目錄)",
+  "spawnChildDialog": {
+    "title": "在「{{title}}」底下開子 agent",
+    "description": "給子 agent 一段任務 prompt,並選擇要用哪個 agent profile 建立(預設沿用這個 session 的 profile,可自行改選);也可以再進一步覆寫 agent 軟體/model。",
+    "profileSelectAriaLabel": "選擇子 agent 的 Profile",
+    "promptLabel": "任務 prompt",
+    "promptPlaceholder": "描述這個子 agent 要執行的任務…",
+    "titleFieldLabel": "標題(選填)",
+    "titlePlaceholder": "例如:Rerun 這個 UI slice 的驗收",
+    "submit": "開子 agent"
+  },
+  "overrideFields": {
+    "softwareLabel": "Agent 軟體(選填,預設沿用 Profile)",
+    "useProfileDefault": "(沿用 Profile 設定)",
+    "modelLabel": "Model(選填)",
+    "useDefaultPlain": "(沿用預設)",
+    "useDefaultProfile": "(沿用 Profile 預設)",
+    "effortLabel": "思考程度(選填)"
+  }
+}

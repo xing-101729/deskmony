@@ -1,0 +1,8 @@
+{
+  "openSidebar": "開啟側欄",
+  "selectOrCreate": "從左側選擇或建立一個對話開始",
+  "directTerminal": "終端直通",
+  "interrupt": "中斷(Ctrl+C)",
+  "inputPlaceholder": "輸入一行文字送進終端(Enter 送出,等同鍵盤輸入後按下 Enter)…",
+  "send": "送出"
+}

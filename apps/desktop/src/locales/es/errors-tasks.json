@@ -1,0 +1,22 @@
+{
+  "task": {
+    "memberNotInTeam": "El miembro \"{{memberId}}\" no pertenece al team de la tarea \"{{taskId}}\"",
+    "teamMissingWorkingDir": "El team \"{{teamName}}\" no tiene un workingDir configurado, por lo que no se puede crear el worktree de la tarea",
+    "sessionControlNotReady": "Error interno: SessionManager aún no está listo, por lo que no se pudo crear automáticamente una session para el miembro ephemeral (la asignación se revirtió)",
+    "memberAlreadyAssigned": "El miembro \"{{memberName}}\" ya está trabajando en otra tarea; un miembro solo puede encargarse de una tarea a la vez (la session {{sessionId}} sigue en uso)",
+    "sessionAutoCreateFailed": "No se pudo crear automáticamente una session para el miembro \"{{memberName}}\"; la asignación se revirtió por completo (la tarea volvió a backlog y se eliminó el workspace): {{detail}}",
+    "mergeRequiresMergingStatus": "Solo se pueden fusionar tareas con estado \"merging\" (estado actual: {{status}}, taskId={{taskId}})",
+    "noWorkspaceToMerge": "La tarea {{taskId}} no tiene un workspace vinculado, por lo que no se puede fusionar",
+    "notAwaitingReview": "La tarea {{taskId}} no está actualmente a la espera de aprobación humana para pasar a review (awaitingHumanReview=false)",
+    "acceptanceAlreadyRunning": "La verificación de aceptación de la tarea {{taskId}} ya se está ejecutando; inténtalo de nuevo en unos instantes"
+  },
+  "workspace": {
+    "baseDirDirty": "baseDir ({{baseDir}}) tiene cambios sin commit. Para evitar perder tu trabajo durante la fusión, se rechaza fusionar en este estado; haz commit o limpia los cambios manualmente y vuelve a intentarlo.\n{{status}}",
+    "mergeConflict": "Se produjo un conflicto de fusión; se revirtió al estado anterior a la fusión. Archivos en conflicto: {{conflictFiles}}",
+    "cleanupFailed": "No se pudo limpiar el worktree ({{worktreePath}} sigue existiendo en disco tras {{retries}} reintentos): {{detail}}; la eliminación posterior del directorio también falló: {{rmDetail}}",
+    "mainBranchNotDetected": "No se pudo detectar el nombre de la rama principal (baseDir={{baseDir}}): no hay una rama de seguimiento remoto de origin configurada, y tampoco se encontró una rama local main o master",
+    "workingDirMissing": "El workingDir del team no existe, por lo que no se puede crear un worktree de aislamiento para la tarea: {{dir}}",
+    "workingDirNotGitRepo": "El workingDir del team no es un git repo, por lo que no se puede crear un worktree de aislamiento para la tarea (ejecuta primero `git init` en ese directorio): {{dir}} ({{detail}})",
+    "gitCommandFailed": "Error al ejecutar git {{command}} (cwd={{cwd}}): {{detail}}"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "session": {
+    "modelSwitched": "已切換模型至 {{model}},後續對話由新模型接續",
+    "effortSwitched": "已切換思考程度至 {{effort}},後續對話由新設定接續",
+    "continuedAfterInterrupt": "已透過「繼續」重新連上後端 session(保有先前記憶),core 先前的一次中斷已結束",
+    "yoloExpired": "YOLO(30 分鐘)已到期,已自動回落為一般權限確認模式",
+    "adapterError": {
+      "label": "[錯誤]"
+    },
+    "contextCheckpointRestarted": "[S8] context 使用率已達閾值,已自動 checkpoint 重啟(讀取先前對話摘要延續,沿用同一個 session)",
+    "permissionTimeoutDenied": "權限請求已逾時,自動拒絕"
+  }
+}

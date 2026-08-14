@@ -1,0 +1,33 @@
+{
+  "title": "Recuperación: sesiones que no se cerraron correctamente la última vez",
+  "description": "El proceso hijo desapareció junto con la última interrupción de core, y el agent no tiene memoria para reanudar automáticamente. Decide una por una si continuar, retomar, volver a ejecutar o abandonar",
+  "emptyTitle": "No hay sesiones interrumpidas por ahora",
+  "unknownProfile": "(profile desconocido)",
+  "sessionMetaLine": "{{profile}} · interrumpida a las {{interruptedAt}} · última actividad {{lastSeenAt}}",
+  "taskLine": "Tarea: {{title}} (estado: {{status}})",
+  "crashedWhileMerging": "Se bloqueó durante la fusión — git podría estar en un estado intermedio",
+  "worktreeLine": "worktree: {{branch}}",
+  "missing": "(perdido)",
+  "hasUncommittedChanges": "(tiene cambios sin confirmar)",
+  "clean": "(limpio)",
+  "continueTitle": "Reconectar la sesión del backend: el agent recuerda el contexto anterior",
+  "continueLabel": "Continuar (conservar memoria)",
+  "takeoverTitle": "Iniciar una sesión nueva con un resumen inyectado: la mente del agent es nueva, solo ha leído las notas",
+  "takeoverLabel": "Retomar (reiniciar desde el resumen)",
+  "rerunTitle": "El worktree debe estar limpio antes de volver a ejecutar",
+  "rerunLabel": "Volver a ejecutar…",
+  "abandonLabel": "Abandonar",
+  "checkingStatus": "Comprobando…",
+  "checkGitStatus": "Comprobar estado de git",
+  "noStatusOutputClean": "(sin salida de git status, probablemente ya esté limpio)",
+  "confirmDiscard": "¿Descartar todos los cambios sin confirmar en el worktree de \"{{title}}\"? Esta acción no se puede deshacer (git reset --hard + git clean -fd).",
+  "confirmAbandon": "¿Abandonar \"{{title}}\"? La sesión se marcará como cerrada, pero la tarea y el worktree se conservarán y aún podrán gestionarse manualmente desde el tablero de tareas.",
+  "dirtyResolver": {
+    "heading": "El worktree tiene cambios sin confirmar. Hay que resolverlos antes de volver a ejecutar:",
+    "loadingDiff": "Cargando diff…",
+    "noStatusOutput": "(sin salida de git status)",
+    "noDiffOutput": "(sin salida de git diff — puede que solo haya archivos nuevos sin seguimiento)",
+    "keep": "Conservar (crear una rama wip y confirmar)",
+    "discard": "Descartar cambios"
+  }
+}

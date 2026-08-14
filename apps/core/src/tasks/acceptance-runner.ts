@@ -1,5 +1,11 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import type { AcceptanceCommandResult, AcceptanceResult, Task, Workspace } from "@deskmony/shared";
+import {
+  DeskmonyError,
+  type AcceptanceCommandResult,
+  type AcceptanceResult,
+  type Task,
+  type Workspace,
+} from "@deskmony/shared";
 
 /**
  * AcceptanceRunner(S4 機器驗收閘,切片:量測半、諮詢性)。
@@ -65,7 +71,11 @@ export class AcceptanceRunner {
       return { passed: false, perCommand: [], startedAt, finishedAt: Date.now(), skippedReason: "workspace-missing" };
     }
     if (this.runningTaskIds.has(task.id)) {
-      throw new Error(`任務 ${task.id} 的驗收目前正在執行中,請稍候再試`);
+      throw new DeskmonyError(
+        "task.acceptanceAlreadyRunning",
+        { taskId: task.id },
+        `任務 ${task.id} 的驗收目前正在執行中,請稍候再試`,
+      );
     }
 
     this.runningTaskIds.add(task.id);

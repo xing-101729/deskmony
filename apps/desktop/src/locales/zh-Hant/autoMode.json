@@ -1,0 +1,16 @@
+{
+  "yoloEnabledTitle": "YOLO 已啟用:繞過 config 政策(hard-deny 仍生效)",
+  "yoloEnabledTitleWithExpiry": "YOLO 已啟用:繞過 config 政策(hard-deny 仍生效),約 {{minutes}} 分鐘後自動關閉",
+  "autoEnabledTitle": "Auto 已啟用:自動放行未分類操作(config 的 deny 規則仍生效)",
+  "autoToggleTitle": "Auto:自動放行未分類的中間地帶操作,仍受 config 的 deny 規則與 hard-deny 約束",
+  "autoOnLabel": "Auto 開啟中",
+  "autoOffLabel": "開啟 Auto",
+  "yoloToggleTitle": "YOLO:繞過 config 的所有規則,30 分鐘後自動關閉;hard-deny 永遠不受影響",
+  "yoloOffLabel": "關閉 YOLO",
+  "yoloOnLabel": "啟用 YOLO",
+  "confirmDialogTitle": "啟用 YOLO?",
+  "risk1": "將繞過 config 裡設定的所有政策規則(包含你自訂的 deny 規則)。",
+  "risk2": "30 分鐘後自動關閉,回到一般確認模式。",
+  "risk3Bold": "硬性禁止項(hard-deny)不受影響",
+  "risk3Rest": "——worktree 外寫入、讀取密鑰路徑、force-push 等操作仍會被拒絕或需要強制確認。"
+}

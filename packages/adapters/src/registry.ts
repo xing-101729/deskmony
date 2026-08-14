@@ -1,4 +1,5 @@
 import type { AgentSoftware } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AgentAdapter } from "./types.js";
 
 /**
@@ -27,7 +28,11 @@ export class AdapterRegistry {
   get(software: AgentSoftware): AgentAdapter {
     const adapter = this.adapters.get(software);
     if (!adapter) {
-      throw new Error(`找不到 software="${software}" 對應的 AgentAdapter,尚未在 AdapterRegistry 註冊`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "adapter", id: software },
+        `找不到 software="${software}" 對應的 AgentAdapter,尚未在 AdapterRegistry 註冊`,
+      );
     }
     return adapter;
   }

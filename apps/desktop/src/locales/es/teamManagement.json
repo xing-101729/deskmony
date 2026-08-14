@@ -1,0 +1,47 @@
+{
+  "dialog": {
+    "title": "Gestión del team",
+    "description": "Crea teams, añade/elimina miembros y consulta el estado de session de los miembros"
+  },
+  "lifecycle": {
+    "persistent": "Persistente (persistent)",
+    "ephemeral": "Efímero (ephemeral)"
+  },
+  "lifecycleHint": "S8: Persistente (persistent) = se crea cuando una persona/team lo inicia, para estar disponible en línea; Efímero (ephemeral) = se crea automáticamente al asignar una tarea y se libera automáticamente al completarla",
+  "teamPanel": {
+    "sectionLabel": "Team",
+    "noTeams": "Aún no hay teams",
+    "newTeamNamePlaceholder": "Nombre del nuevo team",
+    "newTeamWorkingDirPlaceholder": "Directorio de trabajo (opcional)",
+    "creating": "Creando…",
+    "createTeam": "Crear team"
+  },
+  "memberPanel": {
+    "emptyTitle": "Primero selecciona o crea un team a la izquierda",
+    "sectionLabel": "Miembros ({{count}})",
+    "noMembers": "Aún no hay miembros",
+    "canInterruptBadge": "Puede interrumpir",
+    "contextUnsupportedTitle": "Este backend no puede detectar automáticamente el límite de contexto — la session de este miembro persistente no hará auto-checkpoint ni se reiniciará sola, así que necesitará un reinicio manual (dispose + volver a crear la session) antes de que el contexto se llene.",
+    "contextUnsupportedBadge": "Este backend no puede detectar automáticamente el límite de contexto; requiere reinicio manual",
+    "noSession": "Aún no hay session",
+    "createSession": "Crear session",
+    "remove": "Eliminar"
+  },
+  "addMember": {
+    "sectionLabel": "Añadir miembro",
+    "noProfileOption": "(Aún no hay ningún profile)",
+    "namePlaceholder": "Nombre visible (opcional, usa por defecto el del profile)",
+    "rolePlaceholder": "Rol (opcional)",
+    "canInterruptLabel": "Puede interrumpir a otros miembros (canInterrupt)",
+    "autoLifecycleOption": "Automático (derivado del rol)",
+    "derivedPreview": "→ Se derivará como \"{{label}}\"",
+    "adding": "Añadiendo…",
+    "submit": "+ Añadir miembro"
+  },
+  "errors": {
+    "teamNameRequired": "Introduce un nombre de team",
+    "selectTeamFirst": "Selecciona primero un team",
+    "selectProfileFirst": "Selecciona un Agent Profile",
+    "workingDirNotFound": "No se encontró un directorio de trabajo disponible; comprueba que el team o el Profile tengan un workingDir configurado"
+  }
+}

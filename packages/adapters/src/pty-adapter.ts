@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 
@@ -88,7 +89,11 @@ export class GenericPtyAdapter implements AgentAdapter {
   async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
     const ptyConfig = profile.ptyConfig;
     if (!ptyConfig) {
-      throw new Error(`AgentProfile "${profile.id}" 的 software="pty" 缺少 ptyConfig(command)`);
+      throw new DeskmonyError(
+        ErrorCodes.ADAPTER_MISSING_CONFIG,
+        { profileId: profile.id, software: "pty", configField: "command" },
+        `AgentProfile "${profile.id}" 的 software="pty" 缺少 ptyConfig(command)`,
+      );
     }
 
     const outputQueue = new AsyncQueue<AgentEvent>();
@@ -105,7 +110,9 @@ export class GenericPtyAdapter implements AgentAdapter {
         name: "xterm-color",
       });
     } catch (err) {
-      throw new Error(
+      throw new DeskmonyError(
+        "adapterProcess.spawnFailed",
+        { software: "pty", command: ptyConfig.command, detail: err instanceof Error ? err.message : String(err) },
         `pty 子程序啟動失敗(command=${ptyConfig.command}): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
@@ -212,7 +219,11 @@ export class GenericPtyAdapter implements AgentAdapter {
    */
   async setModel(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new Error('software="pty" 不支援變更 model(pty 是無結構化的終端直通,不存在「model」概念)');
+    throw new DeskmonyError(
+      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
+      { software: "pty", operation: "setModel" },
+      'software="pty" 不支援變更 model(pty 是無結構化的終端直通,不存在「model」概念)',
+    );
   }
 
   /**
@@ -223,13 +234,21 @@ export class GenericPtyAdapter implements AgentAdapter {
    */
   async setEffort(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new Error('software="pty" 不支援變更思考程度(pty 是無結構化的終端直通,不存在「思考程度」概念)');
+    throw new DeskmonyError(
+      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
+      { software: "pty", operation: "setEffort" },
+      'software="pty" 不支援變更思考程度(pty 是無結構化的終端直通,不存在「思考程度」概念)',
+    );
   }
 
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {
-      throw new Error(`未知的 agent handle: ${handle.id}`);
+      throw new DeskmonyError(
+        ErrorCodes.ADAPTER_UNKNOWN_HANDLE,
+        { handleId: handle.id },
+        `未知的 agent handle: ${handle.id}`,
+      );
     }
     return internal;
   }

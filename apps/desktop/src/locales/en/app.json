@@ -1,0 +1,62 @@
+{
+  "connectionBanner": {
+    "connecting": "Connecting to Deskmony Core…",
+    "disconnected": "Connection to Deskmony Core was lost — retrying automatically…"
+  },
+  "interruptedBanner": {
+    "message": "The last session wasn't shut down cleanly — <strong>{{count}}</strong> session(s) need manual triage (continue / take over / rerun / abandon)",
+    "action": "Start triage"
+  },
+  "sessionDefaultTitle": "Conversation {{n}}",
+  "commands": {
+    "groupGoto": "Go to",
+    "groupActions": "Actions",
+    "groupSessions": "Conversations",
+    "viewSession": {
+      "title": "Session view",
+      "keywords": "session chat conversation"
+    },
+    "viewTeamChat": {
+      "title": "Team chat",
+      "keywords": "team chat group message"
+    },
+    "viewTaskBoard": {
+      "title": "Task board",
+      "keywords": "task board kanban"
+    },
+    "newSession": {
+      "title": "New conversation",
+      "subtitleWithProfile": "Using profile: {{name}}",
+      "subtitleNoProfile": "No Agent Profile available yet",
+      "keywords": "new session create conversation"
+    },
+    "newProfile": {
+      "title": "Create Agent Profile",
+      "keywords": "profile agent provider create"
+    },
+    "settings": {
+      "title": "Settings",
+      "subtitle": "Global settings · Notifications · Provider management",
+      "keywords": "settings config provider model preferences"
+    },
+    "toggleSidebar": {
+      "show": "Show sidebar",
+      "hide": "Collapse sidebar",
+      "keywords": "sidebar collapse toggle panel"
+    },
+    "toggleTheme": {
+      "toLight": "Switch to light theme",
+      "toDark": "Switch to dark theme",
+      "keywords": "theme dark light mode appearance"
+    },
+    "recovery": {
+      "title": "Recover interrupted sessions ({{count}})",
+      "keywords": "recovery crash interrupted resume restore"
+    },
+    "logout": {
+      "title": "Log out",
+      "subtitle": "Clear the saved token and return to the connect screen",
+      "keywords": "logout signout log out"
+    }
+  }
+}

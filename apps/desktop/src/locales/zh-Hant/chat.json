@@ -1,0 +1,49 @@
+{
+  "model": {
+    "managedByAgentTitle": "model 由 agent/CLI 自行管理",
+    "managedByAgentLabel": "由 agent 管理",
+    "switchAriaLabel": "切換 model"
+  },
+  "effort": {
+    "switchAriaLabel": "切換思考程度"
+  },
+  "control": {
+    "notSpecifiedOption": "(未指定,使用 CLI 預設)",
+    "switchFailed": "切換失敗"
+  },
+  "tool": {
+    "statusRunning": "執行中",
+    "statusFailed": "失敗",
+    "statusDone": "完成",
+    "inputLabel": "輸入",
+    "outputLabel": "輸出"
+  },
+  "usage": {
+    "cannotMeasureTitle": "此後端無法量測花費(或尚未確認會不會回報)——任務/每日成本預算對這個 session 不會生效,只有回合時間/工具呼叫次數上限仍在保護。",
+    "unknownLabel": "花費未知",
+    "cannotMeasureLabel": "無法量測花費",
+    "hasValueTitle": "累計花費(此後端有回報 cost,S3a usage-metering)",
+    "noValueYetTitle": "此後端會回報累計花費,但這個 session 尚未收到第一筆(回合結束時才發)"
+  },
+  "cost": {
+    "taskTrippedLabel": "任務「{{title}}」預算已達上限,新 prompt 已擋下",
+    "taskBudgetPercentLabel": "任務預算 {{percent}}%",
+    "dailyTrippedLabel": "今日成本 kill-switch 已觸發,所有 session 已暫停",
+    "trippedTitle": "此 session/任務已被成本斷路器擋下(worktree/任務保留,可調整預算並重啟 core 續行)",
+    "percentTitle": "任務層級累計花費/token 佔預算比例"
+  },
+  "empty": {
+    "selectOrCreateSession": "從左側選擇或建立一個對話開始",
+    "startTyping": "開始輸入訊息與 agent 對話"
+  },
+  "sidebar": {
+    "openAriaLabel": "開啟側欄"
+  },
+  "session": {
+    "interrupt": "中斷"
+  },
+  "composer": {
+    "placeholder": "輸入訊息給 agent…(Enter 送出,Shift+Enter 換行)",
+    "sendAriaLabel": "送出"
+  }
+}

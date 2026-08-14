@@ -1,0 +1,13 @@
+{
+  "adapterProcess": {
+    "spawnFailed": "{{software}} のサブプロセスの起動に失敗しました(command={{command}}): {{detail}}"
+  },
+  "opencode": {
+    "sessionCreateFailed": "OpenCode セッションの作成に失敗しました: {{detail}}",
+    "listenTimeout": "OpenCode server が listening address を出力するのを待機中にタイムアウトしました({{timeoutMs}} ms)",
+    "healthTimeout": "OpenCode server の /global/health が準備完了になるのを待機中にタイムアウトしました({{timeoutMs}} ms)",
+    "invalidModelFormat": "opencode の model は「providerID/modelID」形式である必要があります。値「{{model}}」を解析できませんでした",
+    "eventStreamMissingBody": "OpenCode の /event レスポンスに body がないため、SSE ストリームを読み取れません",
+    "requestFailed": "POST {{url}} が失敗しました(status={{status}}): {{detail}}"
+  }
+}

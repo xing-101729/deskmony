@@ -1,0 +1,9 @@
+{
+  "dialogLabel": "Paleta de comandos",
+  "searchPlaceholder": "Buscar comandos, conversaciones, proyectos…",
+  "searchAriaLabel": "Buscar comandos",
+  "noResults": "Ningún comando coincide con \"{{query}}\"",
+  "selectHint": "Seleccionar",
+  "runHint": "Ejecutar",
+  "resultsCount": "{{count}} elementos"
+}

@@ -6,24 +6,26 @@ import { eq } from "drizzle-orm";
 import type { NexusDb } from "@deskmony/db";
 import { sessions as sessionsTable, messages as messagesTable } from "@deskmony/db";
 import type { AdapterRegistry, AgentAdapter, AgentHandle, TeamSpawnContext } from "@deskmony/adapters";
-import type {
-  AdapterCapabilities,
-  AgentOverride,
-  AgentProfile,
-  AgentSoftware,
-  CreateSessionInput,
-  EffortLevel,
-  MessageRecord,
-  PermissionResolvedPush,
-  PolicyRule,
-  PromptInput,
-  Session,
-  SessionEventEnvelope,
-  SessionPermissionMode,
-  SessionStatus,
-  SpawnChildSessionInput,
-  SubagentChildSummary,
-  TeamBusPort,
+import {
+  DeskmonyError,
+  ErrorCodes,
+  type AdapterCapabilities,
+  type AgentOverride,
+  type AgentProfile,
+  type AgentSoftware,
+  type CreateSessionInput,
+  type EffortLevel,
+  type MessageRecord,
+  type PermissionResolvedPush,
+  type PolicyRule,
+  type PromptInput,
+  type Session,
+  type SessionEventEnvelope,
+  type SessionPermissionMode,
+  type SessionStatus,
+  type SpawnChildSessionInput,
+  type SubagentChildSummary,
+  type TeamBusPort,
 } from "@deskmony/shared";
 import type { ProfileStore } from "../profiles.js";
 import type { PermissionGateway } from "../permissions/permission-gateway.js";
@@ -357,10 +359,14 @@ export class SessionManager extends EventEmitter {
   async abandonInterruptedSession(sessionId: string): Promise<void> {
     const session = await this.getSession(sessionId);
     if (!session) {
-      throw new Error(`找不到 session: ${sessionId}`);
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
     }
     if (session.status !== "interrupted") {
-      throw new Error(`session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted",無法「放棄」`);
+      throw new DeskmonyError(
+        "sessionManager.abandonRequiresInterrupted",
+        { sessionId, status: session.status },
+        `session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted",無法「放棄」`,
+      );
     }
     await this.setStatus(sessionId, "closed");
     this.emit("session-list-updated");
@@ -386,7 +392,11 @@ export class SessionManager extends EventEmitter {
   async createSession(input: CreateSessionInput): Promise<Session> {
     const profile = await this.profiles.get(input.agentProfileId);
     if (!profile) {
-      throw new Error(`找不到 agent profile: ${input.agentProfileId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "agentProfile", id: input.agentProfileId },
+        `找不到 agent profile: ${input.agentProfileId}`,
+      );
     }
 
     // M3 Round A:若這個 session 屬於某個 team 成員,查出 member 資訊,建立
@@ -398,7 +408,11 @@ export class SessionManager extends EventEmitter {
     if (input.teamMemberId) {
       member = await this.teamManager.getMember(input.teamMemberId);
       if (!member) {
-        throw new Error(`找不到 team member: ${input.teamMemberId}`);
+        throw new DeskmonyError(
+          ErrorCodes.ENTITY_NOT_FOUND,
+          { entityType: "teamMember", id: input.teamMemberId },
+          `找不到 team member: ${input.teamMemberId}`,
+        );
       }
       if (this.teamBus) {
         teamContext = {
@@ -479,7 +493,7 @@ export class SessionManager extends EventEmitter {
   async sendPrompt(sessionId: string, prompt: PromptInput): Promise<void> {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) {
-      throw new Error(`session 尚未啟動或已結束: ${sessionId}`);
+      throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
     }
 
     // S3b(CostGovernor)L4 §2/§3.3:任務預算/每日 kill-switch 越線後,只擋
@@ -489,7 +503,16 @@ export class SessionManager extends EventEmitter {
     // `interrupt()`。
     const budgetCheck = await this.costGovernor.checkSendPromptAllowed(sessionId);
     if (!budgetCheck.allowed) {
-      throw new Error(budgetCheck.reason ?? "此 session 已被成本斷路器擋下,無法送出新的 prompt");
+      // i18n 專案:`budgetCheck.reason` 是 CostGovernor(不在這個批次的改動範圍
+      // 內)組好的完整中文句子,不是 code+params 結構——這裡先用一個一次性
+      // code 包起來、把整句塞進 `reason` 參數(等於原樣直通,不強行翻譯這句話
+      // 本身),避免這裡替 CostGovernor 的錯誤文案瞎猜對應的 ErrorCodes.BUDGET_*
+      // 分類。理想的後續修正是讓 CostGovernor.checkSendPromptAllowed() 改回傳
+      // 結構化的 code/params(它產生的兩種情況剛好對應既有的
+      // ErrorCodes.BUDGET_DAILY_LIMIT / BUDGET_TASK_LIMIT),屆時這裡可以直接
+      // 原樣往外傳、不再需要這層包裝(見最終報告的 TODO 說明)。
+      const reason = budgetCheck.reason ?? "此 session 已被成本斷路器擋下,無法送出新的 prompt";
+      throw new DeskmonyError("sessionManager.promptBlockedByBudget", { reason }, reason);
     }
 
     await this.persistMessage(sessionId, "user", prompt.text);
@@ -603,7 +626,11 @@ export class SessionManager extends EventEmitter {
    */
   setSessionPermissionMode(sessionId: string, mode: SessionPermissionMode): SessionPermissionState {
     if (!this.runtime.has(sessionId)) {
-      throw new Error(`session 尚未啟動或已結束,無法設定權限模式: ${sessionId}`);
+      throw new DeskmonyError(
+        ErrorCodes.SESSION_NOT_RUNNING,
+        { sessionId },
+        `session 尚未啟動或已結束,無法設定權限模式: ${sessionId}`,
+      );
     }
     const state: SessionPermissionState = { mode };
     if (mode === "auto-accept-all") {
@@ -640,7 +667,11 @@ export class SessionManager extends EventEmitter {
   async setSessionModel(sessionId: string, model: string): Promise<Session> {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) {
-      throw new Error(`session 尚未啟動或已結束,無法切換 model: ${sessionId}`);
+      throw new DeskmonyError(
+        ErrorCodes.SESSION_NOT_RUNNING,
+        { sessionId },
+        `session 尚未啟動或已結束,無法切換 model: ${sessionId}`,
+      );
     }
 
     await runtime.adapter.setModel(runtime.handle, model);
@@ -649,11 +680,16 @@ export class SessionManager extends EventEmitter {
     await this.db.update(sessionsTable).set({ model, updatedAt }).where(eq(sessionsTable.id, sessionId)).run();
     // 在聊天串留一則系統訊息,讓使用者(即使是之後重新載入 history)也能
     // 看到「這裡換過 model」的紀錄,呼應 ARCHITECTURE 對話延續性的要求。
-    await this.persistMessage(sessionId, "system", `已切換模型至 ${model},後續對話由新模型接續`);
+    // i18n 專案:改存 JSON 結構化事件({event, params}),不再存預先渲染好
+    // 的中文句子——前端(apps/desktop/src/lib/system-events.ts 的
+    // resolveSystemEventText())在渲染當下才查 systemEvents namespace 翻譯,
+    // event key 字串("session.modelSwitched")與 apps/desktop/src/stores/
+    // session-store.ts 的樂觀本地更新必須完全一致,兩邊才會渲染出同樣的結果。
+    await this.persistMessage(sessionId, "system", JSON.stringify({ event: "session.modelSwitched", params: { model } }));
 
     const session = await this.getSession(sessionId);
     if (!session) {
-      throw new Error(`session 不存在: ${sessionId}`);
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `session 不存在: ${sessionId}`);
     }
     this.emit("session-updated", session);
     return session;
@@ -676,19 +712,25 @@ export class SessionManager extends EventEmitter {
   async setSessionEffort(sessionId: string, effort: EffortLevel): Promise<Session> {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) {
-      throw new Error(`session 尚未啟動或已結束,無法切換思考程度: ${sessionId}`);
+      throw new DeskmonyError(
+        ErrorCodes.SESSION_NOT_RUNNING,
+        { sessionId },
+        `session 尚未啟動或已結束,無法切換思考程度: ${sessionId}`,
+      );
     }
 
     await runtime.adapter.setEffort(runtime.handle, effort);
 
     const updatedAt = Date.now();
     await this.db.update(sessionsTable).set({ effort, updatedAt }).where(eq(sessionsTable.id, sessionId)).run();
-    // 在聊天串留一則系統訊息,比照 setSessionModel() 的既有作法。
-    await this.persistMessage(sessionId, "system", `已切換思考程度至 ${effort},後續對話由新設定接續`);
+    // 在聊天串留一則系統訊息,比照 setSessionModel() 的既有作法(見該方法內
+    // 「改存 JSON 結構化事件」的說明,event key 同樣要與 session-store.ts 的
+    // 樂觀本地更新一致)。
+    await this.persistMessage(sessionId, "system", JSON.stringify({ event: "session.effortSwitched", params: { effort } }));
 
     const session = await this.getSession(sessionId);
     if (!session) {
-      throw new Error(`session 不存在: ${sessionId}`);
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `session 不存在: ${sessionId}`);
     }
     this.emit("session-updated", session);
     return session;
@@ -702,7 +744,13 @@ export class SessionManager extends EventEmitter {
    */
   async spawnChild(input: SpawnChildSessionInput): Promise<Session> {
     const parent = await this.getSession(input.parentSessionId);
-    if (!parent) throw new Error(`找不到父 session: ${input.parentSessionId}`);
+    if (!parent) {
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "session", id: input.parentSessionId },
+        `找不到父 session: ${input.parentSessionId}`,
+      );
+    }
     const child = await this.createSession({
       title: input.title ?? `子 agent（${parent.title}）`,
       agentProfileId: input.agentProfileId,
@@ -728,7 +776,13 @@ export class SessionManager extends EventEmitter {
     agentProfileId?: string;
   }): Promise<{ childSessionId: string }> {
     const parent = await this.getSession(input.parentSessionId);
-    if (!parent) throw new Error(`找不到父 session: ${input.parentSessionId}`);
+    if (!parent) {
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "session", id: input.parentSessionId },
+        `找不到父 session: ${input.parentSessionId}`,
+      );
+    }
     const child = await this.spawnChild({
       parentSessionId: input.parentSessionId,
       agentProfileId: input.agentProfileId ?? parent.agentProfileId,
@@ -759,12 +813,26 @@ export class SessionManager extends EventEmitter {
    */
   async sendToChildFromTool(input: { parentSessionId: string; childSessionId: string; message: string }): Promise<void> {
     const child = await this.getSession(input.childSessionId);
-    if (!child) throw new Error(`找不到子 session: ${input.childSessionId}`);
+    if (!child) {
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "session", id: input.childSessionId },
+        `找不到子 session: ${input.childSessionId}`,
+      );
+    }
     if (child.parentSessionId !== input.parentSessionId) {
-      throw new Error(`session ${input.childSessionId} 不是你的子 session,無法送出訊息`);
+      throw new DeskmonyError(
+        "sessionManager.notYourChild",
+        { sessionId: input.childSessionId, parentSessionId: input.parentSessionId },
+        `session ${input.childSessionId} 不是你的子 session,無法送出訊息`,
+      );
     }
     if (!this.runtime.has(input.childSessionId)) {
-      throw new Error(`子 session ${input.childSessionId} 目前沒有在執行中(可能已被回收或關閉),無法送出訊息`);
+      throw new DeskmonyError(
+        ErrorCodes.SESSION_NOT_RUNNING,
+        { sessionId: input.childSessionId },
+        `子 session ${input.childSessionId} 目前沒有在執行中(可能已被回收或關閉),無法送出訊息`,
+      );
     }
     await this.deliverPromptWhenIdle(input.childSessionId, input.message);
   }
@@ -981,20 +1049,30 @@ export class SessionManager extends EventEmitter {
   async continueSession(sessionId: string): Promise<Session> {
     const session = await this.getSession(sessionId);
     if (!session) {
-      throw new Error(`找不到 session: ${sessionId}`);
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
     }
     if (session.status !== "interrupted") {
-      throw new Error(`session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted",無法「繼續」`);
+      throw new DeskmonyError(
+        "sessionManager.continueRequiresInterrupted",
+        { sessionId, status: session.status },
+        `session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted",無法「繼續」`,
+      );
     }
     if (session.adapterType !== "claude-agent-sdk" || !session.backendSessionId) {
-      throw new Error(
+      throw new DeskmonyError(
+        "sessionManager.continueUnsupportedBackend",
+        { sessionId, adapterType: session.adapterType },
         `session ${sessionId} 的後端(${session.adapterType})不支援「繼續(保有記憶)」,或這條 session 崩潰前還沒捕捉到後端 session 識別碼,請改用「接手」`,
       );
     }
 
     const profile = await this.profiles.get(session.agentProfileId);
     if (!profile) {
-      throw new Error(`找不到 session ${sessionId} 對應的 agent profile: ${session.agentProfileId}`);
+      throw new DeskmonyError(
+        ErrorCodes.ENTITY_NOT_FOUND,
+        { entityType: "agentProfile", id: session.agentProfileId },
+        `找不到 session ${sessionId} 對應的 agent profile: ${session.agentProfileId}`,
+      );
     }
 
     const adapter = this.adapters.get(profile.software);
@@ -1017,13 +1095,24 @@ export class SessionManager extends EventEmitter {
       .set({ status: "idle", interruptedAt: null, lastSeenAt: Date.now(), updatedAt: Date.now() })
       .where(eq(sessionsTable.id, sessionId))
       .run();
-    await this.persistMessage(sessionId, "system", "已透過「繼續」重新連上後端 session(保有先前記憶),core 先前的一次中斷已結束");
+    // i18n 專案:改存 JSON 結構化事件,理由同 setSessionModel() 內的說明。
+    await this.persistMessage(
+      sessionId,
+      "system",
+      JSON.stringify({ event: "session.continuedAfterInterrupt" }),
+    );
 
     void this.consumeEvents(sessionId);
     this.emit("session-list-updated");
 
     const updated = await this.getSession(sessionId);
-    if (!updated) throw new Error(`session ${sessionId} 於「繼續」流程中意外消失`);
+    if (!updated) {
+      throw new DeskmonyError(
+        "sessionManager.vanishedDuringContinue",
+        { sessionId },
+        `session ${sessionId} 於「繼續」流程中意外消失`,
+      );
+    }
     this.emit("session-updated", updated);
     return updated;
   }
@@ -1072,7 +1161,11 @@ export class SessionManager extends EventEmitter {
     const software = override.software ?? profile.software;
     const softwareChanged = override.software !== undefined && override.software !== profile.software;
     if (softwareChanged && software !== "claude-agent-sdk" && !override.command) {
-      throw new Error(`agentOverride.software="${software}" 需要一併提供 command`);
+      throw new DeskmonyError(
+        "sessionManager.agentOverrideMissingCommand",
+        { software },
+        `agentOverride.software="${software}" 需要一併提供 command`,
+      );
     }
     return {
       ...profile,
@@ -1188,7 +1281,8 @@ export class SessionManager extends EventEmitter {
           const { state: permState, justExpired } = this.checkAndExpireYolo(sessionId);
           if (justExpired) {
             console.warn(`[auto-mode] session ${sessionId} 的 YOLO(auto-accept-all)已到期(30 分鐘),自動回落 always-ask`);
-            await this.persistMessage(sessionId, "system", "YOLO(30 分鐘)已到期,已自動回落為一般權限確認模式");
+            // i18n 專案:改存 JSON 結構化事件,理由同 setSessionModel() 內的說明。
+            await this.persistMessage(sessionId, "system", JSON.stringify({ event: "session.yoloExpired" }));
             const updated = await this.getSession(sessionId);
             if (updated) this.emit("session-updated", updated);
           }
@@ -1340,7 +1434,17 @@ export class SessionManager extends EventEmitter {
         }
         case "error": {
           this.clearPtyIdleTimer(runtime);
-          await this.persistMessage(sessionId, "system", `[錯誤] ${event.message}${event.detail ? `\n${event.detail}` : ""}`);
+          // i18n 專案:`event.message`/`event.detail` 是底層 adapter(Claude
+          // Code/Codex/OpenCode/PTY)的原始輸出,不是可翻譯的 UI 文字——只有
+          // "[錯誤]" 這個標籤概念可翻譯,訊息本身原樣存進 params,由前端
+          // apps/desktop/src/lib/system-events.ts 的 resolveSystemEventText()
+          // 在渲染時組回 `label + message + detail`,不強行塞進翻譯後的句子
+          // 範本(見該檔案內的完整說明)。
+          await this.persistMessage(
+            sessionId,
+            "system",
+            JSON.stringify({ event: "session.adapterError", params: { message: event.message, detail: event.detail ?? null } }),
+          );
           await this.setStatus(sessionId, "error", event.message);
           runtime.streamingText = "";
           // S3b:回合以錯誤/interrupt 收場,同樣視為回合結束。
@@ -1493,10 +1597,11 @@ export class SessionManager extends EventEmitter {
     // sessionId),不需要更新。
     this.permissionState.set(sessionId, { mode: profile.permissionLevel });
 
+    // i18n 專案:改存 JSON 結構化事件,理由同 setSessionModel() 內的說明。
     await this.persistMessage(
       sessionId,
       "system",
-      "[S8] context 使用率已達閾值,已自動 checkpoint 重啟(讀取先前對話摘要延續,沿用同一個 session)",
+      JSON.stringify({ event: "session.contextCheckpointRestarted" }),
     );
     await this.setStatus(sessionId, "idle");
 

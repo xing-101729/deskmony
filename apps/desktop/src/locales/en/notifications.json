@@ -1,0 +1,31 @@
+{
+  "tripReason": {
+    "task-budget": "Task budget limit",
+    "daily-limit": "Daily cost limit",
+    "waiting-ttl": "Waiting timeout limit",
+    "message-budget": "Message count limit",
+    "turn-limit": "Turn time / tool-call count limit"
+  },
+  "trip": {
+    "reasonFallback": "Halted by the circuit breaker",
+    "title": "Deskmony: Task halted",
+    "body": "{{who}}: {{reason}}"
+  },
+  "reminder": {
+    "budgetWarning": {
+      "title": "Deskmony: Budget nearly exhausted",
+      "body": "{{who}}: Cost/token usage has reached the warning threshold. Not halted yet — consider reviewing or adjusting the budget limit"
+    },
+    "idle": {
+      "title": "Deskmony: Task idle reminder",
+      "body": "{{who}}: has been waiting for a response for over 6 hours and has not been interrupted. The worktree/task is still preserved — check whether it needs your attention"
+    }
+  },
+  "escalation": {
+    "defaultToolLabel": "operation",
+    "titleSingle": "Deskmony: Waiting for approval",
+    "titlePlural": "Deskmony: {{count}} operations waiting for approval",
+    "body": "{{who}}: waiting for approval on {{tools}}"
+  },
+  "listSeparator": ", "
+}

@@ -1,0 +1,10 @@
+{
+  "gateway": {
+    "invalidUrl": "無効なサーバーアドレスです:{{detail}}",
+    "connectTimeout": "接続がタイムアウトしました。サーバーアドレスが正しいか、サーバーが起動しているかを確認してください",
+    "connectFailed": "サーバーに接続できません。アドレスが正しいか確認してください",
+    "closedBeforeAuth": "認証が完了する前に、サーバーによって接続が閉じられました",
+    "connectionLost": "Deskmony Core との接続が切断されました",
+    "notConnected": "まだ Deskmony Core に接続していません"
+  }
+}

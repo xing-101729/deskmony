@@ -1,0 +1,65 @@
+{
+  "nav": {
+    "session": "Session",
+    "teamChat": "Chat del team",
+    "taskBoard": "Tablero de tareas"
+  },
+  "connection": {
+    "open": "Conectado",
+    "connecting": "Conectando…",
+    "closed": "Desconectado"
+  },
+  "confirmDeleteSession": "¿Eliminar la conversación \"{{title}}\"? Esta acción no se puede deshacer.",
+  "confirmDeleteProfile": "¿Eliminar el Agent Profile \"{{name}}\"? Esta acción no se puede deshacer.{{usageNote}}",
+  "confirmDeleteProfileUsageNote": "\n\nActualmente hay {{count}} conversación(es) existentes creadas con este profile. Eliminarlo no afecta a esas conversaciones, pero ya no podrás crear nuevas conversaciones con este profile después.",
+  "contextUsageTitle": "Uso de la ventana de contexto (S3a usage-metering)",
+  "spawnChildAriaLabel": "Iniciar agent hijo",
+  "spawnChildTitle": "Iniciar un agent hijo para ejecutar una subtarea",
+  "deleteSessionAriaLabel": "Eliminar conversación",
+  "expandSidebarAriaLabel": "Expandir barra lateral",
+  "commandPaletteAriaLabel": "Paleta de comandos",
+  "collapseSidebarAriaLabel": "Contraer barra lateral",
+  "closeSidebarAriaLabel": "Cerrar barra lateral",
+  "paletteTriggerLabel": "Buscar o ejecutar un comando…",
+  "selectProfileAriaLabel": "Seleccionar Agent Profile",
+  "noProfileOption": "(Aún no hay ningún profile)",
+  "advancedToggle": "Avanzado (elegir agent/model)",
+  "newSessionButton": "Nueva conversación",
+  "creating": "Creando…",
+  "createProfileAriaLabel": "Crear Agent Profile",
+  "deleteProfileAriaLabel": "Eliminar Agent Profile",
+  "emptyTitle": "Aún no hay conversaciones",
+  "emptyDescription": "Haz clic en \"Nueva conversación\" arriba para empezar a interactuar con un agent.",
+  "waitingForAuthTitle": "Hay una session esperando autorización",
+  "theme": {
+    "system": "Tema: según el sistema (clic para cambiar)",
+    "darkClickForLight": "Tema oscuro (clic para cambiar a claro)",
+    "lightClickForDark": "Tema claro (clic para cambiar a oscuro)"
+  },
+  "toggleThemeAriaLabel": "Cambiar tema",
+  "languageSwitcher": {
+    "toggleLabel": "Cambiar idioma",
+    "menuLabel": "Seleccionar idioma"
+  },
+  "settingsAriaLabel": "Configuración",
+  "logoutAriaLabel": "Cerrar sesión",
+  "unnamedWorkspace": "(Sin directorio especificado)",
+  "spawnChildDialog": {
+    "title": "Iniciar un agent hijo bajo \"{{title}}\"",
+    "description": "Dale al agent hijo un prompt de tarea y elige con qué agent profile crearlo (usa por defecto el profile de este session, pero puedes elegir otro); también puedes anular además el software/model del agent.",
+    "profileSelectAriaLabel": "Seleccionar el profile del agent hijo",
+    "promptLabel": "Prompt de la tarea",
+    "promptPlaceholder": "Describe la tarea que debe realizar este agent hijo…",
+    "titleFieldLabel": "Título (opcional)",
+    "titlePlaceholder": "p. ej., Repetir la verificación de aceptación de este UI slice",
+    "submit": "Iniciar agent hijo"
+  },
+  "overrideFields": {
+    "softwareLabel": "Software del agent (opcional, usa Profile de forma predeterminada)",
+    "useProfileDefault": "(Usa la configuración del Profile)",
+    "modelLabel": "Model (opcional)",
+    "useDefaultPlain": "(Usar el predeterminado)",
+    "useDefaultProfile": "(Usar el predeterminado del Profile)",
+    "effortLabel": "Nivel de razonamiento (opcional)"
+  }
+}

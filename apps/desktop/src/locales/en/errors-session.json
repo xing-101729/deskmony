@@ -1,0 +1,11 @@
+{
+  "sessionManager": {
+    "abandonRequiresInterrupted": "Session {{sessionId}} is currently \"{{status}}\", not \"interrupted\" — cannot abandon it",
+    "promptBlockedByBudget": "{{reason}}",
+    "notYourChild": "Session {{sessionId}} is not your child session, cannot send it a message",
+    "continueRequiresInterrupted": "Session {{sessionId}} is currently \"{{status}}\", not \"interrupted\" — cannot continue it",
+    "continueUnsupportedBackend": "Session {{sessionId}}'s backend ({{adapterType}}) does not support \"continue (keep memory)\", or its backend session ID was not captured before the crash — use \"take over\" instead",
+    "vanishedDuringContinue": "Session {{sessionId}} unexpectedly disappeared during the \"continue\" flow",
+    "agentOverrideMissingCommand": "agentOverride.software=\"{{software}}\" also requires a command to be provided"
+  }
+}

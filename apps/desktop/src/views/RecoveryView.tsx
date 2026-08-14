@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { RecoveryGitStatusResult, RecoverySessionInfo } from "@deskmony/shared";
 import { useRecoveryStore } from "../stores/recovery-store.js";
 import { Dialog } from "../ui/Dialog.js";
@@ -6,14 +7,23 @@ import { Button } from "../ui/Button.js";
 import { Badge } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
 import { Icon } from "../ui/icons.js";
+import { useLocale } from "../ui/locale.js";
+import { formatDateTime } from "../lib/format-datetime.js";
+import type { Locale } from "../lib/locale-storage.js";
+import { translateError } from "../lib/error-i18n.js";
 
 interface RecoveryViewProps {
   onClose: () => void;
 }
 
-function formatTime(ts: number | undefined): string {
-  if (!ts) return "未知";
-  return new Date(ts).toLocaleString();
+/** i18n 專案新增:改用 formatDateTime()(見 lib/format-datetime.ts)取代原本
+ *  沒帶 locale 參數的裸 `.toLocaleString()`——這支是全 app 唯一一處這種寫法
+ *  (其餘兩處硬編 "zh-TW" 的呼叫點在其他檔案,不在這批次範圍內)。無時間戳
+ *  時顯示的文字改由呼叫端傳入(元件內用 t("common:unknown")),這裡維持是
+ *  不依賴 React context 的純函式。 */
+function formatTime(ts: number | undefined, locale: Locale, unknownLabel: string): string {
+  if (!ts) return unknownLabel;
+  return formatDateTime(ts, locale);
 }
 
 /**
@@ -22,6 +32,7 @@ function formatTime(ts: number | undefined): string {
  * 按鈕在髒 worktree 上直接生效**。
  */
 function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessionInfo; onResolved: () => void }): JSX.Element {
+  const { t } = useTranslation(["recovery", "common"]);
   const gitStatus = useRecoveryStore((s) => s.gitStatus);
   const resolveDirtyWorktree = useRecoveryStore((s) => s.resolveDirtyWorktree);
   const [result, setResult] = useState<RecoveryGitStatusResult | null>(null);
@@ -32,7 +43,7 @@ function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessi
   useEffect(() => {
     void gitStatus(session.sessionId)
       .then(setResult)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setError(translateError(err, t)))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.sessionId]);
@@ -44,14 +55,14 @@ function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessi
       await resolveDirtyWorktree(session.sessionId, "keep");
       onResolved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setBusy(false);
     }
   };
 
   const handleDiscard = async (): Promise<void> => {
-    if (!window.confirm(`確定要丟棄「${session.sessionTitle}」worktree 內所有未提交的變更嗎?此操作無法復原(git reset --hard + git clean -fd)。`)) {
+    if (!window.confirm(t("recovery:confirmDiscard", { title: session.sessionTitle }))) {
       return;
     }
     setBusy(true);
@@ -60,7 +71,7 @@ function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessi
       await resolveDirtyWorktree(session.sessionId, "discard", true);
       onResolved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setBusy(false);
     }
@@ -69,23 +80,23 @@ function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessi
   return (
     <div className="mt-2 rounded-md bg-warn/[0.06] p-2.5 text-xs">
       <p className="mb-1.5 flex items-center gap-1.5 font-medium text-warn">
-        <Icon name="alert" size={13} /> worktree 有未提交的變更,重跑前必須先處理:
+        <Icon name="alert" size={13} /> {t("recovery:dirtyResolver.heading")}
       </p>
-      {loading && <p className="text-fg-faint">載入 diff 中…</p>}
+      {loading && <p className="text-fg-faint">{t("recovery:dirtyResolver.loadingDiff")}</p>}
       {error && <p className="text-danger">{error}</p>}
       {result && (
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-canvas p-2 text-2xs text-fg-muted">
-          {result.status || "(git status 無輸出)"}
+          {result.status || t("recovery:dirtyResolver.noStatusOutput")}
           {"\n---\n"}
-          {result.diff || "(git diff 無輸出——可能只有未追蹤的新檔案)"}
+          {result.diff || t("recovery:dirtyResolver.noDiffOutput")}
         </pre>
       )}
       <div className="mt-2 flex gap-2">
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void handleKeep()}>
-          保留(建 wip 分支並 commit)
+          {t("recovery:dirtyResolver.keep")}
         </Button>
         <Button size="sm" variant="danger" disabled={busy} onClick={() => void handleDiscard()}>
-          丟棄變更
+          {t("recovery:dirtyResolver.discard")}
         </Button>
       </div>
     </div>
@@ -93,6 +104,8 @@ function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessi
 }
 
 function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element {
+  const { t } = useTranslation(["recovery", "common"]);
+  const locale = useLocale((s) => s.locale);
   const continueSession = useRecoveryStore((s) => s.continueSession);
   const takeover = useRecoveryStore((s) => s.takeover);
   const rerun = useRecoveryStore((s) => s.rerun);
@@ -115,7 +128,7 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
     try {
       await action();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setBusy(false);
     }
@@ -136,14 +149,14 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
       const result = await gitStatus(session.sessionId);
       setMergeStatus(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setMergeStatusLoading(false);
     }
   };
 
   const handleAbandon = (): void => {
-    if (!window.confirm(`確定要放棄「${session.sessionTitle}」嗎?session 會標記為已關閉,但任務與 worktree 都會保留,之後仍可從任務看板手動處理。`)) {
+    if (!window.confirm(t("recovery:confirmAbandon", { title: session.sessionTitle }))) {
       return;
     }
     void run(() => abandon(session.sessionId));
@@ -155,24 +168,28 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-fg">{session.sessionTitle}</p>
           <p className="mt-0.5 text-2xs text-fg-faint">
-            {session.profileName ?? "(未知 profile)"} · 中斷於 {formatTime(session.interruptedAt)} · 最後活動 {formatTime(session.lastSeenAt)}
+            {t("recovery:sessionMetaLine", {
+              profile: session.profileName ?? t("recovery:unknownProfile"),
+              interruptedAt: formatTime(session.interruptedAt, locale, t("common:unknown")),
+              lastSeenAt: formatTime(session.lastSeenAt, locale, t("common:unknown")),
+            })}
           </p>
           {session.task && (
             <p className="mt-1 flex flex-wrap items-center gap-1.5 text-2xs text-fg-muted">
-              任務:{session.task.title}(狀態:{session.task.status})
+              {t("recovery:taskLine", { title: session.task.title, status: session.task.status })}
               {isMerging && (
                 <Badge tone="danger" icon="alert">
-                  崩潰於合併中,git 可能處於中間狀態
+                  {t("recovery:crashedWhileMerging")}
                 </Badge>
               )}
             </p>
           )}
           {session.workspace && (
             <p className="mt-1 text-2xs text-fg-faint">
-              worktree:{session.workspace.branch}
-              {worktreeMissing && <span className="ml-1 text-danger">(已遺失)</span>}
-              {!worktreeMissing && worktreeDirty && <span className="ml-1 text-warn">(有未提交的變更)</span>}
-              {!worktreeMissing && !worktreeDirty && <span className="ml-1 text-ok">(乾淨)</span>}
+              {t("recovery:worktreeLine", { branch: session.workspace.branch })}
+              {worktreeMissing && <span className="ml-1 text-danger">{t("recovery:missing")}</span>}
+              {!worktreeMissing && worktreeDirty && <span className="ml-1 text-warn">{t("recovery:hasUncommittedChanges")}</span>}
+              {!worktreeMissing && !worktreeDirty && <span className="ml-1 text-ok">{t("recovery:clean")}</span>}
             </p>
           )}
         </div>
@@ -184,11 +201,11 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
         // §5.3:merging 中崩潰——只提供「檢查 git 狀態」,不提供任何自動修復。
         <div className="mt-2">
           <Button size="sm" variant="outline" loading={mergeStatusLoading} className="hover:!border-danger hover:!text-danger" onClick={() => void handleCheckGitStatus()}>
-            {mergeStatusLoading ? "查詢中…" : "檢查 git 狀態"}
+            {mergeStatusLoading ? t("recovery:checkingStatus") : t("recovery:checkGitStatus")}
           </Button>
           {mergeStatus && (
             <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-canvas p-2 text-2xs text-fg-muted">
-              {mergeStatus.status || "(git status 無輸出,可能已經是乾淨狀態)"}
+              {mergeStatus.status || t("recovery:noStatusOutputClean")}
             </pre>
           )}
         </div>
@@ -196,20 +213,20 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
         <div className="mt-2 flex flex-wrap gap-2">
           {/* §4.1:不支援「繼續」的後端,這個按鈕整個不出現(不是灰掉)。 */}
           {session.canContinue && (
-            <Button size="sm" variant="primary" disabled={busy} title="重連後端 session,agent 記得先前脈絡" onClick={() => void run(() => continueSession(session.sessionId))}>
-              繼續(保有記憶)
+            <Button size="sm" variant="primary" disabled={busy} title={t("recovery:continueTitle")} onClick={() => void run(() => continueSession(session.sessionId))}>
+              {t("recovery:continueLabel")}
             </Button>
           )}
-          <Button size="sm" variant="outline" disabled={busy} title="開新 session,注入摘要——agent 的腦是新的,只讀過筆記" onClick={() => void run(() => takeover(session.sessionId))}>
-            接手(讀摘要重啟)
+          <Button size="sm" variant="outline" disabled={busy} title={t("recovery:takeoverTitle")} onClick={() => void run(() => takeover(session.sessionId))}>
+            {t("recovery:takeoverLabel")}
           </Button>
           {!worktreeMissing && (
-            <Button size="sm" variant="outline" disabled={busy} title="worktree 必須乾淨才能重跑" onClick={handleRerunClick}>
-              重跑…
+            <Button size="sm" variant="outline" disabled={busy} title={t("recovery:rerunTitle")} onClick={handleRerunClick}>
+              {t("recovery:rerunLabel")}
             </Button>
           )}
           <Button size="sm" variant="ghost" disabled={busy} className="hover:!text-danger" onClick={handleAbandon}>
-            放棄
+            {t("recovery:abandonLabel")}
           </Button>
         </div>
       )}
@@ -225,20 +242,21 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
  * 本身是被動的:不會自己彈出,也不會自動對任何一列採取行動(D3)。
  */
 export function RecoveryView({ onClose }: RecoveryViewProps): JSX.Element {
+  const { t } = useTranslation(["recovery", "common"]);
   const sessions = useRecoveryStore((s) => s.sessions);
   const loading = useRecoveryStore((s) => s.loading);
 
   return (
     <Dialog
-      title="復原:上次未被乾淨關閉的 session"
-      description="子程序已隨 core 上次的中斷消失,agent 沒有記憶可自動續接——請逐一決定要繼續、接手、重跑,還是放棄"
+      title={t("recovery:title")}
+      description={t("recovery:description")}
       icon="alert"
       size="lg"
       onClose={onClose}
     >
       <div className="space-y-2">
-        {loading && sessions.length === 0 && <p className="py-6 text-center text-xs text-fg-faint">載入中…</p>}
-        {!loading && sessions.length === 0 && <EmptyState icon="check" title="目前沒有中斷的 session" compact />}
+        {loading && sessions.length === 0 && <p className="py-6 text-center text-xs text-fg-faint">{t("common:loading")}</p>}
+        {!loading && sessions.length === 0 && <EmptyState icon="check" title={t("recovery:emptyTitle")} compact />}
         {sessions.map((session) => (
           <RecoveryRow key={session.sessionId} session={session} />
         ))}

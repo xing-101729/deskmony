@@ -1,0 +1,7 @@
+{
+  "recovery": {
+    "worktreeDirty": "worktree({{worktreePath}})有未提交的變更,請先呼叫「檢查變更」查看 diff,並選擇「保留」(建 wip 分支)或「丟棄」處理乾淨後再重跑——絕不默默在髒 worktree 上重跑",
+    "sessionMissingWorkspace": "Session {{sessionId}} 沒有綁定 workspace",
+    "sessionNotInterrupted": "Session {{sessionId}} 目前狀態是「{{status}}」,不是「interrupted」"
+  }
+}

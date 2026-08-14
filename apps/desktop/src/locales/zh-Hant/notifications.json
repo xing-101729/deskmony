@@ -1,0 +1,31 @@
+{
+  "tripReason": {
+    "task-budget": "任務預算上限",
+    "daily-limit": "每日成本上限",
+    "waiting-ttl": "等待逾時上限",
+    "message-budget": "訊息數上限",
+    "turn-limit": "回合時間/工具呼叫次數上限"
+  },
+  "trip": {
+    "reasonFallback": "已被熔斷叫停",
+    "title": "Deskmony:任務已熔斷",
+    "body": "{{who}}:{{reason}}"
+  },
+  "reminder": {
+    "budgetWarning": {
+      "title": "Deskmony:預算即將用盡",
+      "body": "{{who}}:花費/token 已達到警戒線,尚未 halt,建議關注或調整預算上限"
+    },
+    "idle": {
+      "title": "Deskmony:任務閒置提醒",
+      "body": "{{who}}:已等待回應超過 6 小時,尚未被中斷,worktree/任務仍保留,請確認是否需要回來處理"
+    }
+  },
+  "escalation": {
+    "defaultToolLabel": "操作",
+    "titleSingle": "Deskmony:等待核可",
+    "titlePlural": "Deskmony:{{count}} 個操作等待核可",
+    "body": "{{who}}:等待核可 {{tools}}"
+  },
+  "listSeparator": "、"
+}

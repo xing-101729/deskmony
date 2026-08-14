@@ -52,6 +52,14 @@ import {
   SettingsSetProviderPrefsResultSchema,
 } from "@deskmony/shared";
 import { GatewayClient } from "../lib/gateway-client.js";
+/**
+ * i18n 專案:`handleEnforcementNotification()` 是 zustand store 內的一次性
+ * side effect(不是 JSX/React component),沒有 `useTranslation()` hook 可用
+ * ——這是整個 i18n 專案**唯一**允許直接 import i18next 裸單例(而不是透過
+ * hook 拿 `t`)的地方,見下方呼叫處註解與 `formatEnforcementNotificationText()`
+ * (packages/shared/src/notification.ts)簽章變更的說明。
+ */
+import i18next from "../i18n.js";
 
 /** UI 用的聊天時間軸項目(把持久化的 MessageRecord 與即時串流事件合併呈現)。 */
 export type ChatItem =
@@ -777,6 +785,12 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       // 本地立即補一則系統訊息(後端已經把同樣內容的訊息 persist 到 DB,見
       // SessionManager.setSessionModel()),讓使用者不需要等下一次
       // selectSession() 重新載入 history 就能立刻看到「換過 model」的提示。
+      // i18n 專案:content 改存 JSON 結構化事件(與 SessionManager.
+      // setSessionModel() 寫進 DB 的形狀完全一致),渲染時才由
+      // apps/desktop/src/lib/system-events.ts 的 resolveSystemEventText()
+      // 查 systemEvents namespace 翻譯——這樣這則樂觀本地訊息,與之後
+      // selectSession() 重新載入時從 DB 讀回的「正式版」訊息,會渲染出
+      // 完全相同的文字(不會先閃一次中文、之後才變成翻譯後的文字)。
       itemsBySession: {
         ...state.itemsBySession,
         [sessionId]: [
@@ -784,7 +798,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
           {
             kind: "system",
             id: crypto.randomUUID(),
-            content: `已切換模型至 ${model},後續對話由新模型接續`,
+            content: JSON.stringify({ event: "session.modelSwitched", params: { model } }),
             createdAt: Date.now(),
           },
         ],
@@ -801,6 +815,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         : [...state.sessions, session],
       // 比照上面的 setSessionModel():本地立即補一則系統訊息(後端已經把
       // 同樣內容的訊息 persist 到 DB,見 SessionManager.setSessionEffort())。
+      // i18n 專案:content 改存 JSON 結構化事件,理由同上方 setSessionModel()
+      // 內的說明。
       itemsBySession: {
         ...state.itemsBySession,
         [sessionId]: [
@@ -808,7 +824,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
           {
             kind: "system",
             id: crypto.randomUUID(),
-            content: `已切換思考程度至 ${effort},後續對話由新設定接續`,
+            content: JSON.stringify({ event: "session.effortSwitched", params: { effort } }),
             createdAt: Date.now(),
           },
         ],
@@ -905,10 +921,15 @@ function handlePermissionResolved(
     };
     if (payload.source === "timeout") {
       const items = [...(state.itemsBySession[payload.sessionId] ?? [])];
+      // i18n 專案:這則系統訊息完全是前端本地產生(沒有對應的 backend
+      // persistMessage() 呼叫——見 apps/core/src/session/session-manager.ts
+      // 逾時自動 deny 的路徑並不會寫一則 system 訊息到 DB),content 仍比照
+      // 其餘 system 事件存 JSON 結構化事件,讓 ChatBubble 用同一套
+      // resolveSystemEventText() 邏輯渲染,event key 只在這裡使用。
       items.push({
         kind: "system",
         id: crypto.randomUUID(),
-        content: "權限請求已逾時,自動拒絕",
+        content: JSON.stringify({ event: "session.permissionTimeoutDenied" }),
         createdAt: Date.now(),
       });
       next.itemsBySession = { ...state.itemsBySession, [payload.sessionId]: items };
@@ -938,7 +959,10 @@ function handleEnforcementNotification(rawPayload: unknown): void {
   } catch {
     return;
   }
-  const { title, body } = formatEnforcementNotificationText(payload);
+  // i18n 專案:第二個參數是純函式簽章的 t(見 notification.ts 頂端變更說明
+  // ——那個檔案完全不 import node:*/i18next,只收一個呼叫端提供的回呼),這裡
+  // 傳入 i18next 的裸 t 而非 hook 版本,理由見上方 import 處註解。
+  const { title, body } = formatEnforcementNotificationText(payload, i18next.t);
   void window.deskmony.notify({ title, body, sessionId: payload.sessionId });
 }
 
@@ -1058,10 +1082,18 @@ function handleSessionEvent(
         break;
       }
       case "error": {
+        // i18n 專案:content 改存 JSON 結構化事件,與
+        // apps/core/src/session/session-manager.ts 的 consumeEvents()
+        // "error" case 寫進 DB 的形狀完全一致(含 detail),讓這則即時推播
+        // 版本與之後 selectSession() 重新載入時從 DB 讀回的持久化版本,
+        // 經 resolveSystemEventText() 渲染出完全相同的文字。
         items.push({
           kind: "system",
           id: crypto.randomUUID(),
-          content: `[錯誤] ${event.message}`,
+          content: JSON.stringify({
+            event: "session.adapterError",
+            params: { message: event.message, detail: event.detail ?? null },
+          }),
           createdAt: envelope.timestamp,
         });
         break;

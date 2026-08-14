@@ -1,0 +1,13 @@
+{
+  "session": {
+    "modelSwitched": "Se cambió el modelo a {{model}}: la conversación continuará con el nuevo modelo",
+    "effortSwitched": "Se cambió el nivel de razonamiento a {{effort}}: la conversación continuará con el nuevo ajuste",
+    "continuedAfterInterrupt": "Se reconectó a la sesión del backend mediante \"continuar\" (memoria conservada); la interrupción anterior en core ha finalizado",
+    "yoloExpired": "YOLO (30 minutos) ha expirado y volvió automáticamente al modo normal de confirmación de permisos",
+    "adapterError": {
+      "label": "[Error]"
+    },
+    "contextCheckpointRestarted": "[S8] El uso de contexto alcanzó el umbral: se reinició automáticamente mediante checkpoint (continúa a partir del resumen de la conversación anterior, misma sesión)",
+    "permissionTimeoutDenied": "La solicitud de permiso expiró y fue rechazada automáticamente"
+  }
+}

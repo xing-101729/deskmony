@@ -1,0 +1,13 @@
+{
+  "session": {
+    "modelSwitched": "Switched model to {{model}} — the conversation will continue with the new model",
+    "effortSwitched": "Switched thinking effort to {{effort}} — the conversation will continue with the new setting",
+    "continuedAfterInterrupt": "Reconnected to the backend session via \"continue\" (memory preserved) — the previous interruption in core has ended",
+    "yoloExpired": "YOLO (30 minutes) has expired and automatically fell back to normal permission-confirmation mode",
+    "adapterError": {
+      "label": "[Error]"
+    },
+    "contextCheckpointRestarted": "[S8] Context usage reached the threshold — automatically checkpoint-restarted (resumed from the previous conversation summary, same session)",
+    "permissionTimeoutDenied": "The permission request timed out and was automatically denied"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "urlRequired": "サーバーアドレスを入力してください",
+  "heading": "Deskmony Core に接続",
+  "tagline": "Agent Team 管理プラットフォーム",
+  "description": "ブラウザで Deskmony を使用するには、まず実行中の Deskmony Core サーバーに接続する必要があります。",
+  "serverUrlLabel": "サーバーアドレス",
+  "tokenLabel": "認証 Token(サーバーで認証が無効な場合は空欄のまま)",
+  "connecting": "接続中…",
+  "connect": "接続",
+  "tokenStorageNote": "Token はこのタブの sessionStorage にのみ保存され、タブを閉じると自動的に消去されます。アドレスバーやブラウザの履歴には書き込まれません。共有パソコンで使用している場合は、終了時にメイン画面で「ログアウト」を押すか、このタブを直接閉じてください。"
+}

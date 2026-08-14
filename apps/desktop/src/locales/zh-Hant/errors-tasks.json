@@ -1,0 +1,22 @@
+{
+  "task": {
+    "memberNotInTeam": "成員「{{memberId}}」不屬於任務「{{taskId}}」所在的 team",
+    "teamMissingWorkingDir": "Team「{{teamName}}」未設定 workingDir,無法建立任務 worktree 隔離",
+    "sessionControlNotReady": "內部錯誤:SessionManager 尚未就緒,無法為 ephemeral 成員自動建立 session(指派已回滾)",
+    "memberAlreadyAssigned": "成員「{{memberName}}」目前已在其他任務上,一個成員同時只能承接一個任務(session {{sessionId}} 仍在使用中)",
+    "sessionAutoCreateFailed": "成員「{{memberName}}」的 session 自動建立失敗,指派已整個回滾(任務退回 backlog、workspace 已清除):{{detail}}",
+    "mergeRequiresMergingStatus": "只有狀態為 merging 的任務才能執行合併(目前狀態:{{status}}, taskId={{taskId}})",
+    "noWorkspaceToMerge": "任務 {{taskId}} 沒有綁定 workspace,無法合併",
+    "notAwaitingReview": "任務 {{taskId}} 目前沒有在等待人類核可進入 review(awaitingHumanReview=false)",
+    "acceptanceAlreadyRunning": "任務 {{taskId}} 的驗收目前正在執行中,請稍候再試"
+  },
+  "workspace": {
+    "baseDirDirty": "baseDir({{baseDir}})有未 commit 的變更,為避免合併過程弄丟使用者的工作,拒絕在此狀態下執行合併,請先手動 commit 或處理乾淨後再試一次。\n{{status}}",
+    "mergeConflict": "合併發生衝突,已還原到合併前狀態。衝突檔案:{{conflictFiles}}",
+    "cleanupFailed": "清理 worktree 失敗({{worktreePath}} 仍存在於磁碟上,已重試 {{retries}} 次):{{detail}};後續刪除目錄也失敗:{{rmDetail}}",
+    "mainBranchNotDetected": "無法偵測主幹分支名稱(baseDir={{baseDir}}):沒有設定 origin 遠端追蹤分支,本機也找不到 main 或 master 分支",
+    "workingDirMissing": "team workingDir 不存在,無法建立任務 worktree 隔離:{{dir}}",
+    "workingDirNotGitRepo": "team workingDir 不是 git repo,無法建立任務 worktree 隔離(需要先在該目錄 `git init`):{{dir}}({{detail}})",
+    "gitCommandFailed": "git {{command}} 失敗(cwd={{cwd}}):{{detail}}"
+  }
+}

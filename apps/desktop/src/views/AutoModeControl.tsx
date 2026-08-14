@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { Session } from "@deskmony/shared";
 import { useSessionStore } from "../stores/session-store.js";
 import { Dialog } from "../ui/Dialog.js";
@@ -19,8 +20,13 @@ import { Icon } from "../ui/icons.js";
  * 兩者中間隔著常駐標記徽章,視覺上仍維持這個間隔;YOLO 鈕額外用 `danger`
  * 語氣(而非 outline),讓「這是危險操作」在配色上就先傳達出來,不需要等
  * hover 才知道。
+ *
+ * i18n 專案新增:徽章內文「YOLO」/「AUTO」刻意不經過 t() ——比照
+ * ui/status.ts 的 softwareBadge 慣例,這是產品專有的模式名稱縮寫(見
+ * locales/GLOSSARY.md),四語言一律保留原文。
  */
 export function AutoModeControl({ session }: { session: Session }): JSX.Element | null {
+  const { t } = useTranslation(["autoMode", "common"]);
   const capabilities = useSessionStore((s) => s.gatewayCapabilities);
   const setSessionPermissionMode = useSessionStore((s) => s.setSessionPermissionMode);
   const [showYoloConfirm, setShowYoloConfirm] = useState(false);
@@ -60,10 +66,12 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
         icon="zap"
         title={
           isYolo
-            ? `YOLO 已啟用:繞過 config 政策(hard-deny 仍生效)${
-                session.yoloExpiresAt ? `,約 ${Math.max(0, Math.round((session.yoloExpiresAt - Date.now()) / 60_000))} 分鐘後自動關閉` : ""
-              }`
-            : "Auto 已啟用:自動放行未分類操作(config 的 deny 規則仍生效)"
+            ? session.yoloExpiresAt
+              ? t("autoMode:yoloEnabledTitleWithExpiry", {
+                  minutes: Math.max(0, Math.round((session.yoloExpiresAt - Date.now()) / 60_000)),
+                })
+              : t("autoMode:yoloEnabledTitle")
+            : t("autoMode:autoEnabledTitle")
         }
         className="uppercase tracking-wide"
       >
@@ -83,10 +91,10 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
           variant={isAuto ? "accentSoft" : "outline"}
           disabled={busy}
           onClick={handleAutoClick}
-          title="Auto:自動放行未分類的中間地帶操作,仍受 config 的 deny 規則與 hard-deny 約束"
+          title={t("autoMode:autoToggleTitle")}
           className={isAuto ? "!bg-warn/12 !text-warn" : ""}
         >
-          {isAuto ? "Auto 開啟中" : "開啟 Auto"}
+          {isAuto ? t("autoMode:autoOnLabel") : t("autoMode:autoOffLabel")}
         </Button>
       )}
 
@@ -98,9 +106,9 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
           variant={isYolo ? "danger" : "outline"}
           disabled={busy}
           onClick={handleYoloClick}
-          title="YOLO:繞過 config 的所有規則,30 分鐘後自動關閉;hard-deny 永遠不受影響"
+          title={t("autoMode:yoloToggleTitle")}
         >
-          {isYolo ? "關閉 YOLO" : "啟用 YOLO"}
+          {isYolo ? t("autoMode:yoloOffLabel") : t("autoMode:yoloOnLabel")}
         </Button>
       )}
 
@@ -119,9 +127,10 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
 
 /** L4 §3:YOLO 啟用確認——獨立對話框,取消為預設(不 autoFocus 到啟用鈕)。 */
 function YoloConfirmDialog({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }): JSX.Element {
+  const { t } = useTranslation(["autoMode", "common"]);
   return (
     <Dialog
-      title="啟用 YOLO?"
+      title={t("autoMode:confirmDialogTitle")}
       icon="zap"
       tone="danger"
       size="sm"
@@ -129,10 +138,10 @@ function YoloConfirmDialog({ onCancel, onConfirm }: { onCancel: () => void; onCo
       footer={
         <div className="flex w-full justify-end gap-2">
           <Button variant="secondary" autoFocus onClick={onCancel}>
-            取消
+            {t("common:cancel")}
           </Button>
           <Button variant="danger" onClick={onConfirm}>
-            啟用 YOLO
+            {t("autoMode:yoloOnLabel")}
           </Button>
         </div>
       }
@@ -140,17 +149,17 @@ function YoloConfirmDialog({ onCancel, onConfirm }: { onCancel: () => void; onCo
       <ul className="space-y-1.5 text-xs leading-relaxed text-fg-soft">
         <li className="flex gap-1.5">
           <Icon name="alert" size={13} className="mt-0.5 flex-shrink-0 text-danger" />
-          將繞過 config 裡設定的所有政策規則(包含你自訂的 deny 規則)。
+          {t("autoMode:risk1")}
         </li>
         <li className="flex gap-1.5">
           <Icon name="clock" size={13} className="mt-0.5 flex-shrink-0 text-fg-faint" />
-          30 分鐘後自動關閉,回到一般確認模式。
+          {t("autoMode:risk2")}
         </li>
         <li className="flex gap-1.5">
           <Icon name="shield" size={13} className="mt-0.5 flex-shrink-0 text-ok" />
           <span>
-            <span className="font-medium text-fg">硬性禁止項(hard-deny)不受影響</span>
-            ——worktree 外寫入、讀取密鑰路徑、force-push 等操作仍會被拒絕或需要強制確認。
+            <span className="font-medium text-fg">{t("autoMode:risk3Bold")}</span>
+            {t("autoMode:risk3Rest")}
           </span>
         </li>
       </ul>
