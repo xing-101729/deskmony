@@ -44,6 +44,7 @@ export function createDb(dbFilePath: string): NexusDb {
       session_id TEXT NOT NULL,
       role TEXT NOT NULL,
       content TEXT NOT NULL,
+      attachments TEXT,
       created_at INTEGER NOT NULL
     );
 
@@ -171,6 +172,7 @@ export function createDb(dbFilePath: string): NexusDb {
   ensureSessionsEffortColumn(sqlite);
   ensureSessionsRecoveryColumns(sqlite);
   ensureSessionsParentColumn(sqlite);
+  ensureMessagesAttachmentsColumn(sqlite);
   ensureAgentProfilesOpencodeConfigColumn(sqlite);
   ensureAgentProfilesProviderColumns(sqlite);
   ensureAgentProfilesEffortColumn(sqlite);
@@ -270,6 +272,26 @@ function ensureSessionsParentColumn(sqlite: Database.Database): void {
   if (hasColumn) return;
   try {
     sqlite.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT");
+  } catch {
+    // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
+  }
+}
+
+/**
+ * async-scribbling-llama.md Phase 6(使用者傳送圖片):對「已存在的舊 DB
+ * 檔案」補上 `messages.attachments` 欄位——理由與作法完全比照
+ * `ensureSessionsModelColumn()`(`CREATE TABLE IF NOT EXISTS` 對已存在的表
+ * 不會補欄位,需要另外用 `PRAGMA table_info` 檢查後視情況 `ALTER TABLE`)。
+ * Nullable、無 SQL DEFAULT,不需要額外回填——既有訊息一律沒有附件,
+ * `ALTER TABLE ADD COLUMN` 對既有列天生就會填 NULL,這正是「沒有附件」的
+ * 正確既有語意,不像 `ensureTeamMessagesBudgetColumns()` 那樣需要一次性 UPDATE。
+ */
+function ensureMessagesAttachmentsColumn(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  const hasColumn = columns.some((col) => col.name === "attachments");
+  if (hasColumn) return;
+  try {
+    sqlite.exec("ALTER TABLE messages ADD COLUMN attachments TEXT");
   } catch {
     // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
   }

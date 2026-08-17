@@ -55,6 +55,16 @@ export const messages = sqliteTable("messages", {
   sessionId: text("session_id").notNull(),
   role: text("role").notNull(),
   content: text("content").notNull(),
+  /**
+   * async-scribbling-llama.md Phase 6:使用者訊息夾帶的圖片附件——
+   * `PromptAttachment[]`(packages/shared/src/prompt.ts)序列化成的 JSON 字串,
+   * 獨立欄位而非塞進 `content`(那欄位對 user 訊息就是純文字 prompt.text,
+   * 混進附件需要內容嗅探才能分辨,獨立欄位零歧義)。Nullable——絕大多數訊息
+   * (assistant/system/tool,以及沒有夾帶圖片的 user 訊息)這欄位是 NULL。
+   * 既有的舊 DB 檔案靠 `packages/db/src/client.ts` 的
+   * `ensureMessagesAttachmentsColumn()` 冪等 `ALTER TABLE` 補上。
+   */
+  attachments: text("attachments"),
   createdAt: integer("created_at").notNull(),
 });
 

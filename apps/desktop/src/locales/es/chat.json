@@ -18,6 +18,24 @@
     "inputLabel": "Entrada",
     "outputLabel": "Salida"
   },
+  "code": {
+    "copyAriaLabel": "Copiar código",
+    "copiedAriaLabel": "¡Copiado!"
+  },
+  "diff": {
+    "addedLinesTitle": "{{count}} líneas añadidas",
+    "removedLinesTitle": "{{count}} líneas eliminadas",
+    "noChangesLabel": "No hay cambios visibles"
+  },
+  "image": {
+    "tooLargeLabel": "Imagen demasiado grande para previsualizar en línea ({{size}} MB) — haz clic para verla de todos modos",
+    "altText": "Imagen de salida de la herramienta"
+  },
+  "askUserQuestion": {
+    "submitLabel": "Enviar",
+    "skipLabel": "Omitir",
+    "noAnswerLabel": "Sin respuesta"
+  },
   "usage": {
     "cannotMeasureTitle": "Este backend no puede medir el costo (o aún no se ha confirmado si lo reportará) — el presupuesto de costo diario/de la tarea no aplica a esta sesión; solo el límite de tiempo por turno/número de llamadas a herramientas sigue protegiendo.",
     "unknownLabel": "Costo desconocido",
@@ -44,6 +62,10 @@
   },
   "composer": {
     "placeholder": "Escribe un mensaje para el agent… (Enter para enviar, Shift+Enter para salto de línea)",
-    "sendAriaLabel": "Enviar"
+    "sendAriaLabel": "Enviar",
+    "attachAriaLabel": "Adjuntar imagen",
+    "attachUnsupportedTitle": "Este agent no admite entrada de imágenes",
+    "removeAttachmentAriaLabel": "Quitar archivo adjunto",
+    "attachmentAltText": "Imagen adjunta"
   }
 }

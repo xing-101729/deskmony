@@ -18,6 +18,24 @@
     "inputLabel": "Input",
     "outputLabel": "Output"
   },
+  "code": {
+    "copyAriaLabel": "Copy code",
+    "copiedAriaLabel": "Copied!"
+  },
+  "diff": {
+    "addedLinesTitle": "{{count}} lines added",
+    "removedLinesTitle": "{{count}} lines removed",
+    "noChangesLabel": "No visible changes"
+  },
+  "image": {
+    "tooLargeLabel": "Image too large to preview inline ({{size}} MB) — click to view anyway",
+    "altText": "Tool output image"
+  },
+  "askUserQuestion": {
+    "submitLabel": "Submit",
+    "skipLabel": "Skip",
+    "noAnswerLabel": "No answer"
+  },
   "usage": {
     "cannotMeasureTitle": "This backend cannot measure cost (or it isn't yet confirmed whether it will report it) — the task/daily cost budget doesn't apply to this session; only the turn time/tool-call count limit still protects it.",
     "unknownLabel": "Cost unknown",
@@ -44,6 +62,10 @@
   },
   "composer": {
     "placeholder": "Message the agent… (Enter to send, Shift+Enter for a new line)",
-    "sendAriaLabel": "Send"
+    "sendAriaLabel": "Send",
+    "attachAriaLabel": "Attach image",
+    "attachUnsupportedTitle": "This agent doesn't support image input",
+    "removeAttachmentAriaLabel": "Remove attachment",
+    "attachmentAltText": "Attached image"
   }
 }

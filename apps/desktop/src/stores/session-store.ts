@@ -8,6 +8,7 @@ import {
   type CapabilitySupport,
   type ConfigSetFilePatchInput,
   type CreateAgentProfileInput,
+  type DialogAnswer,
   type EffectiveCoreConfig,
   type EffortLevel,
   type EnforcementNotificationPush,
@@ -17,6 +18,7 @@ import {
   type PermissionRequestEvent,
   type PermissionResolvedPush,
   type PolicyRule,
+  type PromptAttachment,
   type ProviderModel,
   type ProviderPrefs,
   type ProviderPrefsPatchInput,
@@ -24,6 +26,8 @@ import {
   type Session,
   type SessionEventEnvelope,
   type SessionPermissionMode,
+  type UserDialogRequestEvent,
+  type UserDialogResolvedPush,
   type CostGetSummaryResult,
   AdapterCapabilitiesResultSchema,
   BUILTIN_PROVIDERS,
@@ -61,9 +65,27 @@ import { GatewayClient } from "../lib/gateway-client.js";
  */
 import i18next from "../i18n.js";
 
+/**
+ * async-scribbling-llama.md Phase 6:UI 端使用的圖片附件形狀——拿掉 wire
+ * payload(`PromptAttachment`,packages/shared/src/prompt.ts)需要的
+ * discriminant `type` 欄位,那個欄位只在組 `session.sendPrompt` 的 RPC
+ * payload 時才需要補上(見下方 `sendPrompt()` action)。只有圖片變體,不含
+ * 一直沒人用的 `{type:"file"}` 變體。
+ */
+export type PendingImageAttachment = Pick<Extract<PromptAttachment, { type: "image" }>, "mediaType" | "data">;
+
 /** UI 用的聊天時間軸項目(把持久化的 MessageRecord 與即時串流事件合併呈現)。 */
 export type ChatItem =
-  | { kind: "user"; id: string; content: string; createdAt: number }
+  | {
+      kind: "user";
+      id: string;
+      content: string;
+      createdAt: number;
+      /** Phase 6:使用者傳送時夾帶的圖片,樂觀本地回顯與 DB reload 後的
+       *  history 兩條路徑都會填(見 sendPrompt() action 與
+       *  messageRecordsToItems())。 */
+      attachments?: PendingImageAttachment[];
+    }
   | { kind: "assistant"; id: string; content: string; createdAt: number; streaming: boolean }
   | {
       kind: "tool";
@@ -71,6 +93,11 @@ export type ChatItem =
       toolName: string;
       input?: unknown;
       output?: unknown;
+      /** async-scribbling-llama.md Phase 4:同一 toolCallId 的 `tool_use_result`
+       *  結構化資料(例如 Edit/Write 的 `structuredPatch`),見
+       *  packages/shared/src/events.ts 的 `ToolResultEventSchema.structuredResult`
+       *  註解——只有 claude-agent-sdk adapter 且能確定歸屬時才會有值。 */
+      structuredResult?: unknown;
       isError: boolean;
       status: "running" | "done";
       createdAt: number;
@@ -78,6 +105,18 @@ export type ChatItem =
   | { kind: "system"; id: string; content: string; createdAt: number };
 
 export interface PendingPermission extends PermissionRequestEvent {
+  sessionId: string;
+}
+
+/**
+ * async-scribbling-llama.md Phase 7:比照上面的 `PendingPermission`——一筆
+ * `user-dialog-request` 事件加上它所屬的 `sessionId`(`resolveUserDialog()`
+ * 呼叫 `dialog.resolve` RPC 時需要,見該 action 與 gateway.ts 對應 RPC 的
+ * 註解:這條路徑不像 `permission.resolve` 能讓 Core 端反查 sessionId)。
+ * 純 ephemeral(不落地),與 `pendingPermissions` 同命——reload 後不會重建,
+ * 見 AskUserQuestionWidget.tsx 的「兩者皆非」分支說明。
+ */
+export interface PendingUserDialog extends UserDialogRequestEvent {
   sessionId: string;
 }
 
@@ -118,6 +157,8 @@ interface SessionStoreState {
   currentSessionId: string | null;
   itemsBySession: Record<string, ChatItem[]>;
   pendingPermissions: PendingPermission[];
+  /** async-scribbling-llama.md Phase 7:見 `PendingUserDialog` 型別註解。 */
+  pendingUserDialogs: PendingUserDialog[];
   /** S3a(usage-metering)L4 §4:每個 session 目前的用量顯示狀態,見
    * `SessionUsage` 型別註解——純 ephemeral,不落地。 */
   sessionUsage: Record<string, SessionUsage>;
@@ -218,7 +259,10 @@ interface SessionStoreState {
     title?: string,
     agentOverride?: AgentOverride,
   ) => Promise<void>;
-  sendPrompt: (text: string) => Promise<void>;
+  /** Phase 6:`attachments` 選填——composer 沒有待送圖片時省略/傳空陣列皆可,
+   *  action 內部一律正規化成「非空才附加」,樂觀回顯與 wire payload 兩處共用
+   *  同一份判斷(見下方實作)。 */
+  sendPrompt: (text: string, attachments?: PendingImageAttachment[]) => Promise<void>;
   /** 給 TerminalView 用:把一行原始文字寫進 pty session 的 stdin,不經過
    * ChatItem 時間軸(pty 不是回合制聊天,見 GenericPtyAdapter 的設計說明)。 */
   sendTerminalInput: (text: string) => void;
@@ -239,6 +283,14 @@ interface SessionStoreState {
    * 權威。
    */
   resolvePermission: (requestId: string, decision: "allow" | "deny", rememberRule?: PolicyRule) => void;
+  /**
+   * async-scribbling-llama.md Phase 7:回覆一筆 pending 的 AskUserQuestion
+   * (見 AskUserQuestionWidget.tsx)。比照上面的 `resolvePermission()`——樂觀地
+   * 立即從 `pendingUserDialogs` 移除,其餘已連線的 client 靠 `user-dialog-
+   * resolved` 推播同步。`sessionId` 必須明講(不像 `permission.resolve` 那樣
+   * 只靠 `requestId` 就能讓 Core 端反查,見 gateway.ts 對應 RPC 的註解)。
+   */
+  resolveUserDialog: (sessionId: string, requestId: string, result: DialogAnswer) => void;
   /**
    * S7:切換目前 session 的暫態權限模式(auto/YOLO)。**遠端連線呼叫這個方法
    * 會被 Gateway 擋下**(見 `gatewayCapabilities.canToggleAuto`/`canEnableYolo`
@@ -512,7 +564,22 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
   const items: ChatItem[] = [];
   for (const msg of messages) {
     if (msg.role === "user") {
-      items.push({ kind: "user", id: msg.id, content: msg.content, createdAt: msg.createdAt });
+      // Phase 6:`msg.attachments` 已經在 selectSession() 呼叫
+      // `SessionHistoryResultSchema.parse(raw)` 時通過 zod 驗證(型別是
+      // `PromptAttachment[] | undefined`),這裡不需要再做一輪防禦性驗證——
+      // 只需篩出 "image" 變體(忽略一直沒人用的 "file" 變體)並拿掉 wire
+      // payload 的 discriminant `type` 欄位,收斂成與樂觀回顯路徑
+      // (sendPrompt() action)相同的 `PendingImageAttachment[]` 形狀。
+      const imageAttachments = (msg.attachments ?? [])
+        .filter((a): a is Extract<PromptAttachment, { type: "image" }> => a.type === "image")
+        .map((a) => ({ mediaType: a.mediaType, data: a.data }));
+      items.push({
+        kind: "user",
+        id: msg.id,
+        content: msg.content,
+        createdAt: msg.createdAt,
+        ...(imageAttachments.length > 0 ? { attachments: imageAttachments } : {}),
+      });
     } else if (msg.role === "assistant") {
       items.push({ kind: "assistant", id: msg.id, content: msg.content, createdAt: msg.createdAt, streaming: false });
     } else if (msg.role === "system") {
@@ -526,6 +593,7 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
           input?: unknown;
           output?: unknown;
           isError?: boolean;
+          structuredResult?: unknown;
         };
         if (parsed.kind === "call") {
           upsertToolItem(
@@ -535,10 +603,28 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
             msg.createdAt,
           );
         } else {
+          // 修正既有 bug(與這輪 structuredResult 無關,但同一個函式、必須順手
+          // 修掉才能讓 Phase 3/4 的 toolName 派發在 reload 後仍然生效):
+          // claude-sdk-adapter.ts 的 tool-result 事件 toolName 一律是空字串
+          // (只有 tool-call 事件才有真正的工具名稱),這裡若比照 output/isError
+          // 也把 `toolName: parsed.toolName` 塞進 patch,會透過 upsertToolItem
+          // 的 `{...existing, ...patch}` 合併,把前面 "call" 記錄剛設好的正確
+          // toolName(例如 "TodoWrite"/"Edit"/"Write")覆寫回空字串——每次
+          // reload(切換 session、重開 app)後 ChatBubble 的 toolName 派發
+          // (TodoListView/DiffHunkView)就會全部失效,退回通用 ToolCallBubble
+          // 且標題顯示空白。即時串流路徑(下方 handleSessionEvent 的
+          // "tool-result" case)本來就沒有這個問題——那裡的 patch 從未帶
+          // toolName,兩條路徑理應一致,這裡改成同樣不帶 toolName 才是正確的
+          //「兩者收斂」寫法。
           upsertToolItem(
             items,
             parsed.toolCallId,
-            { toolName: parsed.toolName, output: parsed.output, isError: Boolean(parsed.isError), status: "done" },
+            {
+              output: parsed.output,
+              isError: Boolean(parsed.isError),
+              structuredResult: parsed.structuredResult,
+              status: "done",
+            },
             msg.createdAt,
           );
         }
@@ -557,6 +643,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
   currentSessionId: null,
   itemsBySession: {},
   pendingPermissions: [],
+  pendingUserDialogs: [],
   sessionUsage: {},
   capabilitiesBySoftware: {},
   detectedAgents: [],
@@ -583,6 +670,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         void get().refreshSessions();
       } else if (push.channel === "permission-resolved") {
         handlePermissionResolved(set, push.payload as PermissionResolvedPush);
+      } else if (push.channel === "user-dialog-resolved") {
+        handleUserDialogResolved(set, push.payload as UserDialogResolvedPush);
       } else if (push.channel === "enforcement-notification") {
         handleEnforcementNotification(push.payload as EnforcementNotificationPush);
       }
@@ -698,19 +787,39 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     }));
   },
 
-  sendPrompt: async (text) => {
+  sendPrompt: async (text, attachments) => {
     const sessionId = get().currentSessionId;
     if (!sessionId) return;
+    // 正規化:空陣列與 undefined 視為同一件事(「沒有附件」),樂觀回顯與 wire
+    // payload 兩處都依這個值決定要不要附加 attachments 欄位,避免兩處各自判斷
+    // 而漂移(呼應本檔案既有的「單一資料流」慣例)。
+    const validAttachments = attachments && attachments.length > 0 ? attachments : undefined;
     set((state) => ({
       itemsBySession: {
         ...state.itemsBySession,
         [sessionId]: [
           ...(state.itemsBySession[sessionId] ?? []),
-          { kind: "user", id: crypto.randomUUID(), content: text, createdAt: Date.now() },
+          {
+            kind: "user",
+            id: crypto.randomUUID(),
+            content: text,
+            createdAt: Date.now(),
+            ...(validAttachments ? { attachments: validAttachments } : {}),
+          },
         ],
       },
     }));
-    await client.call("session.sendPrompt", { sessionId, prompt: { text } });
+    await client.call("session.sendPrompt", {
+      sessionId,
+      prompt: {
+        text,
+        // 補回 wire payload 需要的 discriminant `type` 欄位(見
+        // `PendingImageAttachment` 型別註解)。
+        ...(validAttachments
+          ? { attachments: validAttachments.map((a) => ({ type: "image" as const, mediaType: a.mediaType, data: a.data })) }
+          : {}),
+      },
+    });
   },
 
   sendTerminalInput: (text) => {
@@ -739,6 +848,13 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void client.call("permission.resolve", { requestId, decision, rememberRule });
     set((state) => ({
       pendingPermissions: state.pendingPermissions.filter((p) => p.requestId !== requestId),
+    }));
+  },
+
+  resolveUserDialog: (sessionId, requestId, result) => {
+    void client.call("dialog.resolve", { sessionId, requestId, result });
+    set((state) => ({
+      pendingUserDialogs: state.pendingUserDialogs.filter((d) => d.requestId !== requestId),
     }));
   },
 
@@ -939,6 +1055,26 @@ function handlePermissionResolved(
 }
 
 /**
+ * async-scribbling-llama.md Phase 7:收到 core 推播的 `user-dialog-resolved`
+ * 事件時,把該筆請求從 `pendingUserDialogs` 移除——涵蓋「不是自己這個 client
+ * 觸發的解決」情境(見 `handlePermissionResolved()` 同樣的理由)。不像
+ * `permission-resolved` 有 timeout/policy 來源需要額外處理(`user-dialog-
+ * request` 沒有逾時自動處理、也沒有 PolicyEngine 自動放行的概念,見
+ * apps/core/src/session/session-manager.ts 的 `consumeEvents()`
+ * `"user-dialog-request"` case 註解),純粹移除即可——真正的「已答」畫面靠
+ * `item.structuredResult`(隨後抵達的 tool-result 事件)呈現,不是這裡的
+ * payload。
+ */
+function handleUserDialogResolved(
+  set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
+  payload: UserDialogResolvedPush,
+): void {
+  set((state) => ({
+    pendingUserDialogs: state.pendingUserDialogs.filter((d) => d.requestId !== payload.requestId),
+  }));
+}
+
+/**
  * S11(Notification)新增:收到 `"enforcement-notification"` push 後,只在
  * Electron 場景(`window.deskmony?.notify` 存在)呼叫 IPC 觸發原生桌面通知
  * ——純瀏覽器 client 沒有這個橋接,靜靜略過(見 global.d.ts 的
@@ -1058,7 +1194,7 @@ function handleSessionEvent(
         upsertToolItem(
           items,
           event.toolCallId,
-          { output: event.output, isError: event.isError, status: "done" },
+          { output: event.output, isError: event.isError, structuredResult: event.structuredResult, status: "done" },
           envelope.timestamp,
         );
         break;
@@ -1068,6 +1204,18 @@ function handleSessionEvent(
         return {
           itemsBySession: { ...state.itemsBySession, [sessionId]: items },
           pendingPermissions: [...state.pendingPermissions, pending],
+        };
+      }
+      case "user-dialog-request": {
+        // async-scribbling-llama.md Phase 7:比照上面的 "permission-request"
+        // ——items 本身不變(問題內容已經隨既有的 tool-call 事件顯示在對話串
+        // 裡,見 UserDialogRequestEventSchema 註解),這裡只需要把這筆待答
+        // 請求掛進 pendingUserDialogs,AskUserQuestionWidget.tsx 依
+        // toolUseID 找到它就會切換成可互動的表單。
+        const pending: PendingUserDialog = { ...event, sessionId };
+        return {
+          itemsBySession: { ...state.itemsBySession, [sessionId]: items },
+          pendingUserDialogs: [...state.pendingUserDialogs, pending],
         };
       }
       case "completed": {

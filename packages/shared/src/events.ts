@@ -36,6 +36,16 @@ export const ToolResultEventSchema = z.object({
   toolName: z.string(),
   output: z.unknown().optional(),
   isError: z.boolean().default(false),
+  /**
+   * async-scribbling-llama.md Phase 4:claude-agent-sdk 的 `SDKUserMessage.
+   * tool_use_result`(每個工具各自的完整結構化 Output 物件,例如
+   * `FileEditOutput`/`FileWriteOutput` 的 `structuredPatch`)。刻意取通用名稱
+   * 而非 `diffResult`——同一條管線之後 Phase 7(AskUserQuestion 的
+   * `answers`)也會沿用,不是 diff 專用欄位。只有 claude-agent-sdk adapter 會
+   * 填這個欄位(且只在能確定歸屬時才填,見該 adapter 的 `case "user":`
+   * 註解),其餘 adapter 一律留 undefined,消費端(UI)須自行 fallback。
+   */
+  structuredResult: z.unknown().optional(),
 });
 export type ToolResultEvent = z.infer<typeof ToolResultEventSchema>;
 
@@ -65,6 +75,29 @@ export const PermissionRequestEventSchema = z.object({
   strong: z.boolean().optional(),
 });
 export type PermissionRequestEvent = z.infer<typeof PermissionRequestEventSchema>;
+
+/**
+ * async-scribbling-llama.md Phase 7:`AskUserQuestion` 的待答問題——由
+ * claude-sdk-adapter.ts 的 `canUseTool` 特例攔截後轉發,**不是**
+ * `permission-request` 的變體(這不是一個允許/拒絕的權限決策,見
+ * docs/DECISIONS.md §C 的政策引擎範圍——政策引擎管的是「要不要放行一個工具
+ * 呼叫」,AskUserQuestion 本身的執行從未被擋下,只是它需要使用者提供答案才能
+ * 完成)。`questions` 直接透傳 SDK 的 `AskUserQuestionInput.questions`(未經
+ * 加工的 `unknown`——桌面端不 import `@anthropic-ai/claude-agent-sdk` 型別,
+ * 由 UI 端自行防禦性驗證,同 Phase 3/4 的 `parseTodoWriteInput()`/
+ * `parseDiffResult()` 既有慣例)。`toolUseID` 對應既有 `tool-call` 事件的
+ * `toolCallId`(SDK 保證同一個工具呼叫兩邊用同一個 id),UI 靠它把這筆待答
+ * 請求與已經在對話串裡顯示的工具呼叫項目對上;`requestId` 是
+ * `canUseTool`/`resolveUserDialog()` 用來配對的 control-protocol id,兩者用途
+ * 不同,刻意都保留(不能只留一個)。
+ */
+export const UserDialogRequestEventSchema = z.object({
+  type: z.literal("user-dialog-request"),
+  requestId: z.string(),
+  toolUseID: z.string(),
+  questions: z.unknown(),
+});
+export type UserDialogRequestEvent = z.infer<typeof UserDialogRequestEventSchema>;
 
 /** 單輪對話完成 */
 export const CompletedEventSchema = z.object({
@@ -154,6 +187,7 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   ToolCallEventSchema,
   ToolResultEventSchema,
   PermissionRequestEventSchema,
+  UserDialogRequestEventSchema,
   CompletedEventSchema,
   ErrorEventSchema,
   TerminalDataEventSchema,
@@ -190,3 +224,25 @@ export const PermissionDecisionSchema = z.object({
   rememberRule: PolicyRuleSchema.optional(),
 });
 export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
+
+/**
+ * async-scribbling-llama.md Phase 7:給 UI 的 `user-dialog-request` 回覆。刻意
+ * 取通用名稱(不叫 `AskUserQuestionAnswer`)——但這是 Deskmony 自訂的「待答 UI
+ * 事件」概念,**不是**在透傳 SDK 官方的某個 dialog result 型別(那條路徑
+ * `onUserDialog`/`supportedDialogKinds` 在這個 SDK 版本確認不會觸發,見
+ * claude-sdk-adapter.ts 的 `canUseTool` 內對應段落的機制說明,沒有對應的官方
+ * 型別可透傳)。
+ *
+ * `"completed"`:使用者實際選了答案(question text -> 選項 label,多選以逗號
+ * 串接,對齊 SDK `AskUserQuestionOutput.answers` 的既有語意)。
+ * `"cancelled"`:使用者略過作答,沒有 `result`——`resolveUserDialog()` 對這
+ * 兩種 behavior 最終都會讓 SDK 收到空 `answers` 物件(比照 SDK 自己 idle 逾時
+ * 未答的語意),差別只在於「是使用者主動略過」還是「送出了具體答案」,兩者都
+ * **不是** `deny`(deny 是權限決策的語彙,這裡完全不適用,見上方
+ * `UserDialogRequestEventSchema` 的註解)。
+ */
+export const DialogAnswerSchema = z.discriminatedUnion("behavior", [
+  z.object({ behavior: z.literal("completed"), result: z.object({ answers: z.record(z.string(), z.string()) }) }),
+  z.object({ behavior: z.literal("cancelled") }),
+]);
+export type DialogAnswer = z.infer<typeof DialogAnswerSchema>;

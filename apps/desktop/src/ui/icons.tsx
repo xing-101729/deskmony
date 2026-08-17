@@ -21,10 +21,12 @@ export type IconName =
   | "chevron-right"
   | "clock"
   | "command"
+  | "copy"
   | "cost"
   | "external"
   | "folder"
   | "gauge"
+  | "image"
   | "logout"
   | "menu"
   | "message"
@@ -89,6 +91,12 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   command: <path d="M15 6a3 3 0 1 1 3 3h-3V6Zm0 3v6m0 0h3a3 3 0 1 1-3 3v-3Zm0 0H9m0 0H6a3 3 0 1 0 3 3v-3Zm0 0V9m0 0H6a3 3 0 1 1 3-3v3Zm0 0h6" />,
+  copy: (
+    <>
+      <rect x="8" y="8" width="12" height="12" rx="2" />
+      <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+    </>
+  ),
   cost: (
     <>
       <circle cx="12" cy="12" r="8.5" />
@@ -109,6 +117,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M4 17a9 9 0 1 1 16 0" />
       <path d="m12 13 4-3.5" />
       <circle cx="12" cy="14" r="1.4" />
+    </>
+  ),
+  image: (
+    <>
+      <rect x="3" y="4.5" width="18" height="15" rx="2" />
+      <circle cx="8.5" cy="9.5" r="1.6" />
+      <path d="m4 17.5 5-5.5 3.5 3.8 3.5-4.3 4 5" />
     </>
   ),
   logout: (

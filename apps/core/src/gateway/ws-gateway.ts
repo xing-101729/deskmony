@@ -18,6 +18,7 @@ import {
   type SessionEventEnvelope,
   type Task,
   type TeamMessage,
+  type UserDialogResolvedPush,
 } from "@deskmony/shared";
 import { applyConfigFilePatch } from "../config/config-file-writer.js";
 import type { SessionManager } from "../session/session-manager.js";
@@ -282,6 +283,11 @@ export class WsGateway {
     });
     this.sessionManager.on("permission-resolved", (payload: PermissionResolvedPush) => {
       this.broadcast({ kind: "event", channel: "permission-resolved", payload });
+    });
+    // async-scribbling-llama.md Phase 7:一筆 AskUserQuestion 的待答問題被解決
+    // 時,轉播給所有已認證 client(比照上面 "permission-resolved" 的既有模式)。
+    this.sessionManager.on("user-dialog-resolved", (payload: UserDialogResolvedPush) => {
+      this.broadcast({ kind: "event", channel: "user-dialog-resolved", payload });
     });
     this.messageBus.on("team-message", (message: TeamMessage) => {
       this.broadcast({ kind: "event", channel: "team-message", payload: message });
@@ -621,6 +627,16 @@ export class WsGateway {
         // 強制忽略(C4 紀律③);遠端連線帶 rememberRule 已在 handleMessage()
         // 更早一步被擋下(見上方 §5.1 之後的自行判斷區塊)。
         this.sessionManager.resolvePermission(request.params.requestId, request.params.decision, request.params.rememberRule);
+        return { ok: true };
+      /**
+       * async-scribbling-llama.md Phase 7:回覆一筆 AskUserQuestion 的待答問題。
+       * 與上面的 `permission.resolve` 不同,`sessionId` 由 client 直接提供
+       * (見 packages/shared/src/gateway.ts 對應 case 的完整說明——這裡不經過
+       * `PermissionGateway`,沒有登記可反查),不需要 `LOCAL_ONLY_METHODS`/
+       * rememberRule 那類遠端限制檢查。
+       */
+      case "dialog.resolve":
+        this.sessionManager.resolveUserDialog(request.params.sessionId, request.params.requestId, request.params.result);
         return { ok: true };
       /**
        * S7 L4 §2:切換 session 的暫態權限模式(auto/YOLO)。**遠端一律拒絕**

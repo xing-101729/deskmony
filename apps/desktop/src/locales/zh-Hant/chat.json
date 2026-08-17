@@ -18,6 +18,24 @@
     "inputLabel": "輸入",
     "outputLabel": "輸出"
   },
+  "code": {
+    "copyAriaLabel": "複製程式碼",
+    "copiedAriaLabel": "已複製!"
+  },
+  "diff": {
+    "addedLinesTitle": "新增 {{count}} 行",
+    "removedLinesTitle": "刪除 {{count}} 行",
+    "noChangesLabel": "沒有可顯示的變更"
+  },
+  "image": {
+    "tooLargeLabel": "圖片過大,無法內嵌預覽({{size}} MB)——點擊仍可查看",
+    "altText": "工具輸出圖片"
+  },
+  "askUserQuestion": {
+    "submitLabel": "送出答案",
+    "skipLabel": "略過",
+    "noAnswerLabel": "未作答"
+  },
   "usage": {
     "cannotMeasureTitle": "此後端無法量測花費(或尚未確認會不會回報)——任務/每日成本預算對這個 session 不會生效,只有回合時間/工具呼叫次數上限仍在保護。",
     "unknownLabel": "花費未知",
@@ -44,6 +62,10 @@
   },
   "composer": {
     "placeholder": "輸入訊息給 agent…(Enter 送出,Shift+Enter 換行)",
-    "sendAriaLabel": "送出"
+    "sendAriaLabel": "送出",
+    "attachAriaLabel": "附加圖片",
+    "attachUnsupportedTitle": "此 agent 不支援圖片輸入",
+    "removeAttachmentAriaLabel": "移除附件",
+    "attachmentAltText": "已附加的圖片"
   }
 }

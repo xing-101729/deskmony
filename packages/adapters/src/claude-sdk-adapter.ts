@@ -11,8 +11,8 @@ import type {
   SDKUserMessage,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, AgentProfile, EffortLevel } from "@deskmony/shared";
-import type { PromptInput } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel } from "@deskmony/shared";
+import type { PromptAttachment, PromptInput } from "@deskmony/shared";
 import type { SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, TeamSpawnContext, Workspace } from "./types.js";
@@ -67,6 +67,37 @@ import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMc
  *    `resume.backendSessionId` 填進 `SdkOptions.resume`,SDK 會載入該 session
  *    的對話歷史繼續(對話上下文由 SDK 自己的磁碟檔案還原,不是這裡自己組
  *    歷史訊息塞回去)。
+ *
+ * async-scribbling-llama.md Phase 7(AskUserQuestion)機制查證——**已用真實
+ * 憑證實測兩輪確認,不是猜測**:
+ *  - 原先假設答案要走全新的 `Options.onUserDialog` + `Options.
+ *    supportedDialogKinds`(`sdk.d.ts:1516-1551`)。實測推翻:接上驗證過正確
+ *    的 `dialogKind`(`"permission_ask_user_question"`,已對照 `claude.exe`
+ *    反組譯字串確認存在於 SDK 內部的 dialog 註冊表)後,兩輪、共兩次真實
+ *    session 都 0 次觸發——這個 dialog-kind 路徑在目前這種 headless `query()`
+ *    用法下結構上就是不會被使用。故**不接** `onUserDialog`/
+ *    `supportedDialogKinds`,不寫死路碼。
+ *  - 真正有效的答案通道其實一直都是下面這個既有的 `canUseTool`:`toolName
+ *    === "AskUserQuestion"` 時特例攔截,**延後** resolve(不像其餘工具立刻
+ *    resolve `{behavior:'allow'}`),掛進 `pendingAskUserQuestion`(比照
+ *    `pendingPermissions` 的 Promise+Map 模式,但額外存原始 `input`——見下方
+ *    `resolveUserDialog()` 需要 spread 回去)並推送 `user-dialog-request`
+ *    事件。關鍵在 `PermissionResult` 的 `allow` 分支有個泛用欄位
+ *    `updatedInput?: Record<string, unknown>`(`sdk.d.ts:2087-2092`),對
+ *    `AskUserQuestion` 而言,工具自己的 input schema 身兼「答案容器」——
+ *    `AskUserQuestionInput.answers?: {[question]: string}`(`sdk-tools.
+ *    d.ts:2393-2398`,官方註解:「User answers collected by the permission
+ *    component」)。實測驗證:單純 `resolve({behavior:'allow'})`(不帶
+ *    `updatedInput`)是 no-op——`tool_result` 是字面字串「The user did not
+ *    answer the questions.」,`answers` 回來是空物件,模型完全沒收到答案;
+ *    改成 `resolve({behavior:'allow', updatedInput:{...input, answers}})`
+ *    後,`tool_result` 變成「Your questions have been answered: ...」,模型
+ *    下一輪清楚且正確地引用了餵進去的答案。
+ *  - 逾時行為:SDK CLI 自己會在 idle 一段時間後,以等效於
+ *    `{behavior:'allow', updatedInput:{...input, answers:{}}}` 的方式自動用
+ *    空答案繼續(`AskUserQuestionOutput.afkTimeoutMs`)——`resolveUserDialog()`
+ *    對 `"cancelled"` 沿用同一種「空答案」語意(而非 `deny`),`dispose()`
+ *    清理未回答的項目時也是同一套邏輯,理由見各自方法的註解。
  */
 export class ClaudeAgentSdkAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
@@ -115,6 +146,13 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     const pendingPermissions = new Map<
       string,
       (result: PermissionResult) => void
+    >();
+    // Phase 7:`AskUserQuestion` 專用的掛起 Map——與 `pendingPermissions` 同一種
+    // Promise+Map 模式,但額外存原始 `input`(`resolveUserDialog()` 組
+    // `updatedInput` 時需要 `{...input, answers}`,只有 resolver 函式不夠)。
+    const pendingAskUserQuestion = new Map<
+      string,
+      { resolve: (result: PermissionResult) => void; input: Record<string, unknown> }
     >();
 
     // S8 迴歸修正(子程序外洩):SDK 沒有任何公開 API 可以拿到它 spawn 出來的
@@ -193,8 +231,23 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         ? { systemPrompt: { type: "preset", preset: "claude_code", append: profile.systemPrompt } }
         : {}),
       canUseTool: async (toolName, input, callOptions) => {
+        const requestId = callOptions.requestId;
+        // Phase 7:`AskUserQuestion` 特例——見檔案頂端「機制查證」段落的完整
+        // 理由。**不**立刻 resolve;改成掛進 pendingAskUserQuestion 並推送
+        // `user-dialog-request` 事件,由 `resolveUserDialog()` 之後才真正
+        // resolve 這個 Promise。
+        if (toolName === "AskUserQuestion") {
+          return new Promise<PermissionResult>((resolve) => {
+            pendingAskUserQuestion.set(requestId, { resolve, input });
+            outputQueue.push({
+              type: "user-dialog-request",
+              requestId,
+              toolUseID: callOptions.toolUseID,
+              questions: input.questions,
+            });
+          });
+        }
         return new Promise<PermissionResult>((resolve) => {
-          const requestId = callOptions.requestId;
           pendingPermissions.set(requestId, resolve);
           outputQueue.push({
             type: "permission-request",
@@ -242,6 +295,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       inputQueue,
       outputQueue,
       pendingPermissions,
+      pendingAskUserQuestion,
       sdkQuery,
       // `query()` 到這裡已經同步建好 transport 並呼叫過 spawnClaudeCodeProcess,
       // 所以 `child` 這時已經有值;萬一 SDK 之後改成延後 spawn,這裡拿到
@@ -264,13 +318,37 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     return handle;
   }
 
+  /**
+   * async-scribbling-llama.md Phase 6:`prompt.attachments` 有圖片變體時,
+   * `message.content` 從純字串換成標準 Anthropic `MessageParam` 的
+   * content-block 陣列(`TextBlockParam` + `ImageBlockParam[]`,讀
+   * `node_modules` 內 `@anthropic-ai/sdk` 的 `messages.d.ts` 查證過
+   * `SDKUserMessage.message: MessageParam`、`MessageParam.content: string |
+   * Array<ContentBlockParam>`——與 Phase 5 接收方向的 `ToolImage.tsx`/
+   * `parseImageBlock()` 讀的是同一個 `Base64ImageSource` 形狀
+   * `{type:"base64", media_type, data}`,這裡是對稱的送出方向)。沒有圖片
+   * 附件時維持原本的純字串,不改變既有行為。`{type:"file"}` 附件變體(仍是
+   * 死程式碼,見 prompt.ts)被下面的 filter 自然排除,不會送給模型。
+   */
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void {
     const internal = this.mustGet(handle);
+    const imageAttachments = (prompt.attachments ?? []).filter(
+      (a): a is Extract<PromptAttachment, { type: "image" }> => a.type === "image",
+    );
     const userMessage: SDKUserMessage = {
       type: "user",
       message: {
         role: "user",
-        content: prompt.text,
+        content:
+          imageAttachments.length === 0
+            ? prompt.text
+            : [
+                { type: "text", text: prompt.text },
+                ...imageAttachments.map((a) => ({
+                  type: "image" as const,
+                  source: { type: "base64" as const, media_type: a.mediaType, data: a.data },
+                })),
+              ],
       },
       parent_tool_use_id: null,
     };
@@ -337,6 +415,16 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       resolver({ behavior: "deny", message: "session 已關閉" });
     }
     internal.pendingPermissions.clear();
+    // Phase 7:尚未回答的 AskUserQuestion 同樣是一個未 resolve 的 canUseTool
+    // Promise,放著不管會讓 SDK 的 query() 永久卡住等一個不會再來的回覆——但
+    // **不能**沿用上面 pendingPermissions 的 deny 收場(那是「使用者拒絕了此
+    // 工具呼叫」的權限語意,AskUserQuestion 不是權限決策,見
+    // resolveUserDialog() 的完整理由)。這裡改用同一套「空答案」語意,與
+    // resolveUserDialog() 的 "cancelled" 分支一致。
+    for (const pending of internal.pendingAskUserQuestion.values()) {
+      pending.resolve({ behavior: "allow", updatedInput: { ...pending.input, answers: {} } });
+    }
+    internal.pendingAskUserQuestion.clear();
     internal.inputQueue.close();
     internal.outputQueue.close();
     try {
@@ -387,6 +475,26 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     } else {
       resolver({ behavior: "deny", message: "使用者拒絕了此工具呼叫" });
     }
+  }
+
+  /**
+   * async-scribbling-llama.md Phase 7:回覆一筆先前透過 `user-dialog-request`
+   * 事件發出的 `AskUserQuestion`。**唯一真正有效的回傳通道是這個 canUseTool
+   * Promise 本身**(見檔案頂端「機制查證」段落,不是走 onUserDialog)——
+   * `"completed"` 時把使用者選的答案透過 `updatedInput.answers` 餵回去;
+   * `"cancelled"` 時故意給空答案物件而非 `deny`:比照 SDK 自己在 idle 逾時後
+   * 的行為(等效於 `{behavior:'allow', updatedInput:{...input,
+   * answers:{}}}`),讓模型收到的 `tool_result` 文字與 SDK 原生逾時一致——
+   * `deny` 會產生語意不同的文字(「使用者拒絕了此工具呼叫」),讓模型誤以為
+   * 是被權限系統擋下,而不是使用者選擇略過作答。
+   */
+  resolveUserDialog(handle: AgentHandle, requestId: string, result: DialogAnswer): void {
+    const internal = this.mustGet(handle);
+    const pending = internal.pendingAskUserQuestion.get(requestId);
+    if (!pending) return;
+    internal.pendingAskUserQuestion.delete(requestId);
+    const answers = result.behavior === "completed" ? result.result.answers : {};
+    pending.resolve({ behavior: "allow", updatedInput: { ...pending.input, answers } });
   }
 
   /** S6(crash-recovery)L4 §4.1:見檔案頂端查證說明與 `types.ts` 的介面註解。 */
@@ -494,6 +602,20 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         // 工具執行結果會以 user 訊息(role: user, content: tool_result[])回傳給模型。
         const content = message.message?.content;
         if (Array.isArray(content)) {
+          // async-scribbling-llama.md Phase 4:`message.tool_use_result` 型別上
+          // 是單一 `unknown`,SDK 文件說「以對應 tool_use 的名稱為 key」但沒有
+          // 說清楚一個 user 訊息含多個 tool_result block(平行工具呼叫)時它
+          // 對應哪一個。已用真實憑證起 session 實測(sequential Write→Edit、
+          // 刻意要求「平行」的 Bash x2、Write 覆寫既有檔、刻意要求「平行」的
+          // Read x3——共 4 組情境、7 次工具呼叫),這個 CLI/SDK 版本
+          // (claude-agent-sdk 0.3.215)無一例外把每個工具呼叫拆成各自獨立的
+          // assistant/user 訊息對,`content` 陣列從未觀察到超過一個
+          // tool_result block。但無法保證未來版本、MCP 工具或其他情境永遠
+          // 如此,所以仍照 Phase 4 計畫的保守原則:只在這個訊息剛好只有一個
+          // tool_result block 時才附加 structuredResult,超過一個(未來若真的
+          // 發生)寧可不附加、讓 UI fallback 回原本的 JSON 顯示,不猜測歸屬。
+          const toolResultCount = content.filter((block) => isRecord(block) && block.type === "tool_result").length;
+          const structuredResult = toolResultCount === 1 ? message.tool_use_result : undefined;
           for (const block of content) {
             if (isRecord(block) && block.type === "tool_result") {
               outputQueue.push({
@@ -502,6 +624,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
                 toolName: "",
                 output: block.content,
                 isError: Boolean(block.is_error),
+                structuredResult,
               });
             }
           }
@@ -641,6 +764,8 @@ interface InternalSession {
   inputQueue: AsyncQueue<SDKUserMessage>;
   outputQueue: AsyncQueue<AgentEvent>;
   pendingPermissions: Map<string, (result: PermissionResult) => void>;
+  /** Phase 7:見 `canUseTool` 內對應特例、`resolveUserDialog()`、`dispose()` 的說明。 */
+  pendingAskUserQuestion: Map<string, { resolve: (result: PermissionResult) => void; input: Record<string, unknown> }>;
   sdkQuery: SdkQuery;
   /** SDK 的 `claude` 子程序 handle(見 `spawn()` 內 spawnClaudeCodeProcess 的說明)。 */
   getChild: () => ChildProcess | undefined;

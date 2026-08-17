@@ -18,6 +18,24 @@
     "inputLabel": "入力",
     "outputLabel": "出力"
   },
+  "code": {
+    "copyAriaLabel": "コードをコピー",
+    "copiedAriaLabel": "コピーしました!"
+  },
+  "diff": {
+    "addedLinesTitle": "{{count}} 行追加",
+    "removedLinesTitle": "{{count}} 行削除",
+    "noChangesLabel": "表示できる変更はありません"
+  },
+  "image": {
+    "tooLargeLabel": "画像が大きすぎてインライン表示できません({{size}} MB)—— クリックすると表示できます",
+    "altText": "ツール出力の画像"
+  },
+  "askUserQuestion": {
+    "submitLabel": "送信",
+    "skipLabel": "スキップ",
+    "noAnswerLabel": "未回答"
+  },
   "usage": {
     "cannotMeasureTitle": "このバックエンドは費用を計測できません(または報告されるかまだ未確認です)。このセッションにはタスク/1日ごとのコスト予算は適用されません。ターンの時間/ツール呼び出し回数の上限のみが引き続き保護します。",
     "unknownLabel": "費用不明",
@@ -44,6 +62,10 @@
   },
   "composer": {
     "placeholder": "agent にメッセージを送る…(Enter で送信、Shift+Enter で改行)",
-    "sendAriaLabel": "送信"
+    "sendAriaLabel": "送信",
+    "attachAriaLabel": "画像を添付",
+    "attachUnsupportedTitle": "この agent は画像入力に対応していません",
+    "removeAttachmentAriaLabel": "添付を削除",
+    "attachmentAltText": "添付された画像"
   }
 }

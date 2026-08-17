@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-profile.js";
+import { PromptAttachmentSchema } from "./prompt.js";
 
 /**
  * Session 狀態機:idle / busy / waiting(等待權限回覆) / error。
@@ -175,5 +176,14 @@ export const MessageRecordSchema = z.object({
   role: MessageRoleSchema,
   content: z.string(),
   createdAt: z.number(),
+  /**
+   * async-scribbling-llama.md Phase 6:使用者傳送訊息時夾帶的圖片(只有
+   * `role === "user"` 的紀錄可能有值)。持久化在獨立的 `messages.attachments`
+   * TEXT 欄位(JSON 陣列),不塞進既有的 `content`——那個欄位對 user 訊息就是
+   * 純文字 `prompt.text`,混進附件需要靠內容嗅探才能分辨,見
+   * packages/db/src/schema.ts 的 `messages.attachments` 欄位註解與
+   * packages/db/src/client.ts 的 `ensureMessagesAttachmentsColumn()`。
+   */
+  attachments: z.array(PromptAttachmentSchema).optional(),
 });
 export type MessageRecord = z.infer<typeof MessageRecordSchema>;

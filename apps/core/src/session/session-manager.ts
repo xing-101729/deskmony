@@ -14,10 +14,12 @@ import {
   type AgentProfile,
   type AgentSoftware,
   type CreateSessionInput,
+  type DialogAnswer,
   type EffortLevel,
   type MessageRecord,
   type PermissionResolvedPush,
   type PolicyRule,
+  type PromptAttachment,
   type PromptInput,
   type Session,
   type SessionEventEnvelope,
@@ -26,6 +28,7 @@ import {
   type SpawnChildSessionInput,
   type SubagentChildSummary,
   type TeamBusPort,
+  type UserDialogResolvedPush,
 } from "@deskmony/shared";
 import type { ProfileStore } from "../profiles.js";
 import type { PermissionGateway } from "../permissions/permission-gateway.js";
@@ -386,6 +389,13 @@ export class SessionManager extends EventEmitter {
         role: row.role as MessageRecord["role"],
         content: row.content,
         createdAt: row.createdAt,
+        // async-scribbling-llama.md Phase 6:`row.attachments` 是我們自己在
+        // persistMessage() 寫入的 JSON.stringify(PromptAttachment[])(或
+        // NULL),不需要像 gateway 邊界那樣做 zod 防禦性驗證——同 `row.role as
+        // MessageRecord["role"]` 這行既有的信任層級。
+        attachments: row.attachments
+          ? (JSON.parse(row.attachments) as NonNullable<MessageRecord["attachments"]>)
+          : undefined,
       }));
   }
 
@@ -515,7 +525,7 @@ export class SessionManager extends EventEmitter {
       throw new DeskmonyError("sessionManager.promptBlockedByBudget", { reason }, reason);
     }
 
-    await this.persistMessage(sessionId, "user", prompt.text);
+    await this.persistMessage(sessionId, "user", prompt.text, prompt.attachments);
     await this.setStatus(sessionId, "busy");
     // S3b:回合開始,見 turn-limiter.ts 的 `startTurn()` 註解——不依賴 usage,
     // 對所有 adapter 種類(含 pty)一律起算。
@@ -615,6 +625,25 @@ export class SessionManager extends EventEmitter {
 
     runtime.adapter.resolvePermission(runtime.handle, requestId, decision);
     this.emitPermissionResolved({ sessionId, requestId, decision, source: "user" });
+  }
+
+  /**
+   * async-scribbling-llama.md Phase 7:回覆一筆 `user-dialog-request`
+   * (AskUserQuestion 的待答問題)。比照上面的 `resolvePermission()`,但**沒有**
+   * `rememberRule`/strong 判斷——這不是一個權限決策(見 packages/shared/src/
+   * events.ts 的 `UserDialogRequestEventSchema`/`DialogAnswerSchema` 註解),
+   * 沒有「記住規則」或「hard-deny 降級確認」的概念可套用。`sessionId` 必須由
+   * 呼叫端提供,不像 `resolvePermission()` 能從 `permissionGateway.
+   * resolve(requestId)` 反查——`user-dialog-request` 完全不經過
+   * `PermissionGateway` 的登記(見下方 `consumeEvents()` 的
+   * `"user-dialog-request"` case 註解)。
+   */
+  resolveUserDialog(sessionId: string, requestId: string, result: DialogAnswer): void {
+    const runtime = this.runtime.get(sessionId);
+    if (!runtime) return;
+    runtime.adapter.resolveUserDialog?.(runtime.handle, requestId, result);
+    const payload: UserDialogResolvedPush = { sessionId, requestId, result };
+    this.emit("user-dialog-resolved", payload);
   }
 
   /**
@@ -1264,6 +1293,7 @@ export class SessionManager extends EventEmitter {
               toolName: event.toolName,
               output: event.output,
               isError: event.isError,
+              structuredResult: event.structuredResult,
             }),
           );
           break;
@@ -1356,6 +1386,25 @@ export class SessionManager extends EventEmitter {
             void this.setStatus(sid, "busy");
             this.emitPermissionResolved({ sessionId: sid, requestId, decision: "deny", source: "timeout" });
           });
+          break;
+        }
+        /**
+         * async-scribbling-llama.md Phase 7:`AskUserQuestion` 的待答問題。
+         * 刻意**不**比照上面 `"permission-request"` 呼叫 `PolicyEngine.
+         * decide()`、不查 YOLO/auto-mode、不寫 audit log、不註冊
+         * `permissionGateway` 的逾時機制——這不是一個權限決策(見
+         * packages/shared/src/events.ts 的 `UserDialogRequestEventSchema`
+         * 註解:政策引擎管的是「要不要放行一個工具呼叫」,`AskUserQuestion`
+         * 本身從未被擋下,只是需要使用者提供答案才能完成)。SDK 自己會
+         * bound 等待時間(idle 逾時後以空答案繼續,見 claude-sdk-adapter.ts
+         * 檔案頂端「機制查證」段落),不需要 Deskmony 重做一套逾時追蹤。
+         * 事件本身已經在上面(迴圈頂端)無條件廣播過(只有
+         * `"permission-request"` 被排除在外),這裡只需要把狀態轉成
+         * waiting——既有的 `ensureBusy()` 會在後續事件(例如答案送出後的
+         * tool-result)自動把狀態轉回 busy,不需要額外處理。
+         */
+        case "user-dialog-request": {
+          await this.setStatus(sessionId, "waiting");
           break;
         }
         case "completed": {
@@ -1824,12 +1873,25 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  private async persistMessage(sessionId: string, role: MessageRecord["role"], content: string): Promise<void> {
+  /**
+   * async-scribbling-llama.md Phase 6:第四個選填參數 `attachments`——目前
+   * 只有 `case "session.sendPrompt"`(見上方 `sendPrompt()`)會傳非空值,其餘
+   * 呼叫點(tool-call/tool-result/system/assistant 訊息)維持不變,`undefined`
+   * 時存 `null`,對齊 `messages.attachments` 的 nullable 語意(見
+   * packages/db/src/schema.ts 的欄位註解)。
+   */
+  private async persistMessage(
+    sessionId: string,
+    role: MessageRecord["role"],
+    content: string,
+    attachments?: PromptAttachment[],
+  ): Promise<void> {
     const row = {
       id: randomUUID(),
       sessionId,
       role,
       content,
+      attachments: attachments && attachments.length > 0 ? JSON.stringify(attachments) : null,
       createdAt: Date.now(),
     };
     await this.db.insert(messagesTable).values(row).run();

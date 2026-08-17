@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentProfile, EffortLevel, PromptInput, TeamBusPort } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, PromptInput, TeamBusPort } from "@deskmony/shared";
 import type { AdapterCapabilities } from "@deskmony/shared";
 
 /**
@@ -80,6 +80,17 @@ export interface AgentAdapter {
   dispose(handle: AgentHandle): Promise<void>;
   /** 回覆一個先前透過 permission-request 事件發出的請求 */
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void;
+  /**
+   * async-scribbling-llama.md Phase 7:回覆一個先前透過 `user-dialog-request`
+   * 事件發出的請求(`AskUserQuestion` 的待答問題)。**可選**——比照
+   * `getBackendSessionId?`/`writeInput?` 這類「只有特定 adapter 才有」的方法
+   * (而非 `setModel` 那種「所有 adapter 都該有、沒支援就 throw」的必要方法):
+   * 這個事件結構上只可能從 `ClaudeAgentSdkAdapter` 發出(ACP/OpenCode/PTY
+   * 都沒有 `AskUserQuestion` 這個工具、也沒有對應的 `user-dialog-request`
+   * 事件會被推播,呼叫端根本不會對那些 adapter 的 handle 呼叫這個方法),
+   * 保持 `undefined` 是正確狀態,不是遺漏。
+   */
+  resolveUserDialog?(handle: AgentHandle, requestId: string, result: DialogAnswer): void;
   /**
    * 變更此 session 後續使用的 model(M5 Round C:對話中換 model)。
    *

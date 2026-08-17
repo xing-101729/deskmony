@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema, SpawnChildSessionInputSchema } from "./session.js";
 import { PromptInputSchema } from "./prompt.js";
-import { PermissionDecisionSchema, SessionEventEnvelopeSchema } from "./events.js";
+import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema } from "./events.js";
 import {
   AgentProfileSchema,
   AgentSoftwareSchema,
@@ -167,6 +167,24 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     ...baseRequest,
     method: z.literal("permission.resolve"),
     params: PermissionDecisionSchema,
+  }),
+  /**
+   * async-scribbling-llama.md Phase 7 新增:回覆一筆 `user-dialog-request`
+   * (AskUserQuestion 的待答問題)。與上面的 `permission.resolve` 刻意不共用
+   * 同一個 method——那是允許/拒絕的權限決策,這是「使用者選了哪個答案」,
+   * 語意不同(見 `DialogAnswerSchema` 的完整說明)。**`sessionId` 必須明講**
+   * (與 `permission.resolve` 不同,那裡的 `sessionId` 是 Core 端從
+   * `PermissionGateway` 的暫存登記反查回來的——`user-dialog-request` 完全不
+   * 經過 `PermissionGateway`,沒有那份登記可查,見 apps/core/src/session/
+   * session-manager.ts 的 `resolveUserDialog()` 註解)。**不需要加進**
+   * `LOCAL_ONLY_METHODS`——回答問題不是「放寬安全罩」的操作,沒有 auto/YOLO
+   * 那種語意,遠端一般客戶端本來就該能回答(比照 `permission.resolve` 本身
+   * 也不在那份清單裡的既有先例)。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("dialog.resolve"),
+    params: z.object({ sessionId: z.string(), requestId: z.string(), result: DialogAnswerSchema }),
   }),
   /**
    * S7(auto-mode-and-yolo)L4 §2 新增:切換一個 session 的暫態權限模式
@@ -563,6 +581,13 @@ export const ServerPushSchema = z.object({
      * childSessionId/childTitle/finalText/ts)。
      */
     "child-result",
+    /**
+     * async-scribbling-llama.md Phase 7:一筆 `user-dialog-request` 被解決時
+     * 推播給所有 client(payload 是下方 `UserDialogResolvedPushSchema`)——比照
+     * `permission-resolved` 的既有理由(讓不是觸發解決的那個 client 也能同步
+     * 讓 AskUserQuestionWidget 從 pendingUserDialogs 移除該筆待答狀態)。
+     */
+    "user-dialog-resolved",
   ]),
   payload: z.unknown(),
 });
@@ -587,6 +612,22 @@ export const PermissionResolvedPushSchema = z.object({
   source: z.enum(["user", "timeout", "policy"]),
 });
 export type PermissionResolvedPush = z.infer<typeof PermissionResolvedPushSchema>;
+
+/**
+ * async-scribbling-llama.md Phase 7:`user-dialog-resolved` channel 的
+ * payload——結構刻意比 `PermissionResolvedPushSchema` 簡單,**沒有 `source`
+ * 欄位**:`permission-request` 有 user/timeout/policy 三種解決來源,但
+ * `user-dialog-request` 完全不經過 `PermissionGateway` 的逾時機制、也不經過
+ * `PolicyEngine`(見 apps/core/src/session/session-manager.ts 的
+ * `consumeEvents()` 內 `"user-dialog-request"` case 註解),唯一的來源就是
+ * 某個 client 呼叫了 `dialog.resolve`,不需要區分。
+ */
+export const UserDialogResolvedPushSchema = z.object({
+  sessionId: z.string(),
+  requestId: z.string(),
+  result: DialogAnswerSchema,
+});
+export type UserDialogResolvedPush = z.infer<typeof UserDialogResolvedPushSchema>;
 
 export const ServerMessageSchema = z.union([ServerResponseSchema, ServerPushSchema]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
