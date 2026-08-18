@@ -18,10 +18,14 @@
 
 Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 
-這句話決定了整個架構的重心。「多 agent 能互聊」只是功能;真正佔掉 `apps/core`
-一半以上程式碼的,是**由三個獨立斷路器組成的安全罩**(見 §5),以及它們共用的
-稽核/通知/中斷底座。任何新功能的設計,都必須回答「這條路徑上,三個斷路器分別
-擋在哪裡」。
+這句話決定了整個架構的重心。「多 agent 能互聊」只是功能,不是護城河;真正的主軸是
+**由三個獨立斷路器組成的安全罩**(見 §5)。專門服務安全罩的四個目錄
+(`permissions/`、`cost/`、`enforcement/`、`recovery/`)合計 **2,268 行,佔
+`apps/core` 的 23%**;若再算上散在 `session-manager.ts` 的決策編排
+(`buildExecContext()`、`checkAndExpireYolo()`、`resolvePermission()`)與
+`MessageBus` 的訊息預算閘,實際比重更高。
+
+任何新功能的設計,都必須回答一個問題:**「這條路徑上,三個斷路器分別擋在哪裡?」**
 
 | 能力 | 落地位置 |
 |---|---|
@@ -48,7 +52,7 @@ flowchart TB
 
     subgraph CORE["apps/core — headless orchestration server(Node.js)"]
         direction TB
-        GW["gateway/ WsGateway — 58 個 RPC + 9 個 push channel"]
+        GW["gateway/ WsGateway — 58 個 RPC + 10 個 push channel"]
         subgraph DOMAIN["領域模組"]
             direction LR
             Sess["session/"]
@@ -389,7 +393,7 @@ CodexAdapter**,Codex 走 PTY:
 
 🔒 = `LOCAL_ONLY_METHODS`,遠端一律拒絕。
 
-**9 個 push channel**:`session-event`、`session-updated`、`session-list-updated`、
+**10 個 push channel**:`session-event`、`session-updated`、`session-list-updated`、
 `permission-resolved`、`team-message`、`task-updated`、`task-deleted`、
 `enforcement-notification`、`child-result`、`user-dialog-resolved`。
 
