@@ -63,8 +63,8 @@
   "composer": {
     "placeholder": "Message the agent… (Enter to send, Shift+Enter for a new line)",
     "sendAriaLabel": "Send",
-    "attachAriaLabel": "Attach image",
-    "attachUnsupportedTitle": "This agent doesn't support image input",
+    "attachAriaLabel": "Attach file",
+    "attachUnsupportedTitle": "This agent doesn't support file input",
     "removeAttachmentAriaLabel": "Remove attachment",
     "attachmentAltText": "Attached image"
   }

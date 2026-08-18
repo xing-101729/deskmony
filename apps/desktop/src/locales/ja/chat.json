@@ -63,8 +63,8 @@
   "composer": {
     "placeholder": "agent にメッセージを送る…(Enter で送信、Shift+Enter で改行)",
     "sendAriaLabel": "送信",
-    "attachAriaLabel": "画像を添付",
-    "attachUnsupportedTitle": "この agent は画像入力に対応していません",
+    "attachAriaLabel": "ファイルを添付",
+    "attachUnsupportedTitle": "この agent はファイル入力に対応していません",
     "removeAttachmentAriaLabel": "添付を削除",
     "attachmentAltText": "添付された画像"
   }

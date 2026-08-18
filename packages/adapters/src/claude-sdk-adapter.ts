@@ -319,34 +319,54 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   }
 
   /**
-   * async-scribbling-llama.md Phase 6:`prompt.attachments` 有圖片變體時,
-   * `message.content` 從純字串換成標準 Anthropic `MessageParam` 的
-   * content-block 陣列(`TextBlockParam` + `ImageBlockParam[]`,讀
-   * `node_modules` 內 `@anthropic-ai/sdk` 的 `messages.d.ts` 查證過
-   * `SDKUserMessage.message: MessageParam`、`MessageParam.content: string |
-   * Array<ContentBlockParam>`——與 Phase 5 接收方向的 `ToolImage.tsx`/
-   * `parseImageBlock()` 讀的是同一個 `Base64ImageSource` 形狀
-   * `{type:"base64", media_type, data}`,這裡是對稱的送出方向)。沒有圖片
-   * 附件時維持原本的純字串,不改變既有行為。`{type:"file"}` 附件變體(仍是
-   * 死程式碼,見 prompt.ts)被下面的 filter 自然排除,不會送給模型。
+   * async-scribbling-llama.md Phase 6:`prompt.attachments` 有圖片/文件變體
+   * 時,`message.content` 從純字串換成標準 Anthropic `MessageParam` 的
+   * content-block 陣列(`TextBlockParam` + `ImageBlockParam[]` +
+   * `DocumentBlockParam[]`,讀 `node_modules` 內 `@anthropic-ai/sdk` 的
+   * `messages.d.ts` 查證過 `SDKUserMessage.message: MessageParam`、
+   * `MessageParam.content: string | Array<ContentBlockParam>`,`ContentBlock
+   * Param` 這個聯集型別本身就包含 `DocumentBlockParam`——與 Phase 5 接收方向
+   * 的 `ToolImage.tsx`/`parseImageBlock()` 讀的是同一個 `Base64ImageSource`
+   * 形狀 `{type:"base64", media_type, data}`,這裡是對稱的送出方向)。文件
+   * 附件的 `DocumentBlockParam.source` 只認 `Base64PDFSource`(PDF)與
+   * `PlainTextSource`(純文字,`data` 要明文不是 base64)兩種——見 prompt.ts
+   * 的 `PromptDocumentAttachmentSchema` 註解,`data` 在 wire 上一律 base64,
+   * text/plain 這裡要先 decode 回明文才能塞進 `PlainTextSource.data`。沒有
+   * 任何附件時維持原本的純字串,不改變既有行為。`{type:"file"}` 附件變體
+   * (仍是死程式碼,見 prompt.ts)被下面的 filter 自然排除,不會送給模型。
    */
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void {
     const internal = this.mustGet(handle);
     const imageAttachments = (prompt.attachments ?? []).filter(
       (a): a is Extract<PromptAttachment, { type: "image" }> => a.type === "image",
     );
+    const documentAttachments = (prompt.attachments ?? []).filter(
+      (a): a is Extract<PromptAttachment, { type: "document" }> => a.type === "document",
+    );
     const userMessage: SDKUserMessage = {
       type: "user",
       message: {
         role: "user",
         content:
-          imageAttachments.length === 0
+          imageAttachments.length === 0 && documentAttachments.length === 0
             ? prompt.text
             : [
                 { type: "text", text: prompt.text },
                 ...imageAttachments.map((a) => ({
                   type: "image" as const,
                   source: { type: "base64" as const, media_type: a.mediaType, data: a.data },
+                })),
+                ...documentAttachments.map((a) => ({
+                  type: "document" as const,
+                  title: a.name,
+                  source:
+                    a.mediaType === "application/pdf"
+                      ? { type: "base64" as const, media_type: "application/pdf" as const, data: a.data }
+                      : {
+                          type: "text" as const,
+                          media_type: "text/plain" as const,
+                          data: Buffer.from(a.data, "base64").toString("utf-8"),
+                        },
                 })),
               ],
       },

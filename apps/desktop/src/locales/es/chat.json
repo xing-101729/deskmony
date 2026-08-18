@@ -63,8 +63,8 @@
   "composer": {
     "placeholder": "Escribe un mensaje para el agent… (Enter para enviar, Shift+Enter para salto de línea)",
     "sendAriaLabel": "Enviar",
-    "attachAriaLabel": "Adjuntar imagen",
-    "attachUnsupportedTitle": "Este agent no admite entrada de imágenes",
+    "attachAriaLabel": "Adjuntar archivo",
+    "attachUnsupportedTitle": "Este agent no admite entrada de archivos",
     "removeAttachmentAriaLabel": "Quitar archivo adjunto",
     "attachmentAltText": "Imagen adjunta"
   }

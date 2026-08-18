@@ -7,7 +7,7 @@ import {
   selectProviderModels,
   selectUsageReporting,
   type ChatItem,
-  type PendingImageAttachment,
+  type PendingAttachment,
 } from "../stores/session-store.js";
 import { AutoModeControl } from "./AutoModeControl.js";
 import { IconButton } from "../ui/Button.js";
@@ -348,6 +348,16 @@ function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null 
   );
 }
 
+/** 圖片附件有縮圖可看;PDF/純文字附件沒有,只能靠檔名+圖示辨識。 */
+function AttachmentFileChip({ name, className }: { name: string; className?: string }): JSX.Element {
+  return (
+    <span className={`inline-flex items-center gap-1 overflow-hidden ${className ?? ""}`} title={name}>
+      <Icon name="file" size={12} className="flex-shrink-0" />
+      <span className="truncate">{name}</span>
+    </span>
+  );
+}
+
 function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
 
@@ -387,20 +397,28 @@ function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
           isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
         }`}
       >
-        {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片——樂觀
-            回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後的
-            history(messageRecordsToItems())兩條路徑都會填 item.attachments,
-            這裡不需要區分來源。 */}
+        {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片/檔案——
+            樂觀回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後
+            的 history(messageRecordsToItems())兩條路徑都會填
+            item.attachments,這裡不需要區分來源。 */}
         {item.kind === "user" && item.attachments && item.attachments.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5">
-            {item.attachments.map((att, index) => (
-              <img
-                key={index}
-                src={`data:${att.mediaType};base64,${att.data}`}
-                alt={t("chat:composer.attachmentAltText")}
-                className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
-              />
-            ))}
+            {item.attachments.map((att, index) =>
+              att.type === "image" ? (
+                <img
+                  key={index}
+                  src={`data:${att.mediaType};base64,${att.data}`}
+                  alt={t("chat:composer.attachmentAltText")}
+                  className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
+                />
+              ) : (
+                <AttachmentFileChip
+                  key={index}
+                  name={att.name}
+                  className="rounded-md border border-accent-fg/20 bg-accent-fg/10 px-2 py-1 text-2xs"
+                />
+              ),
+            )}
           </div>
         )}
         {isUser ? item.content : <MarkdownMessage content={item.content} />}
@@ -413,14 +431,12 @@ function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
 }
 
 /**
- * async-scribbling-llama.md Phase 6:composer 待送圖片的本地狀態形狀——比
- * `PendingImageAttachment`(session-store.ts,樂觀回顯/wire payload 共用的
- * 形狀)多一個純前端用的 `id`,供縮圖預覽條的 React key 與「移除這張」操作
- * 使用,送出前會被拿掉(見 ChatView 內的 handleSend())。
+ * async-scribbling-llama.md Phase 6:composer 待送附件的本地狀態形狀——比
+ * `PendingAttachment`(session-store.ts,樂觀回顯/wire payload 共用的形狀)
+ * 多一個純前端用的 `id`,供縮圖預覽條的 React key 與「移除這個」操作使用,
+ * 送出前會被拿掉(見 ChatView 內的 handleSend())。
  */
-interface ComposerAttachment extends PendingImageAttachment {
-  id: string;
-}
+type ComposerAttachment = PendingAttachment & { id: string };
 
 const SUPPORTED_IMAGE_MEDIA_TYPES = PromptImageMediaTypeSchema.options;
 
@@ -428,28 +444,73 @@ function isSupportedImageMediaType(value: string): value is PromptImageMediaType
   return (SUPPORTED_IMAGE_MEDIA_TYPES as readonly string[]).includes(value);
 }
 
-/**
- * 貼上/選取的 File 讀成 base64(不含 data URL 前綴,見 packages/shared/src/
- * prompt.ts 的既有約定)。MIME type 不在支援清單內(例如 .heic/.svg,或任何
- * 非圖片檔案)時回傳 null,呼叫端靜默略過——v1 不做額外的錯誤提示 UI,不支援
- * 的檔案就是不出現在待送清單裡。
- */
-function readComposerAttachment(file: File): Promise<ComposerAttachment | null> {
+function readFileAsDataUrlBase64(file: File): Promise<string | null> {
   return new Promise((resolve) => {
-    if (!isSupportedImageMediaType(file.type)) {
-      resolve(null);
-      return;
-    }
-    const mediaType = file.type;
     const reader = new FileReader();
     reader.onload = () => {
       const result = typeof reader.result === "string" ? reader.result : "";
       const commaIndex = result.indexOf(",");
-      resolve(commaIndex === -1 ? null : { id: crypto.randomUUID(), mediaType, data: result.slice(commaIndex + 1) });
+      resolve(commaIndex === -1 ? null : result.slice(commaIndex + 1));
     };
     reader.onerror = () => resolve(null);
     reader.readAsDataURL(file);
   });
+}
+
+function readFileAsBytes(file: File): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result instanceof ArrayBuffer ? new Uint8Array(reader.result) : null);
+    reader.onerror = () => resolve(null);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/**
+ * 「這個檔案是不是文字檔」沒有可靠的 MIME type 可查——瀏覽器對 .ts/.py/.log
+ * 這類副檔名多半回報空字串或亂猜的 type(例如 Windows 上 .ts 常被猜成
+ * video/mp2t),不能拿 file.type 當判斷依據。改用 git/grep -I 同一套慣用
+ * 手法:取檔案開頭一段位元組,看有沒有 NUL byte——二進位格式幾乎必然有,
+ * 正常文字檔幾乎不會。只取前 8000 bytes 取樣,避免大檔案拖慢。
+ */
+function looksBinary(bytes: Uint8Array): boolean {
+  const sampleSize = Math.min(bytes.length, 8000);
+  for (let i = 0; i < sampleSize; i++) {
+    if (bytes[i] === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * 貼上/選取的 File 讀成附件。三種結果:
+ *   1. 圖片(mediaType 在既有四種點陣圖清單內)→ image 附件,讀 data URL。
+ *   2. `application/pdf` → document 附件(PDF),讀 data URL(Anthropic
+ *      `Base64PDFSource` 就是要 base64)。
+ *   3. 其他一律嘗試當純文字讀:用 NUL byte 判斷是不是二進位(見
+ *      `looksBinary()`),看起來是二進位或讀出空檔案就回傳 null 靜默略過——
+ *      v1 不做額外的錯誤提示 UI,不支援的檔案就是不出現在待送清單裡。純
+ *      文字內容一律轉 base64 存放,與 prompt.ts 的
+ *      `PromptDocumentAttachmentSchema` 約定一致。
+ */
+async function readComposerAttachment(file: File): Promise<ComposerAttachment | null> {
+  if (isSupportedImageMediaType(file.type)) {
+    const mediaType = file.type;
+    const data = await readFileAsDataUrlBase64(file);
+    return data === null ? null : { id: crypto.randomUUID(), type: "image", mediaType, data };
+  }
+  if (file.type === "application/pdf") {
+    const data = await readFileAsDataUrlBase64(file);
+    return data === null ? null : { id: crypto.randomUUID(), type: "document", mediaType: "application/pdf", name: file.name, data };
+  }
+  const bytes = await readFileAsBytes(file);
+  if (bytes === null || bytes.length === 0 || looksBinary(bytes)) return null;
+  return { id: crypto.randomUUID(), type: "document", mediaType: "text/plain", name: file.name, data: bytesToBase64(bytes) };
 }
 
 export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
@@ -492,14 +553,14 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
     textareaRef.current?.focus();
   }, [currentSessionId]);
 
-  // Phase 6:切換 session 時清掉待送圖片——附件是「這次要送給目前這個
-  // session」的暫態,換一條對話後還留著上一條的縮圖預覽會讓人誤以為會一併
-  // 送給新 session(同一批次的 draft 文字則沿用既有行為,不受這個效果影響)。
+  // Phase 6:切換 session 時清掉待送附件——附件是「這次要送給目前這個
+  // session」的暫態,換一條對話後還留著上一條的預覽會讓人誤以為會一併送給
+  // 新 session(同一批次的 draft 文字則沿用既有行為,不受這個效果影響)。
   useEffect(() => {
     setPendingAttachments([]);
   }, [currentSessionId]);
 
-  const addImageAttachments = (files: File[]): void => {
+  const addComposerAttachments = (files: File[]): void => {
     if (files.length === 0) return;
     void Promise.all(files.map(readComposerAttachment)).then((results) => {
       const valid = results.filter((r): r is ComposerAttachment => r !== null);
@@ -515,13 +576,13 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>): void => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // 允許重新選同一個檔案時仍會觸發 onChange
-    addImageAttachments(files);
+    addComposerAttachments(files);
   };
 
   const handleSend = (): void => {
     const text = draft.trim();
     if (!text || !currentSessionId) return;
-    const attachments = pendingAttachments.map(({ mediaType, data }) => ({ mediaType, data }));
+    const attachments = pendingAttachments.map(({ id, ...rest }) => rest);
     setDraft("");
     setPendingAttachments([]);
     void sendPrompt(text, attachments.length > 0 ? attachments : undefined);
@@ -542,30 +603,30 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const profile = profiles.find((p) => p.id === session.agentProfileId);
   /**
    * async-scribbling-llama.md Phase 6:目前只有 claude-agent-sdk 的
-   * sendPrompt() 有明確路徑把圖片內容送給模型(見 claude-sdk-adapter.ts)。
+   * sendPrompt() 有明確路徑把圖片/文件內容送給模型(見 claude-sdk-adapter.ts)。
    * ACP 的協議層級雖然查證過確實支援圖片 content block(`ActiveSession.
    * prompt()` 接受 `ContentBlock`,含 `ImageContent`——見
    * `@agentclientprotocol/sdk` 的型別定義),但目前的 AcpAdapter.sendPrompt()
    * 尚未接上、不在這次範圍內;OpenCode 是外部 CLI(沒有可查證的本機型別
    * 定義,只能實測 HTTP API 行為),支援與否未經證實;PTY 是純終端直通,
    * 結構上不可能。這是編譯期就能確定的靜態事實(哪個 adapter 的程式碼有實作
-   * 送圖片邏輯),不是「連上線才知道被 spawn 的是哪個 agent」那種執行期
+   * 送圖片/文件邏輯),不是「連上線才知道被 spawn 的是哪個 agent」那種執行期
    * 行為——三態能力機制(AdapterCapabilities 的 usageReporting/
    * contextReporting)是為後者設計的,這裡不適用。比照 EffortControl 既有的
    * `session.adapterType !== "claude-agent-sdk"` 內聯判斷慣例,不新增能力
    * 旗標。
    */
-  const canAttachImages = session.adapterType === "claude-agent-sdk";
+  const canAttachFiles = session.adapterType === "claude-agent-sdk";
 
   const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>): void => {
-    if (!canAttachImages) return;
+    if (!canAttachFiles) return;
     const files = Array.from(e.clipboardData.items)
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .filter((item) => item.kind === "file")
       .map((item) => item.getAsFile())
       .filter((file): file is File => file !== null);
     if (files.length === 0) return;
     e.preventDefault();
-    addImageAttachments(files);
+    addComposerAttachments(files);
   };
 
   return (
@@ -609,11 +670,18 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
           <div className="mb-1.5 flex flex-wrap gap-1.5">
             {pendingAttachments.map((att) => (
               <div key={att.id} className="group relative">
-                <img
-                  src={`data:${att.mediaType};base64,${att.data}`}
-                  alt={t("chat:composer.attachmentAltText")}
-                  className="h-12 w-12 rounded-md border border-line object-cover"
-                />
+                {att.type === "image" ? (
+                  <img
+                    src={`data:${att.mediaType};base64,${att.data}`}
+                    alt={t("chat:composer.attachmentAltText")}
+                    className="h-12 w-12 rounded-md border border-line object-cover"
+                  />
+                ) : (
+                  <AttachmentFileChip
+                    name={att.name}
+                    className="h-12 max-w-[9rem] rounded-md border border-line bg-canvas px-2 text-2xs text-fg-muted"
+                  />
+                )}
                 <button
                   type="button"
                   onClick={() => removeAttachment(att.id)}
@@ -630,16 +698,15 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
             multiple
             onChange={handleFileInputChange}
             className="hidden"
           />
           <IconButton
-            icon="image"
+            icon="file"
             aria-label={t("chat:composer.attachAriaLabel")}
-            title={canAttachImages ? t("chat:composer.attachAriaLabel") : t("chat:composer.attachUnsupportedTitle")}
-            disabled={!canAttachImages}
+            title={canAttachFiles ? t("chat:composer.attachAriaLabel") : t("chat:composer.attachUnsupportedTitle")}
+            disabled={!canAttachFiles}
             onClick={() => fileInputRef.current?.click()}
           />
           <textarea

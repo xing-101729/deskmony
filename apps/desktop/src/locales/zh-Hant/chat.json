@@ -63,8 +63,8 @@
   "composer": {
     "placeholder": "輸入訊息給 agent…(Enter 送出,Shift+Enter 換行)",
     "sendAriaLabel": "送出",
-    "attachAriaLabel": "附加圖片",
-    "attachUnsupportedTitle": "此 agent 不支援圖片輸入",
+    "attachAriaLabel": "附加檔案",
+    "attachUnsupportedTitle": "此 agent 不支援檔案輸入",
     "removeAttachmentAriaLabel": "移除附件",
     "attachmentAltText": "已附加的圖片"
   }

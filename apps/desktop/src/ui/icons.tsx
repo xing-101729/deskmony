@@ -24,6 +24,7 @@ export type IconName =
   | "copy"
   | "cost"
   | "external"
+  | "file"
   | "folder"
   | "gauge"
   | "image"
@@ -109,6 +110,12 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M14 4h6v6" />
       <path d="M20 4 11 13" />
       <path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" />
+    </>
+  ),
+  file: (
+    <>
+      <path d="M6.5 3.5h7l4 4v12.7a1.3 1.3 0 0 1-1.3 1.3H6.5a1.3 1.3 0 0 1-1.3-1.3V4.8a1.3 1.3 0 0 1 1.3-1.3Z" />
+      <path d="M13.5 3.5V7a1 1 0 0 0 1 1h3" />
     </>
   ),
   folder: <path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.5.7l1 1.3H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9Z" />,

@@ -66,13 +66,15 @@ import { GatewayClient } from "../lib/gateway-client.js";
 import i18next from "../i18n.js";
 
 /**
- * async-scribbling-llama.md Phase 6:UI 端使用的圖片附件形狀——拿掉 wire
- * payload(`PromptAttachment`,packages/shared/src/prompt.ts)需要的
- * discriminant `type` 欄位,那個欄位只在組 `session.sendPrompt` 的 RPC
- * payload 時才需要補上(見下方 `sendPrompt()` action)。只有圖片變體,不含
- * 一直沒人用的 `{type:"file"}` 變體。
+ * async-scribbling-llama.md Phase 6(圖片)+ 檔案附件擴充:UI 端使用的附件
+ * 形狀——與 wire payload(`PromptAttachment`,packages/shared/src/prompt.ts)
+ * 共用完全相同的形狀,包含 discriminant `type` 欄位,只是排除一直沒人用的
+ * `{type:"file"}`(檔案路徑)變體。之前的版本會在這裡拿掉 `type`、送出前
+ * 再補回去,但那只在只有圖片一種變體時省得掉——一旦要同時分辨圖片/文件,
+ * `type` 本來就得留著才能分派渲染與 wire 序列化,拿掉再補回只是多一道
+ * 沒必要的轉換,見下方 `sendPrompt()` action。
  */
-export type PendingImageAttachment = Pick<Extract<PromptAttachment, { type: "image" }>, "mediaType" | "data">;
+export type PendingAttachment = Extract<PromptAttachment, { type: "image" | "document" }>;
 
 /** UI 用的聊天時間軸項目(把持久化的 MessageRecord 與即時串流事件合併呈現)。 */
 export type ChatItem =
@@ -81,10 +83,10 @@ export type ChatItem =
       id: string;
       content: string;
       createdAt: number;
-      /** Phase 6:使用者傳送時夾帶的圖片,樂觀本地回顯與 DB reload 後的
+      /** Phase 6:使用者傳送時夾帶的圖片/檔案,樂觀本地回顯與 DB reload 後的
        *  history 兩條路徑都會填(見 sendPrompt() action 與
        *  messageRecordsToItems())。 */
-      attachments?: PendingImageAttachment[];
+      attachments?: PendingAttachment[];
     }
   | { kind: "assistant"; id: string; content: string; createdAt: number; streaming: boolean }
   | {
@@ -259,10 +261,10 @@ interface SessionStoreState {
     title?: string,
     agentOverride?: AgentOverride,
   ) => Promise<void>;
-  /** Phase 6:`attachments` 選填——composer 沒有待送圖片時省略/傳空陣列皆可,
+  /** Phase 6:`attachments` 選填——composer 沒有待送附件時省略/傳空陣列皆可,
    *  action 內部一律正規化成「非空才附加」,樂觀回顯與 wire payload 兩處共用
    *  同一份判斷(見下方實作)。 */
-  sendPrompt: (text: string, attachments?: PendingImageAttachment[]) => Promise<void>;
+  sendPrompt: (text: string, attachments?: PendingAttachment[]) => Promise<void>;
   /** 給 TerminalView 用:把一行原始文字寫進 pty session 的 stdin,不經過
    * ChatItem 時間軸(pty 不是回合制聊天,見 GenericPtyAdapter 的設計說明)。 */
   sendTerminalInput: (text: string) => void;
@@ -567,18 +569,18 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
       // Phase 6:`msg.attachments` 已經在 selectSession() 呼叫
       // `SessionHistoryResultSchema.parse(raw)` 時通過 zod 驗證(型別是
       // `PromptAttachment[] | undefined`),這裡不需要再做一輪防禦性驗證——
-      // 只需篩出 "image" 變體(忽略一直沒人用的 "file" 變體)並拿掉 wire
-      // payload 的 discriminant `type` 欄位,收斂成與樂觀回顯路徑
-      // (sendPrompt() action)相同的 `PendingImageAttachment[]` 形狀。
-      const imageAttachments = (msg.attachments ?? [])
-        .filter((a): a is Extract<PromptAttachment, { type: "image" }> => a.type === "image")
-        .map((a) => ({ mediaType: a.mediaType, data: a.data }));
+      // 只需篩出 "image"/"document" 變體(忽略一直沒人用的 "file" 變體),
+      // 形狀與樂觀回顯路徑(sendPrompt() action)相同的 `PendingAttachment[]`
+      // 一致,不需要再 map 拿掉欄位。
+      const attachments = (msg.attachments ?? []).filter(
+        (a): a is PendingAttachment => a.type === "image" || a.type === "document",
+      );
       items.push({
         kind: "user",
         id: msg.id,
         content: msg.content,
         createdAt: msg.createdAt,
-        ...(imageAttachments.length > 0 ? { attachments: imageAttachments } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       });
     } else if (msg.role === "assistant") {
       items.push({ kind: "assistant", id: msg.id, content: msg.content, createdAt: msg.createdAt, streaming: false });
@@ -813,11 +815,9 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       sessionId,
       prompt: {
         text,
-        // 補回 wire payload 需要的 discriminant `type` 欄位(見
-        // `PendingImageAttachment` 型別註解)。
-        ...(validAttachments
-          ? { attachments: validAttachments.map((a) => ({ type: "image" as const, mediaType: a.mediaType, data: a.data })) }
-          : {}),
+        // `PendingAttachment` 與 wire payload 形狀一致(見型別註解),不需要
+        // 再組一次。
+        ...(validAttachments ? { attachments: validAttachments } : {}),
       },
     });
   },

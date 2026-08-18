@@ -36,9 +36,33 @@ export const PromptImageAttachmentSchema = z.object({
 });
 export type PromptImageAttachment = z.infer<typeof PromptImageAttachmentSchema>;
 
+/**
+ * 圖片以外的檔案附件——對應 Anthropic Messages API 的 `DocumentBlockParam`
+ * (見 packages/adapters/src/claude-sdk-adapter.ts 的 sendPrompt() 查證)。
+ * 該 content block 只認兩種 source:PDF(`Base64PDFSource`)與純文字
+ * (`PlainTextSource`),不是「任何檔案都能附加」。`data` 一律是 base64,
+ * 與圖片附件同一個「不含 data URL 前綴」約定——即使 mediaType 是
+ * text/plain 也一樣先 base64 編碼:`PlainTextSource.data` 本身雖然要明文,
+ * 但讓 wire payload/DB 儲存(JSON.stringify 整個陣列)統一走 base64,adapter
+ * 端組 content block 時才依 mediaType decode,不用為 text/plain 另開一種
+ * 欄位編碼。`name` 是原始檔名——圖片用縮圖不需要檔名,這裡沒有縮圖可看,
+ * UI 靠檔名畫檔案卡片,也順便送進 `DocumentBlockParam.title`。
+ */
+export const PromptDocumentMediaTypeSchema = z.enum(["application/pdf", "text/plain"]);
+export type PromptDocumentMediaType = z.infer<typeof PromptDocumentMediaTypeSchema>;
+
+export const PromptDocumentAttachmentSchema = z.object({
+  type: z.literal("document"),
+  mediaType: PromptDocumentMediaTypeSchema,
+  data: z.string(),
+  name: z.string(),
+});
+export type PromptDocumentAttachment = z.infer<typeof PromptDocumentAttachmentSchema>;
+
 export const PromptAttachmentSchema = z.discriminatedUnion("type", [
   PromptFileAttachmentSchema,
   PromptImageAttachmentSchema,
+  PromptDocumentAttachmentSchema,
 ]);
 export type PromptAttachment = z.infer<typeof PromptAttachmentSchema>;
 
