@@ -2,7 +2,11 @@
 
 > 本文件是 **權威設計基準**,於 2026-07-24 一場 15 題 grilling 後定稿。
 > 凡與 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 衝突之處,**以本文件為準**。
-> ARCHITECTURE.md 保留作為早期概念草圖與元件地圖,但其若干宣稱已過時(見文末「對 ARCHITECTURE.md 的更正」)。
+>
+> ⚠️ **2026-08-18 更新**:文末「對 ARCHITECTURE.md 的更正」指的是
+> [`ARCHITECTURE-legacy-2026-07.md`](./ARCHITECTURE-legacy-2026-07.md)(當時的
+> 早期概念草圖,現已封存)。**[`ARCHITECTURE.md`](./ARCHITECTURE.md) 已依實際
+> 原始碼重寫**,那些更正都已納入,不再需要靠這一節去修補。
 
 ---
 
@@ -98,7 +102,10 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 
 ---
 
-## 對 ARCHITECTURE.md 的更正(它寫過頭了)
+## 對早期 ARCHITECTURE.md 的更正(它寫過頭了)
+
+> 以下針對的是 [`ARCHITECTURE-legacy-2026-07.md`](./ARCHITECTURE-legacy-2026-07.md)。
+> 現行的 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 已重寫,這些更正全部已納入。
 
 - ❌ **「Event Sourcing 可回放重建」** → 現實是當前狀態 CRUD(9 張表,無 event log),而且 event sourcing 救不了崩潰復原(D1)。
 - ❌ **文件列的 `CodexAdapter`** → **不存在**;Codex 走 ACP(B2)。

@@ -4,7 +4,7 @@
 
 | 層 | 內容 | 對應 SONiC/SAI | 本專案檔案 | 狀態 |
 |---|---|---|---|---|
-| **L1** | Overall architecture — 總體架構與設計定案 | [SONiC Architecture](https://github.com/sonic-net/SONiC/wiki/Architecture) | [`ARCHITECTURE.md`](./ARCHITECTURE.md) + [`DECISIONS.md`](./DECISIONS.md) | ✅ 已 grill 定案(2026-07-24, 15 題) |
+| **L1** | Overall architecture — 總體架構與設計定案 | [SONiC Architecture](https://github.com/sonic-net/SONiC/wiki/Architecture) | [`ARCHITECTURE.md`](./ARCHITECTURE.md) + [`DECISIONS.md`](./DECISIONS.md) | ✅ 已 grill 定案(2026-07-24, 15 題);ARCHITECTURE.md 已於 2026-08-18 依實際原始碼重寫,舊版封存為 [`ARCHITECTURE-legacy-2026-07.md`](./ARCHITECTURE-legacy-2026-07.md) |
 | **L2** | Design spec + 模組/功能清單 | [SONiC Design-Specs](https://github.com/sonic-net/SONiC/wiki/Design-Specs) | [`LAYER-2-design-spec.md`](./LAYER-2-design-spec.md) | 🟡 草擬完，待 grill |
 | **L3** | 各模組 High-Level Design(HLD) | [sflow_hld.md](https://github.com/sonic-net/SONiC/blob/master/doc/sflow/sflow_hld.md) | [`LAYER-3-hld/`](./LAYER-3-hld/) | ⬜ 索引待填(逐模組 grill) |
 | **L4** | 各模組 Detail Design | [SAI doc](https://github.com/opencomputeproject/SAI/tree/master/doc) | [`LAYER-4-detail-design/`](./LAYER-4-detail-design/) | ⬜ 索引待填 |

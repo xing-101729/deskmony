@@ -1,762 +1,743 @@
 # Deskmony 系統架構
 
-> 一個結合 **Claude Code Desktop**(桌面 IDE 式介面)、**Paseo**(多 agent 統一調度)、**OpenChamber**(session 化遠端管理)三者概念的 Agent Team 管理平台。
-
-> ⚠️ **2026-07-24 定案更新**:本文件為早期概念草圖與元件地圖,部分宣稱已過時。
-> **權威設計基準改以 [`DECISIONS.md`](./DECISIONS.md) 為準**,衝突時以其為準。具體被更正處:
-> - ❌「Event Sourcing 可回放重建」→ 實為當前狀態 CRUD,event sourcing 不做(見 DECISIONS §D)。
-> - ❌ 下方 §3.4 的 `CodexAdapter` 不存在;Codex 走 ACP。核心後端 set 收斂為 **{Claude Code, Codex, OpenCode}**,**放棄 Antigravity/Gemini**(見 §B)。
-> - ⚠️ `PermissionGateway` 實為 57 行空殼,default-deny 政策引擎尚未實作(淨新增第一優先,見 §C 與 DECISIONS「淨新增工作」)。
-> - ➕ 新增貫穿全局的**無人值守安全罩**(權限/訊息/成本三斷路器,見 DECISIONS §0)。
-
----
-
-## 1. 產品定位與核心能力
-
-| 能力 | 說明 | 概念來源 |
-|---|---|---|
-| Agent Team 管理 | 建立團隊、定義角色(PM / Architect / Coder / Reviewer / QA),每個成員可綁定不同的 agent 軟體與模型 | Paseo |
-| Agent 互相傳訊 | 內建 Message Bus + 每個 agent 的 Mailbox,agent 透過 MCP 工具主動傳訊、廣播、請求審查 | 自創(核心差異化) |
-| 多 agent 軟體支援 | Adapter 層抽象化,支援 Claude Code、Codex CLI、Gemini CLI、OpenCode、任意 CLI | Paseo / OpenChamber |
-| 桌面 IDE 式介面 | Session 側欄、聊天串流、Diff 檢視、內嵌終端、任務看板、團隊群聊視圖 | Claude Code Desktop |
-| 工作區隔離 | 每個任務可綁定獨立 git worktree,agent 平行工作互不干擾 | Claude Code Desktop |
+> **文件定位**:這份文件描述 **原始碼目前實際長什麼樣子**,不是願景、不是規劃。
+> 每一節都可以在 `apps/`、`packages/` 底下找到對應的檔案;寫不出對應檔案的東西
+> 就不寫進來。
+>
+> | 文件 | 回答什麼 | 權威性 |
+> |---|---|---|
+> | [`DECISIONS.md`](./DECISIONS.md) | **為什麼**這樣設計(2026-07-24 grilling 定案) | 設計決策的最高權威,與本文件衝突時以它為準 |
+> | **本文件** | 程式碼**目前**是什麼形狀 | 實作現況的權威;每次結構性改動應同步更新 |
+> | [`LAYER-2-design-spec.md`](./LAYER-2-design-spec.md) → [`LAYER-3-hld/`](./LAYER-3-hld/) → [`LAYER-4-detail-design/`](./LAYER-4-detail-design/) | 逐模組的規格 → 高階設計 → 詳細設計 | 單一模組的細節以對應的 L3/L4 文件為準 |
+> | [`DEVLOG.md`](./DEVLOG.md) | 逐輪做了什麼、踩過什麼坑 | 歷史紀錄 |
+> | [`ARCHITECTURE-legacy-2026-07.md`](./ARCHITECTURE-legacy-2026-07.md) | 2026-07 的早期概念草圖 | **已封存**,多處與現況不符,見文末附錄 A |
 
 ---
 
-## 2. 總體架構圖
+## 1. 這個系統在做什麼
+
+Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
+
+這句話決定了整個架構的重心。「多 agent 能互聊」只是功能;真正佔掉 `apps/core`
+一半以上程式碼的,是**由三個獨立斷路器組成的安全罩**(見 §5),以及它們共用的
+稽核/通知/中斷底座。任何新功能的設計,都必須回答「這條路徑上,三個斷路器分別
+擋在哪裡」。
+
+| 能力 | 落地位置 |
+|---|---|
+| 對話式操作單一 agent(串流、diff、工具呼叫、權限彈窗、內嵌終端) | `apps/desktop/src/views/`、`apps/core/src/session/` |
+| 一隊 agent 互相傳訊、共用任務看板 | `apps/core/src/bus/`、`apps/core/src/team/`、`apps/core/src/tasks/` |
+| 多種 agent 後端(Claude Code / Codex / OpenCode / 任意 CLI) | `packages/adapters/` |
+| 任務級 git worktree 隔離 | `apps/core/src/workspace/` |
+| **無人值守安全罩(權限 / 訊息 / 成本三斷路器)** | `apps/core/src/permissions/`、`bus/`、`cost/`、`enforcement/` |
+| 崩潰復原(對帳 + 人工分流) | `apps/core/src/recovery/` |
+| 遠端存取(瀏覽器/手機),且遠端不可削弱安全罩 | `apps/core/src/gateway/`、`apps/core/src/http/` |
+
+---
+
+## 2. 三層結構
 
 ```mermaid
 flowchart TB
-    subgraph UI["🖥️ UI Layer — Tauri/Electron + React"]
+    subgraph SHELL["apps/desktop — 桌面殼(Electron 33 + React 18)"]
         direction LR
-        ChatView["聊天串流視圖<br/>(單一 agent 對話)"]
-        TeamChat["團隊群聊視圖<br/>(觀察 agent 互傳訊息)"]
-        TaskBoard["任務看板<br/>(Kanban)"]
-        DiffView["Diff 檢視器<br/>(Monaco)"]
-        Term["內嵌終端<br/>(xterm.js)"]
-        Settings["團隊 / Agent<br/>設定中心"]
+        Views["views/ 對話・團隊群聊・任務看板・復原視圖"]
+        Stores["stores/ zustand × 4"]
+        GWC["lib/gateway-client.ts"]
     end
 
-    subgraph GW["🔌 Gateway"]
-        IPC["IPC / WebSocket API"]
-        EventStream["事件串流<br/>(SSE / WS push)"]
+    subgraph CORE["apps/core — headless orchestration server(Node.js)"]
+        direction TB
+        GW["gateway/ WsGateway — 58 個 RPC + 9 個 push channel"]
+        subgraph DOMAIN["領域模組"]
+            direction LR
+            Sess["session/"]
+            Bus["bus/"]
+            Task["tasks/"]
+            Team["team/"]
+            Work["workspace/"]
+        end
+        subgraph SHIELD["安全罩"]
+            direction LR
+            Perm["permissions/"]
+            Cost["cost/"]
+            Enf["enforcement/"]
+            Rec["recovery/"]
+        end
+        subgraph SUPPORT["支撐"]
+            direction LR
+            Cfg["config/"]
+            Det["detect/"]
+            Set["settings/"]
+            Http["http/"]
+        end
     end
 
-    subgraph CORE["⚙️ Orchestration Core (Node.js)"]
-        TeamMgr["TeamManager<br/>團隊與角色定義"]
-        SessMgr["SessionManager<br/>session 生命週期"]
-        MsgBus["MessageBus<br/>訊息路由 + Mailbox"]
-        TaskSvc["TaskService<br/>任務指派 / 狀態機"]
-        PermGW["PermissionGateway<br/>工具授權統一閘道"]
-        WsMgr["WorkspaceManager<br/>git worktree 管理"]
-        Sched["Scheduler<br/>排程 / 自動循環"]
+    subgraph PKG["packages/"]
+        Adapters["adapters/ — 4 個 AgentAdapter + 2 個 MCP server"]
+        Shared["shared/ — zod schema 單一事實來源"]
+        Db["db/ — Drizzle schema(11 張表)"]
     end
 
-    subgraph ADPT["🔄 Agent Adapter Layer"]
-        ACP["AcpAdapter<br/>(Agent Client Protocol)"]
-        SDK["ClaudeAgentSdkAdapter<br/>(深度整合)"]
-        OC["OpenCodeAdapter<br/>(HTTP + SSE)"]
-        CX["CodexAdapter<br/>(codex proto/JSON)"]
-        PTY["GenericPtyAdapter<br/>(任意 CLI 直通)"]
-    end
-
-    subgraph AGENTS["🤖 Agent 軟體"]
+    subgraph BACKENDS["agent 後端"]
+        direction LR
         CC["Claude Code"]
-        GM["Gemini CLI"]
-        OCS["OpenCode Server"]
-        CDX["Codex CLI"]
-        ANY["其他 CLI<br/>(Aider…)"]
+        CDX["Codex"]
+        OCS["OpenCode"]
+        ANY["任意互動式 CLI"]
     end
 
-    subgraph INFRA["🗄️ Infrastructure"]
-        DB[("SQLite<br/>teams / sessions / tasks")]
-        ELog[("Event Log<br/>append-only 事件流")]
-        MCPHub["MCP Hub<br/>內建 team-bus MCP server"]
-        Git["Git / Worktree"]
-        Notify["通知<br/>(系統通知 / webhook)"]
-    end
-
-    UI <--> GW
-    GW <--> CORE
-    TeamMgr --> SessMgr
-    SessMgr --> ADPT
-    MsgBus <--> MCPHub
-    TaskSvc --> MsgBus
-    PermGW --> ADPT
-    WsMgr --> Git
-    CORE --> DB
-    CORE --> ELog
-    Sched --> SessMgr
-
-    ACP --> CC
-    ACP --> GM
-    SDK --> CC
-    OC --> OCS
-    CX --> CDX
-    PTY --> ANY
-
-    MCPHub -.MCP tools 掛載.-> CC
-    MCPHub -.MCP tools 掛載.-> GM
-    MCPHub -.MCP tools 掛載.-> OCS
-    MCPHub -.MCP tools 掛載.-> CDX
+    SHELL -- "WebSocket + token 認證" --> GW
+    GW --> DOMAIN
+    GW --> SHIELD
+    GW --> SUPPORT
+    DOMAIN --> Adapters
+    SHIELD --> DOMAIN
+    CORE --> Db
+    Adapters --> BACKENDS
+    SHELL -.-> Shared
+    CORE -.-> Shared
 ```
+
+**依賴方向鐵則**:`packages/*` **不得** import `apps/*`。跨界需求一律在
+`packages/shared` 宣告介面(`TeamBusPort`、`SubagentPort`、`ClientPresencePort`、
+`SessionControlPort`),由 `apps/core/src/index.ts` 在建構時注入實例。
 
 ---
 
-## 3. 分層說明
+## 3. 執行期形態
 
-### 3.1 UI Layer(桌面殼 + 前端)
+同一份 `apps/core` 有三種跑法,`apps/desktop` 的 React 程式碼三種情境完全共用:
 
-- **殼**:建議 **Tauri 2**(體積小、記憶體省)搭配 Node.js sidecar 跑 Core;若想最快落地可用 **Electron**(main process 直接就是 Node,少一層 sidecar 通訊)。
-- **前端**:React + TypeScript + Zustand(狀態)+ Tailwind。
-- **關鍵元件**:
-  - `xterm.js` — 內嵌終端(GenericPtyAdapter 直通、或查看 agent 原始輸出)
-  - `Monaco Editor` — diff 檢視與檔案預覽
-  - 虛擬列表(聊天串流訊息量大)
-- **三種核心視圖**:
-  1. **Session 視圖** — 像 Claude Code Desktop:左側 session 列表、中間對話串、右側 diff/檔案面板
-  2. **團隊群聊視圖** — 把整個 team 的 agent 互傳訊息以群組聊天呈現,人類可隨時插話 @某個 agent
-     (M3 Round B 已實作,見 `apps/desktop/src/views/TeamChatView.tsx`;`App.tsx`
-     頂部提供 Session 視圖 ↔ 團隊群聊視圖的切換分頁)
-  3. **任務看板** — Kanban:Backlog → Assigned → In Progress → Review → Merging → Done
-     (+ Blocked 獨立區塊)。M4 Round B 已實作,見 `apps/desktop/src/views/TaskBoardView.tsx`;
-     `App.tsx` 頂部提供 Session 視圖 ↔ 團隊群聊視圖 ↔ 任務看板的三分頁切換。
-- **設定介面**(M5 Round D 新增):`App.tsx` 頂部列一個獨立的「⚙ 設定」按鈕
-  (不是第四個分頁,是一個彈窗,見 `apps/desktop/src/views/SettingsDialog.tsx`)
-  —— 呼叫 `env.detectAgents` 顯示本機已裝的 agent 軟體(以及內嵌的 Claude
-  Agent SDK)、版本、路徑、可用 model、憑證提示,並提供「重新偵測」按鈕。
-  M5 Round E 新增「啟用哪些偵測到的 Claude model」勾選區塊(`claude-agent-sdk`
-  卡片下方的 `EnabledModelsEditor`),存檔呼叫 `settings.setEnabledModels`。
-  詳見 3.2/3.3 節備註與 README.md「設定介面與 agent 偵測」「M5 Round E 完成度」
-  章節。
-- **建立 Agent Profile 對話框**(M5 Round E 改版):`ProfileCreateDialog.tsx`
-  的 software 下拉改成只列出 `env.detectAgents` 偵測到、已安裝的項目(+ 內嵌
-  Claude Agent SDK + 「自訂…」逃生選項),每個選項對應一組保證能建立 session
-  的 `(software, command)`(見 3.4 節下方「偵測項 → 可建立目標的推導」備註);
-  workingDir 欄位新增「瀏覽…」按鈕(Electron 專屬,呼叫
-  `window.deskmony.pickDirectory()` 開原生選資料夾對話框,瀏覽器場景優雅降級
-  為隱藏按鈕、維持手動輸入);選到 `claude-agent-sdk` 時額外顯示 model 下拉
-  (選項為「設定」介面啟用的 model,見上方「設定介面」備註)。
+| 形態 | 怎麼啟動 | Core 在哪 | UI 從哪來 |
+|---|---|---|---|
+| **桌面 app** | `Deskmony.exe` / `pnpm dev:electron` | Electron main process `spawn()` 的子程序(`apps/desktop/electron/main.ts` 的 `startCore()`) | Electron `loadFile()` 直接從 asar 載入,不經過 core 的 HTTP server |
+| **開發模式** | `pnpm dev:core` + `pnpm dev:desktop` + `pnpm dev:electron` | 獨立 process | Vite dev server(:5173) |
+| **headless + 瀏覽器/手機** | `pnpm start:core` | 獨立 process | core 自己的靜態 server,**與 WS 共用同一個 port**(`apps/core/src/http/static-server.ts`) |
 
-### 3.2 Gateway
+打包後的 core 子程序用 `ELECTRON_RUN_AS_NODE=1` 借用 Electron 內建的 Node
+執行(`better-sqlite3` 原生模組在打包時已由 `@electron/rebuild` 針對 Electron 的
+ABI 重編),**終端使用者機器不需要安裝 Node.js**;dev 模式反過來優先用系統 Node
+(dev 的 `node_modules` 是系統 Node 的 ABI)。
 
-- UI 與 Core 之間走 **WebSocket(或 Electron IPC)**:指令用 request/response,agent 輸出用事件推播。
-- 同一套 WS API 未來可直接開放給 **瀏覽器 / 手機遠端**(OpenChamber 的概念):Core 本身就是一個 headless server,桌面殼只是其中一種 client。
+桌面殼每次啟動會產生一個隨機 `DESKMONY_AUTH_TOKEN`(記憶體 + 環境變數,不落地),
+同時傳給 core 子程序與 preload,兩端自動對上。
 
-> **M5 Round A 落地備註**:上面兩句話這輪從「設計目標」變成「有安全預設把關的
-> 實際行為」——`apps/core` 新增 `pnpm start:core` 正式入口、**預設只綁
-> `127.0.0.1`**(要對外必須明確設定 `DESKMONY_BIND_HOST`,且對外綁定沒有同時
-> 設定 `DESKMONY_AUTH_TOKEN` 時直接拒絕啟動),以及 token-based 認證(client
-> 連線後第一則訊息必須是帶正確 token 的 `auth` request,未設定 token 時維持
-> 免認證的本機開發預設)。完整設計取捨(token 傳輸方式為何選「連線後第一則
-> 訊息」而非 `Sec-WebSocket-Protocol`/URL query string、逾時/錯誤 token 的
-> 連線處理)見 README.md「認證(token-based)」章節;桌面殼(`apps/desktop`)
-> 這輪也串接了自動認證(`GatewayClient` 建構子新增可選的 `authToken`,連線
-> 後自動送出 `auth`),對既有 UI/store 完全透明。瀏覽器/手機 client 本身仍
-> 留給之後的 round(這輪只確保 Gateway 協議與安全預設就緒)。
->
-> **M5 Round B 落地備註**:上一輪留下的「瀏覽器/手機 client」這句話這輪
-> 真正落地。`apps/core` 的 `WsGateway.listen()` 改成建立一個 `node:http`
-> 的 `Server`,把 `WebSocketServer` 用 `{ server }` 選項掛在它上面(WS 升級
-> 請求走 `upgrade` 事件、一般 HTTP GET 走 `request` 事件,兩者天生不衝突,
-> 不需要手動判斷)——同一個 port 現在**同時**服務兩件事:(1) 既有的 WS
-> Gateway 協議;(2) 新增的靜態網頁 server(`apps/core/src/http/
-> static-server.ts`),把 `apps/desktop` 既有的 Vite build 產物(`dist/`)
-> 服務出去,讓瀏覽器不需要另外架設任何東西就能載入 UI 殼。**安全邊界**:
-> 靜態頁面本身不需要認證即可下載(它只是不含機敏資料的前端 UI 殼),但
-> 頁面連上 WS Gateway 之後,若 core 有設定 `DESKMONY_AUTH_TOKEN`,仍必須
-> 送出正確 token 才能使用——這條界線刻意分開處理(靜態檔案 server 完全不
-> 檢查 token,職責單一),完整的目錄穿越三層防禦與瀏覽器連線畫面/token
-> 儲存取捨見 README.md「瀏覽器存取方式與安全界線」「token 儲存取捨」章節。
-> 同一輪也把 M5 Round A review 留下的兩個安全強化項目補上:token 比對改用
-> `crypto.timingSafeEqual()` 常數時間比較、新增認證失敗 rate limiting(見
-> README.md「安全強化」章節)。至此 ARCHITECTURE.md 第 9 節路線圖 M1~M5
-> 全部完成。
->
-> **M5 Round D 落地備註(agent 偵測)**:新增 `env.detectAgents` request(見
-> `packages/shared/src/gateway.ts`)——`params` 是空物件、刻意不接受任何
-> 呼叫端輸入,回應是 `{ agents: AgentDetectionEntry[] }`(型別定義見
-> `packages/shared/src/detect.ts`)。這個方法本身是唯讀查詢(不改變任何
-> 狀態、不建立/影響任何 session),因此沿用既有的認證閘門即可,沒有另外的
-> 安全考量;真正的安全設計重點在 Core 端的偵測邏輯本身,見 3.3 節備註。
->
-> **M5 Round E 落地備註(啟用模型偏好持久化)**:新增 `settings.getEnabledModels`
-> (`params` 空物件)/`settings.setEnabledModels`(`params: { enabledModelIds:
-> string[] }`)兩個 request(見 `packages/shared/src/gateway.ts`),對應
-> `SettingsStore`(見 3.3 節備註)。**語意約定:空陣列 = 全部啟用**——這兩個
-> 方法都改變/查詢的是「使用者偏好」而非任何 agent/session 狀態,同樣沿用既有
-> 認證閘門,沒有額外授權邏輯。
+---
 
-### 3.3 Orchestration Core(平台心臟)
+## 4. `apps/core` 模組地圖
 
-| 模組 | 職責 |
-|---|---|
-| **TeamManager** | 團隊 CRUD、AgentProfile(角色、系統提示、綁定的軟體/模型/工作目錄/MCP 設定) |
-| **SessionManager** | 對每個 agent 成員建立/恢復/中斷 session;維護 session 狀態機(idle / busy / waiting-permission / error) |
-| **MessageBus** | 核心差異化模組,見第 4 節 |
-| **TaskService** | 任務建立、指派給 agent、狀態流轉、驗收流程 |
-| **PermissionGateway** | 各 adapter 的權限請求統一收斂到這裡 → UI 彈窗或依 policy 自動核可(allowlist / 每 agent 授權等級) |
-| **WorkspaceManager** | 為任務建立 git worktree、追蹤 diff、合併/清理 |
-| **Scheduler** | 定時喚醒 agent(例如每日 standup、自動輪詢 CI) |
-| **AgentDetector**(M5 Round D 新增) | 偵測本機已裝哪些已知 agent CLI(固定 allowlist:`claude`/`gemini`/`opencode`/`codex`/`aider`)+ 版本 + 路徑,以及內嵌 `claude-agent-sdk` 的憑證狀態提示;供「設定」介面與 `env.detectAgents` 使用 |
-| **SettingsStore**(M5 Round E 新增) | 極簡 key/value 持久化偏好(`apps/core/src/settings/settings-store.ts`);目前唯一的 key 是「啟用哪些偵測到的 Claude model」,供 `settings.getEnabledModels`/`settings.setEnabledModels` 使用 |
+以下每一列都對應一個真實檔案。**沒有 Scheduler**(舊文件列過,從未實作)。
 
-> **AgentDetector 安全設計**(見 `apps/core/src/detect/agent-detector.ts` 完整
-> 註解):
->   1. **固定 allowlist,不接受外部輸入** —— 偵測哪些命令完全由程式碼內寫死
->      的常數陣列決定,`env.detectAgents`(唯一對外入口)不接受任何參數,
->      呼叫端沒有辦法要求偵測任意命令。
->   2. **一律 `execFile` 陣列參數,不開 shell、不組字串**(比照
->      `WorkspaceManager` 呼叫 git 的既有寫法):先用 `where`(Windows)/
->      `which`(POSIX)找出完整路徑,才對該路徑跑 `--version`。Windows 上
->      `.cmd`/`.bat` 這類 npm 全域安裝的 shim(例如 `gemini.cmd`)在
->      `shell:false` 下 Node 會直接丟出 `EINVAL`(與 `AcpAdapter` 的
->      `resolveWindowsSpawnCommand()` 遇到的問題相同)——這裡依副檔名決定是否
->      需要 `shell:true`,且只對「解析出來的完整路徑」做必要的引號跳脫(命令
->      本身是寫死的 allowlist 字面字串,不是外部輸入,不構成 shell 注入面)。
->   3. **每次探測都有逾時**(3000ms):找執行檔、跑 `--version` 這兩步各自
->      逾時,逾時/找不到/非 0 結束一律當「未安裝或無法判定」處理,不讓任何
->      一個探測卡住整個 `detectAllAgents()`(內部 `Promise.all` 平行探測)。
->   4. **model 偵測務實降級**:只有內嵌的 `claude-agent-sdk` 有結構化 model
->      清單(直接複用 `KNOWN_CLAUDE_MODELS`);外部 CLI 只做「安裝與否 +
->      版本」,`models` 回空陣列 + `modelsNote` 說明「模型由該工具自行管理」
->      ——不臆測、不嘗試跑任何可能互動式/昂貴的「列出 model」指令。
->
-> `probeCommand()` 這個底層函式額外 export 出來,供 `scripts/e2e-gateway.mjs`
-> 步驟21 不經過 gateway、直接呼叫編譯產物驗證探測邏輯本身的確定性行為(`node`
-> 必定存在、亂數 bogus 命令必定回報未安裝),避免在 gateway 層新增一個「可
-> 指定任意命令」的方法造成不必要的攻擊面。
+### 4.1 領域模組
 
-### 3.4 Agent Adapter Layer(多軟體支援的關鍵)
+| 模組 | 檔案 | 職責 |
+|---|---|---|
+| **SessionManager** | `session/session-manager.ts`(~1.9k 行,最大的單一模組) | session 生命週期與狀態機、adapter 事件消費、權限決策編排、子 agent、context checkpoint、啟動對帳、優雅關閉 |
+| **TeamManager** | `team/team-manager.ts` | team / team member CRUD;member 帶 `lifecycle`(persistent / ephemeral) |
+| **MessageBus** | `bus/message-bus.ts` | 訊息路由、Mailbox(DB 驅動)、投遞策略、**contextId 綁定與訊息預算斷路器** |
+| **TaskService** | `tasks/task-service.ts` | 任務狀態機、指派、機器驗收閘、人類 review 閘、合併並完成 |
+| **AcceptanceRunner** | `tasks/acceptance-runner.ts` | 跑任務定義的驗收指令(test / build / typecheck) |
+| **WorkspaceManager** | `workspace/workspace-manager.ts` | git worktree 建立 / 合併 / 清理;主幹分支動態偵測 |
+| **ProfileStore** | `profiles.ts` | AgentProfile CRUD + 冪等 seed |
 
-所有 adapter 實作同一個介面:
+### 4.2 安全罩模組
+
+| 模組 | 檔案 | 職責 |
+|---|---|---|
+| **PolicyEngine** | `permissions/policy-engine.ts` | 權限決策的**唯一**判斷點,default-deny |
+| **hard-deny** | `permissions/hard-deny.ts` | 四類內建、config 不可關閉的硬性拒絕 |
+| **tool-input** | `permissions/tool-input.ts` | 從工具參數萃取指令 / 路徑 / host;realpath 防逃逸 |
+| **PermissionGateway** | `permissions/permission-gateway.ts` | 待決請求的登記簿 + 情境相依逾時(**不做政策判斷**) |
+| **TurnLimiter** | `cost/turn-limiter.ts` | 回合硬上限(時間 / 工具呼叫次數),**不依賴 usage** |
+| **CostGovernor** | `cost/cost-governor.ts` | usage 權威聚合 + 任務預算 + 每日 kill-switch |
+| **WaitingWatchdog** | `cost/waiting-watchdog.ts` | 掛起 session 的 T1 提醒 / T2 資源回收 |
+| **AuditLog** | `enforcement/audit-log.ts` | append-only 稽核(`enforcement_audit` 表) |
+| **Notifier** | `enforcement/notifier.ts` | 桌面通知 + webhook,批次彙總,靜音時段 |
+| **enforcementTrip** | `enforcement/trip.ts` | 三斷路器共用的 trip 流程(interrupt → audit → notify) |
+| **RecoveryService** | `recovery/recovery-service.ts` | 崩潰復原的四種人工分流(純組合層,無自動觸發) |
+
+### 4.3 支撐模組
+
+| 模組 | 檔案 | 職責 |
+|---|---|---|
+| **WsGateway** | `gateway/ws-gateway.ts` | WS 協議、token 認證、rate limiting、`isLocal` 判定、`LOCAL_ONLY_METHODS` 閘門 |
+| **static-server** | `http/static-server.ts` | 瀏覽器 UI 靜態檔案(與 WS 共用 port),三層目錄穿越防禦 |
+| **loadConfig** | `config/load-config.ts` | 分層合併設定(defaults → config.json → env) |
+| **config-file-writer** | `config/config-file-writer.ts` | 安全子集寫回 config.json;`appendPolicyRule()` |
+| **AgentDetector** | `detect/agent-detector.ts` | 偵測本機已裝的 agent CLI(固定 allowlist + `execFile` + 逾時) |
+| **SettingsStore** | `settings/settings-store.ts` | per-provider 偏好(啟用 / 排序 / env / model),env 對外一律遮罩 |
+
+---
+
+## 5. 安全罩:三斷路器
+
+這是目前整個系統的設計主軸。三條線各自獨立,任一條都能單獨叫停失控。
+
+```mermaid
+flowchart TB
+    subgraph AGENTS["agent 活動"]
+        Tool["工具呼叫"]
+        Msg["agent 互傳訊息"]
+        Usage["token / 回合消耗"]
+    end
+
+    Tool --> P["① 權限斷路器<br/>PolicyEngine"]
+    Msg --> M["② 訊息斷路器<br/>MessageBus 預算"]
+    Usage --> C["③ 成本斷路器<br/>TurnLimiter / CostGovernor / WaitingWatchdog"]
+
+    P --> BASE["共用底座 enforcement/<br/>interrupt → AuditLog → Notifier"]
+    M --> BASE
+    C --> BASE
+    BASE --> H(["人類"])
+```
+
+### 5.1 權限斷路器 — `PolicyEngine.decide()`
+
+**唯一的判斷點**,優先序不可調換:
+
+```mermaid
+flowchart TB
+    Req["權限請求<br/>(toolName, input, workingDir, profileId, role)"] --> HD{"① hard-deny 命中?"}
+    HD -- 否 --> Rules{"②③ config 規則<br/>依序比對"}
+    HD -- "是 + 遠端 或 autoMode" --> Deny["deny(硬地板)"]
+    HD -- "是 + 本機 + attended + 非 autoMode" --> Strong["escalate-strong<br/>紅框二次確認<br/>不得「永遠允許」"]
+    HD -- "是 + 本機 + 無人在場" --> Deny
+    Rules -- "命中 deny" --> Deny2["deny"]
+    Rules -- "命中 allow" --> Allow["allow"]
+    Rules -- "未命中" --> Auto{"④ autoMode?"}
+    Auto -- 是 --> Allow2["allow(中間地帶)"]
+    Auto -- 否 --> Esc["⑤ escalate<br/>default-deny"]
+```
+
+- **hard-deny 四類**(`hard-deny.ts`,config 永遠不可關閉):worktree 外寫入/刪除、
+  讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、
+  `**/credentials`)、危險 git(force-push / 刪遠端分支 / `branch -D`)、
+  非白名單外連。
+- **YOLO 與 auto 的唯一差別**:YOLO 額外跳過 config 的 `effect:"deny"` 規則。
+  **hard-deny 兩者都絕不跳過**。YOLO 30 分鐘後惰性過期(不用計時器)。
+- **判不出來一律 escalate**,絕不 allow(`decide()` 最底部的 fallback)。
+- **逾時語意情境相依**:有人在場 → 逾時 deny;無人值守 → **不設計時器**,
+  session 維持 `waiting` 等人(止損改由 WaitingWatchdog 的 T1/T2 負責)。
+- **「永遠允許」的三條紀律**:①寫最窄的規則(`commandEquals` / `pathUnder`)
+  ②同時寫進 config.json 與 in-memory(`PolicyEngine.addRule()`),重啟前後行為
+  一致 ③escalate-strong 的請求,Core 端**強制忽略** `rememberRule`,即使 client
+  硬塞。
+
+### 5.2 訊息斷路器 — `MessageBus`
+
+兩道閘,加在既有投遞策略之前:
+
+1. **contextId 由 Core 推導,agent 不可指定**(`deriveContextId()`)——依發送者
+   當下綁定的任務推導,推不出來(沒有進行中的任務)一律拒收。讓被管制者自己
+   申報管制欄位,等於讓它換個 id 就能重置預算。
+2. **每 context 的 agent 訊息數上限**——超過即 trip + 拒收該 context 後續的
+   `send_message` / `broadcast` / `request_review`。
+
+**只斷橫向訊息,不斷縱向工作進度**:`report_status` / `list_teammates` 完全不受
+影響。`reportStatus()` / 人類插話產生的訊息 `contextId` 固定填哨兵值 `"legacy"`,
+不參與預算。
+
+### 5.3 成本斷路器 — 三個獨立元件
+
+| 元件 | 訊號來源 | 觸發時 | halt 粒度 |
+|---|---|---|---|
+| **TurnLimiter** | `tool-call` 事件 + 時間(**不依賴 usage**) | 單回合超過 30 分鐘 或 200 次工具呼叫 | **立即 interrupt** |
+| **CostGovernor**(任務預算) | `usage` 事件 | 任務累計花費超標 | **只擋後續 prompt**,不打斷已結束的回合 |
+| **CostGovernor**(每日 kill-switch) | `usage` 事件 | 當日團隊總花費超標 | **全部 session interrupt** |
+| **WaitingWatchdog** T1 | `waiting` 狀態時長 | 掛起 > 6 小時 | 只發提醒,**不 halt** |
+| **WaitingWatchdog** T2 | 同上 | 掛起 > 72 小時 | `dispose()` 回收子程序;任務留 blocked、worktree 保留 |
+
+> **TurnLimiter 是最重要的那一個**:實測「Claude Code 經 ACP」**完全不回報
+> usage**(連 `used`/`size` 都沒有,是 bridge 的結構性缺口)。對那類後端,
+> 任何依賴 usage 的預算都不會生效,回合硬上限是唯一的保護。
+
+### 5.4 共用底座 — `enforcement/`
+
+`enforcementTrip()` 統一處理:(需要時)`await interrupt()` → 寫 `enforcement_audit`
+→ `notifier.deliver()`。`interrupt()` 有 10 秒逾時保護,逾時**不假裝已停**——
+在 audit 的 `reason` 加上 `-interrupt-unconfirmed` 後綴,讓稽核看得到。
+
+`enforcement_audit` 是系統裡**唯一**的 append-only 表:只 INSERT、永不 UPDATE/
+DELETE,記錄權限決策、三斷路器 trip、啟動對帳。**這不是 event sourcing**——
+它不記錄 agent 輸出,不能拿來重建狀態(見 DECISIONS D1/D5)。
+
+### 5.5 遠端能力邊界
+
+```
+連線建立 → remoteAddress 正規化 → isLocal = 是否 loopback(終生不變)
+              ↓
+handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS 檢查
+                                                    ↓
+                              session.setPermissionMode / config.setFile
+                              / profile.create / profile.delete → 遠端一律拒絕
+                              permission.resolve 帶 rememberRule → 遠端一律拒絕
+```
+
+- **`isLocal` 只由 Core 依連線本身判定,絕不採信 client 自稱。**
+- **隧道連線(Tailscale/WireGuard)不是 loopback,一律視為遠端**——刻意的:
+  隧道只解決傳輸安全,不代表操作者在本機。
+- `gateway.capabilities` 握手回傳四個布林(皆等於 `isLocal`),**只讓 UI 顯示
+  正確,不是安全邊界本身**;真正的保證是每次呼叫時的 `LOCAL_ONLY_METHODS` 檢查。
+- 綁定安全檢查用**合併後**的 `config.daemon.bindHost`:非 loopback 綁定且未設
+  `DESKMONY_AUTH_TOKEN` → **拒絕啟動**。改設定檔一樣擋得住。
+- token 用 `crypto.timingSafeEqual()` 常數時間比對;認證失敗 5 次 / 30 秒冷卻。
+- **`DESKMONY_AUTH_TOKEN` 刻意不是設定檔欄位**,永遠只從環境變數讀。
+
+---
+
+## 6. Adapter 層
+
+### 6.1 真實介面(`packages/adapters/src/types.ts`)
 
 ```ts
 interface AgentAdapter {
-  capabilities(): AdapterCapabilities;        // 是否支援串流/工具事件/權限請求/diff
-  spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle>;
-  sendPrompt(handle: AgentHandle, prompt: PromptInput): void;
-  events(handle: AgentHandle): AsyncIterable<AgentEvent>;
-  // AgentEvent = 訊息增量 | 工具呼叫 | 權限請求 | diff | 完成 | 錯誤
-  interrupt(handle: AgentHandle): void;
-  dispose(handle: AgentHandle): Promise<void>;
-  // M5 Round C 新增:對話中換 model(見本節下方備註)。只有
-  // ClaudeAgentSdkAdapter 真正支援,ACP/PTY 一律丟出明確錯誤。
-  setModel(handle: AgentHandle, model: string): Promise<void>;
+  capabilities(): AdapterCapabilities;
+  spawn(profile, workspace, team?: TeamSpawnContext, resume?: ResumeOptions): Promise<AgentHandle>;
+  sendPrompt(handle, prompt: PromptInput): void;
+  events(handle): AsyncIterable<AgentEvent>;
+  interrupt(handle): Promise<void>;      // resolve = 確實停了(呼叫端必須 await)
+  dispose(handle): Promise<void>;
+  resolvePermission(handle, requestId, "allow" | "deny"): void;
+  setModel(handle, model): Promise<void>;
+  setEffort(handle, effort): Promise<void>;
+  // 以下為選配 —— 只有特定 adapter 有,不是遺漏
+  resolveUserDialog?(handle, requestId, result: DialogAnswer): void;  // 僅 Claude SDK
+  writeInput?(handle, data): void;                                     // 僅 PTY
+  resize?(handle, cols, rows): void;                                   // 僅 PTY
+  getBackendSessionId?(handle): string | undefined;                    // 僅 Claude SDK
 }
 ```
 
-> **M5 Round C 落地備註(對話中換 model)**:`setModel()` 直接呼叫
-> `@anthropic-ai/claude-agent-sdk` 的 `Query.setModel(model?: string):
-> Promise<void>`(讀取 `node_modules` 內 `sdk.d.ts` 確認:「Only available
-> in streaming input mode」——`ClaudeAgentSdkAdapter` 本來就一律用 streaming
-> input,因此可以直接切換,不需要 dispose 現有連線或重新 spawn,對話上下文
-> 原封不動保留,比「dispose + 重新 spawn」的替代方案更好)。`AcpAdapter`/
-> `GenericPtyAdapter` 對應的協議本身沒有「呼叫端指定 model」這個機制,一律
-> 丟出明確錯誤(見 README.md「M5 Round C 完成度」的完整調查結論與取捨)。
+### 6.2 註冊的四個 adapter
 
-| Adapter | 對接方式 | 涵蓋軟體 | 功能等級 |
+`AdapterRegistry` 實際註冊(`apps/core/src/index.ts`)只有這四種 —— **沒有
+CodexAdapter**,Codex 走 PTY:
+
+| software | 檔案 | 對接方式 | 涵蓋後端 |
 |---|---|---|---|
-| **AcpAdapter** | [ACP(Agent Client Protocol)](https://agentclientprotocol.com) — stdio JSON-RPC | Claude Code、Gemini CLI、其他支援 ACP 者 | ★★★ 一個 adapter 吃多家,首選 |
-| **ClaudeAgentSdkAdapter** | Claude Agent SDK(程式內嵌) | Claude Code | ★★★ 最深整合:hooks、subagent、細粒度權限 |
-| **OpenCodeAdapter**(已實作) | OpenCode 的 HTTP + SSE server API | OpenCode | ★★★ 天生 server 化,遠端也適用 |
-| **CodexAdapter** | `codex proto` / exec JSON 模式 | Codex CLI | ★★ |
-| **GenericPtyAdapter** | node-pty 直通 + 終端渲染 | 任何互動式 CLI(Aider 等) | ★ 保底方案,無結構化事件,功能降級 |
+| `claude-agent-sdk` | `claude-sdk-adapter.ts` | `@anthropic-ai/claude-agent-sdk` 程式內嵌 | Claude Code |
+| `acp` | `acp-adapter.ts` | [ACP](https://agentclientprotocol.com) stdio JSON-RPC | Gemini CLI、其他 ACP-native agent |
+| `opencode` | `opencode-adapter.ts` | OpenCode headless server 的 HTTP + SSE | OpenCode |
+| `pty` | `pty-adapter.ts` | `node-pty` 原始直通 | Claude Code CLI、Codex、Aider、任意互動式 CLI |
 
-> 設計原則:**能力探測(capabilities)+ 優雅降級**。UI 依 adapter 回報的能力決定顯示豐富聊天串流還是原始終端。
+**Provider 目錄**(`packages/shared/src/provider-catalog.ts`)是使用者看到的那一層,
+七項,每項在型別上保證映射到上面四種之一:
 
-> **M5 Round E 落地備註(偵測項 → 可建立目標的推導)**:`AdapterRegistry`
-> (`apps/core/src/index.ts`)目前只註冊了 `claude-agent-sdk`/`acp`/`pty` 三種
-> adapter——`OpenCodeAdapter`/`CodexAdapter` 仍是上面表格列出的 TODO(未來 round
-> 才會補上)。但 `AgentDetector` 的偵測結果會把 opencode/codex 分類標記成
-> `"opencode"`/`"codex"`(純粹是分類標籤,不代表已有對應 adapter),若 UI 直接
-> 照抄這個分類建 `AgentProfile`,`session.create` 會在 `AdapterRegistry.get()`
-> 找不到對應 adapter 時失敗。`packages/shared/src/agent-target.ts` 的
-> `deriveDefaultAgentTarget()`/`canUseAcpAdvanced()`/`deriveAcpAdvancedTarget()`
-> 是這輪新增的純函式層,把「偵測到的分類」轉換成「保證能建立 session 的
-> `(software, command)`」——內嵌 SDK 維持原樣;其餘所有外部 CLI 一律預設映射成
-> `software="pty"` + command=偵測到的完整路徑(PTY 直通對任何互動式 CLI 都
-> 保證能跑);只有偵測分類本身就是 `"acp"` 的項目(claude-code-cli/
-> gemini-cli)才提供「進階:改用 ACP」的候選,給知道自己 CLI 真的講 ACP 的
-> 使用者手動選用,不是預設值。`ProfileCreateDialog.tsx` 是唯一呼叫端。
->
-> **修復備註(OpenCodeAdapter 落地,取代上一輪的 opencode→pty 退化)**:
-> 使用者實際使用後回報,opencode 走 PTY 直通只是把它自己的整頁 TUI 塞進
-> xterm 終端視圖,體驗很差。這輪依本節表格原訂計畫補上 `OpenCodeAdapter`
-> (`packages/adapters/src/opencode-adapter.ts`,HTTP + SSE 對接 opencode 的
-> headless server,`AdapterRegistry` 新增註冊 `"opencode"`),
-> `deriveDefaultAgentTarget()` 對偵測分類為 `"opencode"` 的項目改成映射成
-> `software="opencode"` 本身(不再退化成 `pty`),`DerivedAgentTarget.
-> software` 型別同步擴充成
-> `Extract<AgentSoftware, "claude-agent-sdk" | "acp" | "pty" | "opencode">`。
-> `codex` 目前仍然沒有對應的 adapter,繼續映射成 `pty`,維持「這個型別只能
-> 包含 `AdapterRegistry` 真正註冊過的 software」這條原則不變。完整的 API
-> 調查結論、事件轉換設計、已知限制見 README.md「OpenCodeAdapter」章節。
+| provider | → software | 備註 |
+|---|---|---|
+| `claude-agent-sdk` | `claude-agent-sdk` | 內嵌,能力最完整 |
+| `claude-cli` | `pty` | 本機安裝的 `claude` CLI |
+| `gemini` | `acp` | |
+| `opencode` | `opencode` | |
+| `codex` | `pty` | **無專屬 adapter** |
+| `aider` | `pty` | |
+| `custom-pty` | `pty` | 手動輸入 command |
 
-### 3.5 Infrastructure
+### 6.3 能力探測 — 兩個布林 + 兩個三態
 
-- **SQLite**(better-sqlite3 + Drizzle ORM):teams、agent_profiles、sessions、tasks、messages、settings(M5 Round E 新增,極簡 key/value 持久化偏好表)。
-- **Event Log**:append-only 事件流(所有 agent 輸出、訊息、權限決策),支援 session 回放與稽核。
-- **MCP Hub**:平台**內建一個 MCP server(`team-bus`)**,啟動每個 agent 時自動掛載 — 這是 agent 互傳訊息的入口(見下節)。
-- **Git / Worktree**:任務級隔離。
-- **通知**:系統通知(agent 需要授權、任務完成)、可選 webhook(Slack 等)。
+```ts
+{ streaming, toolEvents, permissionRequests, diff, interrupt, terminal: boolean,
+  usageReporting, contextReporting: "supported" | "unsupported" | "unknown" }
+```
+
+| adapter | streaming | toolEvents | permissionRequests | terminal | usageReporting |
+|---|---|---|---|---|---|
+| claude-agent-sdk | ✅ | ✅ | ✅ | ❌ | `supported` |
+| acp | ✅ | ✅ | ✅ | ❌ | **`unknown`** |
+| opencode | ✅ | ✅ | ✅ | ❌ | `unsupported` |
+| pty | ❌ | ❌ | **❌** | ✅ | `unsupported` |
+
+- **三態存在的理由**:`AcpAdapter` 會正確轉發 `usage_update`,但**送不送由被
+  spawn 的那個 agent 決定**——Gemini CLI 可能會送,Claude Code 經 bridge 實測
+  一次都不送。靜態布林值表達不了,回報 `true` 是對 UI 說謊。消費端必須靠
+  「這條 session 實際收到過沒有」收斂(`resolveCapabilitySupport()`),
+  **收斂前不得對使用者宣稱有東西可看**。
+- **`permissionRequests: false` 是安全分層,不只是功能缺失**:PTY 是 raw stdin
+  直通,**結構上無法被政策引擎管**。在真正的執行沙箱做出來之前,PTY agent
+  一律唯讀、不給無人值守的自主權(DECISIONS C7)。刻意**不做** shell 指令攔截
+  ——`bash -c` / `$()` / base64 幾秒就能繞過,那是 security theater。
+
+### 6.4 AgentEvent(10 種)
+
+`message-delta` / `tool-call` / `tool-result` / `permission-request` /
+`user-dialog-request` / `completed` / `error` / `terminal-data` / `usage` /
+`context-usage`。
+
+`usage`(累計計數器,可 diff)與 `context-usage`(瞬時計量表,compaction 後會
+變小)**刻意拆成兩個型別**——塞進同一個事件,會讓消費端「新值 < 舊值 = 連線
+重置」這條規則對 gauge 誤判。
 
 ---
 
-## 4. Agent 互相傳訊機制(核心設計)
+## 7. Gateway 協議
 
-### 4.1 原理
+`ws://` 上的 request/response + server push。**58 個 RPC 方法**,分組:
 
-每個 agent session 啟動時,自動掛載平台內建的 **`team-bus` MCP server**,取得以下工具:
-
-| MCP Tool | 用途 |
+| 分組 | 方法 |
 |---|---|
-| `send_message(to, content, priority)` | 傳訊給指定隊友(可標 normal / interrupt) |
-| `broadcast(content)` | 對整個 team 廣播 |
-| `read_inbox()` | 讀取自己的信箱 |
-| `request_review(taskId, to)` | 請求隊友審查(M4 Round B 已實作,見 4.5 節) |
-| `report_status(taskId, status, summary)` | 回報任務進度(同步驅動任務看板) |
-| `list_teammates()` | 查詢隊友名單、角色與目前狀態 |
+| 連線 | `auth`、`gateway.capabilities` |
+| Profile | `profile.list` / `.create` / `.delete` 🔒 |
+| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode` 🔒 / `.spawnChild` / `.terminalInput` / `.resizeTerminal` |
+| 權限 | `permission.resolve`、`dialog.resolve` |
+| Team | `team.create` / `.list` / `.addMember` / `.removeMember` / `.messages` / `.teammates` |
+| 訊息 | `message.send` / `.sendMessage` / `.broadcast` / `.reportStatus` / `.requestReview` / `.getContextBudget` |
+| 任務 | `task.create` / `.list` / `.get` / `.assign` / `.updateStatus` / `.delete` / `.merge` / `.setAcceptance` / `.runAcceptance` / `.approveReview`、`workspace.get` |
+| 成本 | `cost.getSummary` |
+| 復原 | `recovery.list` / `.continue` / `.takeover` / `.rerun` / `.gitStatus` / `.resolveDirtyWorktree` / `.abandon` |
+| 設定 | `settings.getEnabledModels` / `.setEnabledModels` / `.getProviderPrefs` / `.setProviderPrefs`、`config.getEffective` / `config.setFile` 🔒、`env.detectAgents`、`adapter.capabilities` |
 
-### 4.2 投遞策略
+🔒 = `LOCAL_ONLY_METHODS`,遠端一律拒絕。
 
-MessageBus 收到訊息後不會直接打斷對方,而是依目標 agent 狀態決定:
+**9 個 push channel**:`session-event`、`session-updated`、`session-list-updated`、
+`permission-resolved`、`team-message`、`task-updated`、`task-deleted`、
+`enforcement-notification`、`child-result`、`user-dialog-resolved`。
 
-- **idle** → 立即以 prompt 注入目標 session(標明來源:「來自 @Reviewer 的訊息:…」)
-- **busy** → 進入 Mailbox 排隊,該 agent 回合結束後批次注入
-- **priority = interrupt** → 呼叫 adapter 的 `interrupt()` 中斷後注入(僅限授權的角色,例如 PM)
-- 所有訊息同步寫入 Event Log,並推播到 UI 的**團隊群聊視圖**,人類全程可見、可插話
+協議定義在 `packages/shared/src/gateway.ts`,zod discriminated union 是
+**單一事實來源**——core 與 desktop 兩端都從這裡取型別,不會漂移。錯誤回應除了
+`error` 純文字,額外帶 `errorCode`/`errorParams` 供前端 i18n(舊 core 不帶這兩個
+欄位時前端退回顯示純文字,不會壞)。
 
-### 4.3 訊息流時序圖
-
-```mermaid
-sequenceDiagram
-    participant A as 🤖 Coder Agent<br/>(Claude Code)
-    participant MCP as team-bus<br/>MCP Server
-    participant BUS as MessageBus
-    participant LOG as Event Log
-    participant UI as 🖥️ 團隊群聊視圖
-    participant B as 🤖 Reviewer Agent<br/>(Gemini CLI)
-
-    A->>MCP: send_message(to: "Reviewer",<br/>"PR 已就緒,請審查 feature/login")
-    MCP->>BUS: 路由訊息
-    BUS->>LOG: 寫入事件(append-only)
-    BUS-->>UI: 推播 → 人類即時看到
-    alt Reviewer 處於 idle
-        BUS->>B: 立即注入 prompt<br/>「來自 @Coder 的訊息:…」
-    else Reviewer 處於 busy
-        BUS->>BUS: 進入 Mailbox 排隊
-        Note over BUS,B: Reviewer 回合結束
-        BUS->>B: 批次注入信箱訊息
-    end
-    B->>MCP: report_status(taskId, "reviewing")
-    MCP->>BUS: 更新任務狀態
-    BUS-->>UI: 任務看板同步更新
-    B->>MCP: send_message(to: "Coder",<br/>"發現 2 個問題:…")
-    BUS->>A: 注入回覆
-```
-
-> 用 MCP 做傳訊入口的好處:**任何支援 MCP 的 agent 軟體(Claude Code、Gemini CLI、OpenCode、Codex…)都自動獲得傳訊能力**,不需要為每套軟體客製;連 GenericPtyAdapter 跑的 CLI,只要支援 MCP 也能加入團隊。
-
-### 4.4 M3 Round A 實作備註
-
-第 4 節是設計層面的目標;M3 Round A 落地了核心機制,以下記錄實作與設計文字的對應關係與現況範圍(完整清單見 README.md「M3 Round A 完成度」):
-
-- **MCP Tool 清單的實作範圍**:4.1 節表格列了 `send_message`/`broadcast`/`read_inbox`/`request_review`/`report_status`/`list_teammates` 六個工具。M3 Round A 只實作了 `send_message`、`broadcast`、`list_teammates`、`report_status` 四個(`packages/adapters/src/team-bus-mcp.ts`)。`read_inbox` 未實作:目前的投遞策略是「idle 立即注入 / busy 排隊後自動批次注入」,agent 不需要主動輪詢信箱 —— Mailbox 對 agent 是被動、自動送達的,不是拉取式的。`request_review` 未實作:語意上等同於「`send_message` + 之後由 TaskService 追蹤 review 狀態」,而 TaskService 是 M4 的範圍,這輪先不做這個語意包裝,任務相關的協作一律先用 `send_message`/`report_status` 表達。
-- **投遞策略的落地位置**:4.2 節的策略由 `apps/core/src/bus/message-bus.ts` 的 `MessageBus` 類別實作,`deliverToMember()`/`flushMailbox()` 是核心邏輯,詳細設計決策(Mailbox 資料結構、注入 prompt 格式、循環依賴打破方式)見 README.md 對應章節。
-- **「所有訊息同步寫入 Event Log」的現況**:M3 Round A 尚未有獨立的 append-only Event Log(那是第 3.5 節 Infrastructure 的更大範圍設計,`sessions`/`messages` 目前也還是一般 SQLite 表,不是 append-only 結構),這輪先把 `TeamMessage` 寫進 `team_messages` 表(一般 CRUD 表,支援歷史查詢 `team.messages`),語意上滿足「訊息不會遺失、可回放」,但還不是嚴格的 append-only 事件流。
-- **跨軟體傳訊的現況**:4.1 節「MCP Hub」與文末的跨軟體說明是完整願景 —— 這輪只有 `ClaudeAgentSdkAdapter` 會在 `spawn()` 時掛載 team-bus MCP server(讀取 SDK 的 `createSdkMcpServer()`/`tool()` API 對接,見 `packages/adapters/src/team-bus-mcp.ts`);`AcpAdapter`/`GenericPtyAdapter` 這輪不掛(ACP 協議本身雖然也能承載 MCP,但需要另外設計「client 端如何把 MCP server 曝露給 ACP agent」的橋接,留給之後的 round)。**但投遞(接收端)本身是跨 software 的**:`MessageBus` 注入訊息只是呼叫 `SessionManager.sendPrompt()`,任何 software 的 session 都能接收到注入的 prompt(e2e 步驟 12 用兩個 `software="acp"` 的 fake agent 驗證了這一半);缺的只是「主動呼叫工具傳訊」這一端,只有 Claude Agent SDK 成員具備。
-- **`priority="interrupt"` 授權判斷的擴充**:4.2 節文字「僅限授權的角色,例如 PM」對應到 `TeamMember.canInterrupt` 布林;實作上這個判斷同時服務 agent 端(透過 MCP 工具呼叫 `send_message`/`broadcast`)與人類插話(`message.send`)——人類預設不受此限制(找不到同名 `TeamMember` 時直接放行,見 README「人類插話與 agent 傳訊共用降級邏輯」的說明),只有當人類插話刻意以某個既有成員的名義發送時才會套用同一套規則。
-
-### 4.5 M3 Round B 實作備註
-
-M3 Round B 把上一輪留下的兩個待辦補齊:3.1 節第 2 種核心視圖(團隊群聊視圖)與團隊管理 UI 正式落地,並處理了 Round A review 指出的 interrupt 投遞時序問題。完整改動清單見 README.md「M3 Round B 完成度」,這裡只記錄與架構文件本身描述有落差、或需要額外說明的部分。
-
-- **團隊群聊視圖與 4.2/4.3 節「訊息如何路由」的關係**:4.1/4.2 節描述的是訊息路由本身,這輪落地的是「人類如何觀察與插話」——`TeamChatView`(`apps/desktop/src/views/TeamChatView.tsx`)訂閱 `"team-message"` 推播,呈現的正是 4.3 節時序圖裡 `BUS-->>UI` 這一步;人類插話(收件對象可選某成員或廣播、可選 priority)呼叫的 `message.send` 對應 4.2 節「所有訊息…人類全程可見、可插話」這句話,實作細節(狀態管理、視覺區分規則)見 README「M3 Round B 關鍵設計決策」。
-- **團隊管理 UI 與 3.3 節 TeamManager 的關係**:3.3 節表格把「團隊 CRUD、AgentProfile」列為 TeamManager 的職責,這輪的 `TeamManagementDialog`(`apps/desktop/src/views/TeamManagementDialog.tsx`)就是這個職責在 UI 層的對應——建立 team、加入/移除成員(選現有 `AgentProfile`、設定角色與 `canInterrupt`)、檢視成員目前 session 狀態。「檢視成員目前 session 狀態」這個需求原本沒有對應的 gateway 方法(`Session`/`team.list` 都沒有曝露 session↔member 對應),這輪新增 `team.teammates`(複用 M3 Round A 就已存在的 `MessageBus.listTeammates()` 邏輯,多開一個給 UI 用的入口),避免為此修改資料庫 schema。
-- **4.2 節「呼叫 adapter 的 interrupt() 中斷後注入」的時序訂正**:M3 Round A 的實作裡,「中斷」與「注入」這兩步之間沒有正確等待前者真正完成——Round A review 指出這是一個時序 race(SDK 的 `interrupt()` 是非同步的,resolve 才代表真正停止處理)。M3 Round B 修正:`AgentAdapter.interrupt()` 介面改回傳 `Promise<void>`,`MessageBus.deliverToMember()` 的 interrupt 分支現在會先完整 `await` 中斷生效,才進行注入。判斷過程、修正範圍、e2e 驗證方式(步驟 14,真實忙碌中的 Claude SDK session)完整記錄在 README.md「interrupt 時序修正結論」,不在此重複——這裡只記錄一個對架構文件本身的訂正:4.2 節「呼叫 adapter 的 interrupt() 中斷後注入」這句話隱含的「先中斷、後注入」時序關係,現在才是程式碼實際保證的行為(Round A 的實作只是語意上先呼叫、但沒有真正等待完成)。
-
-### 4.6 M4 Round B 實作備註:`request_review`
-
-M3/M4 Round A 都明講「這輪先不做 `request_review`」(見 4.4 節、5.1 節);M4 Round B 補上:
-
-- **語意**:`request_review(to, taskId?)` 等同 `report_status(status: "review", taskId)` +
-  `send_message(to: <reviewer>, "請審查...")` 的組合,但把「請求審查」表達成一個明確意圖的
-  工具,呼叫端不需要自己組出審查請求的措辭、也不需要分別呼叫兩個工具。實作
-  (`apps/core/src/bus/message-bus.ts` 的 `MessageBus.requestReview()`)直接複用既有邏輯:
-  帶 `taskId` 時委派給 `TaskService.tryApplyReportStatus()`(與 `report_status` 完全相同的
-  規則,對映不到/不是指派人/非法轉換都只記錄原因、不報錯),通知訊息走既有的
-  `persistAndPush` + `deliverToMember`(與 `send_message` 相同的持久化/推播/投遞路徑),
-  固定 `priority: "normal"`(審查請求不是緊急插話)。訊息內容附上任務標題與分支名稱
-  (透過新增的 `TaskService.getTaskBranch()`),讓 reviewer 不用額外去查任務看板。
-- **型別落地位置**:`TeamBusPort`(`packages/shared/src/team-bus.ts`)新增
-  `requestReview()` 方法與 `RequestReviewOutcome` 型別(擴充 `TeamBusSendOutcome`,多帶
-  `taskUpdated`/`taskFromStatus`/`taskToStatus`/`taskSkippedReason`);
-  `packages/adapters/src/team-bus-mcp.ts` 新增對應的 `request_review` MCP 工具,對接方式與
-  既有四個工具完全一致(`createSdkMcpServer`/`tool()`),同樣只有 `ClaudeAgentSdkAdapter`
-  掛載(這輪沒有改變 4.4 節記錄的「只有 Claude SDK 成員能主動呼叫工具」現況)。
-- **gateway 對應入口**:比照 M3 Round B「`team.teammates`」與 M4 Round A「`message.reportStatus`」
-  的先例,新增 `message.requestReview` 讓非 agent 呼叫端(UI、或不依賴真實模型的 e2e 決定性
-  測試)也能走同一段 `MessageBus.requestReview()` 實作,不需要透過真實模型呼叫 MCP 工具才能
-  測試(e2e 步驟 16c 用的正是這條路徑)。
-- **與「人類批准合併」的關係**:`request_review` 只能把任務推進到 `review` 狀態(而且僅在
-  發送者確實是該任務指派人、且轉換合法時才會生效),不會、也不能讓任務往後跳過
-  `merging` 直接到 `done`——見第 5 節、5.2 節「人類批准合併」的把關點說明。
+**「多開一個 gateway 入口」的既有慣例**:`message.reportStatus`/`.requestReview`/
+`.sendMessage`/`.broadcast`、`team.teammates` 都是「本來只有 MCP 工具能呼叫的
+邏輯,多開一個非 agent 入口」——走的是**完全相同**的實作(含所有閘門),不是
+繞過閘門的後門,目的是讓 UI 與不依賴真實模型的決定性 e2e 測試能走同一條路徑。
 
 ---
 
-## 5. 任務協作流程
-
-```mermaid
-stateDiagram-v2
-    [*] --> Backlog : 人類或 PM agent 建立任務
-    Backlog --> Assigned : 指派給成員<br/>(自動建立 git worktree)
-    Assigned --> InProgress : agent 開工
-    InProgress --> Review : report_status(done)<br/>+ request_review()
-    Review --> InProgress : Reviewer 退回<br/>(send_message 附意見)
-    Review --> Merging : Reviewer 通過
-    Merging --> Done : worktree 合併回主幹
-    Done --> [*]
-    InProgress --> Blocked : 需要人類授權 / 決策
-    Blocked --> InProgress : 人類回覆
-```
-
-- 每個任務綁定獨立 **git worktree**,多個 agent 平行開發互不踩腳。
-- Review 環節可設定「必須人類批准才能合併」(預設開啟)。
-
-### 5.1 M4 Round A 實作備註
-
-第 5 節是設計層面的目標;M4 Round A 落地了 `TaskService`(`apps/core/src/tasks/task-service.ts`)
-與 `WorkspaceManager`(`apps/core/src/workspace/workspace-manager.ts`)這兩個 core 端模組,任務看板
-UI 留給 Round B。以下記錄實作與設計文字的對應關係與現況範圍(完整清單見 README.md「M4 Round A
-完成度」):
-
-- **狀態機比 mermaid 圖多一條規則,是這輪任務描述刻意放寬的**:上面的狀態圖只畫了
-  `InProgress <-> Blocked`,但 `TaskService.isValidTransition()` 允許
-  `backlog/assigned/in-progress/review/merging` 這五個非終態都能進 `blocked`,離開時回到
-  「進入 blocked 前的那個狀態」(不是寫死回 `in-progress`)。為此 `Task` 多了一個圖上沒有的欄位
-  `blockedFrom`(只有 `status === "blocked"` 時有意義),`packages/db/src/schema.ts` 的 `tasks`
-  表對應多了 `blocked_from` 欄位——這是為了讓「任意狀態 → blocked → 回原狀態」這句話在資料層有地方
-  落地,而不是只在記憶體推導。
-- **`report_status(done) + request_review()` 這句話目前只有 `report_status` 半邊有對應實作**:
-  `request_review` 這個 MCP 工具 M3/M4 都還沒做(M3 Round A 的說明已記錄「語意上等同於
-  `send_message` + TaskService 追蹤 review 狀態」);這輪把 `report_status` 擴充成可選帶
-  `taskId`,對映成功且是合法轉換時會呼叫 `TaskService.updateStatus()`,間接讓 agent 可以用
-  `report_status(status: "review", taskId: ...)` 把任務推進到 Review 狀態,但這是「狀態同步」不是
-  「請求審查」這個動作本身(沒有指定審查者、沒有審查者的通知機制)——語意上比 mermaid 圖描述的窄。
-- **`Merging --> Done : worktree 合併回主幹`這句話目前沒有自動化實作**:`merging → done` 這個狀態轉換
-  本身合法(`isValidTransition` 允許),但「真的把 worktree 分支合併回主幹」是人類或 agent 在 shell/
-  IDE 裡自己執行的 git 操作,`TaskService.updateStatus()` 只負責記錄狀態轉換,不會呼叫任何
-  `git merge`/`git rebase`。`WorkspaceManager` 這輪只做 worktree 的建立(`assignTask` 時)與清理
-  (`task.delete` 時),合併動作留給之後的 round 決定要不要自動化。
-- **`Backlog --> Assigned : 指派給成員(自動建立 git worktree)`的前提**:`team.workingDir` 必須是一個
-  已初始化的 git repo(`git init` 過、至少有一個 commit 不是必要條件,但至少要是合法的 git 目錄),
-  `WorkspaceManager` 在建立 worktree 前會先跑 `git rev-parse --is-inside-work-tree` 確認,不是的話
-  丟出明確錯誤(不靜默失敗、不退化成「不建立 worktree 但假裝指派成功」),見 README「worktree 佈局與
-  命名」章節與下方第 6 節資料模型的 WORKSPACE 補充。
-- **worktree 不會在任務進入 `done` 時自動清理**:刻意的設計決策——`done` 只是狀態轉換,`worktree`
-  仍保留在磁碟上,讓人類事後還能用 3.1 節提到的 Diff 檢視器(Round B 才會真的接上)檢視這個任務改了
-  什麼;只有明確呼叫 `task.delete` 才會觸發 `WorkspaceManager.removeWorkspace()`(`git worktree
-  remove --force` + 刪除對應分支)。完整理由見 `apps/core/src/workspace/workspace-manager.ts`、
-  `apps/core/src/tasks/task-service.ts` 內的程式碼註解。
-
-### 5.2 M4 Round B 實作備註
-
-M4 Round A 留下的三個「這輪沒做」缺口,Round B 補齊:`Merging --> Done` 的真正合併、
-`request_review` 工具(見 4.6 節)、任務看板 UI。以下記錄合併流程與「人類批准合併」這個
-設計決策的完整落地方式:
-
-- **`Merging --> Done : worktree 合併回主幹` 這句話這輪才真正落地**:
-  `WorkspaceManager.mergeWorkspace()`(`apps/core/src/workspace/workspace-manager.ts`)在
-  `baseDir` 這個 worktree 上對 `workspace.branch` 執行 `git merge --no-ff`。**主幹分支名稱是
-  動態偵測、不寫死 `master`**:優先讀 `git symbolic-ref refs/remotes/origin/HEAD`(有設定遠端
-  追蹤時最準確);沒有遠端或偵測失敗時,依序檢查本機是否存在 `main`、`master` 分支,兩者都
-  找不到就丟出明確錯誤,不猜測、不假設任何名字。合併前會先確認 `baseDir` 乾淨
-  (`git status --porcelain` 無輸出)才進行——若 `baseDir` 目前有未 commit 的變更就切換
-  分支/合併,可能弄丟使用者在主幹上還沒 commit 的工作,這輪選擇直接拒絕(丟出明確錯誤),
-  不嘗試 stash 等自動化犧牲使用者資料的做法。
-- **合併衝突處理:不留下半完成狀態**:`git merge --no-ff` 失敗時,`mergeWorkspace()` 會用
-  `git status --porcelain` 找出真正處於「未合併」(`UU`/`AA`/`DD`/`AU`/`UA`/`UD`/`DU` 開頭)
-  狀態的檔案清單,接著呼叫 `git merge --abort` 把 `baseDir` 還原成合併前的乾淨狀態,再把衝突
-  檔案清單包進 `MergeConflictError` 往外丟。呼叫端(`TaskService.mergeAndComplete()`)收到
-  這個錯誤後**不會**呼叫 `updateStatus()`,任務狀態維持在 `merging`,也不會 emit 任何
-  `task-updated`——讓使用者可以看著錯誤訊息(含衝突檔案清單)決定下一步。e2e 步驟 16b 用
-  「baseDir 與 worktree 對同一個檔案做衝突變更」重現了這個路徑,驗證 `task.merge` RPC 確實
-  失敗、任務留在 `merging`、`baseDir` 的 `git status --porcelain` 事後為空、沒有殘留的
-  `.git/MERGE_HEAD`。
-- **人類批准合併(第 5 節「Review 環節可設定必須人類批准才能合併(預設開啟)」的具體實作,
-  而且這輪把它做成唯一路徑、不是可選項)**:
-  - `TaskService.mergeAndComplete()`(只被 `task.merge` gateway 方法呼叫,而 `task.merge` 是
-    人類從任務看板 UI 觸發的動作)是**整個系統裡唯一真正執行 `git merge` 的入口**:要求現狀
-    必須是 `merging`,先呼叫 `WorkspaceManager.mergeWorkspace()`,只有合併真的成功才呼叫既有
-    的 `updateStatus(taskId, "done")`。
-  - **agent 端的把關點在 `TaskService.tryApplyReportStatus()`**:`report_status`(與委派給它
-    的 `request_review`)若把 `status` 對映到 `"done"`,會被明確擋下來(回傳
-    `updated: false`,`skippedReason` 說明「需要人類透過 task.merge 執行實際合併」),不會
-    呼叫 `updateStatus()`。`REPORT_STATUS_ALIASES` 本身仍保留 `"done"`/`"completed"` 等別名
-    (`mapReportStatusToTaskStatus()` 不變)——擋在套用階段而非拿掉別名,是因為這些詞語意上
-    對映到 `"done"`沒有錯,只是「report_status/request_review 這個管道不被允許把任務直接標記
-    完成」,兩件事分開表達比較清楚。因此 agent 沒有任何 MCP 工具能讓任務自己變成 `done`:
-    `report_status`/`request_review` 最多只能把任務推到 `review`/`merging`,真正的合併與
-    `done` 轉換只能由人類經 `task.merge` 完成。e2e 步驟 16d 驗證了這個把關點(任務推進到
-    `merging` 後,`report_status(status: "done", taskId)` 不會讓任務變成 `done`)。
-  - 值得記錄的邊界:`task.updateStatus` 這個既有的 gateway 方法本身沒有被鎖死成只能經
-    `task.merge` 才能到 `done`——理論上人類/UI 仍可以直接呼叫 `task.updateStatus(taskId,
-    "done")` 讓狀態轉換,而不做真正的合併。這輪任務描述只要求擋住 **agent** 自行合併,沒有
-    要求把 `task.updateStatus` 這條給人類/進階使用者用的既有路徑也鎖死,因此刻意保留(見
-    `apps/core/src/tasks/task-service.ts` 頂端狀態機註解的完整說明);`TaskBoardView` UI 本身
-    只在 `merging` 欄位提供「批准合併」按鈕(呼叫 `task.merge`),不提供直接把任務拖/點到
-    `done` 的操作。
-- **刪除時的未 commit 變更警告**:`WorkspaceManager.removeWorkspace()` 在 `git worktree remove
-  --force` 之前,先用 `git status --porcelain` 檢查 worktree 是否有未 commit 的變更,回傳
-  `hadUncommittedChanges` 旗標。**這個旗標不阻擋刪除**——`task.delete` 本身就是「呼叫端已經
-  決定要刪」的動作,`--force` 的語意也是如此;旗標純粹讓上層/UI 能事後警告「剛才刪掉的
-  worktree 裡其實還有沒存的變更,已經不可復原」。`TaskService.deleteTask()` 回傳型別從
-  `Promise<void>` 改成 `Promise<{ hadUncommittedChanges: boolean }>`,`task.delete` gateway
-  回應多帶這個欄位,`TaskBoardView` 刪除任務時先跳確認對話框,刪除完成後若旗標為
-  `true` 則額外顯示一則警告橫幅。
-- **任務看板 UI**(`apps/desktop/src/views/TaskBoardView.tsx`):對應 3.1 節第三種核心視圖。
-  欄位 Backlog / Assigned / In-Progress / Review / Merging / Done 各自一欄,`blocked` 不在這
-  六欄的主線上(任意可打斷狀態都能進 `blocked`,見 M4 Round A 備註的 `BLOCKABLE_STATUSES`),
-  改用獨立的「封鎖」區塊呈現,卡片標示 `blockedFrom`。狀態推進一律用按鈕(只提供
-  `isValidTransition()` 允許的操作),不做拖拉——按鈕最終呼叫的還是同一個
-  `task.updateStatus`/`task.merge`,拖拉不會減少心智負擔,反而多引入一個 DnD 套件依賴。
-  訂閱 `"task-updated"` 即時更新卡片,新增的 `"task-deleted"` 推播(`TaskService.deleteTask()`
-  這輪補上的 `emit`)讓看板在任務被刪除時能把卡片從畫面上移除,而不是誤把「查不到」當成
-  網路問題重試。`apps/desktop/src/stores/task-store.ts` 是對應的 zustand store,設計比照
-  既有 `team-store.ts` 的慣例(獨立 store、共用同一條 WS 連線)。`App.tsx` 頂部新增第三個
-  分頁「任務看板」。
-
----
-
-## 6. 資料模型
+## 8. 資料模型(11 張表)
 
 ```mermaid
 erDiagram
-    TEAM ||--o{ AGENT_PROFILE : "擁有成員"
-    AGENT_PROFILE ||--o{ SESSION : "執行"
-    TEAM ||--o{ TASK : "包含"
-    TASK ||--o| WORKSPACE : "綁定 worktree"
-    TASK }o--o{ AGENT_PROFILE : "指派給"
-    SESSION ||--o{ MESSAGE : "產生"
-    MESSAGE }o--|| AGENT_PROFILE : "發送者"
-    SESSION ||--o{ EVENT : "事件流"
-
-    TEAM {
-        string id PK
-        string name
-        string workingDir
-    }
-    AGENT_PROFILE {
-        string id PK
-        string name "如 Coder-1"
-        string role "PM/Coder/Reviewer/QA"
-        string software "claude-code/gemini/opencode/codex/pty"
-        string providerId "這輪新增:對應 provider 目錄項目 id,選填"
-        string model
-        string systemPrompt
-        json mcpConfig
-        string permissionLevel
-        json env "這輪新增:profile 層級 env 覆寫,選填,見 6.1 節"
-    }
-    SESSION {
-        string id PK
-        string status "idle/busy/waiting/error"
-        string adapterType
-        string model "M5 Round C:session 級 model 覆寫,可為 null"
-    }
-    TASK {
-        string id PK
-        string title
-        string status
-        string assigneeId FK
-    }
-    WORKSPACE {
-        string id PK
-        string taskId FK
-        string baseDir
-        string worktreePath
-        string branch
-    }
-    MESSAGE {
-        string id PK
-        string fromAgent
-        string toAgent "或 broadcast"
-        string priority
-        text content
-    }
+    TEAMS ||--o{ TEAM_MEMBERS : "成員"
+    AGENT_PROFILES ||--o{ TEAM_MEMBERS : "引用"
+    AGENT_PROFILES ||--o{ SESSIONS : "執行"
+    SESSIONS ||--o{ MESSAGES : "對話歷史"
+    SESSIONS ||--o{ SESSIONS : "parentSessionId 父子"
+    TEAMS ||--o{ TASKS : "包含"
+    TEAMS ||--o{ TEAM_MESSAGES : "群聊"
+    TASKS ||--o| WORKSPACES : "綁定 worktree"
+    TEAM_MEMBERS ||--o{ TASKS : "指派"
 ```
 
-> M4 Round A 落地備註:`TASK` 實際多了 `teamId`/`description`/`workspaceId`/`blockedFrom`/
-> `createdAt`/`updatedAt` 幾個圖上省略的欄位(`assigneeId` 實際命名是 `assigneeMemberId`,對應
-> `AGENT_PROFILE` 是透過 `TEAM_MEMBER` 間接指派,不是直接指到 `AGENT_PROFILE`);`WORKSPACE` 是這輪
-> 才真正落地成資料表(`packages/db/src/schema.ts` 的 `workspaces`),完整欄位定義見
-> `packages/shared/src/task.ts` 的 `TaskSchema`/`WorkspaceSchema`,不在此重複整份欄位表。
-
----
-
-## 7. 建議技術棧總表
-
-| 層 | 選擇 | 理由 |
+| 表 | 關鍵欄位 | 備註 |
 |---|---|---|
-| 桌面殼 | Tauri 2(+ Node sidecar)或 Electron | Tauri 輕量;Electron 開發最快 |
-| 前端 | React + TypeScript + Zustand + Tailwind | 生態成熟 |
-| 終端/Diff | xterm.js / Monaco | 業界標準 |
-| Core | Node.js(TypeScript) | Claude Agent SDK、ACP、node-pty 都在 Node 生態 |
-| Agent 協議 | ACP 優先,SDK/HTTP/PTY 補位 | 一次對接多家 |
-| 傳訊 | 內建 MCP server(team-bus) | 跨軟體通用 |
-| 儲存 | SQLite + append-only Event Log | 免部署、可回放 |
-| 版控隔離 | git worktree | 平行任務不衝突 |
+| `sessions` | `status`、`model`、`effort`、`parentSessionId`、`interruptedAt`、`lastSeenAt`、`backendSessionId` | status 六態:`idle`/`busy`/`waiting`/`error`/`closed`/`interrupted` |
+| `messages` | `role`、`content`、`attachments` | `attachments` 是圖片附件的 JSON,獨立欄位而非塞進 `content` |
+| `agent_profiles` | `software`、`providerId`、`model`、`effort`、`env`、`acpConfig`/`ptyConfig`/`opencodeConfig` | 巢狀物件以 JSON 字串存 |
+| `teams` / `team_members` | `lifecycle`(`persistent`/`ephemeral`)、`canInterrupt` | |
+| `team_messages` | `deliveredAt`(null = 仍在 Mailbox)、`contextId` | **DB 是 Mailbox 的權威來源**,不是記憶體 Map |
+| `tasks` | `status`、`assigneeMemberId`、`workspaceId`、`blockedFrom`、`acceptance`、`awaitingHumanReview` | |
+| `workspaces` | `baseDir`、`worktreePath`、`branch` | |
+| `settings` | `key` / `value`(JSON) | 通用 k/v,新增偏好不需要 schema 遷移 |
+| `enforcement_audit` | `kind`、`effect`、`reason`、`payload` | **append-only**,唯一 |
+| `usage_rollup` | 複合主鍵 `(scope, scopeId)`,scope ∈ session/task/day | 成本治理的權威持久層 |
+
+**遷移策略**:`CREATE TABLE IF NOT EXISTS` + 逐欄位的冪等 `ensureXxxColumn()`
+`ALTER TABLE`(`packages/db/src/client.ts`)——`CREATE TABLE IF NOT EXISTS` 對已
+存在的表不會補欄位,所以每個後加的欄位都要有自己的 ensure 函式。
 
 ---
 
-## 8. 專案目錄結構建議
+## 9. Agent 協作機制
 
-```
-Deskmony/
-├─ apps/
-│  ├─ desktop/            # Tauri/Electron 殼 + React 前端
-│  │  ├─ src/views/       # ChatView, TeamChat, TaskBoard, DiffView, Terminal
-│  │  └─ src/stores/      # Zustand stores
-│  └─ core/               # headless orchestration server
-│     ├─ gateway/         # WS/IPC API + 事件推播
-│     ├─ team/            # TeamManager
-│     ├─ session/         # SessionManager + 狀態機
-│     ├─ bus/             # MessageBus + Mailbox + 投遞策略
-│     ├─ tasks/           # TaskService
-│     ├─ permissions/     # PermissionGateway
-│     ├─ workspace/       # git worktree 管理
-│     └─ mcp/             # 內建 team-bus MCP server
-├─ packages/
-│  ├─ adapters/           # AgentAdapter 介面 + 各實作
-│  │  ├─ acp/
-│  │  ├─ claude-sdk/
-│  │  ├─ opencode/
-│  │  ├─ codex/
-│  │  └─ pty/
-│  ├─ shared/             # 型別、事件 schema(zod)
-│  └─ db/                 # Drizzle schema + migrations
-└─ docs/
-   └─ ARCHITECTURE.md     # 本文件
-```
+### 9.1 兩個內建 MCP server
 
----
+只掛在 `ClaudeAgentSdkAdapter`(其餘 adapter 這輪不掛;ACP 協議雖然也能承載
+MCP,但需要另外設計橋接):
 
-## 9. 開發路線圖
-
-| 階段 | 目標 | 內容 |
+| MCP server | 工具 | 進 `allowedTools`(自動放行)? |
 |---|---|---|
-| **M1 — 單 agent MVP** | 先跑得起來 | Electron/Tauri 殼 + ClaudeAgentSdkAdapter + 聊天視圖 + 權限彈窗 + SQLite |
-| **M2 — 多軟體** | Adapter 層成型 | AcpAdapter(涵蓋 Gemini CLI 等)+ GenericPtyAdapter + 能力降級 UI |
-| **M3 — 團隊與傳訊** | 核心差異化 | TeamManager + team-bus MCP + MessageBus + 團隊群聊視圖 |
-| **M4 — 任務協作** | 完整工作流 | TaskBoard + git worktree 隔離 + Review 流程 + Scheduler |
-| **M5 — 遠端化** | OpenChamber 化 | Core 獨立部署、瀏覽器/手機 client、認證(**已完成**:Round A 完成 Core 獨立部署正式化 + 安全預設(綁定位址/token 認證)+ e2e 套件切分為 deterministic/model-behavior 兩組;Round B 完成瀏覽器/手機 client(Core 提供靜態網頁 + 連線畫面 + 響應式)+ 安全強化(timingSafeEqual + 認證失敗 rate limiting)) |
+| **`team-bus`** | `send_message`、`broadcast`、`list_teammates`、`report_status`、`request_review` | ✅ 全部(只是傳訊/查詢,不碰檔案或指令) |
+| **`subagent`** | `list_profiles`、`list_subagents` | ✅ 純查詢 |
+| | `spawn_subagent`、`send_to_subagent` | ❌ **刻意不放**——會讓某個 session 多跑一輪,走 PolicyEngine 的 default-deny 升級給人 |
 
-> **路線圖總結(M5 Round B 落地)**:上面 M1~M5 五個階段至此**全部完成**。
-> 從「單 agent MVP」(M1)到「多軟體 adapter」(M2)、「團隊與傳訊」(M3)、
-> 「任務協作」(M4),最後在 M5 把 Core 收斂成一個可獨立部署、可被任意
-> client(桌面殼、瀏覽器、未來的手機 client)連上的 headless server ——
-> 第 10 節設計決策 1「Core 與殼分離」從一開始就是架構前提,M5 兩輪只是把
-> 「理論上可以」變成「有安全預設把關、有 e2e 驗證的實際能力」。
->
-> **M5 Round C(小版本追加,對話管理 UI 補完)**:五個階段全部完成後,補上
-> 兩個 M1 Session 視圖一直缺的日常操作:UI 刪除對話(後端 `session.delete`
-> 早就存在,這輪接上 `apps/desktop` 的 `SessionList`/`session-store.ts`)、
-> 對話中查看/切換目前 model(`Session.model` 新欄位 + `session.setModel`
-> gateway 方法 + `ChatView` 標題列的下拉選單,只對 `software=
-> "claude-agent-sdk"` 的 session 啟用)。完整改動清單、SDK 換 model 能力的
-> 調查結論、DB 遷移驗證方式見 README.md「M5 Round C 完成度」。
->
-> **M5 Round D(小版本追加,設定介面)**:新增「設定」功能 —— 偵測本機裝了
-> 哪些已知 agent CLI(固定 allowlist)、各自版本/路徑,以及(盡力而為)可用
-> model,做成一個彈窗介面(`SettingsDialog.tsx`)。偵測結果同時接回 `ChatView`
-> 既有的 model 切換下拉選單(以偵測結果為優先來源、`KNOWN_CLAUDE_MODELS` 為
-> fallback,見 `apps/desktop/src/stores/session-store.ts` 的 `detectedAgents`),
-> 確保只有一份 model 清單、不會漂移。完整安全設計見 3.3 節備註、README.md
-> 「設定介面與 agent 偵測」章節。
->
-> **M5 Round E(小版本追加,建立 Profile 對話框 + 啟用模型偏好)**:
-> 「建立 Agent Profile」對話框改版——工作目錄改用原生「選擇資料夾」對話框
-> (Electron 專屬 IPC `deskmony:pickDirectory`,瀏覽器場景優雅降級);
-> software 下拉改成只列出 `env.detectAgents` 偵測到的項目,每個選項都經
-> `packages/shared/src/agent-target.ts` 的純函式映射成保證能建立 session 的
-> `(software, command)`(見 3.4 節備註),不再讓使用者手動打 command;選到
-> `claude-agent-sdk` 時可另外選一個 model。「設定」介面新增持久化的「啟用哪些
-> 偵測到的 Claude model」偏好(新的 `settings` 表 + `SettingsStore` + 兩個
-> gateway 方法,見 3.2/3.3/3.5 節備註),`ProfileCreateDialog`/`ChatView` 的
-> model 下拉都改成只顯示已啟用的清單(單一資料流,見
-> `apps/desktop/src/stores/session-store.ts` 的 `selectEnabledClaudeModels()`)。
-> 完整改動清單、映射表、e2e 驗證見 README.md「M5 Round E 完成度」。
->
-> **使用者實測回報修復(OpenCodeAdapter + 建立 Profile 對話框被切掉)**:
-> 兩個使用者實際使用後回報的問題:(1) opencode profile 建出來只是把它自己的
-> 整頁 TUI 塞進 xterm 終端視圖,體驗差——這輪依本節 3.4 表格原訂計畫補上
-> `OpenCodeAdapter`(HTTP + SSE,見 3.4 節備註、README.md「OpenCodeAdapter」
-> 章節的完整 API 調查與設計決策);(2)「建立 Agent Profile」對話框在主視窗
-> 內被切掉左半部——根因是 `SessionList.tsx` 的側欄 `<aside>` 帶
-> `transition-transform`,而對話框當時渲染在這個帶 transform 的祖先內部,
-> CSS 規範下祖先的 transform 會成為 `position: fixed` 子孫的定位基準,對話框
-> 因此對齊只有 256px 寬的側欄而非整個視窗。修法:所有 `fixed inset-0` 全螢幕
-> 遮罩彈窗(`ProfileCreateDialog`/`SettingsDialog`/`PermissionModal`/
-> `TeamManagementDialog`)統一改用 `apps/desktop/src/views/ModalPortal.tsx`
-> (`createPortal()` 掛到 `document.body`),不受任何祖先 transform 影響。
-> 完整根因分析、稽核範圍、驗證方式見 README.md 對應章節。
->
-> **Provider 目錄重構(對齊 [Paseo](https://paseo.dev) 的 provider 設計)**:
-> 「建立 Agent Profile」的方式改成「選一個具名 provider、只覆寫差異」——
-> 新增 `packages/shared/src/provider-catalog.ts`(內建 provider 目錄,含
-> `claude-agent-sdk`/`claude-cli`/`gemini`/`opencode`/`codex`/`aider`/
-> `custom-pty` 七項,每項的 `software` 型別上保證是 `AdapterRegistry` 已
-> 註冊的四種之一,不可能是 `"codex"`)與 `resolve-providers.ts`(純函式
-> `resolveProviders()`:目錄 + `env.detectAgents` 偵測結果 + 使用者偏好
-> → 可直接建立 profile 的清單,含 `models` 取代/`additionalModels` 合併
-> 語意)。`settings` 表擴充成 per-provider 偏好(`enabled`/`order`/`label`/
-> `env`/`models`/`additionalModels`/`enabledModelIds`),既有的
-> `settings.getEnabledModels`/`setEnabledModels` **完全保留、簽章不變**,
-> 底層改接同一份新儲存(單一資料來源);舊版扁平 `enabledClaudeModelIds`
-> 有冪等的向下相容遷移。`AgentProfile` 新增 `providerId`/`env`(DB 冪等
-> 遷移,比照既有 `ensureSessionsModelColumn()` 手法),`env` 併入子程序
-> 環境變數的優先順序是 `process.env < provider 層級 env < profile.env <
-> *Config.env`。**安全關鍵**:provider 偏好透過 gateway 回傳時 `env` 一律
-> 遮罩成 `"***"`(只回 key 名稱),絕不把明文金鑰回傳給任何連上 core 的
-> client;本機 SQLite 檔案本身仍是明文(與 Paseo 把金鑰寫進
-> `~/.paseo/config.json` 同一類取捨)。完整設計、與 Paseo 的對應/刻意
-> 不做的部分、e2e 驗證見 README.md「Provider 目錄重構」章節。
->
-> **M6 Round A(分層合併的設定檔,對齊 Paseo 的全域設定設計)**:把 core 目前
-> 散落在環境變數的設定(`DESKMONY_CORE_PORT`/`DESKMONY_BIND_HOST`/
-> `DESKMONY_WORKSPACE`/`DESKMONY_DATA_DIR`/`DESKMONY_STATIC_DIR`/
-> `DESKMONY_PERMISSION_TIMEOUT_MS`/`DESKMONY_AUTH_RATE_LIMIT_*`)改成「分層
-> 合併的設定檔」——新增 `packages/shared/src/core-config.ts`(`CoreConfigSchema`
-> zod schema + 型別 + 預設值)與 `apps/core/src/config/load-config.ts`
-> (合併順序 `defaults → <DESKMONY_HOME>/config.json → 環境變數`,這個專案
-> 沒有 CLI flags,不需要 Paseo 的第四層)。`apps/core/src/index.ts`/`db.ts`
-> 不再各處零散讀 `process.env.DESKMONY_*`,改從這個載入器取得合併後的設定
-> ——**唯一例外是 `DESKMONY_AUTH_TOKEN`,永遠只從環境變數讀,設定檔完全沒有
-> 任何 token 欄位**(Deskmony 的認證是共享 bearer token 用
-> `timingSafeEqual` 比對,不是 Paseo 那種存 bcrypt 雜湊的模型,存雜湊會改變
-> 比對模型本身;設定檔出現疑似 token 欄位一律忽略並警告)。**安全關鍵**:
-> `validateBindSafety()` 這輪改看「合併後」的 `config.daemon.bindHost`,
-> 防止使用者改設定檔就意外把無認證的 core 曝露到區網。gateway 新增
-> `config.getEffective`(回傳合併後的有效設定,每個欄位帶
-> `"default"`/`"file"`/`"env"` 來源標記,不含任何 token)與 `config.setFile`
-> (只允許安全子集:`workspace.*`/`features.staticDir`/`log.level`/
-> `daemon.permissionTimeoutMs`/`daemon.authRateLimit.*`,**刻意不允許**
-> `daemon.port`/`daemon.bindHost`——這兩個決定 core 網路曝露面的欄位只能
-> 手動編輯設定檔,不做熱重載)。`SettingsDialog` 新增「全域設定」區塊顯示
-> 有效值 + 來源徽章,來源是 `env` 的欄位鎖定為唯讀。由 `CoreConfigSchema`
-> 透過 `zod-to-json-schema` 產生 `docs/deskmony.config.v1.json`(`pnpm
-> generate:config-schema`),對應 Paseo 發佈 `paseo.config.v1.json` 供編輯器
-> 自動補全的做法。完整設計、合併優先權驗證、三條安全防線、e2e 驗證見
-> README.md「全域設定」相關章節與 e2e 步驟28。
+> 舊文件列過的 `read_inbox` **不存在也不需要**:投遞策略是「idle 立即注入 /
+> busy 排隊後自動批次注入」,Mailbox 對 agent 是被動送達,不是拉取式的。
+
+### 9.2 投遞策略(`MessageBus.deliverToMember()`)
+
+```mermaid
+sequenceDiagram
+    participant A as Coder agent
+    participant MCP as team-bus MCP
+    participant BUS as MessageBus
+    participant DB as team_messages
+    participant UI as 團隊群聊視圖
+    participant B as Reviewer agent
+
+    A->>MCP: send_message(to, content)
+    MCP->>BUS: 路由
+    BUS->>BUS: ①deriveContextId(agent 不可指定)
+    BUS->>BUS: ②檢查 context 訊息預算
+    alt 預算已 trip
+        BUS-->>A: 拒收 + enforcementTrip
+    else 通過
+        BUS->>DB: 持久化(deliveredAt=null)
+        BUS-->>UI: 推播 team-message
+        alt 目標 idle
+            BUS->>B: 立即注入 prompt
+        else 目標 busy
+            BUS->>BUS: 留在 Mailbox,回合結束後批次注入
+        else priority=interrupt 且 canInterrupt
+            BUS->>B: await interrupt() 確實生效,才注入
+        else 無活躍 session
+            BUS->>BUS: 留在 Mailbox,session 建立後補投
+        end
+        BUS->>DB: 標記 deliveredAt
+    end
+```
+
+**interrupt 必須先 `await` 確實生效才注入** —— `AgentAdapter.interrupt()` 回傳
+Promise 的語意就是「resolve 才代表真的停了」,不 await 會與尚未停下的回合競爭。
+
+### 9.3 Session 子 agent(獨立於 team/看板的另一條路)
+
+`sessions.parentSessionId` + `session.spawnChild` RPC + `subagent` MCP server。
+子完成時:結果**當 prompt 注入父 session**(父忙就排隊 `pendingIdleInjection`、
+父不在就丟棄),同時 push `child-result` 給 UI。子完成後維持 idle,不自動 dispose。
+
+`spawn_subagent` 的 `parentSessionId` 由閉包捕捉 `handle.id`,**agent 不可冒名**;
+`send_to_subagent` 有三層檢查(存在 → 是自己的子 → runtime 還活著),任何一層
+沒過都明確報錯,不讓 agent 誤以為送成功了。
 
 ---
 
-## 10. 關鍵設計決策摘要
+## 10. 任務生命週期
 
-1. **Core 與殼分離**:Orchestration Core 是 headless server,桌面殼只是 client → M5 遠端化零重構。**M5 Round A 驗證**:`apps/core` 全程用 `pnpm start:core`(即 `node dist/index.js`)獨立啟動,不 import 任何 `apps/desktop`/`electron` 套件;`scripts/e2e-gateway.mjs` 從 M1 起就是直接對這個獨立 process 打 WS RPC,從未經過 Electron,這輪只是把它正式化並補上對外曝露時必要的安全預設(綁定位址 + 認證,見 3.2 節備註)。**M5 Round B 驗證**:「桌面殼只是 client」這句話這輪連瀏覽器分頁都算進去了——`apps/desktop` 的 React app(`apps/desktop/src/App.tsx`)同一份程式碼在 Electron renderer 與純瀏覽器分頁下都能跑,差別只在於「連線目標從哪裡拿到」(Electron 靠 preload 的 `window.deskmony`;瀏覽器靠使用者在連線畫面手動輸入),渲染層/store/gateway 協議完全共用同一套。
-2. **ACP 優先的 adapter 策略**:一個協議吃多家 agent 軟體,客製 adapter 只留給值得深整合的(Claude SDK)與保底的(PTY)。
-3. **MCP 作為 agent 互通語言**:傳訊能力不綁定任何一家 agent 軟體,天然跨平台。
-4. **不打斷原則**:訊息預設排隊注入,interrupt 需授權 → 避免 agent 互相打斷造成混亂。
-5. **人類永遠在迴路中**:群聊視圖全透明、合併預設需人類批准、權限統一閘道。
-6. **Event Sourcing**:一切皆事件,可回放、可稽核、可重建 UI 狀態。
+```mermaid
+stateDiagram-v2
+    [*] --> backlog
+    backlog --> assigned: 指派(ephemeral 成員自動 spawn session + 建 worktree)
+    assigned --> in_progress
+    in_progress --> review: 過驗收閘 或 人類 approveReview
+    review --> in_progress: 退回
+    review --> merging
+    merging --> done: task.merge(唯一真正跑 git merge 的入口)
+    done --> [*]
+    backlog --> blocked
+    assigned --> blocked
+    in_progress --> blocked
+    review --> blocked
+    merging --> blocked
+    blocked --> backlog: 回到 blockedFrom 記錄的原狀態
+```
+
+`isValidTransition()` 是**唯一**允許改變 `status` 的判斷式。任意非終態都能進
+`blocked`,離開時回到 `blockedFrom` 記錄的那個狀態(不是寫死回 `in-progress`)。
+
+**三道人類把關**:
+
+1. **機器驗收閘(S4)**——任務可帶 `acceptance`(test/build/typecheck/自訂指令)。
+   `report_status(done)` 必須先過驗收才進得了 review。
+2. **人類 review 閘(S5)**——沒有機器驗收條件、或連續驗收失敗達上限時,任務維持
+   `in-progress` 並設 `awaitingHumanReview`,等人類呼叫 `task.approveReview`。
+3. **人類批准合併**——`TaskService.mergeAndComplete()`(只被 `task.merge` 呼叫,
+   而 `task.merge` 只從任務看板的按鈕觸發)是**整個系統唯一真正執行 `git merge`
+   的入口**。`report_status`/`request_review` 對映到 `"done"` 時會被明確擋下
+   (`updated: false` + `skippedReason`)。
+
+**agent 沒有任何工具能讓任務自己變成 `done`。**
+
+**合併衝突不留半完成狀態**:`git merge --no-ff` 失敗 → 蒐集衝突檔案清單 →
+`git merge --abort` 還原 → 包成 `MergeConflictError` 丟出;任務維持 `merging`,
+不 emit 任何 `task-updated`。合併前先確認 `baseDir` 乾淨(`git status --porcelain`
+無輸出),髒的話直接拒絕,**不嘗試 stash 等會犧牲使用者資料的自動化**。
+
+**主幹分支動態偵測**:優先 `git symbolic-ref refs/remotes/origin/HEAD` → 檢查本機
+`main` → `master` → 都找不到就明確報錯。**不寫死、不猜測。**
+
+**worktree 不在 `done` 時自動清理**——刻意的,讓人事後還能檢視這個任務改了什麼;
+只有 `task.delete` 才會 `git worktree remove --force`,並回傳
+`hadUncommittedChanges` 旗標讓 UI 事後警告。
+
+**ephemeral 成員生命週期(S8)**:指派任務時自動 spawn session,任務進 `done`
+(或被刪除)時自動 dispose。`persistent` 成員不受影響。
+
+---
+
+## 11. 崩潰復原
+
+**核心立場(DECISIONS D1/D3)**:最貴的東西(agent 累積的推理與 context)活在
+**後端 agent 行程裡**,不在 DB。replay 重建的是帳本,不是 agent 的腦。所以崩潰
+復原的本質是「**對帳 + 人工分流**」,不是 replay。
+
+```
+core 啟動
+  → reconcileOnStartup()(必須在 gateway.listen() 之前)
+  → 上次沒被乾淨關閉的 session 標記 interrupted + 寫 audit
+  → 人類打開復原視圖,逐一決定
+```
+
+四種分流,**全部要人主動點,RecoveryService 沒有任何背景計時器**:
+
+| 動作 | 語意 | 前提 |
+|---|---|---|
+| **繼續** | 保有記憶重啟 | 後端真的支援磁碟持久化 session(目前只有 Claude SDK 的 `resume`);Core 端會重新驗證,不採信 client 舊快照 |
+| **接手** | 讀摘要重啟 | 一律可用 |
+| **重跑** | 從頭來 | **要求 worktree 乾淨**,髒的話明確拋錯,絕不默默在髒 worktree 上重跑 |
+| **放棄** | session 標 `closed` | worktree 與任務一律保留(回收 ≠ 丟棄) |
+
+髒 worktree 有強制前置流程:`keep`(建 wip 分支 + commit)或 `discard`
+(`reset --hard` + `clean -fd`,**必須帶 `confirmDiscard: true` 二次確認**)。
+
+優雅關閉 5 秒逾時保護:寧可留下孤兒讓下次啟動對帳抓到,也不卡住不關。
+
+---
+
+## 12. 設定系統
+
+三層合併,**這個專案沒有 CLI flags,不需要第四層**:
+
+```
+defaults(packages/shared/src/core-config.ts 的 CoreConfigSchema)
+  → <DESKMONY_HOME>/config.json
+    → 環境變數
+```
+
+區塊:`daemon`(port / bindHost / permissionTimeoutMs / authRateLimit)、
+`workspace`、`data`、`features`、`log`、`policy`(rules / allowedHosts)、
+`notification`、`budget`(task / daily / turn / modelPricing)、`messageBudget`。
+
+**三條安全線**:
+
+1. **`DESKMONY_AUTH_TOKEN` 完全不是設定檔欄位**——設定檔出現疑似 token 欄位一律
+   忽略並警告。
+2. **`config.setFile` 只允許安全子集**:`workspace.*` / `features.staticDir` /
+   `log.level` / `daemon.permissionTimeoutMs` / `daemon.authRateLimit.*`。
+   **刻意不允許 `daemon.port` / `daemon.bindHost`**(決定網路曝露面)與 `policy`
+   (F4:遠端不可改安全罩)——這些只能手動編輯設定檔。
+3. **`validateBindSafety()` 看合併後的值**,防止改設定檔就意外把無認證的 core
+   曝露到區網。
+
+寫入後**不做熱重載**,回應明講 `requiresRestart: true`。
+`config.getEffective` 回傳每個欄位的來源標記(`default`/`file`/`env`),UI 對
+來源是 `env` 的欄位鎖成唯讀(改設定檔不會生效)。
+
+`pnpm generate:config-schema` 由 zod schema 產生 `docs/deskmony.config.v1.json`,
+供編輯器自動補全。
+
+**四個獨立的路徑環境變數**(互不連動,本機隔離驗證時必須一起設):
+`DESKMONY_HOME`(config.json)、`DESKMONY_DATA_DIR`(SQLite)、
+`DESKMONY_WORKSPACE`(預設工作目錄)、`DESKMONY_CORE_PORT`。
+
+---
+
+## 13. 桌面前端
+
+```
+apps/desktop/src/
+├─ App.tsx              # ViewMode = "session" | "team-chat" | "task-board" 三分頁
+├─ i18n.ts              # i18next,4 語系
+├─ locales/{en,zh-Hant,ja,es}/   # 每語系約 20 個 namespace
+├─ stores/              # zustand × 4:session / team / task / recovery
+├─ lib/                 # gateway-client、connection-config、error-i18n、agent-override…
+├─ ui/                  # 設計系統:Button / Dialog / Field / Badge / Feedback / icons / theme / hotkeys
+└─ views/
+   ├─ SessionView + ChatView + chat/{MarkdownMessage,DiffHunkView,CodeBlock,
+   │                                 TodoListView,ToolImage,AskUserQuestionWidget}
+   ├─ TeamChatView / TaskBoardView / RecoveryView / TerminalView
+   ├─ SessionList / CommandPalette(Ctrl+K)/ AutoModeControl
+   └─ PermissionModal / ProfileCreateDialog / SettingsDialog / TeamManagementDialog
+      └─ 全部經 ModalPortal(createPortal 到 document.body)
+```
+
+- **所有全螢幕遮罩彈窗必須經 `ModalPortal`**:CSS 規範下,帶 `transform` 的祖先
+  會成為 `position: fixed` 子孫的定位基準——側欄的 `transition-transform` 曾讓
+  對話框對齊 256px 寬的側欄而非整個視窗。
+- **沒有 Monaco**:diff 是自製的 `DiffHunkView.tsx`,程式碼高亮用
+  `react-syntax-highlighter`,markdown 用 `react-markdown` + `remark-gfm`。
+- **同一份程式碼跑 Electron 與純瀏覽器**:差別只在連線目標從哪來——Electron 靠
+  preload 的 `window.deskmony`,瀏覽器靠 `ConnectScreen` 手動輸入。
+- Electron 專屬能力優雅降級:`pickDirectory`(原生選資料夾)、`notify`(原生系統
+  通知)、`focusWindow`(OS 層級焦點,`element.focus()` 在 renderer 拿不回被 OS
+  拿走的焦點)在瀏覽器一律是 `undefined`,呼叫端已處理。
+
+---
+
+## 14. 建置、打包、測試
+
+| 指令 | 做什麼 |
+|---|---|
+| `pnpm build` / `pnpm typecheck` | 全 workspace 遞迴 |
+| `pnpm dev:core` / `dev:desktop` / `dev:electron` | 開發 |
+| `pnpm start:core` | headless 正式啟動 |
+| `pnpm package` / `package:dir` | `bundle-core.mjs`(含 `@electron/rebuild`)→ vite build → electron-builder NSIS |
+
+**11 支 e2e 腳本**(`scripts/e2e-*.mjs`),全部直接對獨立的 core process 打 WS
+RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
+`policy-engine`、`auto-mode-yolo`、`message-budget`、`cost-governor`、
+`crash-recovery`(+ `graceful-bootstrap`)、`notification`、`agent-lifecycle`、
+`lead-gate`、`session-subagents`。
+
+**三個 fake 後端**讓測試不依賴真實模型也不依賴外部 CLI:`fake-acp-agent.mjs`、
+`fake-opencode-server.mjs`、`fake-pty-echo.mjs`。e2e 套件切分成
+`deterministic` / `model-behavior` 兩組,前者可無條件在 CI 跑。
+
+`package-smoke.mjs` 是打包迴歸測試(驗證 packaged exe 能解析所有依賴)。
+
+---
+
+## 15. 已知缺口(誠實列出)
+
+| 缺口 | 現況 | 影響 |
+|---|---|---|
+| **PTY 執行沙箱** | 未實作 | PTY tier 結構上無法執行權限政策,因此一律唯讀、不給無人值守自主權(DECISIONS C7) |
+| **LLM lead / orchestrator** | 未實作 | 任務拆解目前純人工;`TaskService` 是確定性的,沒有會提議拆解的 LLM |
+| **mid-turn 成本熔斷** | 未實作 | 目前唯一會發 `usage` 的 adapter 在回合結束前才發一次,沒有可觀測的「回合進行中收到 usage」情境可驗證,強行分岔只是憑空編造行為 |
+| **ACP / OpenCode / PTY 掛載 MCP** | 未實作 | 只有 Claude SDK 成員能**主動**呼叫傳訊工具;但**接收端是跨 software 的**(注入 prompt 對任何 session 都有效) |
+| **`session ↔ team member` 持久化** | 只在記憶體 | `sessions` 表沒有欄位記錄這條 session 屬於哪個 team member,崩潰重啟後 `RecoveryService` 只能用 `agentProfileId` 盡力反查(假設一個 profile 只被一個 member 引用) |
+| **遠端能力矩陣的細粒度版本** | 部分 | `LOCAL_ONLY_METHODS` 已擋住 auto/YOLO/policy/profile;DECISIONS F3 列的其餘項目(改預算上限、改綁定介面)尚未有對應的可遠端呼叫方法,因此暫時無需額外閘門 |
+| **`profile.update`** | 未實作 | 只能建立/刪除;實作後必須同步加進 `LOCAL_ONLY_METHODS` |
+| **provider env 的靜態加密** | 未做 | 對外(gateway)一律遮罩成 `"***"`,但本機 SQLite 檔案本身是明文(與 Paseo 把金鑰寫進 `~/.paseo/config.json` 同一類取捨) |
+| **非 Windows 打包** | 未做 | core 與 adapters 是純 Node/TypeScript,主要是打包工程而非程式碼問題 |
+
+---
+
+## 附錄 A:舊版 ARCHITECTURE.md 被更正的宣稱
+
+封存於 [`ARCHITECTURE-legacy-2026-07.md`](./ARCHITECTURE-legacy-2026-07.md)。
+以下是它與現況不符之處,列出來避免有人再引用:
+
+| 舊文件的宣稱 | 實際情況 |
+|---|---|
+| 「Event Sourcing:一切皆事件,可回放、可重建 UI 狀態」 | ❌ 當前狀態 CRUD。唯一的 append-only 是 `enforcement_audit`,只記權限決策/trip/對帳,**不記 agent 輸出、不能重建狀態**(DECISIONS D1/D5) |
+| `Scheduler`(排程/自動循環)列在核心模組表與架構圖 | ❌ **從未實作**,沒有任何對應檔案 |
+| `CodexAdapter`(`codex proto` / exec JSON) | ❌ 不存在。Codex 映射到 `pty` |
+| 「殼:建議 Tauri 2…或 Electron」 | ✅ 已定案 **Electron 33**,沒有 Tauri 程式碼 |
+| 「Monaco Editor — diff 檢視與檔案預覽」 | ❌ 無 Monaco。自製 `DiffHunkView` + `react-syntax-highlighter` |
+| 「虛擬列表(聊天串流訊息量大)」 | ❌ 未實作 |
+| `read_inbox` MCP 工具 | ❌ 不存在也不需要(投遞是推播式,不是拉取式) |
+| 「ACP 優先,一個協議吃多家,省下逐家客製」 | ⚠️ DECISIONS B3 明確推翻:最肥的 adapter(OpenCode)是全客製;ACP 只是剛好覆蓋兩家的其中一個 adapter |
+| adapter set 含 Gemini CLI / Antigravity 為核心 | ⚠️ 核心 set 收斂為 {Claude Code, Codex, OpenCode},**放棄 Antigravity**(DECISIONS B1) |
+| 「PermissionGateway:UI 彈窗或依 policy 自動核可」 | ⚠️ 職責已拆:`PermissionGateway` 只是待決登記簿 + 逾時(96 行);政策判斷在 `PolicyEngine` |
+| SQLite「teams、agent_profiles、sessions、tasks、messages、settings」 | ⚠️ 實際 **11 張表**,另有 `team_members`、`team_messages`、`workspaces`、`enforcement_audit`、`usage_rollup` |
+| SESSION status「idle/busy/waiting/error」 | ⚠️ 實際六態,另有 `closed`、`interrupted`(S6 崩潰對帳需要) |
+| 路線圖只到 M5 | ⚠️ M6 與 S1–S12 系列(安全罩全部)皆已完成 |
+| §1「核心能力」表完全沒提安全罩 | ⚠️ 安全罩現在是**主軸**,佔 `apps/core` 一半以上程式碼 |
+
+---
+
+## 附錄 B:舊章節編號對照表
+
+原始碼裡約有 **99 處註解**引用舊版的章節編號(例如「見 ARCHITECTURE.md 3.3 節」)。
+**刻意不去改那 99 處程式碼**——為了一次文件重編號而動生產程式碼,風險遠大於效益。
+改用這張對照表:看到舊編號,查這裡即可對應到本文件的新章節。
+
+| 舊編號 | 舊標題 | → 本文件 | 引用次數 |
+|---|---|---|---|
+| 3.1 節 | UI Layer(桌面殼 + 前端) | [§13 桌面前端](#13-桌面前端) | 4 |
+| 3.2 節 | Gateway | [§7 Gateway 協議](#7-gateway-協議) | 9 |
+| 3.3 節 | Orchestration Core | [§4 模組地圖](#4-appscore-模組地圖) | 49 |
+| 3.4 節 | Agent Adapter Layer | [§6 Adapter 層](#6-adapter-層) | 37 |
+| 3.5 節 | Infrastructure | [§8 資料模型](#8-資料模型11-張表) + [§9.1 MCP server](#91-兩個內建-mcp-server) | 6 |
+| 4.1 節 | team-bus MCP 工具清單 | [§9.1 兩個內建 MCP server](#91-兩個內建-mcp-server) | 28 |
+| 4.2 節 | 訊息投遞策略 | [§9.2 投遞策略](#92-投遞策略messagebusdelivertomember) | 21 |
+| 4.3 節 | 訊息流時序圖 / `AgentAdapter` 介面 / `AgentEvent` | [§6.1 真實介面](#61-真實介面packagesadapterssrctypests) + [§6.4 AgentEvent](#64-agentevent10-種) + [§9.2](#92-投遞策略messagebusdelivertomember) | 24 |
+| 第 5 節 | 任務協作流程 | [§10 任務生命週期](#10-任務生命週期) | 6 |
+| 第 6 節 | 資料模型 ERD | [§8 資料模型](#8-資料模型11-張表) | — |
+| 第 8 節 | 專案目錄結構 | [§4 模組地圖](#4-appscore-模組地圖) + [§13 桌面前端](#13-桌面前端) | — |
+| 第 9 節 | 開發路線圖 | **已移除** —— 路線圖不屬於架構文件,歷史見 [`DEVLOG.md`](./DEVLOG.md) | — |
+| 第 10 節 | 關鍵設計決策摘要 | **已移除** —— 設計決策的權威是 [`DECISIONS.md`](./DECISIONS.md),不再在兩處各自表述 | — |
+
+> **新增註解時請直接引用新章節**(例如「見 ARCHITECTURE.md §5.1」),不要沿用舊編號。
