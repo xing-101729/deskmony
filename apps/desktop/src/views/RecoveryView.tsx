@@ -78,7 +78,7 @@ function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessi
   };
 
   return (
-    <div className="mt-2 rounded-md bg-warn/[0.06] p-2.5 text-xs">
+    <div className="mt-2 rounded-md bg-warn/[0.06] p-3 text-xs">
       <p className="mb-1.5 flex items-center gap-1.5 font-medium text-warn">
         <Icon name="alert" size={13} /> {t("recovery:dirtyResolver.heading")}
       </p>
@@ -163,7 +163,7 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
   };
 
   return (
-    <div className={`rounded-md p-3 ${isMerging ? "bg-danger/[0.06] ring-1 ring-danger/30" : "bg-surface"}`}>
+    <div className={`rounded-md p-3.5 ${isMerging ? "bg-danger/[0.06] ring-1 ring-danger/30" : "bg-surface"}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-fg">{session.sessionTitle}</p>

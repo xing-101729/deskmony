@@ -75,7 +75,7 @@ export function Dialog({
   return (
     <ModalPortal>
       <div
-        className="fixed inset-0 z-50 flex animate-fade-in items-center justify-center bg-scrim/60 p-4 backdrop-blur-[2px]"
+        className="fixed inset-0 z-50 flex animate-fade-in items-center justify-center bg-scrim/60 p-4 backdrop-blur-sm"
         onMouseDown={(event) => {
           // 只有點到遮罩本身(不是內容)才關閉;mousedown 而非 click,避免在
           // 對話框內開始拖選文字、滑到遮罩上放開時被誤判為「點了遮罩」。
@@ -90,13 +90,13 @@ export function Dialog({
           } ${danger ? "ring-1 ring-danger/60" : ""}`}
         >
           <header
-            className={`flex flex-shrink-0 items-start gap-2.5 px-4 py-3 ${
+            className={`flex flex-shrink-0 items-start gap-3 px-5 py-4 ${
               danger ? "border-b border-danger/25 bg-danger/[0.07]" : "border-b border-line-subtle"
             }`}
           >
             {icon && (
               <span
-                className={`mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md ${
+                className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded ${
                   danger ? "bg-danger/15 text-danger" : "bg-surface-2 text-fg-muted"
                 }`}
               >
@@ -105,7 +105,7 @@ export function Dialog({
             )}
             <div className="min-w-0 flex-1">
               <h2 className={`text-md font-semibold tracking-tight ${danger ? "text-danger" : "text-fg"}`}>{title}</h2>
-              {description && <p className="mt-0.5 text-xs leading-relaxed text-fg-subtle">{description}</p>}
+              {description && <p className="mt-1 text-xs leading-relaxed text-fg-subtle">{description}</p>}
             </div>
             <div className="flex flex-shrink-0 items-center gap-1">
               {headerAction}
@@ -113,10 +113,10 @@ export function Dialog({
             </div>
           </header>
 
-          <div className={`min-h-0 flex-1 overflow-y-auto ${bare ? "" : "px-4 py-3"}`}>{children}</div>
+          <div className={`min-h-0 flex-1 overflow-y-auto ${bare ? "" : "px-5 py-4"}`}>{children}</div>
 
           {footer && (
-            <footer className="flex flex-shrink-0 items-center justify-between gap-2 border-t border-line-subtle bg-surface/40 px-4 py-2.5">
+            <footer className="flex flex-shrink-0 items-center justify-between gap-2 border-t border-line-subtle bg-surface/40 px-5 py-3.5">
               {footer}
             </footer>
           )}

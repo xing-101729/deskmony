@@ -123,7 +123,7 @@ export function CommandPalette({
   return (
     <ModalPortal>
       <div
-        className="fixed inset-0 z-[60] flex animate-fade-in items-start justify-center bg-scrim/60 p-4 pt-[12vh] backdrop-blur-[2px]"
+        className="fixed inset-0 z-[60] flex animate-fade-in items-start justify-center bg-scrim/60 p-4 pt-[12vh] backdrop-blur-sm"
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) onClose();
         }}
@@ -134,7 +134,7 @@ export function CommandPalette({
           aria-label={t("commandPalette:dialogLabel")}
           className="flex w-[min(620px,calc(100vw-32px))] animate-pop-in flex-col overflow-hidden rounded-xl bg-panel shadow-overlay"
         >
-          <div className="flex items-center gap-2 border-b border-line-subtle px-3">
+          <div className="flex items-center gap-2.5 border-b border-line-subtle px-4">
             <Icon name="search" size={15} className="text-fg-faint" />
             <input
               autoFocus
@@ -143,12 +143,12 @@ export function CommandPalette({
               onKeyDown={handleKeyDown}
               placeholder={t("commandPalette:searchPlaceholder")}
               aria-label={t("commandPalette:searchAriaLabel")}
-              className="h-11 flex-1 bg-transparent text-md text-fg outline-none placeholder:text-fg-faint"
+              className="h-12 flex-1 bg-transparent text-md text-fg outline-none placeholder:text-fg-faint"
             />
             <Kbd>Esc</Kbd>
           </div>
 
-          <div ref={listRef} className="max-h-[min(52vh,420px)] overflow-y-auto p-1.5">
+          <div ref={listRef} className="max-h-[min(52vh,420px)] overflow-y-auto p-2">
             {results.length === 0 && (
               <p className="px-3 py-8 text-center text-xs text-fg-subtle">{t("commandPalette:noResults", { query })}</p>
             )}
@@ -172,7 +172,7 @@ export function CommandPalette({
                       onClose();
                       command.run();
                     }}
-                    className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition ${
+                    className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition ${
                       active ? "bg-accent/12" : "hover:bg-surface"
                     }`}
                   >
@@ -208,7 +208,7 @@ export function CommandPalette({
             })}
           </div>
 
-          <div className="flex select-chrome items-center gap-3 border-t border-line-subtle bg-surface/40 px-3 py-2 text-2xs text-fg-faint">
+          <div className="flex select-chrome items-center gap-3 border-t border-line-subtle bg-surface/40 px-4 py-2.5 text-2xs text-fg-faint">
             <span className="flex items-center gap-1">
               <Kbd>↑</Kbd>
               <Kbd>↓</Kbd> {t("commandPalette:selectHint")}

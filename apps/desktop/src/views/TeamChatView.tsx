@@ -48,7 +48,7 @@ function MessageBubble({
   return (
     <div className={`my-1 flex ${isHuman ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[78%] rounded-lg px-3 py-2 text-sm leading-relaxed ${
+        className={`max-w-[78%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
           isHuman ? "bg-accent/15 text-fg" : "bg-surface text-fg"
         } ${isInterrupt && !isDowngraded ? "ring-1 ring-danger/60" : ""}`}
       >
@@ -188,7 +188,7 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
 
   return (
     <main className="flex h-full flex-1 flex-col bg-canvas">
-      <header className="flex flex-shrink-0 flex-wrap items-start justify-between gap-2 border-b border-line-subtle px-3 py-2 sm:px-4">
+      <header className="flex flex-shrink-0 flex-wrap items-start justify-between gap-2 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <div className="flex min-w-0 items-start gap-2">
           <IconButton icon="menu" aria-label={t("teamChat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="mt-0.5 sm:hidden" />
           <div className="min-w-0">
@@ -221,16 +221,16 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
         </Button>
       </header>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 sm:px-4">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 sm:px-5">
         {messages.length === 0 && <p className="mt-6 text-center text-xs text-fg-faint">{t("teamChat:messageList.empty")}</p>}
         {messages.map((message) => (
           <MessageBubble key={message.id} message={message} budget={contextBudgets[message.contextId]} />
         ))}
       </div>
 
-      <div className="flex-shrink-0 border-t border-line-subtle p-2.5 sm:p-3">
+      <div className="flex-shrink-0 border-t border-line-subtle p-3 sm:p-4">
         {error && <div className="mb-2 rounded-md bg-danger/10 px-2.5 py-1.5 text-xs text-danger">{error}</div>}
-        <div className="flex items-end gap-2 rounded-lg border border-line bg-surface p-1.5 focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
+        <div className="flex items-end gap-2 rounded-lg border border-line bg-surface p-2 transition focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
           <div className="flex flex-shrink-0 flex-col gap-1">
             <Select aria-label={t("teamChat:composer.toAriaLabel")} value={to} onChange={(e) => setTo(e.target.value)}>
               <option value="broadcast">{t("teamChat:composer.broadcastOption")}</option>

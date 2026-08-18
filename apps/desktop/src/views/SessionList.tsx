@@ -221,7 +221,7 @@ export function SessionList({
             void selectSession(session.id);
             onCloseMobile();
           }}
-          className="focus-ring min-w-0 flex-1 rounded-md py-1.5 pl-2 pr-1 text-left"
+          className="focus-ring min-w-0 flex-1 rounded-md py-2 pl-2.5 pr-1 text-left"
         >
           <div className="flex items-center gap-1.5">
             <StatusDot meta={meta} />
@@ -331,7 +331,7 @@ export function SessionList({
         <button
           type="button"
           onClick={onOpenPalette}
-          className="focus-ring flex h-7 w-full items-center gap-1.5 rounded-md border border-line bg-surface px-2 text-xs text-fg-faint transition hover:border-line-strong hover:text-fg-subtle"
+          className="focus-ring flex h-7 w-full items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs text-fg-faint transition hover:border-line-strong hover:text-fg-subtle"
         >
           <Icon name="search" size={12} />
           <span className="flex-1 text-left">{t("sessionList:paletteTriggerLabel")}</span>
@@ -349,7 +349,7 @@ export function SessionList({
               onChangeView(item.mode);
               onCloseMobile();
             }}
-            className={`focus-ring flex h-7 w-full items-center gap-2 rounded-md px-2 text-xs font-medium transition ${
+            className={`focus-ring flex h-7 w-full items-center gap-2 rounded-md px-2.5 text-xs font-medium transition ${
               viewMode === item.mode ? "bg-accent/12 text-accent" : "text-fg-muted hover:bg-surface hover:text-fg"
             }`}
           >
@@ -511,7 +511,7 @@ export function SessionList({
       </div>
 
       {/* ---- 底部工具列 ---- */}
-      <div className="flex flex-shrink-0 items-center gap-0.5 border-t border-line-subtle px-2 py-1.5">
+      <div className="flex flex-shrink-0 items-center gap-0.5 border-t border-line-subtle px-2.5 py-2">
         <IconButton
           icon={resolvedTheme === "dark" ? "moon" : "sun"}
           aria-label={t("sessionList:toggleThemeAriaLabel")}

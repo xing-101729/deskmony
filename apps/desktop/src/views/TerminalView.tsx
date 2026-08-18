@@ -186,7 +186,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
 
   return (
     <main className="flex h-full flex-1 flex-col bg-canvas">
-      <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-line-subtle px-3 py-2 sm:px-4">
+      <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("terminal:openSidebar")} onClick={onOpenSidebar} className="sm:hidden" />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
@@ -209,12 +209,12 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
       {/* M5 Round B(任務2,響應式):overflow-auto(而非 overflow-hidden)——
           xterm 的 fit addon 會依容器寬度調整欄數,但視窗極窄時仍可能有內容
           比容器寬(例如既有的長輸出未隨視窗縮小重新換行),允許捲動至少不破版。 */}
-      <div className="min-h-0 flex-1 overflow-auto bg-canvas p-2">
+      <div className="min-h-0 flex-1 overflow-auto bg-canvas p-3">
         <div ref={containerRef} data-terminal-surface className="h-full w-full" />
       </div>
 
-      <div className="flex-shrink-0 border-t border-line-subtle p-2.5 sm:p-3">
-        <div className="flex items-center gap-2 rounded-lg border border-line bg-surface p-1.5 focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
+      <div className="flex-shrink-0 border-t border-line-subtle p-3 sm:p-4">
+        <div className="flex items-center gap-2 rounded-lg border border-line bg-surface p-2 transition focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
           <span className="pl-1.5 font-mono text-xs text-fg-faint">$</span>
           <input
             value={draft}

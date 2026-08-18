@@ -31,9 +31,9 @@ const VARIANT: Record<ButtonVariant, string> = {
 };
 
 const SIZE: Record<ButtonSize, string> = {
-  xs: "h-6 gap-1 rounded px-1.5 text-2xs",
-  sm: "h-7 gap-1.5 rounded-md px-2.5 text-xs",
-  md: "h-8 gap-1.5 rounded-md px-3 text-sm",
+  xs: "h-6 gap-1.5 rounded px-2 text-2xs",
+  sm: "h-7 gap-1.5 rounded-md px-3 text-xs",
+  md: "h-8 gap-2 rounded-md px-3.5 text-sm",
 };
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -97,10 +97,15 @@ export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
   active?: boolean;
 }
 
+/*
+ * 正方形圖示按鈕**不**沿用 Button 文字按鈕的 rounded-md(12px)——12px 套在
+ * 24–28px 見方的容器上會逼近甚至等於半徑一半,變成圓形而不是圓角方形。這裡
+ * 固定用較小的圓角階梯,維持「圓角方形」而非「圓形」。
+ */
 const ICON_SIZE: Record<ButtonSize, string> = {
-  xs: "h-5 w-5 rounded",
-  sm: "h-6 w-6 rounded-md",
-  md: "h-7 w-7 rounded-md",
+  xs: "h-5 w-5 rounded-sm",
+  sm: "h-6 w-6 rounded",
+  md: "h-7 w-7 rounded",
 };
 
 export function IconButton({
@@ -188,7 +193,7 @@ export function SegmentedControl<T extends string>({
             aria-selected={selected}
             title={option.hint ? `${option.label}(${option.hint})` : option.label}
             onClick={() => onChange(option.value)}
-            className={`focus-ring inline-flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition ${
+            className={`focus-ring inline-flex h-6 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition ${
               selected ? "bg-surface-2 text-fg shadow-panel" : "text-fg-subtle hover:text-fg-soft"
             }`}
           >
@@ -208,7 +213,7 @@ export function SegmentedControl<T extends string>({
 export function Kbd({ children, className }: { children: ReactNode; className?: string }): JSX.Element {
   return (
     <kbd
-      className={`inline-flex h-4 min-w-4 items-center justify-center rounded border border-line bg-surface-2 px-1 font-sans text-2xs font-medium text-fg-subtle ${
+      className={`inline-flex h-4 min-w-4 items-center justify-center rounded-sm border border-line bg-surface-2 px-1 font-sans text-2xs font-medium text-fg-subtle ${
         className ?? ""
       }`}
     >

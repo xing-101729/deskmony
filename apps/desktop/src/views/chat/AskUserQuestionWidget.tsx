@@ -130,7 +130,7 @@ function PendingQuestions({
   };
 
   return (
-    <div className="my-1.5 space-y-3 rounded-md border border-accent/30 bg-accent/[0.04] px-3 py-2.5 text-xs">
+    <div className="my-1.5 space-y-3 rounded-md border border-accent/30 bg-accent/[0.04] px-3.5 py-3 text-xs">
       {questions.map((q) => (
         <div key={q.question}>
           <QuestionHeader header={q.header} question={q.question} />
@@ -143,7 +143,7 @@ function PendingQuestions({
                   type="button"
                   disabled={submitting}
                   onClick={() => toggleOption(q, opt.label)}
-                  className={`focus-ring flex select-chrome items-start gap-2 rounded-md border px-2.5 py-1.5 text-left transition disabled:pointer-events-none disabled:opacity-50 ${
+                  className={`focus-ring flex select-chrome items-start gap-2 rounded-md border px-3 py-2 text-left transition disabled:pointer-events-none disabled:opacity-50 ${
                     isSelected
                       ? "border-accent bg-accent/10 text-fg"
                       : "border-line-subtle bg-surface/60 text-fg-soft hover:border-line-strong"
@@ -191,7 +191,7 @@ function ResolvedQuestions({
 }): JSX.Element {
   const { t } = useTranslation(["chat"]);
   return (
-    <div className="my-1.5 space-y-2.5 rounded-md border border-line-subtle bg-surface/60 px-3 py-2.5 text-xs">
+    <div className="my-1.5 space-y-2.5 rounded-md border border-line-subtle bg-surface/60 px-3.5 py-3 text-xs">
       {questions.map((q) => {
         const answer = answers?.[q.question];
         return (

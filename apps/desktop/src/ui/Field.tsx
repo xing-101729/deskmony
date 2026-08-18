@@ -22,8 +22,8 @@ const BASE =
   "disabled:cursor-not-allowed disabled:opacity-50";
 
 const SIZE: Record<FieldSize, string> = {
-  sm: "h-7 px-2 text-xs",
-  md: "h-8 px-2.5 text-sm",
+  sm: "h-7 px-2.5 text-xs",
+  md: "h-8 px-3 text-sm",
 };
 
 export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "size"> {
@@ -56,7 +56,7 @@ export interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElemen
 export function Textarea({ mono, className, ...rest }: TextareaProps): JSX.Element {
   return (
     <textarea
-      className={[BASE, "resize-y px-2.5 py-1.5 text-sm leading-relaxed", mono ? "font-mono text-xs" : "", className ?? ""]
+      className={[BASE, "resize-y px-3 py-2 text-sm leading-relaxed", mono ? "font-mono text-xs" : "", className ?? ""]
         .filter(Boolean)
         .join(" ")}
       {...rest}
@@ -83,7 +83,7 @@ export function Select({ fieldSize = "sm", className, children, ...rest }: Selec
       <Icon
         name="chevron-down"
         size={12}
-        className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-fg-faint"
+        className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-fg-faint"
       />
     </div>
   );
@@ -140,7 +140,7 @@ export function Checkbox({
     <label className={`inline-flex cursor-pointer select-none items-center gap-1.5 text-xs text-fg-muted ${className ?? ""}`}>
       <input
         type="checkbox"
-        className="focus-ring h-3.5 w-3.5 flex-shrink-0 rounded border-line bg-surface"
+        className="focus-ring h-3.5 w-3.5 flex-shrink-0 rounded-sm border-line bg-surface"
         {...rest}
       />
       {label}

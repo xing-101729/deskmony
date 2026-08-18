@@ -87,8 +87,12 @@ export default {
       },
 
       fontFamily: {
+        // "Inter Variable" 是自帶字型(src/index.css 的 @fontsource-variable/inter
+        // import)實際註冊的 font-family 名稱;"Inter" 留作系統剛好裝了靜態版的
+        // 保底,其餘為原生系統字型 fallback(CJK 由 Microsoft JhengHei/PingFang TC
+        // 等接手,Inter 本身不含中日文字符)。
         sans: [
-          "Inter var",
+          "Inter Variable",
           "Inter",
           "-apple-system",
           "Segoe UI Variable Text",
@@ -120,18 +124,26 @@ export default {
         15: "60px",
       },
 
+      /*
+       * Linear 風改版:12px 是主要互動面(按鈕、輸入框、清單列、下拉選單)的標準
+       * 圓角——原本的 3–8px 階梯整體偏「方」,新階梯把 md 直接對齊 12px,大面積
+       * 容器(對話框/彈出選單)再放大一階做出層級,細小元件(徽章、kbd、勾選框
+       * 用 DEFAULT/sm)維持較小圓角以免在 18–20px 高的元件上顯得過圓。
+       */
       borderRadius: {
-        sm: "3px",
-        DEFAULT: "5px",
-        md: "6px",
-        lg: "8px",
-        xl: "12px",
+        sm: "6px",
+        DEFAULT: "8px",
+        md: "12px",
+        lg: "14px",
+        xl: "18px",
       },
 
       boxShadow: {
         panel: "var(--shadow-panel)",
         overlay: "var(--shadow-overlay)",
         pop: "var(--shadow-pop)",
+        card: "var(--shadow-card)",
+        "card-hover": "var(--shadow-card-hover)",
       },
 
       ringColor: {
@@ -139,7 +151,7 @@ export default {
       },
 
       transitionDuration: {
-        DEFAULT: "120ms",
+        DEFAULT: "160ms",
       },
 
       keyframes: {

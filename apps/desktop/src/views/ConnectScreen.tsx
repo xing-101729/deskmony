@@ -77,8 +77,8 @@ export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element 
 
   return (
     <div className="flex h-full min-h-[100dvh] w-full items-center justify-center bg-canvas p-4 text-fg">
-      <div className="w-full max-w-sm rounded-xl bg-panel p-6 shadow-overlay">
-        <div className="mb-5 flex items-center gap-2">
+      <div className="w-full max-w-sm rounded-xl bg-panel p-7 shadow-overlay">
+        <div className="mb-6 flex items-center gap-2.5">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/15 text-accent">
             <Icon name="sparkle" size={16} />
           </span>
@@ -87,14 +87,14 @@ export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element 
             <p className="text-2xs text-fg-faint">{t("connect:tagline")}</p>
           </div>
         </div>
-        <p className="mb-4 text-xs leading-relaxed text-fg-muted">{t("connect:description")}</p>
+        <p className="mb-5 text-xs leading-relaxed text-fg-muted">{t("connect:description")}</p>
 
         <form
           onSubmit={(e) => {
             e.preventDefault();
             void attempt(url, token);
           }}
-          className="space-y-3"
+          className="space-y-4"
         >
           <Field label={t("connect:serverUrlLabel")}>
             <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="ws://localhost:4317" autoComplete="off" spellCheck={false} fieldSize="md" mono />
@@ -110,7 +110,7 @@ export function ConnectScreen({ onConnected }: ConnectScreenProps): JSX.Element 
           </Button>
         </form>
 
-        <p className="mt-4 text-2xs leading-relaxed text-fg-faint">{t("connect:tokenStorageNote")}</p>
+        <p className="mt-5 text-2xs leading-relaxed text-fg-faint">{t("connect:tokenStorageNote")}</p>
       </div>
     </div>
   );

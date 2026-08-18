@@ -1,3 +1,8 @@
+/* 自帶 Inter Variable(僅 weight 軸,無 italic/opsz):桌面 app 不能賭使用者
+ * 系統裝了 Inter,字重軸夠用(標題/正文/次要文字都只是不同 font-weight),斜體
+ * 極少用到,交給瀏覽器合成斜體即可,不必多拉一份檔案。 */
+@import "@fontsource-variable/inter/wght.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -50,9 +55,14 @@
 
   --c-scrim: 0 0 0;
 
-  --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.4);
-  --shadow-overlay: 0 16px 48px -12px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.04);
-  --shadow-pop: 0 8px 24px -8px rgb(0 0 0 / 0.6), 0 0 0 1px rgb(255 255 255 / 0.05);
+  /* 柔和陰影:比改版前更大的模糊半徑、更低的不透明度(「霧」而不是「硬影」),
+   * 疊一層 1px 的極淡描邊撐出邊緣——這是 Linear/Raycast 深色介面讓懸浮面板
+   * 「飄」起來的標準配方,而不是單純加深黑色。 */
+  --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 1px rgb(0 0 0 / 0.2);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.24);
+  --shadow-card-hover: 0 10px 24px -8px rgb(0 0 0 / 0.4), 0 2px 8px -2px rgb(0 0 0 / 0.3);
+  --shadow-overlay: 0 24px 64px -16px rgb(0 0 0 / 0.55), 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-pop: 0 12px 32px -10px rgb(0 0 0 / 0.45), 0 0 0 1px rgb(255 255 255 / 0.06);
 }
 
 :root[data-theme="light"] {
@@ -87,9 +97,11 @@
 
   --c-scrim: 24 24 30;
 
-  --shadow-panel: 0 1px 2px rgb(16 16 20 / 0.06);
-  --shadow-overlay: 0 16px 48px -12px rgb(16 16 20 / 0.22), 0 0 0 1px rgb(16 16 20 / 0.06);
-  --shadow-pop: 0 8px 24px -8px rgb(16 16 20 / 0.16), 0 0 0 1px rgb(16 16 20 / 0.06);
+  --shadow-panel: 0 1px 2px rgb(16 16 20 / 0.05), 0 1px 1px rgb(16 16 20 / 0.04);
+  --shadow-card: 0 1px 2px rgb(16 16 20 / 0.04);
+  --shadow-card-hover: 0 10px 24px -8px rgb(16 16 20 / 0.14), 0 2px 8px -2px rgb(16 16 20 / 0.08);
+  --shadow-overlay: 0 24px 64px -16px rgb(16 16 20 / 0.18), 0 0 0 1px rgb(16 16 20 / 0.06);
+  --shadow-pop: 0 12px 32px -10px rgb(16 16 20 / 0.14), 0 0 0 1px rgb(16 16 20 / 0.06);
 }
 
 html,
@@ -184,6 +196,12 @@ select option {
   /* 密集列表的分隔線(取代「每列都畫一個框」) */
   .divide-rows > * + * {
     border-top: 1px solid rgb(var(--c-line-subtle));
+  }
+
+  /* 卡片類元素(看板卡片、可點列)的懸浮反饋:靜置時只有極淡陰影,
+   * hover 時「浮起」1px + 陰影放大變柔——比單純換底色更接近 Linear 卡片的手感。 */
+  .hover-lift {
+    @apply shadow-card transition duration-200 ease-out hover:-translate-y-px hover:shadow-card-hover;
   }
 }
 

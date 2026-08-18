@@ -204,7 +204,7 @@ export function ToolCallBubble({ item }: { item: Extract<ChatItem, { kind: "tool
   const tone = item.status === "running" ? "accent" : item.isError ? "danger" : "ok";
   return (
     <details className="group my-1.5 rounded-md border border-line-subtle bg-surface/60 text-xs">
-      <summary className="flex cursor-pointer select-none list-none items-center gap-2 px-2.5 py-1.5 text-fg-muted marker:content-none">
+      <summary className="flex cursor-pointer select-none list-none items-center gap-2 px-3 py-2 text-fg-muted marker:content-none">
         <Icon
           name="chevron-right"
           size={11}
@@ -220,7 +220,7 @@ export function ToolCallBubble({ item }: { item: Extract<ChatItem, { kind: "tool
           {item.status === "running" ? t("chat:tool.statusRunning") : item.isError ? t("chat:tool.statusFailed") : t("chat:tool.statusDone")}
         </Badge>
       </summary>
-      <div className="space-y-2 border-t border-line-subtle px-2.5 py-2">
+      <div className="space-y-2 border-t border-line-subtle px-3 py-2.5">
         {item.input !== undefined && (
           <div>
             <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-fg-faint">{t("chat:tool.inputLabel")}</div>
@@ -393,7 +393,7 @@ function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
   return (
     <div className={`my-1 flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[75%] rounded-lg px-3 py-2 text-sm leading-relaxed ${
+        className={`max-w-[75%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
           isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
         }`}
       >
@@ -631,7 +631,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
 
   return (
     <main className="flex h-full flex-1 flex-col bg-canvas">
-      <header className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line-subtle px-3 py-2 sm:px-4">
+      <header className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
@@ -658,14 +658,14 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
         </div>
       </header>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 sm:px-4">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 sm:px-5">
         {items.length === 0 && <p className="mt-6 text-center text-xs text-fg-faint">{t("chat:empty.startTyping")}</p>}
         {items.map((item) => (
           <ChatBubble key={item.id} item={item} />
         ))}
       </div>
 
-      <div className="flex-shrink-0 border-t border-line-subtle p-2.5 sm:p-3">
+      <div className="flex-shrink-0 border-t border-line-subtle p-3 sm:p-4">
         {pendingAttachments.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5">
             {pendingAttachments.map((att) => (
@@ -694,7 +694,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
             ))}
           </div>
         )}
-        <div className="flex items-end gap-2 rounded-lg border border-line bg-surface p-1.5 focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
+        <div className="flex items-end gap-2 rounded-lg border border-line bg-surface p-2 transition focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
           <input
             ref={fileInputRef}
             type="file"

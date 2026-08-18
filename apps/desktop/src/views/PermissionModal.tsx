@@ -141,7 +141,7 @@ function RememberRuleSection({
   const selected = candidates[selectedIdx];
 
   return (
-    <div className="mt-3 space-y-2 rounded-md border border-accent/30 bg-accent/[0.05] px-3 py-2.5">
+    <div className="mt-3 space-y-2 rounded-md border border-accent/30 bg-accent/[0.05] px-3.5 py-3">
       <p className="text-xs font-medium text-fg">{t("permission:remember.chooseScope")}</p>
       {candidates.map((c, idx) => (
         <label key={c.label} className="flex cursor-pointer items-start gap-2 text-xs text-fg-soft">
@@ -243,7 +243,7 @@ export function PermissionModal(): JSX.Element | null {
         )
       }
     >
-      <div className="rounded-md bg-surface px-3 py-2">
+      <div className="rounded-md bg-surface px-3.5 py-2.5">
         <div className="text-2xs text-fg-faint">{t("permission:toolLabel")}</div>
         <div className="font-mono text-sm text-accent">{current.toolName}</div>
       </div>

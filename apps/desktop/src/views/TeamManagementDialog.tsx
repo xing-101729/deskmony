@@ -156,7 +156,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
     <Dialog title={t("teamManagement:dialog.title")} description={t("teamManagement:dialog.description")} icon="users" size="xl" onClose={onClose} bare>
       <div className="flex h-[68vh] min-h-0 max-h-full">
         {/* ---- 左側:team 清單 + 建立 team ---- */}
-        <div className="w-52 flex-shrink-0 overflow-y-auto border-r border-line-subtle p-3">
+        <div className="w-52 flex-shrink-0 overflow-y-auto border-r border-line-subtle p-4">
           <SectionLabel>{t("teamManagement:teamPanel.sectionLabel")}</SectionLabel>
           <div className="mb-3 mt-1 space-y-0.5">
             {teams.length === 0 && <p className="text-xs text-fg-faint">{t("teamManagement:teamPanel.noTeams")}</p>}
@@ -165,7 +165,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
                 key={team.id}
                 type="button"
                 onClick={() => handleSelectTeam(team.id)}
-                className={`focus-ring block w-full truncate rounded-md px-2 py-1.5 text-left text-xs transition ${
+                className={`focus-ring block w-full truncate rounded-md px-2.5 py-2 text-left text-xs transition ${
                   team.id === selectedTeamId ? "bg-surface-2 text-fg" : "text-fg-muted hover:bg-surface"
                 }`}
               >
@@ -189,7 +189,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
         </div>
 
         {/* ---- 右側:成員清單 + 加入成員 ---- */}
-        <div className="flex min-h-0 flex-1 flex-col p-3">
+        <div className="flex min-h-0 flex-1 flex-col p-4">
           {!selectedTeam ? (
             <EmptyState icon="users" title={t("teamManagement:memberPanel.emptyTitle")} compact />
           ) : (
@@ -209,7 +209,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
                       return support !== "supported";
                     })();
                   return (
-                    <div key={member.id} className="rounded-md bg-surface px-3 py-2 text-xs">
+                    <div key={member.id} className="rounded-md bg-surface px-3 py-2.5 text-xs">
                       <div className="flex items-center gap-2">
                         <StatusDot meta={meta} />
                         <span className="font-medium text-fg">{member.name}</span>
