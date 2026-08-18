@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import path from "node:path";
-import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, PromptInput, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
@@ -152,6 +152,12 @@ export class OpenCodeAdapter implements AgentAdapter {
       // 沒有,不管後端送什麼都不可能變成事件,所以答案是確定的「不會報」。
       usageReporting: "unsupported",
       contextReporting: "unsupported",
+      // 這輪(slash command)新增:**不是 "supported"**——opencode 是使用者自帶、
+      // 版本不受 Deskmony 控制的外部 CLI(本機驗證版本 1.18.7 確實有
+      // `GET /command`,但不能保證使用者實際指到的版本一定有這支端點),故三態
+      // 宣告為 "unknown",實際結果依 `spawn()` 內那次 `GET /command` 是否成功
+      // 收斂(見該處呼叫點註解)。
+      slashCommands: "unknown",
     };
   }
 
@@ -237,6 +243,30 @@ export class OpenCodeAdapter implements AgentAdapter {
       );
     }
 
+    // 這輪(slash command)新增:取得這個 opencode server process 的 "/" 指令
+    // 清單(已本機實測 `GET /command` 回傳 `Command[]`,見檔案頂端查證段落)。
+    // **必須 `await`,不可 fire-and-forget**——與 claude-agent-sdk/ACP 不同,
+    // opencode 的 `sendPrompt()` 需要靠這份清單決定要打 `/message` 還是
+    // `/command` 端點(兩者已實測不是同義詞,見下方 `sendPrompt()` 註解),若
+    // 這裡用 fire-and-forget、使用者的第一則訊息剛好是指令,查詢還沒回來時
+    // `sendPrompt()` 就會誤判成一般文字,重現查證段落裡發現的既有 bug。
+    // 失敗時**不拋錯、不影響 spawn()**——這個查詢失敗只代表這個 session 不會
+    // 有 "/" 指令支援(退化成這個功能出現之前的既有行為),不該讓整個 session
+    // 起不來;也**不**推播 `available-commands` 事件(維持 capabilities 的
+    // "unknown" 未收斂狀態是誠實的——查詢失敗代表「不知道」,不是「確認為
+    // 空清單」,兩者語意不同,見 events.ts 的 SlashCommandInfoSchema 附近註解)。
+    let availableCommands = new Map<string, OpencodeCommand>();
+    let availableCommandsFetched = false;
+    try {
+      const commands = await getJson<OpencodeCommand[]>(`${baseUrl}/command`);
+      availableCommands = new Map(commands.map((c) => [c.name, c]));
+      availableCommandsFetched = true;
+    } catch (err) {
+      console.error(
+        `[opencode-adapter] ${profile.name} GET /command 失敗(不影響對話,只影響 "/" 指令與選單): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     const outputQueue = new AsyncQueue<AgentEvent>();
     const handle: AgentHandle = { id: randomUUID(), profile, workspace };
     const sseController = new AbortController();
@@ -256,6 +286,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       turnErrored: false,
       idleWaiters: [],
       sseController,
+      availableCommands,
     };
     this.sessions.set(handle.id, internal);
 
@@ -277,6 +308,15 @@ export class OpenCodeAdapter implements AgentAdapter {
       });
     });
 
+    // 這輪(slash command)新增:上面的 GET /command 查詢成功時才推播——見該
+    // 呼叫點註解,查詢失敗維持沉默(不編造一份空清單)。opencode 沒有「清單
+    // 變動」推播事件(只有執行後才發的 command.executed 稽核事件,見檔案頂端
+    // 查證段落),清單在這個 server process 生命週期內是靜態的,這裡推播一次
+    // 就是這個 session 僅有的一次 available-commands 事件。
+    if (availableCommandsFetched) {
+      outputQueue.push({ type: "available-commands", commands: mapOpencodeCommands(availableCommands) });
+    }
+
     return handle;
   }
 
@@ -284,6 +324,39 @@ export class OpenCodeAdapter implements AgentAdapter {
     const internal = this.mustGet(handle);
     internal.busy = true;
     internal.turnErrored = false;
+
+    // 這輪(slash command)新增:偵測開頭 "/已知指令名稱"——**完整比對整個
+    // 第一個 token,不是 prefix**(例如已知指令 "review" 不可誤配到使用者
+    // 打的 "/review-all"),命中才改走 opencode 專門的
+    // POST /session/{id}/command 端點,否則(包括「不是 / 開頭」與「/ 開頭但
+    // 不是任何已知指令」兩種情況)完全比照既有行為走下面的 /message 端點,
+    // 不影響「剛好用 / 開頭的一般文字」這種既有情境。
+    //
+    // **已實測(見檔案頂端查證段落)兩個端點不是同義詞**:對 /message 送純
+    // 文字 "/review test-arg-abc",opencode 原封不動存成字面文字,完全沒有
+    // 展開成該指令的 template——不做這個判斷的話,使用者手動打的 "/指令"
+    // 只會變成一段令人困惑的字面文字送給模型,不會真的觸發那個指令。
+    const commandMatch = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(prompt.text);
+    const commandName = commandMatch?.[1];
+    if (commandName !== undefined && internal.availableCommands.has(commandName)) {
+      // 刻意不帶 model 欄位:OpenAPI 文件上 POST /session/{id}/command 的
+      // `model` 是純字串,型別上與 /message 既有使用的 {providerID,modelID}
+      // 物件形狀不同,這輪沒有機會實測這支端點真正接受的字串格式(對接策略
+      // 一貫要求「以實際觀察到的行為為準,不臆測」)——setModel() 覆寫對
+      // 指令呼叫暫不生效,是刻意縮小的範圍,不是遺漏。
+      void postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/command`, {
+        command: commandName,
+        arguments: commandMatch?.[2] ?? "",
+      }).catch((err: unknown) => {
+        internal.outputQueue.push({
+          type: "error",
+          message: "OpenCode session/command 送出失敗",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      });
+      return;
+    }
+
     // model 解析優先序:`internal.modelOverride`(透過 setModel() 對話中途
     // 設定,見該方法)> `handle.profile.model`(profile 建立時挑選的
     // "providerID/modelID" 組合字串,見 ProfileCreateDialog.tsx 的送出邏輯)。
@@ -738,6 +811,24 @@ interface InternalSession {
   sseController: AbortController;
   /** setModel() 設定的覆寫值,優先於 handle.profile.model——見 setModel()/sendPrompt() 方法註解。 */
   modelOverride?: { providerID: string; modelID: string };
+  /**
+   * 這輪(slash command)新增:spawn() 時 `GET /command` 查到的指令清單,key
+   * 為指令名稱——`sendPrompt()` 靠它判斷開頭 "/word" 是否命中已知指令、要不要
+   * 改走 POST /session/{id}/command。查詢失敗時維持空 Map(見 spawn() 內查詢
+   * 失敗分支的註解),不影響一般 /message 路徑。
+   */
+  availableCommands: Map<string, OpencodeCommand>;
+}
+
+/**
+ * 這輪(slash command)新增:`GET /command`(本機實測 opencode 1.18.7)回傳的
+ * `Command` 形狀——只宣告這裡實際用到的欄位(比照既有 `OpencodePart` 的
+ * 既有風格),完整形狀見檔案頂端查證段落。
+ */
+interface OpencodeCommand {
+  name: string;
+  description?: string;
+  hints?: string[];
 }
 
 interface OpencodePart {
@@ -851,6 +942,34 @@ async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
     );
   }
   return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/** 這輪(slash command)新增:比照上面 postJson() 的既有錯誤處理風格,補一個 GET 版本。 */
+async function getJson<T = unknown>(url: string): Promise<T> {
+  const res = await fetch(url);
+  const text = await res.text();
+  if (!res.ok) {
+    throw new DeskmonyError(
+      "opencode.requestFailed",
+      { url, status: res.status, detail: text.slice(0, 500) },
+      `GET ${url} 失敗(status=${res.status}): ${text.slice(0, 500)}`,
+    );
+  }
+  return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/**
+ * 這輪(slash command)新增:`OpencodeCommand` → `SlashCommandInfo`。opencode
+ * 的 `hints` 是 template 佔位符 token 陣列(例如 `["$ARGUMENTS"]`),不是人類
+ * 可讀的提示文字(不像 claude-agent-sdk 的 `argumentHint`/ACP 的
+ * `input.hint`),如實映射、不強行美化——見 events.ts 對應型別的註解。
+ */
+function mapOpencodeCommands(commands: Map<string, OpencodeCommand>): SlashCommandInfo[] {
+  return Array.from(commands.values()).map((c) => ({
+    name: c.name,
+    description: c.description || undefined,
+    argumentHint: c.hints && c.hints.length > 0 ? c.hints.join(" ") : undefined,
+  }));
 }
 
 /** 解析一個以雙換行分隔的 SSE frame,取出 `data:` 那幾行拼起來的 JSON。 */

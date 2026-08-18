@@ -615,6 +615,8 @@ export class WsGateway {
         return { ok: true };
       case "session.history":
         return { messages: await this.sessionManager.getHistory(request.params.sessionId) };
+      case "session.getSlashCommands":
+        return this.sessionManager.getSlashCommands(request.params.sessionId);
       case "session.delete":
         await this.sessionManager.deleteSession(request.params.sessionId);
         return { ok: true };

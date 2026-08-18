@@ -67,5 +67,9 @@
     "attachUnsupportedTitle": "此 agent 不支援檔案輸入",
     "removeAttachmentAriaLabel": "移除附件",
     "attachmentAltText": "已附加的圖片"
+  },
+  "slashCommands": {
+    "menuAriaLabel": "slash command 選單",
+    "noMatches": "找不到符合的 slash command"
   }
 }

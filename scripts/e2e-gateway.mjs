@@ -34,8 +34,14 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { FAKE_ACP_REPLY_CHUNKS, WRITE_FILE_PREFIX, USAGE_UPDATE_PREFIX, delayEchoMarker } from "./fake-acp-agent.mjs";
-import { FAKE_OPENCODE_REPLY_CHUNKS, TOOL_CALL_PREFIX, SLOW_PREFIX } from "./fake-opencode-server.mjs";
+import {
+  FAKE_ACP_REPLY_CHUNKS,
+  WRITE_FILE_PREFIX,
+  USAGE_UPDATE_PREFIX,
+  AVAILABLE_COMMANDS_PREFIX,
+  delayEchoMarker,
+} from "./fake-acp-agent.mjs";
+import { FAKE_OPENCODE_REPLY_CHUNKS, TOOL_CALL_PREFIX, SLOW_PREFIX, TEST_COMMANDS } from "./fake-opencode-server.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -2687,6 +2693,259 @@ async function usageMeteringSmokeTest(client, workspaceDir) {
 }
 
 // ---------------------------------------------------------------------
+// 步驟 31: slash command(這輪新增,決定性測試——斷言的是協定/事件轉換與
+// 路由邏輯是否正確,不是模型自由選擇的用詞,即使 31f 底下真的起一個
+// claude-agent-sdk session 也一樣,分類原則見上方步驟29
+// usageMeteringSmokeTest() 的同一套先例)
+//
+//   31a ACP:capabilities().slashCommands === "unknown";session.getSlashCommands
+//       在收到推播前回報 observed:false;送 AVAILABLE_COMMANDS_PREFIX prompt後,
+//       available-commands 事件與 pull 兩者內容一致、observed 收斂成 true。
+//   31b OpenCode:capabilities().slashCommands === "unknown";spawn 後(不需要
+//       送任何 prompt)自動推播一次 available-commands,內容對應
+//       fake-opencode-server.mjs 的 TEST_COMMANDS,argumentHint 依 hints
+//       是否非空正確 coalesce。
+//   31c OpenCode:送 "/greet world"(已知指令)真的打到 POST /session/{id}/command
+//       (回覆帶 [command:greet args:world] 標記),不是 /message。
+//   31d OpenCode:送 "/nonexistent-cmd hello"(/ 開頭但不是已知指令)仍照舊打到
+//       /message(回覆是既有的 FAKE_OPENCODE_REPLY_CHUNKS,不含 [command:...] 標記)。
+//   31e OpenCode:送 "/greeting hi"(已知指令 "greet" 的 prefix,但本身不是已知
+//       指令全名)同樣落到 /message,不誤配——驗證比對邏輯是完整 token 相等,
+//       不是 startsWith/prefix。
+//   31f claude-agent-sdk(真實模型,見步驟29d 的同一套先例,判定的是系統行為
+//       不是模型講什麼,故仍歸 deterministic):capabilities().slashCommands ===
+//       "supported";spawn 後(不需要送任何 prompt)fire-and-forget 推播一次
+//       available-commands,清單非空。
+// ---------------------------------------------------------------------
+async function slashCommandSmokeTest(client, workspaceDir) {
+  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
+  const fakeOpencodeServerPath = path.join(REPO_ROOT, "scripts", "fake-opencode-server.mjs");
+
+  // ---- 31a: ACP ----
+  let acpSessionId;
+  try {
+    const caps = await client.rpc("adapter.capabilities", { software: "acp" });
+    const capsOk = caps.capabilities.slashCommands === "unknown";
+
+    const profileCreated = await client.rpc("profile.create", {
+      name: "E2E Slash Command (acp)",
+      software: "acp",
+      workingDir: workspaceDir,
+      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
+    });
+    const sessionCreated = await client.rpc(
+      "session.create",
+      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-slash-acp" },
+      30_000,
+    );
+    acpSessionId = sessionCreated.session.id;
+
+    const beforePush = await client.rpc("session.getSlashCommands", { sessionId: acpSessionId });
+    const beforeOk = beforePush.observed === false && beforePush.commands.length === 0;
+
+    const payload = { commands: [{ name: "foo", description: "Foo cmd", hint: "<arg>" }, { name: "bar" }] };
+    const prompt = `${AVAILABLE_COMMANDS_PREFIX}${JSON.stringify(payload)}`;
+    const { finalEvent, collected } = await client.drivePrompt(acpSessionId, prompt, {
+      onPermission: async () => "deny", // 不應該觸發權限請求
+      timeoutMs: 20_000,
+    });
+
+    const commandsEvent = collected.find((e) => e.event.type === "available-commands");
+    const foo = commandsEvent?.event.commands.find((c) => c.name === "foo");
+    const bar = commandsEvent?.event.commands.find((c) => c.name === "bar");
+    const eventOk = Boolean(
+      commandsEvent &&
+        commandsEvent.event.commands.length === 2 &&
+        foo?.description === "Foo cmd" &&
+        foo?.argumentHint === "<arg>" &&
+        !bar?.description &&
+        !bar?.argumentHint,
+    );
+
+    const afterPush = await client.rpc("session.getSlashCommands", { sessionId: acpSessionId });
+    const afterOk = afterPush.observed === true && afterPush.commands.length === 2;
+
+    record(
+      '步驟31a ACP capabilities().slashCommands="unknown" + available_commands_update 正確轉發(REPLACE 語意、description/argumentHint coalescing)+ session.getSlashCommands pull 與 observed 收斂',
+      capsOk && beforeOk && eventOk && afterOk && finalEvent.event.type === "completed",
+      `caps=${JSON.stringify(caps.capabilities)}, before=${JSON.stringify(beforePush)}, event=${JSON.stringify(commandsEvent?.event)}, after=${JSON.stringify(afterPush)}`,
+    );
+  } catch (err) {
+    record("步驟31a ACP slash command", false, String(err));
+  } finally {
+    if (acpSessionId) {
+      try {
+        await client.rpc("session.delete", { sessionId: acpSessionId });
+      } catch (err) {
+        log(`[cleanup] 刪除步驟31a session 時發生錯誤(忽略): ${err}`);
+      }
+    }
+  }
+
+  // ---- 31b-31e: OpenCode ----
+  let opencodeSessionId;
+  try {
+    const caps = await client.rpc("adapter.capabilities", { software: "opencode" });
+    const capsOk = caps.capabilities.slashCommands === "unknown";
+
+    const profileCreated = await client.rpc("profile.create", {
+      name: "E2E Slash Command (opencode)",
+      software: "opencode",
+      workingDir: workspaceDir,
+      opencodeConfig: { command: process.execPath, args: [fakeOpencodeServerPath] },
+    });
+    const sessionCreated = await client.rpc(
+      "session.create",
+      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-slash-opencode" },
+      30_000,
+    );
+    opencodeSessionId = sessionCreated.session.id;
+
+    // spawn() 內已 await 過一次 GET /command 才回傳 handle(見
+    // opencode-adapter.ts 的查證註解),event 這時多半已經在 client.events
+    // 緩衝區裡,waitForEvent() 兩種情況都能處理(已存在的/之後才到的)。
+    const commandsEvent = await client.waitForEvent(
+      (e) => e.sessionId === opencodeSessionId && e.event.type === "available-commands",
+      10_000,
+    );
+    const greet = commandsEvent.event.commands.find((c) => c.name === "greet");
+    const noop = commandsEvent.event.commands.find((c) => c.name === "noop");
+    const eventOk = Boolean(
+      commandsEvent.event.commands.length === TEST_COMMANDS.length &&
+        greet?.description === "fake greet command" &&
+        greet?.argumentHint === "$ARGUMENTS" &&
+        noop?.description === "fake no-arg command" &&
+        !noop?.argumentHint,
+    );
+
+    const pulled = await client.rpc("session.getSlashCommands", { sessionId: opencodeSessionId });
+    const pullOk = pulled.observed === true && pulled.commands.length === TEST_COMMANDS.length;
+
+    record(
+      '步驟31b OpenCode capabilities().slashCommands="unknown" + spawn 後自動推播 GET /command 結果(不需要送任何 prompt)+ argumentHint coalescing(有 hints 才給值)+ session.getSlashCommands pull',
+      capsOk && eventOk && pullOk,
+      `caps=${JSON.stringify(caps.capabilities)}, event=${JSON.stringify(commandsEvent.event)}, pulled=${JSON.stringify(pulled)}`,
+    );
+  } catch (err) {
+    record("步驟31b OpenCode slash command 清單推播", false, String(err));
+  }
+
+  if (opencodeSessionId) {
+    try {
+      const { finalEvent, collected } = await client.drivePrompt(opencodeSessionId, "/greet world", {
+        onPermission: async () => "deny",
+        timeoutMs: 20_000,
+      });
+      const { groups, violation } = analyzeMessageDeltas(collected);
+      const fullText = groups.map((g) => g.text).join("");
+      const ok = finalEvent.event.type === "completed" && !violation && fullText.includes("[command:greet args:world]");
+      record(
+        '步驟31c OpenCode 送 "/greet world"(已知指令)打到 POST /session/{id}/command,不是 /message(回覆帶 [command:greet args:world] 標記)',
+        ok,
+        violation ? `違規: ${violation}` : `fullText=${JSON.stringify(fullText)}`,
+      );
+    } catch (err) {
+      record("步驟31c OpenCode 已知指令路由到 /command", false, String(err));
+    }
+
+    try {
+      const { finalEvent, collected } = await client.drivePrompt(opencodeSessionId, "/nonexistent-cmd hello", {
+        onPermission: async () => "deny",
+        timeoutMs: 20_000,
+      });
+      const { groups, violation } = analyzeMessageDeltas(collected);
+      const fullText = groups.map((g) => g.text).join("");
+      const ok =
+        finalEvent.event.type === "completed" &&
+        !violation &&
+        !fullText.includes("[command:") &&
+        fullText === FAKE_OPENCODE_REPLY_CHUNKS.join("");
+      record(
+        '步驟31d OpenCode 送 "/nonexistent-cmd hello"(/ 開頭但不是已知指令)仍照舊打到 /message,不誤傷既有行為',
+        ok,
+        violation ? `違規: ${violation}` : `fullText=${JSON.stringify(fullText)}`,
+      );
+    } catch (err) {
+      record("步驟31d OpenCode 未知指令落回 /message", false, String(err));
+    }
+
+    try {
+      const { finalEvent, collected } = await client.drivePrompt(opencodeSessionId, "/greeting hi", {
+        onPermission: async () => "deny",
+        timeoutMs: 20_000,
+      });
+      const { groups, violation } = analyzeMessageDeltas(collected);
+      const fullText = groups.map((g) => g.text).join("");
+      const ok =
+        finalEvent.event.type === "completed" &&
+        !violation &&
+        !fullText.includes("[command:") &&
+        fullText === FAKE_OPENCODE_REPLY_CHUNKS.join("");
+      record(
+        '步驟31e OpenCode 送 "/greeting hi"(已知指令 "greet" 的 prefix,非完整比對)不誤配,落回 /message',
+        ok,
+        violation ? `違規: ${violation}` : `fullText=${JSON.stringify(fullText)}`,
+      );
+    } catch (err) {
+      record("步驟31e OpenCode prefix 不誤配", false, String(err));
+    }
+
+    try {
+      await client.rpc("session.delete", { sessionId: opencodeSessionId });
+    } catch (err) {
+      log(`[cleanup] 刪除步驟31b-e session 時發生錯誤(忽略): ${err}`);
+    }
+  }
+
+  // ---- 31f: claude-agent-sdk(真實模型,見步驟29d 的同一套先例)----
+  let sdkSessionId;
+  try {
+    const caps = await client.rpc("adapter.capabilities", { software: "claude-agent-sdk" });
+    const capsOk = caps.capabilities.slashCommands === "supported";
+
+    const profileCreated = await client.rpc("profile.create", {
+      name: "E2E Slash Command (claude-agent-sdk)",
+      software: "claude-agent-sdk",
+      workingDir: workspaceDir,
+    });
+    const sessionCreated = await client.rpc(
+      "session.create",
+      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-slash-sdk" },
+      30_000,
+    );
+    sdkSessionId = sessionCreated.session.id;
+
+    // 不需要送任何 prompt——`supportedCommands()` 是 spawn() 後 fire-and-forget
+    // 呼叫的 CLI control-request(已用真實憑證實測不需要先送一輪對話,見
+    // claude-sdk-adapter.ts 的查證註解),等這則 available-commands 事件即可。
+    const commandsEvent = await client.waitForEvent(
+      (e) => e.sessionId === sdkSessionId && e.event.type === "available-commands",
+      30_000,
+    );
+    const eventOk = commandsEvent.event.commands.length > 0;
+
+    const pulled = await client.rpc("session.getSlashCommands", { sessionId: sdkSessionId });
+    const pullOk = pulled.observed === true && pulled.commands.length > 0;
+
+    record(
+      '步驟31f claude-agent-sdk capabilities().slashCommands="supported" + spawn 後 fire-and-forget 推播 supportedCommands() 結果(不需要送任何 prompt)+ session.getSlashCommands pull',
+      capsOk && eventOk && pullOk,
+      `caps=${JSON.stringify(caps.capabilities)}, commands數=${commandsEvent.event.commands.length}, pulled觀察=${pulled.observed}`,
+    );
+  } catch (err) {
+    record("步驟31f claude-agent-sdk slash command 清單推播", false, String(err));
+  } finally {
+    if (sdkSessionId) {
+      try {
+        await client.rpc("session.delete", { sessionId: sdkSessionId });
+      } catch (err) {
+        log(`[cleanup] 刪除步驟31f session 時發生錯誤(忽略): ${err}`);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
 // 步驟 30: 機器驗收閘(S4,決定性測試,真實 git 子程序 + 真實 node 子程序,
 // 不依賴任何真實模型)
 //
@@ -5005,6 +5264,14 @@ async function main() {
       await usageMeteringSmokeTest(client, workspaceDir);
     } else {
       skipNote("步驟29 usage-metering(S3a)", "deterministic");
+    }
+
+    // ---- 步驟 31: slash command(這輪新增,決定性測試——見 slashCommandSmokeTest()
+    // 頂端註解的分類原則,31f 雖然起真實 claude-agent-sdk session 仍歸類此組)----
+    if (shouldRun("deterministic")) {
+      await slashCommandSmokeTest(client, workspaceDir);
+    } else {
+      skipNote("步驟31 slash command", "deterministic");
     }
 
     // ---- 步驟 30: 機器驗收閘(S4,決定性測試,真實 git + node 子程序)----

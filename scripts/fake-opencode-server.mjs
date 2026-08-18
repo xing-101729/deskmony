@@ -40,6 +40,13 @@
  *     e2e 有時間視窗呼叫 `POST /session/{id}/abort` 測試 interrupt() ——
  *     收到 abort 後,立刻停止後續 chunk、送出帶 `MessageAbortedError` 的
  *     `message.updated`,再送 idle。
+ *   - 這輪(slash command)新增:`GET /command` 回傳 TEST_COMMANDS(固定測試
+ *     清單,形狀比照本機真實 `opencode serve`(1.18.7)`GET /command` 的
+ *     `Command[]`,見 packages/adapters/src/opencode-adapter.ts 檔案頂端查證
+ *     段落);`POST /session/{id}/command`(body `{command, arguments}`)回覆
+ *     文字前面帶一段 `[command:X args:Y]` 可觀察標記(比照既有 `[model:...]`
+ *     手法),只用來讓 e2e(步驟31)斷言「送 /已知指令 真的打到這支端點,
+ *     且 body 形狀正確」,不影響既有 `/message` 端點的行為。
  */
 
 import http from "node:http";
@@ -52,6 +59,15 @@ export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
 export const SLOW_PREFIX = "OPENCODE_SLOW";
 export const SLOW_CHUNK_COUNT = 20;
 export const SLOW_CHUNK_INTERVAL_MS = 300;
+/**
+ * 這輪(slash command)新增:`GET /command` 的固定測試清單——`"greet"` 帶
+ * `hints`(模擬有 argument 佔位符的指令),`"noop"` 不帶(模擬無參數指令),
+ * 涵蓋 `mapOpencodeCommands()` 的 coalescing 分支(見 opencode-adapter.ts)。
+ */
+export const TEST_COMMANDS = [
+  { name: "greet", description: "fake greet command", source: "command", template: "Say hello to $ARGUMENTS", hints: ["$ARGUMENTS"] },
+  { name: "noop", description: "fake no-arg command", source: "command", template: "Do nothing", hints: [] },
+];
 
 const sessions = new Map(); // sessionId -> { aborted: boolean, pendingPermission: Map<id, resolve> }
 /** @type {Set<http.ServerResponse>} */
@@ -217,6 +233,27 @@ async function handlePrompt(sessionId, text, model) {
   return { info: { id: assistantMessageId, role: "assistant", sessionID: sessionId }, parts: [] };
 }
 
+/**
+ * 這輪(slash command)新增:`POST /session/{id}/command` 的最小實作——與
+ * `handlePrompt()` 平行但簡化(不需要涵蓋 tool-call/slow 這些既有分支的
+ * 排列組合,那些已由 `handlePrompt()` 涵蓋),回覆文字帶一段可觀察標記
+ * (`[command:X args:Y]`),見檔頭註解。
+ */
+async function handleCommand(sessionId, command, args) {
+  const userMessageId = `msg_${randomUUID()}`;
+  const assistantMessageId = `msg_${randomUUID()}`;
+  broadcast("message.updated", { sessionID: sessionId, info: { id: userMessageId, role: "user", sessionID: sessionId } });
+  broadcast("session.status", { sessionID: sessionId, status: { type: "busy" } });
+  broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+
+  await streamTextReply(sessionId, assistantMessageId, [`[command:${command} args:${args}]`]);
+  broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+
+  broadcast("session.status", { sessionID: sessionId, status: { type: "idle" } });
+  broadcast("session.idle", { sessionID: sessionId });
+  return { info: { id: assistantMessageId, role: "assistant", sessionID: sessionId }, parts: [] };
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://internal");
   void route(req, res, url).catch((err) => {
@@ -231,6 +268,11 @@ const server = http.createServer((req, res) => {
 async function route(req, res, url) {
   if (req.method === "GET" && url.pathname === "/global/health") {
     sendJson(res, 200, { healthy: true, version: "0.0.0-fake" });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/command") {
+    sendJson(res, 200, TEST_COMMANDS);
     return;
   }
 
@@ -267,6 +309,23 @@ async function route(req, res, url) {
       .map((p) => p.text)
       .join("");
     const result = await handlePrompt(sessionId, text, body.model);
+    sendJson(res, 200, result);
+    return;
+  }
+
+  const commandMatch = url.pathname.match(/^\/session\/([^/]+)\/command$/);
+  if (req.method === "POST" && commandMatch) {
+    const sessionId = commandMatch[1];
+    if (!sessions.has(sessionId)) {
+      sendJson(res, 404, { error: "session not found" });
+      return;
+    }
+    const body = await readJsonBody(req);
+    if (typeof body.command !== "string" || typeof body.arguments !== "string") {
+      sendJson(res, 400, { error: "command/arguments required" });
+      return;
+    }
+    const result = await handleCommand(sessionId, body.command, body.arguments);
     sendJson(res, 200, result);
     return;
   }

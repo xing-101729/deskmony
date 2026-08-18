@@ -65,6 +65,16 @@
  *     抵達時)——用來決定性地驗證回合硬上限的「時間」維度,以及
  *     `TurnLimiter` 觸發的 `interrupt()`(= ACP 的 `session/cancel`)真的能讓
  *     這個假 agent 提早結束回合,而不是一路睡到底才發現已經被中斷。
+ *   - 若 prompt 文字以 AVAILABLE_COMMANDS_PREFIX("ACP_AVAILABLE_COMMANDS ")
+ *     開頭,其後接一段 JSON `{"commands": [{"name": string, "description"?:
+ *     string, "hint"?: string}]}`(這輪 slash command,e2e 步驟 31 用,見
+ *     scripts/e2e-gateway.mjs):送出一則 `session/update` 通知,
+ *     `sessionUpdate: "available_commands_update"`,`hint` 有給才組進
+ *     `input: {hint}`(模擬「並非每個指令都有 argument hint」的真實情況,見
+ *     packages/adapters/src/acp-adapter.ts `mapAvailableCommands()` 的
+ *     coalescing 處理),再回一句簡短訊息並以 end_turn 結束——用來在沒有真實
+ *     ACP agent 的情況下,決定性地驗證 AcpAdapter 對 available_commands_update
+ *     的事件轉換。
  */
 
 import * as acp from "@agentclientprotocol/sdk";
@@ -82,6 +92,8 @@ export const USAGE_UPDATE_PREFIX = "ACP_USAGE_UPDATE ";
 export const MANY_TOOL_CALLS_PREFIX = "ACP_MANY_TOOL_CALLS ";
 /** S3b(cost-governor)TurnLimiter e2e 用,見檔頭註解。 */
 export const SLEEP_TURN_PREFIX = "ACP_SLEEP_TURN ";
+/** 這輪(slash command)e2e 用,見檔頭註解。 */
+export const AVAILABLE_COMMANDS_PREFIX = "ACP_AVAILABLE_COMMANDS ";
 /** 建構出一段「延遲 delayMs 毫秒後把整段 prompt 文字回顯」的標記文字。 */
 export function delayEchoMarker(delayMs) {
   return `[[E2E_DELAY_ECHO:${delayMs}]]`;
@@ -140,6 +152,8 @@ class FakeAcpAgent {
         await this.handleManyToolCalls(params.sessionId, text.slice(MANY_TOOL_CALLS_PREFIX.length), cx);
       } else if (text.startsWith(SLEEP_TURN_PREFIX)) {
         await this.handleSleepTurn(params.sessionId, text.slice(SLEEP_TURN_PREFIX.length), abort, cx);
+      } else if (text.startsWith(AVAILABLE_COMMANDS_PREFIX)) {
+        await this.handleAvailableCommands(params.sessionId, text.slice(AVAILABLE_COMMANDS_PREFIX.length), cx);
       } else {
         await this.handleEcho(params.sessionId, cx);
       }
@@ -202,6 +216,32 @@ class FakeAcpAgent {
         sessionUpdate: "agent_message_chunk",
         messageId,
         content: { type: "text", text: "usage reported" },
+      },
+    });
+  }
+
+  /** 這輪(slash command)e2e 用,見檔頭註解:送一則 available_commands_update,`hint` 有給才組進 `input`。 */
+  async handleAvailableCommands(sessionId, rawJson, cx) {
+    const { commands } = JSON.parse(rawJson);
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: commands.map((c) => ({
+          name: c.name,
+          description: c.description ?? "",
+          ...(c.hint ? { input: { hint: c.hint } } : {}),
+        })),
+      },
+    });
+
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId,
+        content: { type: "text", text: "commands reported" },
       },
     });
   }

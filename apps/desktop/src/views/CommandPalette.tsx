@@ -37,8 +37,14 @@ export interface Command {
   run: () => void;
 }
 
-/** 子序列模糊比對:回傳分數(越大越相關),沒命中回傳 -1。 */
-function fuzzyScore(haystack: string, needle: string): number {
+/**
+ * 子序列模糊比對:回傳分數(越大越相關),沒命中回傳 -1。
+ *
+ * 這輪(slash command)新增:export 出來給 ChatView.tsx 的 "/" 指令選單共用
+ * ——同屬 apps/desktop/src、同一層,不像 packages/adapters/src 內
+ * `resolveWindowsSpawnCommand()` 那樣有跨套件耦合的顧慮,沒有理由複製一份。
+ */
+export function fuzzyScore(haystack: string, needle: string): number {
   if (!needle) return 0;
   const text = haystack.toLowerCase();
   const query = needle.toLowerCase();

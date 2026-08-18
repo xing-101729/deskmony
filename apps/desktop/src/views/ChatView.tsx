@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentProfile, EffortLevel, Session } from "@deskmony/shared";
+import type { AgentProfile, EffortLevel, Session, SlashCommandInfo } from "@deskmony/shared";
 import { PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
 import {
   useSessionStore,
@@ -10,6 +10,7 @@ import {
   type PendingAttachment,
 } from "../stores/session-store.js";
 import { AutoModeControl } from "./AutoModeControl.js";
+import { fuzzyScore } from "./CommandPalette.js";
 import { IconButton } from "../ui/Button.js";
 import { Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
@@ -513,6 +514,77 @@ async function readComposerAttachment(file: File): Promise<ComposerAttachment | 
   return { id: crypto.randomUUID(), type: "document", mediaType: "text/plain", name: file.name, data: bytesToBase64(bytes) };
 }
 
+/**
+ * 這輪(slash command)新增:輸入框上方錨定彈出的 "/" 指令選單——外觀/定位比照
+ * `SessionList.tsx` 的 `LanguageSwitcher`(`absolute bottom-full left-0 z-50
+ * mb-1`、`role="menu"`),但這是一個**單純的展示元件**,不持有自己的開關/
+ * 篩選狀態:是否顯示、篩選結果、目前選中的項目都由 `ChatView` 決定(見下方
+ * `ChatView` 內的 `showSlashMenu`/`slashResults`/`slashActiveIndex`)——鍵盤事件
+ * (ArrowUp/Down/Enter/Escape)發生在 `<textarea>` 上,`textarea` 由 `ChatView`
+ * 擁有,狀態沒辦法下推到這個子元件自己管理,索性整個邏輯都留在 `ChatView`,
+ * 這裡只負責渲染。
+ *
+ * `max-h-[...] overflow-y-auto`(比照 `CommandPalette.tsx` 的既有寫法)——
+ * `claude-agent-sdk` 一個 session 實測可能有 55 筆(內建指令 + 使用者
+ * skills),不能無上限展開。
+ */
+function SlashCommandMenu({
+  commands,
+  activeIndex,
+  onHover,
+  onSelect,
+}: {
+  commands: SlashCommandInfo[];
+  activeIndex: number;
+  onHover: (index: number) => void;
+  onSelect: (command: SlashCommandInfo) => void;
+}): JSX.Element {
+  const { t } = useTranslation(["chat"]);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
+
+  return (
+    <div
+      ref={listRef}
+      role="menu"
+      aria-label={t("chat:slashCommands.menuAriaLabel")}
+      className="absolute bottom-full left-0 z-50 mb-1 max-h-[min(40vh,320px)] w-[min(360px,90vw)] overflow-y-auto rounded-md border border-line-subtle bg-panel py-1 shadow-overlay"
+    >
+      {commands.length === 0 ? (
+        <p className="px-2.5 py-3 text-center text-2xs text-fg-faint">{t("chat:slashCommands.noMatches")}</p>
+      ) : (
+        commands.map((command, index) => {
+          const active = index === activeIndex;
+          return (
+            <button
+              key={command.name}
+              type="button"
+              role="menuitem"
+              data-active={active ? "true" : undefined}
+              onMouseMove={() => onHover(index)}
+              onClick={() => onSelect(command)}
+              className={`flex w-full items-start gap-2 px-2.5 py-1.5 text-left transition ${
+                active ? "bg-accent/12" : "hover:bg-surface"
+              }`}
+            >
+              <span className={`flex-shrink-0 font-mono text-xs ${active ? "text-accent" : "text-fg-soft"}`}>
+                /{command.name}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-2xs text-fg-faint">
+                {command.argumentHint && <span className="mr-1 font-mono">{command.argumentHint}</span>}
+                {command.description}
+              </span>
+            </button>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
   const { t } = useTranslation(["chat"]);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
@@ -521,12 +593,17 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const itemsBySession = useSessionStore((s) => s.itemsBySession);
   const sendPrompt = useSessionStore((s) => s.sendPrompt);
   const interrupt = useSessionStore((s) => s.interrupt);
+  const slashCommandsBySession = useSessionStore((s) => s.slashCommandsBySession);
+  const fetchSlashCommands = useSessionStore((s) => s.fetchSlashCommands);
 
   const [draft, setDraft] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<ComposerAttachment[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerBoxRef = useRef<HTMLDivElement>(null);
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
 
   const session = sessions.find((s) => s.id === currentSessionId);
   const items = useMemo(
@@ -537,6 +614,71 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [items]);
+
+  // 這輪(slash command)新增:對話框掛載/切換 session 時拉一次這個 session
+  // 目前已知的 "/" 指令清單——純 push 補的缺口(見 session-store.ts 的
+  // `fetchSlashCommands()` 註解:client 若是在 spawn 前後那次推播之後才連上
+  // 就永遠等不到),之後仍靠既有的 push 事件(`handleSessionEvent()` 的
+  // `"available-commands"` case)即時更新。
+  useEffect(() => {
+    if (currentSessionId) void fetchSlashCommands(currentSessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSessionId]);
+
+  // 這輪(slash command)新增:輸入框上方 "/" 選單的篩選/顯示邏輯——
+  // `slashQuery` 是「使用者目前正在打指令名稱」這個狀態的偵測(整段輸入等於
+  // "/" 加零或多個非空白字元、完全沒有空白;一有空白代表已經開始打參數,見
+  // 下方 `showSlashMenu`),`undefined` 代表現在不是這個狀態。
+  const sessionSlashCommands = currentSessionId ? (slashCommandsBySession[currentSessionId]?.commands ?? []) : [];
+  const slashMatch = /^\/(\S*)$/.exec(draft);
+  const slashQuery = slashMatch?.[1];
+  const slashResults = useMemo(() => {
+    if (slashQuery === undefined) return [];
+    if (!slashQuery) return sessionSlashCommands;
+    return sessionSlashCommands
+      .map((command) => ({ command, score: fuzzyScore(command.name, slashQuery) }))
+      .filter((entry) => entry.score >= 0)
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.command);
+  }, [sessionSlashCommands, slashQuery]);
+  // 只有這個 session 確實有過至少一份指令清單時才顯示選單(即使篩選結果是
+  // 空的,也顯示「找不到符合的指令」——比起使用者打了字卻什麼都沒發生,更清楚
+  // 的回饋);這個 adapter 從未回報過任何指令(例如 pty,或 claude-agent-sdk/
+  // opencode/acp 這個 session 還沒收到過推播)時,`sessionSlashCommands` 恆為
+  // 空陣列,選單完全不出現,不會對著一個永遠空的選單打字。
+  const showSlashMenu = slashQuery !== undefined && sessionSlashCommands.length > 0 && !slashMenuDismissed;
+
+  // 清單本身可能在使用者操作選單期間透過 push 事件變動(commands_changed/
+  // available_commands_update),`slashResults` 的 useMemo 依賴 `slashQuery`
+  // 與 `sessionSlashCommands` 兩者——不論是輸入文字變了還是清單內容變了,都要
+  // 重置選中項目,避免選到跳掉的項目。
+  useEffect(() => setSlashActiveIndex(0), [slashResults]);
+  // 使用者繼續輸入(query 變了)時,重新允許選單顯示——Escape/點外面只是
+  // 「這次先不看」,不是永久關閉,比照互動式 CLI "/" 選單的既有預期。
+  useEffect(() => setSlashMenuDismissed(false), [slashQuery]);
+
+  // 點擊 composer 以外的地方時收起選單——不能比照 LanguageSwitcher 那種鋪滿
+  // 全螢幕的透明遮罩(那樣會連 textarea 本身都點不到,這裡選單顯示期間使用者
+  // 仍要能繼續在 textarea 打字),改成只在選單顯示時掛一個 document 層級的
+  // mousedown 監聽,判斷點擊位置是否落在整個 composer 外層框(textarea +
+  // 選單本身都在裡面)之外。
+  useEffect(() => {
+    if (!showSlashMenu) return;
+    const handlePointerDown = (e: MouseEvent): void => {
+      if (composerBoxRef.current && !composerBoxRef.current.contains(e.target as Node)) {
+        setSlashMenuDismissed(true);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [showSlashMenu]);
+
+  const applySlashCommand = (command: SlashCommandInfo): void => {
+    // 選中即插入、不自動送出——對齊使用者對互動式 CLI "/" 選單的既有預期
+    // (選完通常還能繼續打參數,自己按 Enter),見這輪計畫「刻意不做的事」。
+    setDraft(`/${command.name} `);
+    textareaRef.current?.focus();
+  };
 
   // 新建立或切換 session 時(例如剛建立第一個 profile 後接著建新對話),把
   // 焦點自動移到輸入框——否則焦點停在觸發按鈕/body 上,使用者直接打字會
@@ -694,7 +836,18 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
             ))}
           </div>
         )}
-        <div className="flex items-end gap-2 rounded-lg border border-line bg-surface p-2 transition focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
+        <div
+          ref={composerBoxRef}
+          className="relative flex items-end gap-2 rounded-lg border border-line bg-surface p-2 transition focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20"
+        >
+          {showSlashMenu && (
+            <SlashCommandMenu
+              commands={slashResults}
+              activeIndex={slashActiveIndex}
+              onHover={setSlashActiveIndex}
+              onSelect={applySlashCommand}
+            />
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -714,6 +867,33 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
+              // 這輪(slash command)新增:選單顯示時,方向鍵/Enter/Tab/Escape
+              // 優先交給選單操作,不落入下面既有的「Enter 送出」邏輯。
+              if (showSlashMenu) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSlashActiveIndex((i) => (slashResults.length === 0 ? 0 : (i + 1) % slashResults.length));
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSlashActiveIndex((i) => (slashResults.length === 0 ? 0 : (i - 1 + slashResults.length) % slashResults.length));
+                  return;
+                }
+                if (e.key === "Enter" || e.key === "Tab") {
+                  const command = slashResults[slashActiveIndex];
+                  if (command) {
+                    e.preventDefault();
+                    applySlashCommand(command);
+                    return;
+                  }
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setSlashMenuDismissed(true);
+                  return;
+                }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 handleSend();

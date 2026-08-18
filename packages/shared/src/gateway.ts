@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema, SpawnChildSessionInputSchema } from "./session.js";
 import { PromptInputSchema } from "./prompt.js";
-import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema } from "./events.js";
+import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema, SlashCommandInfoSchema } from "./events.js";
 import {
   AgentProfileSchema,
   AgentSoftwareSchema,
@@ -132,6 +132,22 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   z.object({
     ...baseRequest,
     method: z.literal("session.history"),
+    params: z.object({ sessionId: z.string() }),
+  }),
+  /**
+   * 這輪(slash command)新增:查詢一個 session 目前已知的「/指令」清單(見
+   * `packages/shared/src/events.ts` 的 `AvailableCommandsEventSchema`)。
+   *
+   * 比照 `cost.getSummary`(見下方 result schema 註解)而非只靠 `"session-event"`
+   * push 頻道——三個後端的指令清單都是「spawn 前後推一次(+ ACP/claude-agent-sdk
+   * 偶爾再推)」,SessionManager 端沒有把它寫進 DB,純 push 沒辦法讓「推播當下
+   * 沒連上的 client」(app 重啟、開第二個視窗)事後補齊,而叫出 `/` 選單卻永遠
+   * 是空清單正好是這個功能唯一的價值所在——這個 pull 方法只負責補齊「UI 開啟
+   * 對話框當下」這一刻,之後仍靠既有的 push 事件即時更新。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.getSlashCommands"),
     params: z.object({ sessionId: z.string() }),
   }),
   z.object({
@@ -670,6 +686,18 @@ export const ProfileDeleteResultSchema = z.object({ ok: z.literal(true) });
 export const SessionListResultSchema = z.object({ sessions: z.array(SessionSchema) });
 export const SessionCreateResultSchema = z.object({ session: SessionSchema });
 export const SessionHistoryResultSchema = z.object({ messages: z.array(MessageRecordSchema) });
+/**
+ * 這輪(slash command)新增:`session.getSlashCommands` 的回應。**刻意帶
+ * `observed` 而非只回一個陣列**——理由同 `UsageBadge` 既有的 `usageSeen`/
+ * `contextSeen` 手法(見 `session-store.ts`):「這個 session 還沒收到過任何
+ * 一次 `available-commands` 推播」跟「後端已經回報過、清單就是空的」必須是
+ * UI 分得清楚的兩種狀態,都顯示成空清單會讓使用者以為這個後端不支援任何指令
+ * (即使只是還沒連上、或這一輪根本沒有 skill/自訂 command)。
+ */
+export const SessionGetSlashCommandsResultSchema = z.object({
+  commands: z.array(SlashCommandInfoSchema),
+  observed: z.boolean(),
+});
 export const OkResultSchema = z.object({ ok: z.literal(true) });
 /** M5 Round C:`session.setModel` 的回應——回傳更新後的完整 Session,讓呼叫端
  * 不需要等下一次 "session-updated" 推播就能立即拿到新的 `model` 值。 */

@@ -182,6 +182,33 @@ export const ContextUsageEventSchema = z.object({
 });
 export type ContextUsageEvent = z.infer<typeof ContextUsageEventSchema>;
 
+/**
+ * 這輪(slash command)新增:各 adapter 把自己後端「原生支援的 /指令」清單往上
+ * 送——claude-agent-sdk 的 `Query.supportedCommands()`/`SDKCommandsChangedMessage`、
+ * ACP 的 `available_commands_update` session/update、OpenCode 的 `GET /command`,
+ * 三者皆已查證屬實(不是猜測,見對應 adapter 檔案內的查證註解)。
+ *
+ * 三個來源的原始形狀不同,這裡收斂到最小公倍數:只留 `name`/`description`/
+ * `argumentHint`,捨棄 claude-agent-sdk 的 `aliases`(選單不列別名,使用者仍可
+ * 手動輸入別名,後端照樣認得,只是刻意不在這裡多做一層比對)。
+ *
+ * **REPLACE 語意,不是增量**:每次收到這個事件,消費端(SessionManager/UI)都
+ * 應該用 `commands` 整份覆蓋掉先前存的清單,不要嘗試合併——三個來源的「清單
+ * 有變動」推播(或唯一一次推播)本身都是整份重新給值,見各 adapter 內的呼叫點。
+ */
+export const SlashCommandInfoSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  argumentHint: z.string().optional(),
+});
+export type SlashCommandInfo = z.infer<typeof SlashCommandInfoSchema>;
+
+export const AvailableCommandsEventSchema = z.object({
+  type: z.literal("available-commands"),
+  commands: z.array(SlashCommandInfoSchema),
+});
+export type AvailableCommandsEvent = z.infer<typeof AvailableCommandsEventSchema>;
+
 export const AgentEventSchema = z.discriminatedUnion("type", [
   MessageDeltaEventSchema,
   ToolCallEventSchema,
@@ -193,6 +220,7 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   TerminalDataEventSchema,
   UsageEventSchema,
   ContextUsageEventSchema,
+  AvailableCommandsEventSchema,
 ]);
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 

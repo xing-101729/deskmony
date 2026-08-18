@@ -67,5 +67,9 @@
     "attachUnsupportedTitle": "Este agent no admite entrada de archivos",
     "removeAttachmentAriaLabel": "Quitar archivo adjunto",
     "attachmentAltText": "Imagen adjunta"
+  },
+  "slashCommands": {
+    "menuAriaLabel": "Menú de slash commands",
+    "noMatches": "No hay slash commands coincidentes"
   }
 }

@@ -9,9 +9,10 @@ import type {
   SDKMessage,
   SDKResultMessage,
   SDKUserMessage,
+  SlashCommand,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
 import type { SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
@@ -130,6 +131,11 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // cache_read + cache_creation」反推,但那是推論不是來源給的值,這輪
       // 刻意不做(不猜、不估),如實回報 "unsupported"。
       contextReporting: "unsupported",
+      // 這輪(slash command)新增:vendored、版本鎖定的相依套件,
+      // `Query.supportedCommands()` 存在與否是建置期就確定的事實(已用真實
+      // 憑證實測,見 spawn() 內呼叫點的註解),可靠性等同上面的
+      // usageReporting:"supported"。
+      slashCommands: "supported",
     };
   }
 
@@ -314,6 +320,24 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         detail: err instanceof Error ? err.message : String(err),
       });
     });
+
+    // 這輪(slash command)新增:取得這個 session 目前的 "/" 指令清單(已用
+    // 真實憑證實測,見檔案頂端查證說明:`supportedCommands()` 在送出任何
+    // prompt 之前就能呼叫)。**刻意 fire-and-forget**——這是給 UI 選單用的
+    // 中繼資料,不是對話流程必要的一環,`spawn()` 必須立刻回傳 handle,不能
+    // 卡在等它(比照上面 `void this.consume(internal)` 同樣的 fire-and-forget
+    // 紀律)。失敗只記 log,不影響這個 session 的正常對話(SDK 官方文件沒有
+    // 記載這個 control-request 會失敗的情境,理論上不該發生)。
+    void sdkQuery
+      .supportedCommands()
+      .then((commands) => {
+        outputQueue.push({ type: "available-commands", commands: mapSlashCommands(commands) });
+      })
+      .catch((err: unknown) => {
+        console.error(
+          `[claude-sdk-adapter] ${profile.name} supportedCommands() 失敗(不影響對話,只影響 "/" 選單): ${String(err)}`,
+        );
+      });
 
     return handle;
   }
@@ -689,6 +713,12 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         // (見檔案頂端 §4.1 查證說明)。
         if (message.subtype === "init") {
           internal.backendSessionId = message.session_id;
+        } else if (message.subtype === "commands_changed") {
+          // 這輪(slash command)新增:SDK 官方註解明講 `supportedCommands()`
+          // 只是初始化當下的快照,之後不會自動反映變動——中途唯一能看到清單
+          // 變化的管道就是這則訊息(REPLACE 語意,見 events.ts 的
+          // `AvailableCommandsEventSchema` 註解),整份覆蓋轉發,不是增量。
+          outputQueue.push({ type: "available-commands", commands: mapSlashCommands(message.commands) });
         }
         break;
 
@@ -796,4 +826,22 @@ interface InternalSession {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/**
+ * 這輪(slash command)新增:`SlashCommand{name,description,argumentHint,
+ * aliases?}` → `SlashCommandInfo`。**`description`/`argumentHint` 在 SDK 型別上
+ * 是必填字串,不是 optional**(已讀 sdk.d.ts 確認),但實務上沒有值時給的是
+ * 空字串而非省略(已用真實憑證實測),所以這裡用 `|| undefined` 做 coalescing
+ * ——否則 UI 會顯示一段空白的提示/說明文字,而不是乾脆不顯示。刻意捨棄
+ * `aliases`(例如 `/cost`/`/stats` 都指到 `/usage`):選單只列正式名稱,使用者
+ * 手動輸入別名依然對後端有效,只是選單不會另外收錄,見 events.ts 對應型別的
+ * 註解。
+ */
+function mapSlashCommands(commands: SlashCommand[]): SlashCommandInfo[] {
+  return commands.map((c) => ({
+    name: c.name,
+    description: c.description || undefined,
+    argumentHint: c.argumentHint || undefined,
+  }));
 }

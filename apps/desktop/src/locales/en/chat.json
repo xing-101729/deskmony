@@ -67,5 +67,9 @@
     "attachUnsupportedTitle": "This agent doesn't support file input",
     "removeAttachmentAriaLabel": "Remove attachment",
     "attachmentAltText": "Attached image"
+  },
+  "slashCommands": {
+    "menuAriaLabel": "Slash command menu",
+    "noMatches": "No matching slash commands"
   }
 }

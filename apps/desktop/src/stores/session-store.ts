@@ -26,6 +26,7 @@ import {
   type Session,
   type SessionEventEnvelope,
   type SessionPermissionMode,
+  type SlashCommandInfo,
   type UserDialogRequestEvent,
   type UserDialogResolvedPush,
   type CostGetSummaryResult,
@@ -45,6 +46,7 @@ import {
   resolveCapabilitySupport,
   resolveProviders,
   SessionCreateResultSchema,
+  SessionGetSlashCommandsResultSchema,
   SessionHistoryResultSchema,
   SessionListResultSchema,
   SessionSetEffortResultSchema,
@@ -210,6 +212,17 @@ interface SessionStoreState {
    */
   costSummaryBySession: Record<string, CostGetSummaryResult>;
   /**
+   * 這輪(slash command)新增:每個 session 目前已知的 "/" 指令清單,見
+   * `packages/shared/src/events.ts` 的 `AvailableCommandsEventSchema`。
+   * **雙來源**——與 `costSummaryBySession`(純 pull)不同,這裡同時被
+   * `handleSessionEvent()` 的 push 事件(`"available-commands"`)與下方
+   * `fetchSlashCommands()` 的 pull 更新,兩者都是整份覆蓋(REPLACE 語意)。
+   * `observed` 比照 `SessionUsage.usageSeen` 的既有理由——「還沒收到過任何
+   * 推播/查詢結果」跟「後端確認清單就是空的」是 UI 要分得清楚的兩種狀態,見
+   * 下方 `selectSlashCommandsReporting()`。純 ephemeral,不落地。
+   */
+  slashCommandsBySession: Record<string, { commands: SlashCommandInfo[]; observed: boolean }>;
+  /**
    * S7(auto-mode-and-yolo)L4 §5.3:握手能力集——`connect()` 呼叫一次
    * `gateway.capabilities`(獨立於 `auth`,見 lib/gateway-client.ts 的
    * `configure()`/`connect()`:未設定 `authToken` 時完全跳過 `auth` 請求,故
@@ -362,6 +375,18 @@ interface SessionStoreState {
    * 即可,不需要長駐計時器輪詢。失敗時安靜保留舊值,不阻塞畫面。
    */
   fetchCostSummary: (sessionId: string) => Promise<void>;
+  /**
+   * 這輪(slash command)新增:拉取一個 session 目前已知的 "/" 指令清單
+   * (`session.getSlashCommands`)。補的是純 push 的缺口——三個後端的指令
+   * 清單推播都只在 spawn 前後(+ ACP/claude-agent-sdk 偶爾再推)發生一次,
+   * 若 client 是在那之後才連上(app 重啟、開第二個視窗),單靠
+   * `handleSessionEvent()` 永遠等不到,叫出 "/" 選單只會是空的——呼叫端
+   * (ChatView)在開啟/切換到一個 session 時呼叫一次即可,之後仍靠既有的
+   * push 事件即時更新(比照 `fetchCostSummary()` 的呼叫時機,但理由不同:
+   * 那裡是「輪詢,因為沒有對應 push channel」,這裡是「pull 補一次初始值,
+   * push channel 本來就存在」)。
+   */
+  fetchSlashCommands: (sessionId: string) => Promise<void>;
   /**
    * M6 Round A:把安全子集的欄位 patch 寫進 `<DESKMONY_HOME>/config.json`
    * (`config.setFile`)。**不會**修改 `daemon.port`/`daemon.bindHost`——那兩個
@@ -538,6 +563,17 @@ export function selectContextReporting(
   return resolveCapabilitySupport(capabilities?.contextReporting, Boolean(usage?.contextSeen));
 }
 
+/** 這輪(slash command)新增:比照上面兩個 selectXxxReporting()——把「靜態宣告」
+ *  (`capabilities.slashCommands`)與「這條 session 實際觀察到的事實」
+ *  (`slashCommandsBySession[id]?.observed`)收斂成一個可直接拿來決定 UI 顯示
+ *  與否的值。 */
+export function selectSlashCommandsReporting(
+  capabilities: AdapterCapabilities | undefined,
+  entry: { commands: SlashCommandInfo[]; observed: boolean } | undefined,
+): CapabilitySupport {
+  return resolveCapabilitySupport(capabilities?.slashCommands, Boolean(entry?.observed));
+}
+
 function upsertToolItem(
   items: ChatItem[],
   toolCallId: string,
@@ -654,6 +690,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
   providerPrefs: {},
   effectiveConfig: null,
   costSummaryBySession: {},
+  slashCommandsBySession: {},
   gatewayCapabilities: { canToggleAuto: false, canEnableYolo: false, canEditPolicy: false, canManageProfiles: false },
 
   connect: () => {
@@ -1003,6 +1040,17 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     }
   },
 
+  fetchSlashCommands: async (sessionId) => {
+    try {
+      const raw = await client.call("session.getSlashCommands", { sessionId });
+      const result = SessionGetSlashCommandsResultSchema.parse(raw);
+      set((state) => ({ slashCommandsBySession: { ...state.slashCommandsBySession, [sessionId]: result } }));
+    } catch {
+      // 尚未連線/RPC 失敗:保留舊值,不阻塞畫面(同 fetchCapabilities/
+      // fetchCostSummary 既有慣例)——之後仍有機會靠 push 事件補上。
+    }
+  },
+
   setConfigFile: async (patch) => {
     const raw = await client.call("config.setFile", patch);
     const parsed = ConfigSetFileResultSchema.parse(raw);
@@ -1152,6 +1200,19 @@ function handleSessionEvent(
           contextSize: event.size,
           contextSeen: true,
         },
+      },
+    }));
+    return;
+  }
+  // 這輪(slash command)新增:比照上面 usage/context-usage 兩種事件的既有
+  // 寫法——不進 itemsBySession 的聊天時間軸(這不是一則對話訊息),整份覆蓋
+  // 語意(REPLACE,不是累加,見 events.ts 的 AvailableCommandsEventSchema
+  // 註解),提前 return。
+  if (event.type === "available-commands") {
+    set((state) => ({
+      slashCommandsBySession: {
+        ...state.slashCommandsBySession,
+        [sessionId]: { commands: event.commands, observed: true },
       },
     }));
     return;

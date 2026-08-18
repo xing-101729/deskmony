@@ -25,6 +25,7 @@ import {
   type SessionEventEnvelope,
   type SessionPermissionMode,
   type SessionStatus,
+  type SlashCommandInfo,
   type SpawnChildSessionInput,
   type SubagentChildSummary,
   type TeamBusPort,
@@ -199,6 +200,19 @@ interface RuntimeState {
   /** S12(session-subagent):若這個 session 是 child subagent,記錄 parent
    *  session id——child session completed 時用來向上回傳結果。 */
   parentSessionId?: string;
+  /**
+   * 這輪(slash command)新增:這個 session 目前已知的 "/" 指令清單快取(見
+   * `consumeEvents()` 的 `"available-commands"` case、`getSlashCommands()`)。
+   * 純記憶體快取,不寫 DB——比照 `backendSessionId`/`streamingText` 的既有
+   * 規模,core 行程重啟就重新來過。`undefined` 代表這個 session 至今**還沒
+   * 收到過**任何一次 `available-commands` 事件(與下面 `slashCommandsObserved`
+   * 搭配使用,理由見 `getSlashCommands()`)。
+   */
+  slashCommands?: SlashCommandInfo[];
+  /** 見上方 `slashCommands` 註解——`true` 代表至少收到過一次推播(即使清單是
+   *  空的),用來讓 `session.getSlashCommands` 的回應區分「還不知道」與「已
+   *  確認是空清單」,對齊既有 usage/context-usage 事件的 observed 慣例。 */
+  slashCommandsObserved: boolean;
 }
 
 /**
@@ -482,6 +496,7 @@ export class SessionManager extends EventEmitter {
       agentProfileId: profile.id,
       workingDir: input.workingDir,
       parentSessionId: input.parentSessionId,
+      slashCommandsObserved: false,
     });
     if (member) {
       this.memberSessions.set(member.id, session.id);
@@ -570,6 +585,26 @@ export class SessionManager extends EventEmitter {
    * `adapter.capabilities` 方法使用,UI 依此決定聊天視圖或終端視圖)。 */
   getCapabilities(software: AgentSoftware): AdapterCapabilities {
     return this.adapters.get(software).capabilities();
+  }
+
+  /**
+   * 這輪(slash command)新增:查詢一個 session 目前已知的 "/" 指令清單(見
+   * `RuntimeState.slashCommands`/`consumeEvents()` 的 `"available-commands"`
+   * case)。供 gateway 的 `session.getSlashCommands` 方法使用——這是純 push
+   * 推播之外補的 pull 入口,理由見 `packages/shared/src/gateway.ts` 的
+   * `session.getSlashCommands` 註解(reconnect/多視窗會錯過 push 的缺口)。
+   *
+   * **不要求 session 目前是「執行中」的**——與 `setSessionModel()` 等「必須
+   * 操作活著的 adapter」的方法不同,這裡純粹讀取一份記憶體快取,session 還沒
+   * spawn、已經 dispose,或這個 adapter 從未推播過,都只是回傳
+   * `{commands: [], observed: false}`,不視為錯誤——語意上與「session 執行中
+   * 但還沒收到推播」完全相同(對呼叫端 UI 而言都是「目前不知道有什麼指令可
+   * 用」,不需要為兩種情況分別處理)。
+   */
+  getSlashCommands(sessionId: string): { commands: SlashCommandInfo[]; observed: boolean } {
+    const runtime = this.runtime.get(sessionId);
+    if (!runtime) return { commands: [], observed: false };
+    return { commands: runtime.slashCommands ?? [], observed: runtime.slashCommandsObserved };
   }
 
   /**
@@ -1116,6 +1151,7 @@ export class SessionManager extends EventEmitter {
       agentProfileId: profile.id,
       workingDir: session.workingDir,
       backendSessionId: session.backendSessionId,
+      slashCommandsObserved: false,
     });
     this.permissionState.set(sessionId, { mode: profile.permissionLevel });
 
@@ -1538,6 +1574,19 @@ export class SessionManager extends EventEmitter {
           });
           break;
         }
+        /**
+         * 這輪(slash command)新增:快取這個 session 目前的 "/" 指令清單
+         * (`session.getSlashCommands` pull 方法讀的就是這裡,見該方法註解)。
+         * **REPLACE 語意**——整份覆蓋 `runtime.slashCommands`,不累加,對齊
+         * 三個來源adapter「清單有變動就整份重推」的既有語意(見 events.ts 的
+         * `AvailableCommandsEventSchema` 註解)。這個事件不需要持久化、不影響
+         * CostGovernor/TurnLimiter/session 狀態機,純粹是記憶體快取更新。
+         */
+        case "available-commands": {
+          runtime.slashCommands = event.commands;
+          runtime.slashCommandsObserved = true;
+          break;
+        }
       }
     }
   }
@@ -1641,6 +1690,7 @@ export class SessionManager extends EventEmitter {
       teamMemberId: member.id,
       agentProfileId: profile.id,
       workingDir: session.workingDir,
+      slashCommandsObserved: false,
     });
     // memberSessions/sessionMembers 的 key/value 不變(同一 member ↔ 同一
     // sessionId),不需要更新。

@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
-import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, PromptInput, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
@@ -43,10 +43,13 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
  * 已知限制 / TODO(M2 Round A 範圍):
  *  - 只處理 `ContentBlock.type === "text"`,image/audio/resource(_link)
  *    尚未轉發。
- *  - `session/update` 的 `plan`/`plan_update`/`available_commands_update`/
- *    `current_mode_update`/`config_option_update`/`session_info_update`/
- *    `usage_update`/`agent_thought_chunk`/`user_message_chunk` 尚未有對應的
- *    AgentEvent 型別(見 packages/shared/src/events.ts),先略過不轉發。
+ *  - `session/update` 的 `plan`/`plan_update`/`current_mode_update`/
+ *    `config_option_update`/`session_info_update`/`agent_thought_chunk`/
+ *    `user_message_chunk` 尚未有對應的 AgentEvent 型別(見
+ *    packages/shared/src/events.ts),先略過不轉發。`usage_update` 已在 S3a
+ *    (usage-metering)接上(見下方 `handleSessionUpdate()`),
+ *    `available_commands_update` 已在這輪(slash command)接上,這裡的清單
+ *    同步移除,避免文件與程式碼漂移。
  *  - `diff` 能力回報為 false:ACP 的 `ToolCallContent` 雖然有 `type: "diff"`,
  *    但這裡尚未解析轉發,如實回報避免 UI 誤判。
  *  - `fs.readTextFile`/`fs.writeTextFile`/`terminal.*` 皆回報不支援
@@ -82,6 +85,11 @@ export class AcpAdapter implements AgentAdapter {
       // UI 不得對使用者宣稱有花費可看。
       usageReporting: "unknown",
       contextReporting: "unknown",
+      // 這輪(slash command)新增:同上面 usageReporting/contextReporting 的
+      // 理由——要連上線、看實際 spawn 出來的是哪個 ACP agent 才知道會不會送
+      // `available_commands_update`(已查證 `@agentclientprotocol/sdk@1.2.1`
+      // 型別上這是一個 optional 的 session/update 變體,agent 不一定會送)。
+      slashCommands: "unknown",
     };
   }
 
@@ -417,6 +425,16 @@ export class AcpAdapter implements AgentAdapter {
         }
         break;
       }
+      /**
+       * 這輪(slash command)新增:agent 主動告知/更新可用的 "/" 指令清單
+       * (已查證 `@agentclientprotocol/sdk@1.2.1` 的 `AvailableCommandsUpdate =
+       * { availableCommands: Array<AvailableCommand> }`)。**REPLACE 語意**
+       * ——`availableCommands` 每次都是完整清單,不是增量,原樣整份轉發即可,
+       * 見 events.ts 的 `AvailableCommandsEventSchema` 註解。
+       */
+      case "available_commands_update":
+        internal.outputQueue.push({ type: "available-commands", commands: mapAvailableCommands(update.availableCommands) });
+        break;
       default:
         // user_message_chunk / agent_thought_chunk / plan* / 其餘擴充型別:
         // M2 Round A 的 AgentEvent 尚未涵蓋,略過不轉發(見上方 class 註解的 TODO)。
@@ -520,6 +538,20 @@ function buildPermissionResponse(
 ): acp.RequestPermissionResponse {
   const optionId = pickPermissionOptionId(options, decision);
   return optionId ? { outcome: { outcome: "selected", optionId } } : { outcome: { outcome: "cancelled" } };
+}
+
+/**
+ * 這輪(slash command)新增:`AvailableCommand{name,description,input?:{hint}}`
+ * → `SlashCommandInfo`。**`description` 在 ACP 型別上是必填字串,不是
+ * optional**(已讀 `@agentclientprotocol/sdk@1.2.1` 的型別宣告確認),但可能是
+ * 空字串,故用 `|| undefined` coalescing,避免 UI 顯示一段空白說明文字。
+ */
+function mapAvailableCommands(commands: acp.AvailableCommand[]): SlashCommandInfo[] {
+  return commands.map((c) => ({
+    name: c.name,
+    description: c.description || undefined,
+    argumentHint: c.input?.hint || undefined,
+  }));
 }
 
 /**

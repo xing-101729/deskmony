@@ -88,5 +88,19 @@ export const AdapterCapabilitiesSchema = z.object({
    * 使用率 gauge,見 `ContextUsageEventSchema`)。同樣是三態。
    */
   contextReporting: CapabilitySupportSchema,
+  /**
+   * 這輪(slash command)新增:是否會回報 `available-commands` 事件(見
+   * `events.ts` 的 `AvailableCommandsEventSchema`)。同樣是三態,理由與
+   * `usageReporting`/`contextReporting` 一致——`claude-agent-sdk` 是 vendored、
+   * 版本鎖定的相依套件,`supportedCommands()` 存在與否是建置期就確定的事實,
+   * 故為 `"supported"`;`acp` 要看實際 spawn 出來的是哪個 ACP agent 才知道會不
+   * 會送 `available_commands_update`,故為 `"unknown"`;`opencode` 是使用者自帶、
+   * 版本不受 Deskmony 控制的外部 CLI,`GET /command` 這個端點存不存在是執行期
+   * 才能確認的事實,同樣為 `"unknown"`(即使本機驗證版本確實有這支端點,也不
+   * 能保證使用者實際指到的版本一定有——"supported" 該保留給 adapter 自己
+   * 保證做得到的情況,見上方本檔案開頭的三態定義);`pty` 是無結構化的終端
+   * 直通,連「指令清單」這個概念本身都不存在,為 `"unsupported"`。
+   */
+  slashCommands: CapabilitySupportSchema,
 });
 export type AdapterCapabilities = z.infer<typeof AdapterCapabilitiesSchema>;

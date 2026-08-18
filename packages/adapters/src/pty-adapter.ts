@@ -83,6 +83,10 @@ export class GenericPtyAdapter implements AgentAdapter {
       // 兩者一律 "unsupported"(三態裡最確定的那一態,永遠不會被觀察推翻)。
       usageReporting: "unsupported",
       contextReporting: "unsupported",
+      // 這輪(slash command)新增:同上——pty 是無結構化的終端直通,連「指令
+      // 清單」這個概念本身都不存在,這是**結構上**的不可能。若底層 CLI 自己
+      // 有互動式 "/" 選單,終端視圖裡直接打字就已經能用,不需要這裡額外支援。
+      slashCommands: "unsupported",
     };
   }
 

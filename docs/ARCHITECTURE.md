@@ -52,7 +52,7 @@ flowchart TB
 
     subgraph CORE["apps/core — headless orchestration server(Node.js)"]
         direction TB
-        GW["gateway/ WsGateway — 58 個 RPC + 10 個 push channel"]
+        GW["gateway/ WsGateway — 59 個 RPC + 10 個 push channel"]
         subgraph DOMAIN["領域模組"]
             direction LR
             Sess["session/"]
@@ -338,19 +338,19 @@ CodexAdapter**,Codex 走 PTY:
 | `aider` | `pty` | |
 | `custom-pty` | `pty` | 手動輸入 command |
 
-### 6.3 能力探測 — 兩個布林 + 兩個三態
+### 6.3 能力探測 — 兩個布林 + 三個三態
 
 ```ts
 { streaming, toolEvents, permissionRequests, diff, interrupt, terminal: boolean,
-  usageReporting, contextReporting: "supported" | "unsupported" | "unknown" }
+  usageReporting, contextReporting, slashCommands: "supported" | "unsupported" | "unknown" }
 ```
 
-| adapter | streaming | toolEvents | permissionRequests | terminal | usageReporting |
-|---|---|---|---|---|---|
-| claude-agent-sdk | ✅ | ✅ | ✅ | ❌ | `supported` |
-| acp | ✅ | ✅ | ✅ | ❌ | **`unknown`** |
-| opencode | ✅ | ✅ | ✅ | ❌ | `unsupported` |
-| pty | ❌ | ❌ | **❌** | ✅ | `unsupported` |
+| adapter | streaming | toolEvents | permissionRequests | terminal | usageReporting | slashCommands |
+|---|---|---|---|---|---|---|
+| claude-agent-sdk | ✅ | ✅ | ✅ | ❌ | `supported` | `supported` |
+| acp | ✅ | ✅ | ✅ | ❌ | **`unknown`** | `unknown` |
+| opencode | ✅ | ✅ | ✅ | ❌ | `unsupported` | `unknown` |
+| pty | ❌ | ❌ | **❌** | ✅ | `unsupported` | `unsupported` |
 
 - **三態存在的理由**:`AcpAdapter` 會正確轉發 `usage_update`,但**送不送由被
   spawn 的那個 agent 決定**——Gemini CLI 可能會送,Claude Code 經 bridge 實測
@@ -362,11 +362,16 @@ CodexAdapter**,Codex 走 PTY:
   一律唯讀、不給無人值守的自主權(DECISIONS C7)。刻意**不做** shell 指令攔截
   ——`bash -c` / `$()` / base64 幾秒就能繞過,那是 security theater。
 
-### 6.4 AgentEvent(10 種)
+### 6.4 AgentEvent(11 種)
 
 `message-delta` / `tool-call` / `tool-result` / `permission-request` /
 `user-dialog-request` / `completed` / `error` / `terminal-data` / `usage` /
-`context-usage`。
+`context-usage` / `available-commands`。
+
+`available-commands`(這輪 slash command 新增):adapter 回報後端原生支援的
+"/" 指令清單(claude-agent-sdk 的 `supportedCommands()`、ACP 的
+`available_commands_update`、OpenCode 的 `GET /command`),**整份取代**語意,
+不是增量。
 
 `usage`(累計計數器,可 diff)與 `context-usage`(瞬時計量表,compaction 後會
 變小)**刻意拆成兩個型別**——塞進同一個事件,會讓消費端「新值 < 舊值 = 連線
@@ -376,13 +381,13 @@ CodexAdapter**,Codex 走 PTY:
 
 ## 7. Gateway 協議
 
-`ws://` 上的 request/response + server push。**58 個 RPC 方法**,分組:
+`ws://` 上的 request/response + server push。**59 個 RPC 方法**,分組:
 
 | 分組 | 方法 |
 |---|---|
 | 連線 | `auth`、`gateway.capabilities` |
 | Profile | `profile.list` / `.create` / `.delete` 🔒 |
-| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode` 🔒 / `.spawnChild` / `.terminalInput` / `.resizeTerminal` |
+| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode` 🔒 / `.spawnChild` / `.terminalInput` / `.resizeTerminal` |
 | 權限 | `permission.resolve`、`dialog.resolve` |
 | Team | `team.create` / `.list` / `.addMember` / `.removeMember` / `.messages` / `.teammates` |
 | 訊息 | `message.send` / `.sendMessage` / `.broadcast` / `.reportStatus` / `.requestReview` / `.getContextBudget` |
