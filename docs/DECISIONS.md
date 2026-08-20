@@ -40,7 +40,7 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 | # | 決策 | 說明 |
 |---|---|---|
 | B1 | **核心 set = {Claude Code, Codex, OpenCode}** | **放棄 Antigravity**(原生 `--acp` 未出貨,不依賴第三方橋)。PTY 為任意其他 CLI 的保底。 |
-| B2 | **ACP 收斂** | Claude Code + Codex 走 ACP(Codex 本就 ACP-native、無需 bespoke codex adapter);OpenCode 維持 bespoke HTTP/SSE;PTY 保底。ACP `diff:false` 的缺口用「從 git / 檔案寫入反推 diff」補。 |
+| B2 | **ACP 收斂** | Claude Code + Codex 走 ACP(Codex CLI 本身**不**原生講 ACP,經 `@agentclientprotocol/codex-acp` 橋接套件對接,但仍**無需 bespoke codex adapter**——橋接套件走既有的通用 `AcpAdapter`);OpenCode 維持 bespoke HTTP/SSE;PTY 保底。ACP `diff:false` 的缺口已補上(`capabilities().diff` 現為 `true`):`AcpAdapter` 內建兩條路徑——路徑 A 優先讀取原生 `ToolCallContent` 的 `type:"diff"` 區塊;沒有時走路徑 B,在 `tool_call`(kind==="edit")建立時、`tool_call_update` 完成時各**直接讀一次目標檔案內容**合成 before/after(不是呼叫外部 `git diff` 指令),交給 `diff` 套件的 `structuredPatch()` 產生 hunk,重用既有的 `ToolResultEvent.structuredResult` → `DiffHunkView` 顯示管線,無需新的事件型別或 UI 元件。細節見 `packages/adapters/src/acp-adapter.ts`。 |
 | B3 | **放棄「ACP 省工」幻覺** | adapter 本就逐家客製,ACP 只是剛好覆蓋兩家的其中一個 adapter,不是救世主。廣度是 feature,不是 moat;護城河在協作層。 |
 | B4 | **能力分層 = 安全分層** | 「相容 tier」(PTY)不只少 diff,更**結構上無法執行權限政策**。見 C6。 |
 
@@ -108,7 +108,7 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 > 現行的 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 已重寫,這些更正全部已納入。
 
 - ❌ **「Event Sourcing 可回放重建」** → 現實是當前狀態 CRUD(9 張表,無 event log),而且 event sourcing 救不了崩潰復原(D1)。
-- ❌ **文件列的 `CodexAdapter`** → **不存在**;Codex 走 ACP(B2)。
+- ❌ **文件列的 `CodexAdapter`** → **不存在**;Codex 走 ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,B2)。
 - ❌ **「ACP-first 省下逐家客製」** → 你最肥的 adapter(OpenCode 36KB)是全客製(B3)。
 - ⚠️ **PermissionGateway 被畫成核心元件** → 實際是 57 行 timeout-and-forward 空殼,政策引擎還沒寫(淨新增 #1)。
 - ⚠️ **adapter set 含 Gemini CLI / Antigravity** → 核心 set 收斂為 {Claude Code, Codex, OpenCode},放棄 Antigravity(B1)。

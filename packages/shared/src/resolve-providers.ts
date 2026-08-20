@@ -110,7 +110,12 @@ export function resolveProviders(
       enabled: pref?.enabled ?? true,
       software: entry.software,
       command,
-      defaultArgs: entry.defaultArgs,
+      // 這輪(Codex ACP 橋接):偵測階段的 `args`(見 detect.ts 的
+      // AgentDetectionEntrySchema.args 註解)優先於目錄靜態的 defaultArgs——
+      // codex-acp 的進入點路徑要看橋接套件實際裝到哪裡才知道,目錄寫不出來。
+      // 其餘 provider 的偵測結果沒有 `args` 欄位(`detected?.args` 為
+      // undefined),`??` 落回 entry.defaultArgs,行為 100% 不變。
+      defaultArgs: detected?.args ?? entry.defaultArgs,
       installed,
       detectedVersion: detected?.version,
       detectKey: entry.detectKey,

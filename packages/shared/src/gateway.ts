@@ -23,6 +23,7 @@ import {
   TeamWithMembersSchema,
 } from "./team.js";
 import { TeammateInfoSchema } from "./team-bus.js";
+import { SubagentChildSummarySchema, SubagentProfileSummarySchema } from "./subagent.js";
 import {
   AcceptanceResultSchema,
   AssignTaskInputSchema,
@@ -90,6 +91,16 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   z.object({ ...baseRequest, method: z.literal("profile.list"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("profile.create"), params: CreateAgentProfileInputSchema }),
   z.object({ ...baseRequest, method: z.literal("profile.delete"), params: z.object({ id: z.string() }) }),
+  /**
+   * Phase 2(ACP scoped MCP bridge token)新增:`list_profiles` MCP 工具
+   * (packages/adapters/src/subagent-mcp.ts / mcp-bridge-server.ts)對應的
+   * gateway 入口——**刻意不是**直接放行 `profile.list`:那個方法回傳完整
+   * `AgentProfile`(含 `env`/`mcpConfig`/`systemPrompt` 等可能夾帶密鑰或指令的
+   * 欄位,見 agent-profile.ts 對 `env` 欄位的說明),不該進到任何 agent 的對話
+   * context。這裡回傳的欄位與 `SubagentPort.listProfiles()` 的既有 in-process
+   * 實作(apps/core/src/index.ts)完全相同的最小揭露子集。
+   */
+  z.object({ ...baseRequest, method: z.literal("profile.listForSubagent"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("session.list"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("session.create"), params: CreateSessionInputSchema }),
   z.object({
@@ -226,6 +237,54 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     ...baseRequest,
     method: z.literal("session.spawnChild"),
     params: SpawnChildSessionInputSchema,
+  }),
+  /**
+   * Phase 2(ACP scoped MCP bridge token)新增:`spawn_subagent` MCP 工具
+   * (packages/adapters/src/subagent-mcp.ts / mcp-bridge-server.ts)對應的
+   * gateway 入口。**刻意不是**直接放行 `session.spawnChild`(上面那個)——
+   * 那個方法的 `agentProfileId` 是必填(`SpawnChildSessionInputSchema`),而
+   * `spawn_subagent` 工具允許省略(省略時沿用父 session 自己的 profile,見
+   * `SubagentPort.spawnChild()` 的介面註解、apps/core/src/session/
+   * session-manager.ts 的 `spawnChildFromTool()`)——兩者语意不同,分開成獨立
+   * 方法比修改既有 `session.spawnChild` 的必填規則更精確,不影響既有呼叫端。
+   * `agentProfileId` 省略時,handler 呼叫 `SessionManager.spawnChildFromTool()`
+   * (而非 `spawnChild()`)解析預設值。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.spawnChildForSubagent"),
+    params: z.object({
+      parentSessionId: z.string(),
+      prompt: z.string().min(1),
+      title: z.string().optional(),
+      agentProfileId: z.string().optional(),
+    }),
+  }),
+  /**
+   * Phase 2(ACP scoped MCP bridge token)新增:`send_to_subagent` MCP 工具對應
+   * 的 gateway 入口,見 `SubagentPort.sendToChild()` 的介面註解、
+   * apps/core/src/session/session-manager.ts 的 `sendToChildFromTool()`
+   * (授權檢查——只能對呼叫端自己的直接子 session 送訊息——完整邏輯都在那裡,
+   * 這裡只是薄薄一層委派)。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.sendToChild"),
+    params: z.object({
+      parentSessionId: z.string(),
+      childSessionId: z.string(),
+      message: z.string().min(1),
+    }),
+  }),
+  /**
+   * Phase 2(ACP scoped MCP bridge token)新增:`list_subagents` MCP 工具對應
+   * 的 gateway 入口,見 `SubagentPort.listChildren()` 的介面註解、
+   * apps/core/src/session/session-manager.ts 的 `listChildrenFromTool()`。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.listChildren"),
+    params: z.object({ parentSessionId: z.string() }),
   }),
   z.object({
     ...baseRequest,
@@ -683,6 +742,9 @@ export const AuthResultSchema = z.object({ ok: z.literal(true), capabilities: Ga
 export const ProfileListResultSchema = z.object({ profiles: z.array(AgentProfileSchema) });
 export const ProfileCreateResultSchema = z.object({ profile: AgentProfileSchema });
 export const ProfileDeleteResultSchema = z.object({ ok: z.literal(true) });
+/** Phase 2:`profile.listForSubagent` 的回應——見 `ClientRequestSchema` 對應
+ *  case 的完整說明(最小揭露子集,不含 env/mcpConfig/systemPrompt)。 */
+export const ProfileListForSubagentResultSchema = z.object({ profiles: z.array(SubagentProfileSummarySchema) });
 export const SessionListResultSchema = z.object({ sessions: z.array(SessionSchema) });
 export const SessionCreateResultSchema = z.object({ session: SessionSchema });
 export const SessionHistoryResultSchema = z.object({ messages: z.array(MessageRecordSchema) });
@@ -868,6 +930,22 @@ export { SessionEventEnvelopeSchema };
  * Session 物件。
  */
 export const SpawnChildSessionResultSchema = z.object({ session: SessionSchema });
+
+/**
+ * Phase 2(ACP scoped MCP bridge token):`session.spawnChildForSubagent` 的
+ * 回應——**刻意只回傳 `childSessionId`**(不是整個 `Session` 物件,不同於上面
+ * `session.spawnChild` 的 `SpawnChildSessionResultSchema`)——比照
+ * `SubagentPort.spawnChild()` 的既有回傳型別
+ * `Promise<{ childSessionId: string }>`,`mcp-bridge-server.ts` 的
+ * `spawn_subagent` 工具 handler 只需要這個 id 就能組出回覆給 agent 的文字。
+ */
+export const SessionSpawnChildForSubagentResultSchema = z.object({ childSessionId: z.string() });
+/** Phase 2:`session.sendToChild` 的回應——薄薄一層委派給
+ *  `SessionManager.sendToChildFromTool()`(回傳 `Promise<void>`),無額外資料。 */
+export const SessionSendToChildResultSchema = z.object({ ok: z.literal(true) });
+/** Phase 2:`session.listChildren` 的回應,見
+ *  `SubagentPort.listChildren()`/`SessionManager.listChildrenFromTool()`。 */
+export const SessionListChildrenResultSchema = z.object({ children: z.array(SubagentChildSummarySchema) });
 
 /**
  * S12(session-subagent):"child-result" push 的 payload——child session 完成

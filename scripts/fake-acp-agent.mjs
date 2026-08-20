@@ -75,6 +75,37 @@
  *     coalescing 處理),再回一句簡短訊息並以 end_turn 結束——用來在沒有真實
  *     ACP agent 的情況下,決定性地驗證 AcpAdapter 對 available_commands_update
  *     的事件轉換。
+ *   - 若 prompt 文字以 DIFF_CONTENT_PREFIX("ACP_DIFF_CONTENT ")開頭,其後接
+ *     一段 JSON `{"path": string, "oldText"?: string, "newText": string}`
+ *     (Codex ACP 橋接切換 Phase 3「diff 顯示」路徑 A 的 e2e 用,見
+ *     scripts/e2e-gateway.mjs):送出 `tool_call`(kind: "edit",
+ *     **刻意不帶 `locations`**,好讓這個情境只可能命中路徑 A、不可能誤觸路徑
+ *     B 的檔案快照 fallback,兩條路徑的測試訊號才不會混在一起),再送
+ *     `tool_call_update`(status: "completed",`content: [{type:"diff", path,
+ *     oldText, newText}]`)——不實際寫入任何檔案(純粹測試
+ *     session/update → AgentEvent 的轉換邏輯,見
+ *     packages/adapters/src/acp-adapter.ts 的 `findDiffBlock()`/
+ *     `buildDiffStructuredResult()`),用來在沒有真實 ACP agent 的情況下,
+ *     決定性地驗證 AcpAdapter 對原生 diff 內容區塊的重建結果。
+ *   - 若 prompt 文字以 CALL_BRIDGE_TOOL_PREFIX("ACP_CALL_BRIDGE_TOOL ")開頭,
+ *     其後接一段 JSON `{"tool": string, "args": object}`(Phase 2 scoped MCP
+ *     bridge token 的 e2e 用,見 scripts/e2e-gateway.mjs):**真的**把
+ *     `session/new` 請求裡收到的 `mcpServers[0]`(`AcpAdapter.spawn()` 透過
+ *     `SessionBuilder.withMcpServer()` 掛上的 mcp-bridge-server.ts 設定,見
+ *     `newSession()` 如何把它存進 `this.sessions`)當成一個 `StdioServerParameters`
+ *     spawn 成真正的子行程,用 `@modelcontextprotocol/sdk` 的 `Client` +
+ *     `StdioClientTransport` 連上去、呼叫 `tool` 這個工具、把回傳的
+ *     `CallToolResult` 轉成一則 `agent_message_chunk`
+ *     (`"BRIDGE_TOOL_RESULT:" + JSON.stringify(result)`)送回去,再關閉這個
+ *     client。這是**決定性**的(完全由這支腳本的程式碼決定要不要呼叫、呼叫
+ *     哪個工具,不依賴任何真實模型的自由選擇),但走的是完整的真實管線:
+ *     AcpAdapter 核發的 scoped token → 真的透過 WS 打回 gateway → 真的觸發
+ *     TeamBusPort/SubagentPort 對應的方法——見
+ *     packages/adapters/src/mcp-bridge-server.ts 的完整安全/協定說明。
+ *     `mcpServers` 陣列為空(這個 session 沒有掛任何 MCP server,例如沒有
+ *     team/subagentPort 的一般 ACP session)時,回覆一則固定的錯誤文字
+ *     `"BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured"`,不嘗試 spawn
+ *     任何東西。
  */
 
 import * as acp from "@agentclientprotocol/sdk";
@@ -83,6 +114,8 @@ import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 export const FAKE_ACP_REPLY_CHUNKS = ["Hello", " from", " fake ACP agent"];
 export const WRITE_FILE_PREFIX = "ACP_WRITE_FILE ";
@@ -94,6 +127,21 @@ export const MANY_TOOL_CALLS_PREFIX = "ACP_MANY_TOOL_CALLS ";
 export const SLEEP_TURN_PREFIX = "ACP_SLEEP_TURN ";
 /** 這輪(slash command)e2e 用,見檔頭註解。 */
 export const AVAILABLE_COMMANDS_PREFIX = "ACP_AVAILABLE_COMMANDS ";
+/** Codex ACP 橋接切換 Phase 3(diff 顯示)路徑 A e2e 用,見檔頭註解。 */
+export const DIFF_CONTENT_PREFIX = "ACP_DIFF_CONTENT ";
+/** Phase 2(ACP scoped MCP bridge token)e2e 用,見檔頭註解。 */
+export const CALL_BRIDGE_TOOL_PREFIX = "ACP_CALL_BRIDGE_TOOL ";
+/**
+ * Phase 2 e2e 用(不接受任何參數,純字面比對):把這個 session 於
+ * `session/new` 收到的完整 `mcpServers` 陣列(含 `AcpAdapter.spawn()` 核發的
+ * scoped token 本身,見 `newSession()`)原樣 JSON 化回顯。給
+ * scripts/e2e-gateway.mjs 用來取出**真實核發**的 token/gatewayUrl,直接用
+ * `GatewayClient` 對 gateway 做低階的白名單/綁定範圍/過期/撤銷決定性測試
+ * (不透過 MCP 協議本身走一輪——那部分由 `CALL_BRIDGE_TOOL_PREFIX` 涵蓋),
+ * 兩者互補,合起來涵蓋「token 核發的內容正確」與「token 真的能驅動完整
+ * MCP 管線」兩個不同的斷言面向。
+ */
+export const REPORT_MCP_SERVERS_PREFIX = "ACP_REPORT_MCP_SERVERS";
 /** 建構出一段「延遲 delayMs 毫秒後把整段 prompt 文字回顯」的標記文字。 */
 export function delayEchoMarker(delayMs) {
   return `[[E2E_DELAY_ECHO:${delayMs}]]`;
@@ -113,9 +161,15 @@ class FakeAcpAgent {
     };
   }
 
-  async newSession() {
+  async newSession(params) {
     const sessionId = randomUUID();
-    this.sessions.set(sessionId, { abort: null });
+    // Phase 2(ACP scoped MCP bridge token)e2e 用:把這次 `session/new` 請求
+    // 帶的 `mcpServers`(AcpAdapter.spawn() 透過 `SessionBuilder.
+    // withMcpServer()` 掛上的設定,見檔頭註解)存起來,供
+    // `handleCallBridgeTool()` 之後真的拿去 spawn 成子行程。沒有掛任何
+    // server 時(這個 session 沒有 team/subagentPort)是空陣列,不是
+    // undefined(見 NewSessionRequest.mcpServers 的型別——必填欄位)。
+    this.sessions.set(sessionId, { abort: null, mcpServers: params?.mcpServers ?? [] });
     return { sessionId };
   }
 
@@ -154,6 +208,12 @@ class FakeAcpAgent {
         await this.handleSleepTurn(params.sessionId, text.slice(SLEEP_TURN_PREFIX.length), abort, cx);
       } else if (text.startsWith(AVAILABLE_COMMANDS_PREFIX)) {
         await this.handleAvailableCommands(params.sessionId, text.slice(AVAILABLE_COMMANDS_PREFIX.length), cx);
+      } else if (text.startsWith(DIFF_CONTENT_PREFIX)) {
+        await this.handleDiffContent(params.sessionId, text.slice(DIFF_CONTENT_PREFIX.length), cx);
+      } else if (text.startsWith(CALL_BRIDGE_TOOL_PREFIX)) {
+        await this.handleCallBridgeTool(params.sessionId, text.slice(CALL_BRIDGE_TOOL_PREFIX.length), cx);
+      } else if (text === REPORT_MCP_SERVERS_PREFIX) {
+        await this.handleReportMcpServers(params.sessionId, cx);
       } else {
         await this.handleEcho(params.sessionId, cx);
       }
@@ -242,6 +302,133 @@ class FakeAcpAgent {
         sessionUpdate: "agent_message_chunk",
         messageId,
         content: { type: "text", text: "commands reported" },
+      },
+    });
+  }
+
+  /**
+   * Codex ACP 橋接切換 Phase 3(diff 顯示)路徑 A e2e 用,見檔頭註解:送出
+   * 一則帶原生 `type:"diff"` content block 的 `tool_call_update`,不觸碰真實
+   * 檔案系統。`tool_call` 刻意不帶 `locations`,確保這個情境不會意外也命中
+   * 路徑 B(檔案快照 fallback)。
+   */
+  async handleDiffContent(sessionId, rawJson, cx) {
+    const { path: diffPath, oldText, newText } = JSON.parse(rawJson);
+    const toolCallId = `diff-${randomUUID()}`;
+
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: "Apply patch",
+        kind: "edit",
+        status: "pending",
+        rawInput: { path: diffPath },
+      },
+    });
+
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        content: [
+          {
+            type: "diff",
+            path: diffPath,
+            ...(oldText !== undefined ? { oldText } : {}),
+            newText,
+          },
+        ],
+        rawOutput: { success: true },
+      },
+    });
+
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId,
+        content: { type: "text", text: "diff reported" },
+      },
+    });
+  }
+
+  /**
+   * Phase 2(ACP scoped MCP bridge token)e2e 用,見檔頭註解:真的把
+   * `session/new` 收到的 `mcpServers[0]` 當成 `StdioServerParameters` spawn
+   * 成子行程,用真正的 MCP client 連上去呼叫一個工具,把結果回顯成訊息。
+   * `mcpServers` 為空時不嘗試 spawn 任何東西,直接回覆固定的錯誤文字——見
+   * 檔頭註解對這個分支的完整說明。
+   */
+  async handleCallBridgeTool(sessionId, rawJson, cx) {
+    const session = this.sessions.get(sessionId);
+    const { tool: toolName, args } = JSON.parse(rawJson);
+    const mcpServer = session?.mcpServers?.[0];
+    const messageId = randomUUID();
+
+    if (!mcpServer) {
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          messageId,
+          content: { type: "text", text: "BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured" },
+        },
+      });
+      return;
+    }
+
+    // `schema.McpServerStdio` 的 `env` 是 `Array<{name, value}>`(ACP 協議的
+    // wire 形狀),`StdioClientTransport`(MCP SDK 的 client-side transport,
+    // 自己會 spawn 子行程並接管它的 stdio)要的是 `Record<string,string>`
+    // ——這裡做形狀轉換,不改變任何實際的 key/value。
+    const env = Object.fromEntries((mcpServer.env ?? []).map((e) => [e.name, e.value]));
+    const transport = new StdioClientTransport({
+      command: mcpServer.command,
+      args: mcpServer.args ?? [],
+      env: { ...process.env, ...env },
+    });
+    const client = new Client({ name: "deskmony-fake-acp-agent-bridge-client", version: "1.0.0" });
+
+    let resultText;
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name: toolName, arguments: args ?? {} });
+      resultText = `BRIDGE_TOOL_RESULT:${JSON.stringify(result)}`;
+    } catch (err) {
+      resultText = `BRIDGE_TOOL_RESULT_ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      try {
+        await client.close();
+      } catch {
+        // ignore
+      }
+    }
+
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId,
+        content: { type: "text", text: resultText },
+      },
+    });
+  }
+
+  /** Phase 2 e2e 用,見 REPORT_MCP_SERVERS_PREFIX 的檔頭/常數註解。 */
+  async handleReportMcpServers(sessionId, cx) {
+    const session = this.sessions.get(sessionId);
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId,
+        content: { type: "text", text: `MCP_SERVERS:${JSON.stringify(session?.mcpServers ?? [])}` },
       },
     });
   }
@@ -406,7 +593,7 @@ async function main() {
   acp
     .agent({ name: "deskmony-fake-acp-agent" })
     .onRequest(acp.methods.agent.initialize, () => agent.initialize())
-    .onRequest(acp.methods.agent.session.new, () => agent.newSession())
+    .onRequest(acp.methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
     .onRequest(acp.methods.agent.authenticate, () => agent.authenticate())
     .onRequest(acp.methods.agent.session.setMode, () => agent.setSessionMode())
     .onRequest(acp.methods.agent.session.prompt, (ctx) => agent.prompt(ctx.params, ctx.client))

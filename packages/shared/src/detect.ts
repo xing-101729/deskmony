@@ -46,11 +46,20 @@ export const AgentDetectionEntrySchema = z.object({
   version: z.string().optional(),
   /** 偵測到的執行檔完整路徑(內嵌 SDK 沒有對應的外部執行檔,不填)。 */
   path: z.string().optional(),
+  /**
+   * `ProviderCatalogEntry.defaultArgs`(見 provider-catalog.ts)的「動態版本」
+   * ——用在「command 的參數要看某個 vendored 相依套件實際裝到哪裡才知道」這種
+   * 靜態目錄寫不出來的情況(目錄只能是編譯期就固定的字面字串常數),codex-acp
+   * 是第一個用到的案例:`args` 是 `resolveCodexAcpBridge()` 解析出來的橋接
+   * 套件進入點絕對路徑,每台機器/每次安裝都可能不同。`resolveProviders()`
+   * (見 resolve-providers.ts)這個欄位若存在會優先於目錄的靜態 `defaultArgs`。
+   */
+  args: z.array(z.string()).optional(),
   /** 已知可用的 model 清單;沒有結構化清單時為空陣列(改用 `modelsNote` 說明)。 */
   models: z.array(DetectedModelSchema),
   /** 沒有結構化 model 清單時的說明文字(例如「模型由該工具自行管理」)。 */
   modelsNote: z.string().optional(),
-  /** 憑證狀態提示(目前只有 claude-agent-sdk 這個內嵌項會填)。 */
+  /** 憑證狀態提示(目前 claude-agent-sdk 與 codex-acp 這兩個獨立探測項會填)。 */
   credentialHint: z.string().optional(),
 });
 export type AgentDetectionEntry = z.infer<typeof AgentDetectionEntrySchema>;

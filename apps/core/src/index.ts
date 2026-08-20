@@ -2,6 +2,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AcpAdapter, AdapterRegistry, ClaudeAgentSdkAdapter, GenericPtyAdapter, OpenCodeAdapter } from "@deskmony/adapters";
+import type { SubagentPort } from "@deskmony/shared";
 import { initDb } from "./db.js";
 import { ProfileStore, createDefaultProfile } from "./profiles.js";
 import { PermissionGateway } from "./permissions/permission-gateway.js";
@@ -157,9 +158,14 @@ async function main(): Promise<void> {
   // 給它(見下方 sessionManager 建好後的注入行),adapter 建立時 SessionManager
   // 還不存在,沿用既有的「先建構、事後注入」手法。
   const claudeAdapter = new ClaudeAgentSdkAdapter();
+  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):保留具名參考——`WsGateway`
+  // 建好後要用 `setTokenMinter()` 把 scoped token 的核發/撤銷實作(委派給
+  // `WsGateway.mintMcpBridgeToken()`/`revokeMcpBridgeTokensForSession()`)注入
+  // 給它,理由同 `claudeAdapter` 的既有先例(見下方注入處的完整說明)。
+  const acpAdapter = new AcpAdapter();
   const adapters = new AdapterRegistry()
     .register("claude-agent-sdk", claudeAdapter)
-    .register("acp", new AcpAdapter())
+    .register("acp", acpAdapter)
     .register("pty", new GenericPtyAdapter())
     .register("opencode", new OpenCodeAdapter());
   const permissionGateway = new PermissionGateway(config.daemon.permissionTimeoutMs);
@@ -201,6 +207,13 @@ async function main(): Promise<void> {
   // `loadConfig()` 的分層合併,也不落地任何設定檔。
   const yoloDurationMsOverride = process.env.DESKMONY_YOLO_DURATION_MS
     ? Number(process.env.DESKMONY_YOLO_DURATION_MS)
+    : undefined;
+  // Phase 2(ACP scoped MCP bridge token):同樣是純 e2e 測試用的覆寫(比照
+  // 上面 DESKMONY_YOLO_DURATION_MS 的既有慣例)——縮短 scoped token 的絕對
+  // 過期保底時間(預設 24 小時),讓 e2e 能在合理時間內決定性地驗證「過期後
+  // 拒絕」這條規則,不落地任何設定檔。
+  const mcpBridgeTokenTtlMsOverride = process.env.DESKMONY_MCP_BRIDGE_TOKEN_TTL_MS
+    ? Number(process.env.DESKMONY_MCP_BRIDGE_TOKEN_TTL_MS)
     : undefined;
   // S3b(CostGovernor):三個成本治理元件,建構順序刻意在 SessionManager 之前
   // ——`TurnLimiter`/`CostGovernor`/`WaitingWatchdog` 都需要在 trip 時回頭呼叫
@@ -292,10 +305,31 @@ async function main(): Promise<void> {
   // `list_subagents`(R5)讓 agent 查自己名下有哪些子——包含使用者透過 UI
   // 手動開、agent 完全不知情的那些(見 listChildrenFromTool())。與
   // setTeamBus() 同一位置群組:SessionManager 已建好,正是能回頭注入的時機。
-  claudeAdapter.setSubagentPort({
-    spawnChild: (input) => sessionManager.spawnChildFromTool(input),
-    sendToChild: (input) => sessionManager.sendToChildFromTool(input),
-    listChildren: (input) => sessionManager.listChildrenFromTool(input.parentSessionId),
+  //
+  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):抽成具名變數,**同一個
+  // 實例**同時注入給 `claudeAdapter` 與 `acpAdapter`——兩個 adapter 對
+  // `spawn_subagent`/`send_to_subagent`/`list_subagents`/`list_profiles` 的
+  // 行為(誰能對誰做什麼、看到哪些欄位)必須完全一致,共用同一個物件參考從
+  // 結構上保證不會漂移,比各自組一份重複的物件字面量更不容易之後兩邊不同步。
+  // **這是刻意的取捨**:讓 `AcpAdapter` 也拿到 subagentPort,代表**所有**
+  // ACP session(不只是 team 成員,含目前唯一在測的 Gemini 個人單機情境)都
+  // 會在 spawn 時核發一個 scoped token、掛載 mcp-bridge-server.ts(見
+  // `AcpAdapter.spawn()`/`buildMcpBridgeServer()`)——多一個子行程與一條
+  // (惰性建立,只在 agent 真的呼叫工具時才連線)WS 連線。選擇補齊這一步(而
+  // 非只掛 team-bus)的理由:(a) 這輪的目標本來就是讓 ACP 也具備與
+  // ClaudeAgentSdkAdapter 對等的 team-bus **與** subagent 兩種能力,只掛一半
+  // 是不完整的功能;(b) 唯有這樣接,`session.spawnChildForSubagent`/
+  // `session.sendToChild`/`session.listChildren`/`profile.listForSubagent`
+  // 這四個這輪新增的 gateway 方法才能透過標準的 `apps/core/dist/index.js`
+  // 產物被 e2e 決定性測試真正走過一次完整管線(見
+  // scripts/e2e-gateway.mjs 的 `scopedMcpBridgeTokenSmokeTest()`),而不是
+  // 只測到型別/白名單邏輯本身。若之後覺得這個資源足跡不划算,把下面這一行
+  // `acpAdapter.setSubagentPort(subagentPort);` 刪掉即可完全回退,`AcpAdapter`
+  // 本身的 `subagentPort` 欄位/setter/spawn() 內的累加掛載邏輯不需要跟著改。
+  const subagentPort = {
+    spawnChild: (input: Parameters<SubagentPort["spawnChild"]>[0]) => sessionManager.spawnChildFromTool(input),
+    sendToChild: (input: Parameters<SubagentPort["sendToChild"]>[0]) => sessionManager.sendToChildFromTool(input),
+    listChildren: (input: Parameters<SubagentPort["listChildren"]>[0]) => sessionManager.listChildrenFromTool(input.parentSessionId),
     // listProfiles:只回傳 agent 決策需要的最小欄位,不把 env/mcpConfig 等可能
     // 含密鑰的欄位送進 agent 的對話 context(見 SubagentPort.listProfiles() 的
     // 介面註解)。
@@ -303,7 +337,9 @@ async function main(): Promise<void> {
       const list = await profiles.list();
       return list.map((p) => ({ id: p.id, name: p.name, software: p.software, model: p.model, role: p.role }));
     },
-  });
+  };
+  claudeAdapter.setSubagentPort(subagentPort);
+  acpAdapter.setSubagentPort(subagentPort);
   // L4 §2「已知限制」的對稱補洞:core 啟動時重新計算每個 context 目前的訊息數,
   // 還原 trippedContexts——否則崩潰重啟會讓「這個 context 已經 trip」這個
   // 記憶體旗標消失,變相多放行一則訊息(見 message-bus.ts 的 `initialize()`
@@ -332,6 +368,7 @@ async function main(): Promise<void> {
     authToken,
     config.daemon.authRateLimit.max,
     config.daemon.authRateLimit.cooldownMs,
+    mcpBridgeTokenTtlMsOverride && Number.isFinite(mcpBridgeTokenTtlMsOverride) ? mcpBridgeTokenTtlMsOverride : undefined,
   );
   // S7 L4 §2.1:`ExecContext` 的 `attended`/`local` 是**環境事實**(現在有沒有
   // 人看得到彈窗、有沒有遠端 client 連線中),只有 Gateway 知道。與上面
@@ -341,6 +378,16 @@ async function main(): Promise<void> {
   // 個連上來的 client 有機會在注入完成前就觸發權限決策,那一筆會用退化預設值
   // (attended=false)決定逾時語意。
   sessionManager.setClientPresence(gateway);
+  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`AcpAdapter` 需要
+  // `WsGateway` 才能核發/撤銷 scoped MCP bridge token(見
+  // `apps/core/src/gateway/ws-gateway.ts` 的 `mintMcpBridgeToken()`/
+  // `revokeMcpBridgeTokensForSession()`)——與上面 `setClientPresence()` 同一
+  // 個解耦手法:`AcpAdapter` 建構時 `WsGateway` 還不存在,`WsGateway` 的建構子
+  // 又需要 `SessionManager`,只能在 `WsGateway` 建好之後用 setter 事後注入。
+  acpAdapter.setTokenMinter({
+    mint: (scope) => gateway.mintMcpBridgeToken(scope),
+    revokeForSession: (sessionId) => gateway.revokeMcpBridgeTokensForSession(sessionId),
+  });
 
   // M5 Round B 任務1:apps/desktop 的 Vite build 產物(dist/),與 WS 共用
   // 同一個 port。`config.features.staticDir` 已經是 load-config.ts 算好的最終值

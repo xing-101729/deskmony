@@ -153,11 +153,11 @@ Four adapters are registered. Every one implements the same interface, so permis
 | Adapter | Transport | Backends today | Capability tier |
 |---|---|---|---|
 | `ClaudeAgentSdkAdapter` | Claude Agent SDK, embedded in-process | Claude Code | Deepest — hooks, sub-agents, fine-grained permission events, live model and effort switching |
-| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com) over stdio JSON-RPC | Gemini CLI, other ACP-native agents | Structured events |
+| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com) over stdio JSON-RPC | Gemini CLI, Codex (via the `@agentclientprotocol/codex-acp` bridge package — the official `codex` binary doesn't speak ACP natively), other ACP-native agents | Structured events |
 | `OpenCodeAdapter` | OpenCode's HTTP + SSE server | OpenCode | Native server, works remotely |
-| `GenericPtyAdapter` | Raw `node-pty` passthrough | Claude Code CLI, Codex, Aider, any interactive CLI | **Fallback — no permission events** |
+| `GenericPtyAdapter` | Raw `node-pty` passthrough | Claude Code CLI, Aider, any interactive CLI | **Fallback — no permission events** |
 
-The user-facing layer is a **provider catalog** of seven entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `codex` → PTY, `aider` → PTY, `custom-pty`.
+The user-facing layer is a **provider catalog** of seven entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `codex` → ACP (via the `@agentclientprotocol/codex-acp` bridge, not a locally installed codex CLI), `aider` → PTY, `custom-pty`.
 
 **The PTY tier's missing permission events are a security boundary, not a to-do item.** It's raw stdin passthrough — structurally unmanageable by the policy engine. Until a real execution sandbox exists, PTY agents stay read-only with no unattended autonomy. Deskmony deliberately does **not** try to intercept shell commands: `bash -c`, `$()`, and base64 defeat that in seconds, and shipping it would be security theater.
 
@@ -201,7 +201,7 @@ Dirty worktrees get a forced decision first: keep the work on a WIP branch, or d
 
 - **Node.js ≥ 20** and **pnpm 10** (the repo pins `pnpm@10.13.1` — `corepack enable` picks it up)
 - Windows for the packaged installer today. Core and adapters are plain Node/TypeScript, so other platforms are mostly a packaging exercise.
-- At least one agent backend: log into the Claude Code CLI, install Codex or OpenCode, or point a profile at any interactive CLI through the PTY adapter. **Deskmony orchestrates agents; it does not ship model access.**
+- At least one agent backend: log into the Claude Code CLI, set an `OPENAI_API_KEY`/`CODEX_API_KEY` (or use ChatGPT login) for Codex — it runs through a bundled `@agentclientprotocol/codex-acp` bridge, no separate codex CLI install needed — install OpenCode, or point a profile at any interactive CLI through the PTY adapter. **Deskmony orchestrates agents; it does not ship model access.**
 
 ### Install
 

@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
+import { resolveCodexAcpBridge } from "@deskmony/adapters";
 import { type AgentDetectionEntry, type AgentSoftware, type DetectedModel } from "@deskmony/shared";
 
 /**
  * agent-detector.ts(M5 Round D 新增):偵測本機裝了哪些已知 agent CLI(以及
- * 內嵌的 Claude Agent SDK),供「設定」介面(`env.detectAgents` gateway 方法,
- * 見 apps/core/src/gateway/ws-gateway.ts)使用。
+ * 內嵌的 Claude Agent SDK、Codex ACP 橋接切換 Phase 1 新增的
+ * `@agentclientprotocol/codex-acp` vendored 相依,見下方 `detectCodexAcp()`),
+ * 供「設定」介面(`env.detectAgents` gateway 方法,見
+ * apps/core/src/gateway/ws-gateway.ts)使用。
  *
  * ---- 安全設計(這個檔案最重要的部分,務必維持)----
  *
@@ -242,13 +245,22 @@ interface AllowlistEntry {
 }
 
 /**
- * 已知 agent CLI 的 allowlist(需求明列的 5 個,未來要擴充新工具只需要在這裡
+ * 已知 agent CLI 的 allowlist(這輪起是 4 個,未來要擴充新工具只需要在這裡
  * 加一筆,不需要改動安全機制本身)。`software` 的選擇:
  *   - `claude`/`gemini`:實務上多半經 ACP 對接(見 README/需求描述),歸類
  *     為 "acp"。
- *   - `opencode`/`codex`:`AgentSoftwareSchema` 剛好已經有對應的獨立列舉值
- *     (`"opencode"`/`"codex"`),直接沿用,不需要額外新增型別。
+ *   - `opencode`:`AgentSoftwareSchema` 剛好已經有對應的獨立列舉值
+ *     (`"opencode"`),直接沿用,不需要額外新增型別。
  *   - `aider`:目前只能透過 PTY 直通對接(無結構化協議),歸類為 "pty"。
+ *
+ * **`codex` 這輪(Codex ACP 橋接切換)起不在這個 allowlist 裡**——這裡的
+ * PATH 探測迴圈問的是「使用者本機是否自己裝了某個叫這個名字的執行檔」,而
+ * Codex 改走的 `@agentclientprotocol/codex-acp` 橋接套件是隨 core 一起 vendor
+ * 進來的 npm 相依(不是使用者自己安裝、也不在 PATH 上),這個問題本身就問
+ * 錯了對象。改用下方獨立的 `detectCodexAcp()` 函式(呼叫方式比照
+ * `detectClaudeAgentSdk()`:不塞進這個迴圈,因為判斷邏輯結構不同——是
+ * `require.resolve()` 一個 vendored 套件,不是掃 PATH 找使用者自己的執行檔),
+ * 見該函式與 `detectAllAgents()` 如何併入結果。
  */
 const AGENT_ALLOWLIST: AllowlistEntry[] = [
   {
@@ -275,13 +287,6 @@ const AGENT_ALLOWLIST: AllowlistEntry[] = [
     // modelsCommandArgs 註解),不需要啟動 `opencode serve`、不需要等 port
     // 就緒,是這輪選用的偵測機制。
     modelsCommandArgs: ["models"],
-  },
-  {
-    key: "codex-cli",
-    displayName: "Codex CLI",
-    command: "codex",
-    software: "codex",
-    modelsNote: "模型由 codex CLI 自行管理,此處不臆測。",
   },
   {
     key: "aider-cli",
@@ -385,16 +390,112 @@ async function detectClaudeAgentSdk(): Promise<AgentDetectionEntry> {
 }
 
 /**
+ * 「Codex(經 ACP 橋接)」這個特殊項(Codex ACP 橋接切換 Phase 1 新增):跟
+ * `detectClaudeAgentSdk()` 一樣是獨立函式,不塞進 `AGENT_ALLOWLIST` 迴圈
+ * ——判斷邏輯結構不同,不是「PATH 上找不找得到某個使用者自己裝的執行檔」,
+ * 而是「`@agentclientprotocol/codex-acp` 這個隨 core 一起 vendor 進來的 npm
+ * 相依有沒有真的裝好、跑得動」(見 packages/adapters/src/
+ * codex-acp-locator.ts 的 `resolveCodexAcpBridge()`)。
+ *
+ * 兩層檢查,兩層都要過才算 `installed: true`(單靠其中一層不夠——已用真機
+ * 驗證這兩層是獨立的失敗模式,見 codex-acp-locator.ts 頂端註解的完整記錄):
+ *   1. `resolveCodexAcpBridge()` 能不能用 `require.resolve()` 解析到套件的
+ *      進入點——證明 npm 套件本身裝好了(JS 殼)。解析失敗(套件沒裝、
+ *      node_modules 損壞)直接 `installed: false`,不會進到第2步。
+ *   2. 實際執行一次 `<entryPath> --version`(已驗證有效、有 3 倍以上時間
+ *      餘裕;`--help` 已驗證會整個掛住,絕對不可用來探測,同樣記錄在
+ *      codex-acp-locator.ts)——證明橋接套件依賴的原生 codex engine
+ *      (`@openai/codex` 的平台專屬 vendored binary)也真的能啟動。JS 殼
+ *      resolve 成功不保證這一步會過:原生 binary 是平台相關的 optional
+ *      dependency,理論上可能在某些平台/安裝狀態下缺席或損壞。
+ *
+ * 憑證提示:只檢查 `OPENAI_API_KEY`/`CODEX_API_KEY` 這兩個環境變數是否存在
+ * ——比照 `detectClaudeAgentSdk()` 的既有保守原則,不嘗試探測 ChatGPT 登入
+ * 憑證的本機檔案位置(理由相同:沒有穩定、跨版本都成立的路徑,見該函式頂端
+ * 註解)。三段式文案(對應「OPENAI_API_KEY 存在/CODEX_API_KEY 存在/兩者都
+ * 沒有」三種情況,比 detectClaudeAgentSdk() 只檢查單一 key 的兩段式更細緻,
+ * 因為 codex-acp 明確支援兩個不同名稱的環境變數,兩者都值得個別告知使用者
+ * 具體偵測到哪一個)。
+ *
+ * `models` 固定空陣列 + 固定的 `modelsNote`——不像 claude-agent-sdk 有
+ * Anthropic Models API 可查,codex-acp 沒有已知的非互動列模型機制(理由同
+ * `AllowlistEntry.modelsCommandArgs` 註解對 codex 的既有說明),不臆測。
+ *
+ * 整個函式包一層防禦性 try/catch:雖然 `resolveCodexAcpBridge()`
+ * 與下方的 `runVersionCommand()` 目前的實作都已經是 fail-soft(不會
+ * throw),仍比照這個檔案「探測失敗一律優雅回報 installed:false,絕不讓
+ * 例外往外傳」的既有紀律(見檔案頂端註解第3點),避免未來任一函式的實作
+ * 改動不慎引入例外時,拖垮呼叫端 `detectAllAgents()` 的整條 pipeline。
+ */
+async function detectCodexAcp(): Promise<AgentDetectionEntry> {
+  const modelsNote = "模型由 Codex 自行管理,此處不臆測。";
+  try {
+    const hasOpenAiKey = Boolean(process.env.OPENAI_API_KEY?.trim());
+    const hasCodexKey = Boolean(process.env.CODEX_API_KEY?.trim());
+    const credentialHint = hasOpenAiKey
+      ? "已偵測到 OPENAI_API_KEY 環境變數。"
+      : hasCodexKey
+        ? "已偵測到 CODEX_API_KEY 環境變數。"
+        : "未偵測到 OPENAI_API_KEY/CODEX_API_KEY,仍可能透過 ChatGPT 登入使用(不嘗試探測本機登入憑證位置,理由同 Claude Agent SDK 項目)。";
+
+    const bridge = resolveCodexAcpBridge();
+    if (!bridge) {
+      return {
+        key: "codex-acp",
+        displayName: "Codex",
+        software: "acp",
+        installed: false,
+        models: [],
+        modelsNote,
+        credentialHint,
+      };
+    }
+
+    // 第2層檢查(見上方函式頂端註解):`bridge.command` 是 process.execPath
+    // (一定是 .exe,不需要 shell/quoting),`bridge.args` 是解析出來的橋接
+    // 套件進入點絕對路徑——重用既有的 runVersionCommand() helper,附加
+    // "--version"(已驗證有效的探測旗標)。
+    const version = await runVersionCommand(bridge.command, [...bridge.args, "--version"]);
+    const installed = version !== undefined;
+
+    return {
+      key: "codex-acp",
+      displayName: "Codex",
+      software: "acp",
+      installed,
+      version,
+      path: installed ? bridge.command : undefined,
+      args: installed ? bridge.args : undefined,
+      models: [],
+      modelsNote,
+      credentialHint,
+    };
+  } catch {
+    return {
+      key: "codex-acp",
+      displayName: "Codex",
+      software: "acp",
+      installed: false,
+      models: [],
+      modelsNote,
+    };
+  }
+}
+
+/**
  * 組裝完整偵測結果 —— `env.detectAgents` gateway 方法的唯一呼叫對象(見
- * apps/core/src/gateway/ws-gateway.ts)。`claude-agent-sdk` 固定排第一個
- * (它不依賴任何外部 CLI,必定出現在清單裡),其餘依 `AGENT_ALLOWLIST` 宣告
- * 順序、平行探測(`Promise.all`)——每一項各自的逾時互不影響,整體耗時約等於
- * 「單一探測的兩次逾時週期」,不會隨 allowlist 項目數線性增加。
+ * apps/core/src/gateway/ws-gateway.ts)。`claude-agent-sdk`/`codex-acp` 這兩個
+ * 不依賴 PATH 探測的獨立項固定排前兩個(`claude-agent-sdk` 必為
+ * installed:true;`codex-acp` 是否 installed 依實際探測結果,但兩者都不受
+ * `AGENT_ALLOWLIST` 迴圈影響,見各自函式頂端註解),其餘依 `AGENT_ALLOWLIST`
+ * 宣告順序、與前兩者一起平行探測(`Promise.all`)——每一項各自的逾時互不
+ * 影響,整體耗時約等於「單一探測的兩次逾時週期」,不會隨探測項目數線性增加。
  */
 export async function detectAllAgents(): Promise<AgentDetectionEntry[]> {
-  const [claudeAgentSdk, externalResults] = await Promise.all([
+  const [claudeAgentSdk, codexAcp, externalResults] = await Promise.all([
     detectClaudeAgentSdk(),
+    detectCodexAcp(),
     Promise.all(AGENT_ALLOWLIST.map((entry) => detectExternalCli(entry))),
   ]);
-  return [claudeAgentSdk, ...externalResults];
+  return [claudeAgentSdk, codexAcp, ...externalResults];
 }

@@ -155,10 +155,22 @@ export type ProviderPrefsPatchInput = z.infer<typeof ProviderPrefsPatchInputSche
  *   - `gemini`:對齊需求描述引用的 Paseo 範例(`"extends": "acp", "command":
  *     ["gemini", "--acp"]`)——固定用 ACP 對接、`defaultArgs: ["--acp"]`。
  *   - `opencode`:對應這輪稍早新增的 `OpenCodeAdapter`(HTTP + SSE)。
- *   - `codex`/`aider`:目前都沒有專屬 adapter,一律映射成 `pty`(codex 若映射
- *     成 `"codex"` 會是 AdapterRegistry 建不起來的組合,見上方
- *     `RegisteredAgentSoftwareSchema` 註解——這裡選擇「映射到 pty」而非
- *     「不列出」,讓使用者仍能透過 PTY 直通使用 codex CLI)。
+ *   - `aider`:目前沒有專屬 adapter,映射成 `pty`(`AgentSoftwareSchema` 沒有
+ *     對應的 `"aider"` 獨立列舉值,PTY 直通是唯一可行選項)。
+ *   - `codex`:**這輪(Codex ACP 橋接)起改映射成 `"acp"`**——OpenAI 官方
+ *     `codex` binary 本身不講 ACP(`openai/codex#9085` 要求原生支援已 closed
+ *     as not planned),但透過社群/Zed 系維護的橋接套件
+ *     `@agentclientprotocol/codex-acp`(見 packages/adapters/package.json 的
+ *     相依、`packages/adapters/src/codex-acp-locator.ts`)可以把 codex 接上
+ *     既有的通用 `AcpAdapter`——這個套件內附自己的 `@openai/codex` 相依,
+ *     使用者不需要另外安裝 codex CLI,`command`/`args` 也不是使用者本機
+ *     PATH 上的路徑,而是這個橋接套件的絕對進入點路徑,由
+ *     `apps/core/src/detect/agent-detector.ts` 的 `detectCodexAcp()` 動態
+ *     解析後填進 `AgentDetectionEntry.args`(見 detect.ts 該欄位註解),
+ *     `resolveProviders()` 會優先採用這個動態值而非這裡的靜態
+ *     `defaultArgs`(這個項目刻意不寫 `defaultArgs`,見下方 codex 項目定義)。
+ *     `docs/DECISIONS.md` B2 對這個取捨(依賴非 OpenAI 官方維護的第三方套件)
+ *     有更完整的說明。
  *   - `custom-pty`:逃生閥,無 `detectKey`,`resolveProviders()` 一律回傳
  *     `command: undefined`,由使用者在 UI 手動輸入(比照既有
  *     ProfileCreateDialog 的「自訂…」選項)。
@@ -224,10 +236,14 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
   },
   {
     id: "codex",
-    label: "Codex CLI",
-    description: "尚無專屬 adapter,以 PTY 直通對接。",
-    software: "pty",
-    detectKey: "codex-cli",
+    label: "Codex",
+    description:
+      "透過 @agentclientprotocol/codex-acp 橋接套件以 ACP 對接(內附自己的 codex engine,不是使用者自行安裝的 codex CLI)。OPENAI_API_KEY/CODEX_API_KEY 需在下方「環境變數」設定,或改用 ChatGPT 登入。",
+    software: "acp",
+    detectKey: "codex-acp",
+    // 刻意不寫 defaultArgs——這個 provider 的 args(橋接套件進入點絕對路徑)
+    // 只能在偵測階段動態解析,見 resolve-providers.ts 的
+    // `defaultArgs: detected?.args ?? entry.defaultArgs`。
     models: [],
     supportsModelSelection: false,
     order: 40,

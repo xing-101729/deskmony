@@ -12,6 +12,7 @@ export * from "./adapter-capabilities.js";
 export * from "./team.js";
 export * from "./team-bus.js";
 export * from "./subagent.js";
+export * from "./mcp-bridge-auth.js";
 export * from "./task.js";
 export * from "./gateway.js";
 export * from "./enforcement.js";

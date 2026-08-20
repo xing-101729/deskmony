@@ -5,4 +5,5 @@ export * from "./claude-sdk-adapter.js";
 export * from "./acp-adapter.js";
 export * from "./pty-adapter.js";
 export * from "./opencode-adapter.js";
+export * from "./codex-acp-locator.js";
 export * from "./registry.js";

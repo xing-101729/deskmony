@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { Readable, Writable } from "node:stream";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
-import type { AgentEvent, AgentProfile, PromptInput, SlashCommandInfo } from "@deskmony/shared";
+import { structuredPatch } from "diff";
+import type { AgentEvent, AgentProfile, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SlashCommandInfo, SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, TeamSpawnContext, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 
@@ -50,8 +54,20 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
  *    (usage-metering)接上(見下方 `handleSessionUpdate()`),
  *    `available_commands_update` 已在這輪(slash command)接上,這裡的清單
  *    同步移除,避免文件與程式碼漂移。
- *  - `diff` 能力回報為 false:ACP 的 `ToolCallContent` 雖然有 `type: "diff"`,
- *    但這裡尚未解析轉發,如實回報避免 UI 誤判。
+ *  - `diff` 能力(Codex ACP 橋接切換 Phase 3 起回報為 true):
+ *    `resolveDiffStructuredResult()` 用兩條路徑合成
+ *    `ToolResultEvent.structuredResult`(消費端是既有機制,見
+ *    `apps/desktop/src/views/chat/DiffHunkView.tsx` 的 `parseDiffResult()`,
+ *    這裡不需要新增任何 AgentEvent 型別)——路徑 A 優先讀取原生
+ *    `ToolCallContent` 的 `type: "diff"` 區塊(`{path, oldText, newText}`,
+ *    已讀 `@agentclientprotocol/sdk@1.2.1` 的
+ *    `dist/schema/types.gen.d.ts` 確認形狀);路徑 A 沒命中時退而求其次走
+ *    路徑 B(檔案快照 fallback,對應 `docs/DECISIONS.md` B2):`tool_call`
+ *    建立時若 `kind === "edit"` 且 `locations` 有值,先讀一次檔案「呼叫前」
+ *    內容存進 `InternalSession.pendingFileSnapshots`,對應的
+ *    `tool_call_update` 完成(`completed`/`failed`)時重讀一次同一個檔案當
+ *    「呼叫後」,兩者交給 `diff` 套件的 `structuredPatch()` 合成 hunk。讀檔
+ *    失敗(檔案不存在以外的錯誤)一律優雅放棄,不影響其餘事件推送。
  *  - `fs.readTextFile`/`fs.writeTextFile`/`terminal.*` 皆回報不支援
  *    (`clientCapabilities` 對應欄位為 false/未設定),agent 若呼叫這些方法
  *    會由 ACP 底層回 JSON-RPC method-not-found。
@@ -59,12 +75,51 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
 export class AcpAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
 
+  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`subagentPort` 完全比照
+  // `ClaudeAgentSdkAdapter` 既有的 `setSubagentPort()` 模式——apps/core 的
+  // SessionManager 在啟動時用 setter 事後注入(adapter 建構當下 core 的
+  // SessionManager 還沒好,打破建構循環,見 claude-sdk-adapter.ts 同名欄位的
+  // 註解)。`tokenMinter` 是這輪新增的第二個事後注入依賴——見
+  // packages/shared/src/mcp-bridge-auth.ts 的 `McpBridgeTokenPort` 完整背景
+  // 說明,實例由 apps/core 的 WsGateway 提供。兩者都是 **可選**:`spawn()`
+  // 只在 `team`(呼叫端傳入)或 `subagentPort`(已注入)至少一者存在、且
+  // `tokenMinter` 也已注入時,才會核發 token、掛載 mcp-bridge-server.ts——
+  // 三者缺一,行為與這輪之前完全相同(不核發 token、不多一個子行程)。
+  private subagentPort?: SubagentPort;
+  setSubagentPort(port: SubagentPort): void {
+    this.subagentPort = port;
+  }
+  private tokenMinter?: McpBridgeTokenPort;
+  setTokenMinter(minter: McpBridgeTokenPort): void {
+    this.tokenMinter = minter;
+  }
+
   capabilities(): AdapterCapabilities {
     return {
       streaming: true,
       toolEvents: true,
       permissionRequests: true,
-      diff: false,
+      // Codex ACP 橋接切換 Phase 3 起改為 true:見下方 resolveDiffStructuredResult()
+      // /findDiffBlock()/resolveEditSnapshotPath() 與 handleSessionUpdate() 的
+      // "tool_call"/"tool_call_update" case——diff 重建邏輯完全自包含在這個
+      // adapter 內部,路徑 A(原生 ToolCallContent 的 type:"diff" 區塊)是額外
+      // 加分,路徑 B(檔案快照 fallback:tool_call 建立時、tool_call_update
+      // 完成時各讀一次目標檔案內容,不是呼叫外部 `git diff` 指令)保底,兩者
+      // 都不依賴被 spawn 的 agent 是否主動配合。這與 `claude-sdk-adapter.ts`
+      // 的 `slashCommands: "supported"` 是同一種判斷標準——"adapter 自己保證
+      // 做得到",不是"不確定,要看對方送不送事件",所以是單純的 `true`,不需要
+      // 像 usageReporting/slashCommands 那樣三態(那些欄位的不確定性來自
+      // 「事件會不會被外部 agent 主動送出」,這裡的重建邏輯不假外求,唯一的
+      // 失敗模式是讀檔失敗,發生時已經妥善 fallback 成「不附加
+      // structuredResult」,不是回報能力卻做不到)。
+      //
+      // 這個值刻意跟 `claude-sdk-adapter.ts` 的 `diff: false` 不一致——不是
+      // 沒同步、是真的不同:那邊的 diff 顯示是被動轉發 SDK 附帶的
+      // `structuredPatch`(只在模型剛好呼叫 Edit/Write、且該訊息剛好只有一個
+      // tool_result block 時才有,見該檔案 `case "user":` 的 toolResultCount
+      // 判斷),沒有這裡路徑 B 這種主動重建的保底,覆蓋率結構上較低——是這輪
+      // 計畫「誠實的天花板」一節明確接受的既有落差,不是需要一併修正的不一致。
+      diff: true,
       interrupt: true,
       terminal: false,
       // S3a(usage-metering)§7.5 ④ 修正:這兩項**只能是 "unknown"**。
@@ -93,7 +148,7 @@ export class AcpAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
+  async spawn(profile: AgentProfile, workspace: Workspace, team?: TeamSpawnContext): Promise<AgentHandle> {
     const acpConfig = profile.acpConfig;
     if (!acpConfig) {
       throw new DeskmonyError(
@@ -102,6 +157,15 @@ export class AcpAdapter implements AgentAdapter {
         `AgentProfile "${profile.id}" 的 software="acp" 缺少 acpConfig(command)`,
       );
     }
+
+    // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`AgentHandle.id` 提前在
+    // 這裡生成(這輪之前是等 ACP handshake 成功後才在下面產生)——scoped
+    // token 需要綁定「這一個 session」,但核發時機必須在
+    // `buildSession().withMcpServer()` 之前(掛進 `session/new` 請求的
+    // `mcpServers` 欄位),比 handshake 完成、正式建立 `AgentHandle` 都早,
+    // 所以提前生成這個 id,下面 `const handle: AgentHandle = { id: handleId,
+    // ... }` 沿用同一個值。
+    const handleId = randomUUID();
 
     const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
     // 這輪新增:`profile.env`(provider 層級預設 + profile 自己的覆寫,已由
@@ -164,6 +228,18 @@ export class AcpAdapter implements AgentAdapter {
 
     const connection = clientApp.connect(stream);
 
+    // Phase 2:team(呼叫端傳入)或 this.subagentPort(已注入)任一存在時,
+    // 核發 scoped token 並算出要掛載的 mcp-bridge-server.ts 設定——比照
+    // ClaudeAgentSdkAdapter.spawn() 既有的「team 跟 subagent 各自獨立判斷、
+    // 兩者皆有時同時掛上」累加模式,唯一差異是 ACP 只有一個統一的 bridge
+    // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是兩個
+    // 各自獨立的 in-process MCP server,所以這裡是「核發一個範圍涵蓋兩者聯集
+    // 的 token、掛一個 server」而不是「核發兩個 token、掛兩個 server」。
+    // 兩者皆無時 `buildMcpBridgeServer()` 直接回傳 undefined,不核發任何
+    // token、不掛任何 MCP server——這輪之前唯一在跑的 ACP 情境(沒有 team 的
+    // Gemini 個人單機使用)行為與這輪之前完全相同。
+    const bridgeMcpServer = this.buildMcpBridgeServer(handleId, team);
+
     try {
       await Promise.race([
         connection.agent.request(acp.methods.agent.initialize, {
@@ -176,12 +252,13 @@ export class AcpAdapter implements AgentAdapter {
         spawnFailure,
       ]);
 
-      const session = await Promise.race([
-        connection.agent.buildSession(workspace.path).start(),
-        spawnFailure,
-      ]);
+      let sessionBuilder = connection.agent.buildSession(workspace.path);
+      if (bridgeMcpServer) {
+        sessionBuilder = sessionBuilder.withMcpServer(bridgeMcpServer);
+      }
+      const session = await Promise.race([sessionBuilder.start(), spawnFailure]);
 
-      const handle: AgentHandle = { id: randomUUID(), profile, workspace };
+      const handle: AgentHandle = { id: handleId, profile, workspace };
       const internal: InternalSession = {
         handle,
         child,
@@ -213,6 +290,12 @@ export class AcpAdapter implements AgentAdapter {
 
       return handle;
     } catch (err) {
+      // Phase 2:handshake/session/new 失敗時,若已核發過 token,一併撤銷,
+      // 避免留下一個永遠用不到的孤兒 grant(不影響既有 TTL 保底,只是提早
+      // 清理——這個 session 從未真正建立成功,不會有任何子行程用得到它)。
+      if (bridgeMcpServer) {
+        this.tokenMinter?.revokeForSession(handleId);
+      }
       try {
         connection.close();
       } catch {
@@ -221,6 +304,57 @@ export class AcpAdapter implements AgentAdapter {
       this.killChild(child);
       throw err;
     }
+  }
+
+  /**
+   * Phase 2:算出這個 session 要不要掛載 mcp-bridge-server.ts,以及要掛的話
+   * 需要的完整 `McpServerStdio` 設定(含核發好的 scoped token)。回傳
+   * `undefined` 代表不掛載(`team`/`subagentPort` 皆無,或缺少
+   * `tokenMinter`/找不到已編譯的 bridge server 進入點這兩種**優雅降級**的
+   * 情況——後兩者理論上不該發生,但寧可略過掛載、印警告,也不要讓整個
+   * session 建立失敗:team-bus/subagent 工具是加分項,不是這個 session 能不
+   * 能建立的前提)。
+   */
+  private buildMcpBridgeServer(sessionId: string, team: TeamSpawnContext | undefined): acp.McpServer | undefined {
+    if (!team && !this.subagentPort) return undefined;
+    if (!this.tokenMinter) {
+      console.warn(
+        `[acp-adapter] session ${sessionId}: team/subagentPort 存在但尚未注入 tokenMinter,略過掛載 team-bus/subagent MCP 工具`,
+      );
+      return undefined;
+    }
+    const entryPath = resolveMcpBridgeServerEntry();
+    if (!entryPath || !existsSync(entryPath)) {
+      console.warn(
+        `[acp-adapter] session ${sessionId}: 找不到 mcp-bridge-server.js(${entryPath ?? "無法解析路徑"}),` +
+          "略過掛載 team-bus/subagent MCP 工具——請確認 packages/adapters 已執行過 pnpm build。",
+      );
+      return undefined;
+    }
+
+    const grant: McpBridgeTokenGrant = this.tokenMinter.mint({
+      sessionId,
+      team: team ? { teamId: team.teamId, memberId: team.memberId } : undefined,
+      subagent: Boolean(this.subagentPort),
+    });
+
+    // 見 mcp-bridge-server.ts 檔頭「環境變數」段落——一律透過 env(不是 CLI
+    // args)傳遞,避免 token 出現在行程列表裡(尤其是 Windows 的
+    // tasklist/工作管理員預設就會顯示完整命令列,見這輪的核心安全設計)。
+    const env: acp.EnvVariable[] = [
+      { name: "DESKMONY_MCP_BRIDGE_TOKEN", value: grant.token },
+      { name: "DESKMONY_MCP_BRIDGE_GATEWAY_URL", value: grant.gatewayUrl },
+      { name: "DESKMONY_MCP_BRIDGE_SESSION_ID", value: sessionId },
+    ];
+    if (team) {
+      env.push({ name: "DESKMONY_MCP_BRIDGE_TEAM_ID", value: team.teamId });
+      env.push({ name: "DESKMONY_MCP_BRIDGE_MEMBER_ID", value: team.memberId });
+    }
+    if (this.subagentPort) {
+      env.push({ name: "DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED", value: "1" });
+    }
+
+    return { name: "deskmony-mcp-bridge", command: process.execPath, args: [entryPath], env };
   }
 
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void {
@@ -261,6 +395,12 @@ export class AcpAdapter implements AgentAdapter {
   async dispose(handle: AgentHandle): Promise<void> {
     const internal = this.sessions.get(handle.id);
     if (!internal) return;
+    // Phase 2:這個 session 若曾核發過 scoped MCP bridge token(見 spawn() 的
+    // `buildMcpBridgeServer()`),session 結束時必須讓它立即失效——不能變成
+    // 孤兒憑證一直有效到 24 小時 TTL 才過期。`revokeMcpBridgeTokensForSession()`
+    // 對「這個 session 根本沒核發過 token」是安全的 no-op(見
+    // apps/core/src/gateway/ws-gateway.ts 的實作),不需要先判斷有沒有核發過。
+    this.tokenMinter?.revokeForSession(handle.id);
     // 懸置的權限請求(agent 端 requestPermission 呼叫的 Promise)若放著不管
     // 會讓 agent 子程序永久卡住等回應 —— 一律以「拒絕」收場後再清空。
     for (const pending of internal.pendingPermissions.values()) {
@@ -380,17 +520,24 @@ export class AcpAdapter implements AgentAdapter {
         }
         continue;
       }
-      this.handleSessionUpdate(internal, message.notification.update);
+      // Codex ACP 橋接切換 Phase 3(diff 顯示):handleSessionUpdate() 的
+      // "tool_call"/"tool_call_update" case 這輪起需要 await 檔案讀取(路徑 B
+      // 的 before/after 快照,見該方法與 resolveDiffStructuredResult() 註解)
+      // ——改成 await 確保同一個 toolCallId 的 tool_call → tool_call_update
+      // 一定依序處理完才讀下一則 session/update,不會有「快照還沒讀完,
+      // completed 就先到」的競速。其餘不需要 async 工作的 case(文字增量、
+      // usage_update 等)只是多一次 microtask 排程,不影響既有行為。
+      await this.handleSessionUpdate(internal, message.notification.update);
     }
     outputQueue.close();
   }
 
-  private handleSessionUpdate(internal: InternalSession, update: acp.SessionUpdate): void {
+  private async handleSessionUpdate(internal: InternalSession, update: acp.SessionUpdate): Promise<void> {
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
         this.pushTextChunk(internal, update);
         break;
-      case "tool_call":
+      case "tool_call": {
         internal.toolTitles.set(update.toolCallId, update.title);
         internal.outputQueue.push({
           type: "tool-call",
@@ -398,18 +545,43 @@ export class AcpAdapter implements AgentAdapter {
           toolName: update.title,
           input: update.rawInput,
         });
+        // diff 顯示路徑 B(檔案快照 fallback)前半段:見 resolveEditSnapshotPath()
+        // 的查證註解——只有「kind === "edit" 且有 locations」時才值得預先讀檔。
+        // `pendingFileSnapshots` 是 InternalSession 上的**選填**欄位(故意不放進
+        // spawn() 建立 internal 物件時的初始化清單,這輪不動 spawn() 的簽章或
+        // 內容,避免跟同時進行的 team-bus/subagent MCP 掛載那個 Phase 衝突),
+        // 這裡用 `??=` 在第一次真的需要時才 lazily 建立。
+        const snapshotPath = resolveEditSnapshotPath(update.kind, update.locations, internal.handle.workspace.path);
+        if (snapshotPath) {
+          const before = await readFileSnapshot(snapshotPath);
+          // undefined = 讀檔失敗(非「檔案不存在」的其他錯誤,見
+          // readFileSnapshot() 註解)——放棄這次快照,不寫入 Map,tool_call_update
+          // 完成時會因為找不到 pending entry 而自然 fallback 成「兩條路徑都沒
+          // 命中」,不會拋錯或中斷事件推送。
+          if (before !== undefined) {
+            (internal.pendingFileSnapshots ??= new Map()).set(update.toolCallId, { path: snapshotPath, before });
+          }
+        }
         break;
-      case "tool_call_update":
+      }
+      case "tool_call_update": {
         if (update.status === "completed" || update.status === "failed") {
+          const structuredResult = await this.resolveDiffStructuredResult(internal, update);
           internal.outputQueue.push({
             type: "tool-result",
             toolCallId: update.toolCallId,
             toolName: internal.toolTitles.get(update.toolCallId) ?? update.title ?? "",
             output: update.rawOutput ?? update.content,
             isError: update.status === "failed",
+            // undefined 時完全不附加這個欄位(而不是顯式 `structuredResult:
+            // undefined`)——比照 events.ts 對 `z.unknown().optional()` 的既有
+            // 慣例,消費端(DiffHunkView.parseDiffResult())兩者處理結果相同,
+            // 但省略更貼近「這個 adapter 這次沒有 diff 資訊可給」的語意。
+            ...(structuredResult ? { structuredResult } : {}),
           });
         }
         break;
+      }
       /**
        * S3a(usage-metering)L4 §2:ACP 的 `UsageUpdate = { used, size, cost? }`
        * ——`used`/`size` 是 context 窗口計量表(gauge,每次都發,便宜且 S8 的
@@ -440,6 +612,43 @@ export class AcpAdapter implements AgentAdapter {
         // M2 Round A 的 AgentEvent 尚未涵蓋,略過不轉發(見上方 class 註解的 TODO)。
         break;
     }
+  }
+
+  /**
+   * Codex ACP 橋接切換 Phase 3(diff 顯示):completed/failed 的
+   * `tool_call_update` 嘗試合成 `ToolResultEvent.structuredResult`。路徑 A
+   * (原生 diff 內容區塊)優先於路徑 B(檔案快照 fallback)——見檔案開頭 class
+   * 註解與 `capabilities()` 的 `diff: true` 理由段落。回傳 `undefined` 代表
+   * 兩條路徑都沒有命中(或路徑 B 讀檔失敗),呼叫端維持現有行為,不附加
+   * `structuredResult`。
+   *
+   * 不論最終走哪條路徑,這個 `toolCallId` 的 `pendingFileSnapshots` entry
+   * 到這裡都已經沒用了——`completed`/`failed` 是 `ToolCallStatus` 的終態
+   * (已讀 types.gen.d.ts 確認 `ToolCallStatus = "pending" | "in_progress" |
+   * "completed" | "failed"`,ACP 協議不會再對同一個 toolCallId 送出新的
+   * `tool_call_update`),故統一在此刪除,避免長時間 session 的
+   * `pendingFileSnapshots`(存的是檔案全文,不是短字串)只增不減。
+   */
+  private async resolveDiffStructuredResult(
+    internal: InternalSession,
+    update: acp.ToolCallUpdate,
+  ): Promise<DiffStructuredResult | undefined> {
+    const pending = internal.pendingFileSnapshots?.get(update.toolCallId);
+    internal.pendingFileSnapshots?.delete(update.toolCallId);
+
+    const diffBlock = findDiffBlock(update.content);
+    if (diffBlock) {
+      // Diff.oldText 是 `string | null | undefined`——`null`/缺席代表「呼叫前
+      // 不存在這個檔案」(已讀 types.gen.d.ts 的欄位註解「The original content
+      // (None for new files)」確認),與路徑 B 對 ENOENT 的處理(視為空字串)
+      // 語意一致,故同樣 coalesce 成 `""`。
+      return buildDiffStructuredResult(diffBlock.path, diffBlock.oldText ?? "", diffBlock.newText);
+    }
+
+    if (!pending) return undefined;
+    const after = await readFileSnapshot(pending.path);
+    if (after === undefined) return undefined; // 讀檔失敗(非 ENOENT):優雅放棄,見 readFileSnapshot() 註解
+    return buildDiffStructuredResult(pending.path, pending.before, after);
   }
 
   private pushTextChunk(
@@ -517,6 +726,160 @@ interface InternalSession {
    * ——ACP 的 `cost` 是 optional,可能整個 session 都不回報。
    */
   lastCost?: { amount: number; currency: string };
+  /**
+   * Codex ACP 橋接切換 Phase 3(diff 顯示)路徑 B(檔案快照 fallback)用:
+   * toolCallId -> 該工具呼叫執行前讀到的檔案內容快照
+   * (`resolveEditSnapshotPath()` 判斷為檔案編輯類、且成功讀到內容時才會有
+   * 記錄)。`tool_call_update` 完成時若這裡有對應記錄、且路徑 A(原生 diff
+   * 內容區塊)沒有命中,就重新讀一次同一個檔案當作 after,合成 diff——見
+   * `resolveDiffStructuredResult()`。用完(不論成功與否)一律刪除對應
+   * entry,避免長時間 session 累積大量檔案全文在記憶體裡。
+   *
+   * **選填、預設不存在**(而不是比照 `toolTitles` 在 `spawn()` 建構
+   * `InternalSession` 時就初始化成空 Map)——這輪明確不動 `spawn()` 的簽章或
+   * 內容(避免跟同時進行的「ACP 掛載 team-bus/subagent MCP」那個 Phase 的
+   * 改動衝突),改成在 `handleSessionUpdate()` 第一次真的需要寫入時用
+   * `??=` lazily 建立,行為上與「一開始就是空 Map」完全等價。
+   */
+  pendingFileSnapshots?: Map<string, { path: string; before: string }>;
+}
+
+/**
+ * `apps/desktop/src/views/chat/DiffHunkView.tsx` 的 `parseDiffResult()`
+ * 期待的 `ToolResultEvent.structuredResult` 形狀——這裡不 import 那個檔案
+ * (packages/* 不得依賴 apps/*,見 packages/adapters/src/types.ts 開頭的既有
+ * 依賴方向規則),純粹複製欄位名稱維持形狀一致。`structuredPatch` 元素形狀
+ * 直接借用 `diff` 套件 `structuredPatch()` 回傳值的 `hunks` 元素型別
+ * (`ReturnType` 取的是這個多載函式的最後一個簽章,即下面
+ * `buildDiffStructuredResult()` 實際呼叫的那個),不手動重複宣告欄位,兩邊
+ * 型別自動保持同步。
+ */
+interface DiffStructuredResult {
+  filePath: string;
+  structuredPatch: ReturnType<typeof structuredPatch>["hunks"];
+}
+
+/**
+ * 在一組 `ToolCallContent[]` 裡找第一個 `type:"diff"` 的區塊。已讀
+ * node_modules 內 `@agentclientprotocol/sdk@1.2.1` 的
+ * `dist/schema/types.gen.d.ts` 確認:
+ *   `ToolCallContent = (Content & {type:"content"}) | (Diff & {type:"diff"})
+ *                     | (Terminal & {type:"terminal"})`
+ *   `Diff = { path: string; oldText?: string | null; newText: string;
+ *             _meta?: {[key:string]: unknown} | null }`
+ * `_meta` 是 ACP 的通用擴充欄位,這個 adapter 其餘地方一律不處理,這裡比照
+ * 辦理。一則 `tool_call_update` 的 `content?: Array<ToolCallContent> | null`
+ * 理論上可以同時帶多個 content block,但 `DiffResult`/
+ * `ToolResultEvent.structuredResult` 的既有形狀只能表達單一檔案的 diff,取
+ * 第一個命中的 `type:"diff"` 區塊即可,不嘗試合併多個。
+ */
+function findDiffBlock(content: acp.ToolCallContent[] | null | undefined): acp.Diff | undefined {
+  return content?.find((c): c is acp.Diff & { type: "diff" } => c.type === "diff");
+}
+
+/**
+ * 把一組 before/after 全文丟進 `diff` 套件的 `structuredPatch()` 合成
+ * `DiffHunkView.parseDiffResult()` 期待的 hunk 陣列。已讀 node_modules 內
+ * `diff@9.0.0`(`packages/adapters/package.json` 這輪新增的相依,無需
+ * `@types/diff`——這個套件自 v5 起自帶型別宣告,`package.json` 的 `exports`/
+ * `types` 欄位都指向套件自己的 `.d.ts`)的
+ * `libesm/patch/create.d.ts`/`libesm/types.d.ts` 確認:
+ *   - 簽章:`structuredPatch(oldFileName, newFileName, oldStr, newStr,
+ *     oldHeader?, newHeader?, options?): StructuredPatch`——後三個參數全部
+ *     optional,四參數呼叫合法。
+ *   - `StructuredPatch.hunks` 元素形狀是 `{oldStart, oldLines, newStart,
+ *     newLines, lines: string[]}`——與 `DiffHunkView.DiffHunk` 逐欄位同名同
+ *     型別,不需要任何欄位改名/轉換。
+ *   - 實測(node 腳本直接呼叫,結果記錄於此,腳本本身已刪除未進版控):
+ *     `lines` 陣列每個元素已經帶好 `+`/`-`/`(空白)` 前綴(新增行 `+xxx`、
+ *     刪除行 `-xxx`、context 行 ` xxx`,以及 `\ No newline at end of file`
+ *     這種以反斜線開頭的中性 metadata 行),與 `DiffLine`
+ *     (`DiffHunkView.tsx`)靠 `line.charAt(0)` 判斷顏色的既有邏輯完全吻合,
+ *     不需要額外加前綴。
+ *   - `oldStr` 為空字串(新建檔案)時,`hunks` 是單一個 `oldStart:1,
+ *     oldLines:0` 的全綠 hunk;`newStr` 為空字串(檔案被刪除)時反過來全紅;
+ *     兩者相同或都空時 `hunks` 是空陣列(對應 `DiffHunkView` 的「沒有變更」
+ *     分支)。
+ */
+function buildDiffStructuredResult(filePath: string, oldText: string, newText: string): DiffStructuredResult {
+  const patch = structuredPatch(filePath, filePath, oldText, newText);
+  return { filePath, structuredPatch: patch.hunks };
+}
+
+/**
+ * 路徑 B(檔案快照 fallback)第一步:判斷一個剛建立的 `tool_call` 是否值得
+ * 在執行前先讀一次目標檔案內容。已讀 types.gen.d.ts 確認
+ * `ToolKind = "read" | "edit" | "delete" | "move" | "search" | "execute" |
+ * "think" | "fetch" | "switch_mode" | "other"`——只在 `kind === "edit"`(語意
+ * 上唯一對應「這個工具呼叫的目的是修改檔案內容」的值;"delete"/"move" 是
+ * 結構性操作而非內容變更,合成 content diff 沒有意義;"read"/"search" 等
+ * 即使帶 `locations` 也只是「牽涉到」而非「即將修改」該檔案,若照樣預先讀檔
+ * 會讓每個帶 location 的唯讀工具呼叫都多一次不必要的檔案 I/O)且 `locations`
+ * 至少有一筆記錄時才觸發。
+ *
+ * 刻意不嘗試從 `rawInput`(型別是 `unknown`,沒有跨工具通用的欄位名稱可言)
+ * 猜測路徑——`locations` 是 ACP 協議明訂、有型別保證的欄位
+ * (`ToolCallLocation = {path: string; line?: number | null; _meta?: ...}`),
+ * `rawInput` 的形狀完全由個別工具自訂,沒有穩定可靠的方式能通用地抽出
+ * 「檔案路徑」。多個 `locations` 時只取第一筆——`DiffResult`/
+ * `ToolResultEvent.structuredResult` 的既有形狀只支援單一檔案。
+ *
+ * **安全審查補強**:`locations[0].path` 完全由被 spawn 的外部 ACP agent
+ * (codex-acp/gemini)回報,不是 Deskmony 自己產生的值。這裡新增
+ * `workspaceRoot` 參數、用 `isWithinWorkspace()` 把它限制在這個 session 自己
+ * 的 workspace 目錄內才會去讀——真正透過 `Edit`/`Write` 一類受權限政策管控
+ * 的工具去改動 workspace 外的檔案,理當會先經過 `permission-request`(見
+ * `canUseTool`/policy-engine.ts 的既有把關,含 `~/.ssh`/`.env`/憑證庫等秘密
+ * 路徑的硬性 deny,docs/DECISIONS.md C5);但這裡的檔案快照走的是另一條路徑
+ * ——由 `tool_call`/`tool_call_update` 這個**通知**(不是需要核可的請求)驅動,
+ * 結構上完全繞過那層審核。即使被 spawn 的 agent 本來就有相同 OS 使用者權限
+ * 能直接讀那些檔案(這裡不是在擋一個「原本讀不到」的能力),把 workspace
+ * 外的內容順手讀出來、diff 過後推播並落地存進聊天紀錄,仍然是這條新路徑不該
+ * 額外多開的門,故加上邊界檢查,對齊既有「未分類/未審視過的操作預設不做」
+ * 這條原則(DECISIONS C2)。
+ */
+function resolveEditSnapshotPath(
+  kind: acp.ToolKind | null | undefined,
+  locations: acp.ToolCallLocation[] | null | undefined,
+  workspaceRoot: string,
+): string | undefined {
+  if (kind !== "edit") return undefined;
+  const candidate = locations?.[0]?.path;
+  if (!candidate || !isWithinWorkspace(candidate, workspaceRoot)) return undefined;
+  return candidate;
+}
+
+/**
+ * `candidatePath` 是否落在 `workspaceRoot` 目錄之內(含 workspaceRoot 本身)。
+ * 兩者都先 `path.resolve()` 正規化(處理 `..`/相對路徑),再用 `path.relative()`
+ * 判斷——結果以 `..` 開頭代表跳出目錄樹;Windows 上兩個路徑分屬不同磁碟機
+ * (例如 root 在 `C:\...`、candidate 在 `D:\...`)時 `path.relative()` 會直接
+ * 回傳一個絕對路徑而非以 `..` 開頭的相對路徑,故額外用 `path.isAbsolute()`
+ * 補這個情況,兩個條件缺一不可。
+ */
+function isWithinWorkspace(candidatePath: string, workspaceRoot: string): boolean {
+  const root = path.resolve(workspaceRoot);
+  const resolved = path.resolve(root, candidatePath);
+  const relative = path.relative(root, resolved);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/**
+ * 讀取檔案目前內容,供路徑 B 的 before/after 快照使用。`ENOENT`(檔案不
+ * 存在)視為合法情況——快照前讀到 ENOENT 代表這是一個「即將被建立」的新
+ * 檔案,回傳空字串,比照 `diff` 套件與路徑 A(`Diff.oldText` 的 `null`/
+ * 缺席同樣代表新檔案)對「新檔案」的一致慣例;其餘錯誤(權限不足、路徑其實
+ * 是目錄等)一律回傳 `undefined`,呼叫端據此放棄這次快照,不讓一次讀檔失敗
+ * 中斷整個 session/update 事件推送迴圈(`NodeJS.ErrnoException.code` 的查法
+ * 比照 apps/core/src/config/load-config.ts 的既有慣例)。
+ */
+async function readFileSnapshot(filePath: string): Promise<string | undefined> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+    return undefined;
+  }
 }
 
 function pickPermissionOptionId(
@@ -552,6 +915,25 @@ function mapAvailableCommands(commands: acp.AvailableCommand[]): SlashCommandInf
     description: c.description || undefined,
     argumentHint: c.input?.hint || undefined,
   }));
+}
+
+/**
+ * Phase 2:算出 `packages/adapters/src/mcp-bridge-server.ts` 編譯後的路徑。
+ *
+ * **不用** `require.resolve()`(對照 `codex-acp-locator.ts` 的
+ * `resolveCodexAcpBridge()`)——那是給*外部* npm 套件用的解法(套件的
+ * `main`/`bin` 欄位理論上可能隨版本改變檔名/位置,交給 Node 的模組解析機制
+ * 比自己組字串路徑可靠)。`mcp-bridge-server.ts` 是**這個套件自己的檔案**,
+ * `tsc`(見 `packages/adapters/tsconfig.json` 的 `outDir: "dist"`)把
+ * `src/` 底下每個檔案原樣編譯成 `dist/` 底下同名的 `.js`,所以
+ * `mcp-bridge-server.js` 永遠跟這個檔案編譯後的 `acp-adapter.js` 在**同一個
+ * 目錄**——用 `import.meta.url`(這個模組自己的路徑)算出所在目錄,取同目錄
+ * 下的檔名即可,不需要、也不應該假設它是一個可以被 `require.resolve()`
+ * 查到的獨立套件。
+ */
+function resolveMcpBridgeServerEntry(): string {
+  const thisFile = fileURLToPath(import.meta.url);
+  return path.join(path.dirname(thisFile), "mcp-bridge-server.js");
 }
 
 /**

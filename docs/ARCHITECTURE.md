@@ -316,14 +316,16 @@ interface AgentAdapter {
 ### 6.2 註冊的四個 adapter
 
 `AdapterRegistry` 實際註冊(`apps/core/src/index.ts`)只有這四種 —— **沒有
-CodexAdapter**,Codex 走 PTY:
+CodexAdapter**,Codex 走 ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,
+**不是**本機 codex CLI 原生支援 ACP——OpenAI 官方 `codex` binary 本身不講
+ACP,見 `docs/DECISIONS.md` B2):
 
 | software | 檔案 | 對接方式 | 涵蓋後端 |
 |---|---|---|---|
 | `claude-agent-sdk` | `claude-sdk-adapter.ts` | `@anthropic-ai/claude-agent-sdk` 程式內嵌 | Claude Code |
-| `acp` | `acp-adapter.ts` | [ACP](https://agentclientprotocol.com) stdio JSON-RPC | Gemini CLI、其他 ACP-native agent |
+| `acp` | `acp-adapter.ts` | [ACP](https://agentclientprotocol.com) stdio JSON-RPC | Gemini CLI、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件)、其他 ACP-native agent |
 | `opencode` | `opencode-adapter.ts` | OpenCode headless server 的 HTTP + SSE | OpenCode |
-| `pty` | `pty-adapter.ts` | `node-pty` 原始直通 | Claude Code CLI、Codex、Aider、任意互動式 CLI |
+| `pty` | `pty-adapter.ts` | `node-pty` 原始直通 | Claude Code CLI、Aider、任意互動式 CLI |
 
 **Provider 目錄**(`packages/shared/src/provider-catalog.ts`)是使用者看到的那一層,
 七項,每項在型別上保證映射到上面四種之一:
@@ -334,7 +336,7 @@ CodexAdapter**,Codex 走 PTY:
 | `claude-cli` | `pty` | 本機安裝的 `claude` CLI |
 | `gemini` | `acp` | |
 | `opencode` | `opencode` | |
-| `codex` | `pty` | **無專屬 adapter** |
+| `codex` | `acp` | 經 `@agentclientprotocol/codex-acp` 橋接套件(非本機 codex CLI 原生支援) |
 | `aider` | `pty` | |
 | `custom-pty` | `pty` | 手動輸入 command |
 
@@ -694,7 +696,7 @@ RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
 | **PTY 執行沙箱** | 未實作 | PTY tier 結構上無法執行權限政策,因此一律唯讀、不給無人值守自主權(DECISIONS C7) |
 | **LLM lead / orchestrator** | 未實作 | 任務拆解目前純人工;`TaskService` 是確定性的,沒有會提議拆解的 LLM |
 | **mid-turn 成本熔斷** | 未實作 | 目前唯一會發 `usage` 的 adapter 在回合結束前才發一次,沒有可觀測的「回合進行中收到 usage」情境可驗證,強行分岔只是憑空編造行為 |
-| **ACP / OpenCode / PTY 掛載 MCP** | 未實作 | 只有 Claude SDK 成員能**主動**呼叫傳訊工具;但**接收端是跨 software 的**(注入 prompt 對任何 session 都有效) |
+| **OpenCode / PTY 掛載 MCP** | 未實作 | 只有 Claude SDK 成員與 ACP 成員(codex/gemini,經 `packages/adapters/src/mcp-bridge-server.ts` 橋接子行程 + scoped token,見 `AcpAdapter.spawn()`)能**主動**呼叫傳訊/子 agent 工具;但**接收端是跨 software 的**(注入 prompt 對任何 session 都有效) |
 | **`session ↔ team member` 持久化** | 只在記憶體 | `sessions` 表沒有欄位記錄這條 session 屬於哪個 team member,崩潰重啟後 `RecoveryService` 只能用 `agentProfileId` 盡力反查(假設一個 profile 只被一個 member 引用) |
 | **遠端能力矩陣的細粒度版本** | 部分 | `LOCAL_ONLY_METHODS` 已擋住 auto/YOLO/policy/profile;DECISIONS F3 列的其餘項目(改預算上限、改綁定介面)尚未有對應的可遠端呼叫方法,因此暫時無需額外閘門 |
 | **`profile.update`** | 未實作 | 只能建立/刪除;實作後必須同步加進 `LOCAL_ONLY_METHODS` |
@@ -712,7 +714,7 @@ RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
 |---|---|
 | 「Event Sourcing:一切皆事件,可回放、可重建 UI 狀態」 | ❌ 當前狀態 CRUD。唯一的 append-only 是 `enforcement_audit`,只記權限決策/trip/對帳,**不記 agent 輸出、不能重建狀態**(DECISIONS D1/D5) |
 | `Scheduler`(排程/自動循環)列在核心模組表與架構圖 | ❌ **從未實作**,沒有任何對應檔案 |
-| `CodexAdapter`(`codex proto` / exec JSON) | ❌ 不存在。Codex 映射到 `pty` |
+| `CodexAdapter`(`codex proto` / exec JSON) | ❌ 不存在。Codex 走 `acp`(經 `@agentclientprotocol/codex-acp` 橋接套件,非本機 codex CLI 原生支援) |
 | 「殼:建議 Tauri 2…或 Electron」 | ✅ 已定案 **Electron 33**,沒有 Tauri 程式碼 |
 | 「Monaco Editor — diff 檢視與檔案預覽」 | ❌ 無 Monaco。自製 `DiffHunkView` + `react-syntax-highlighter` |
 | 「虛擬列表(聊天串流訊息量大)」 | ❌ 未實作 |

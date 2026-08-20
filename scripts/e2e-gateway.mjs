@@ -39,6 +39,9 @@ import {
   WRITE_FILE_PREFIX,
   USAGE_UPDATE_PREFIX,
   AVAILABLE_COMMANDS_PREFIX,
+  DIFF_CONTENT_PREFIX,
+  CALL_BRIDGE_TOOL_PREFIX,
+  REPORT_MCP_SERVERS_PREFIX,
   delayEchoMarker,
 } from "./fake-acp-agent.mjs";
 import { FAKE_OPENCODE_REPLY_CHUNKS, TOOL_CALL_PREFIX, SLOW_PREFIX, TEST_COMMANDS } from "./fake-opencode-server.mjs";
@@ -503,6 +506,48 @@ function analyzeMessageDeltas(collected) {
 }
 
 // ---------------------------------------------------------------------
+// diff 顯示驗證(Codex ACP 橋接切換 Phase 3,決定性測試,不依賴外部模型)
+// ---------------------------------------------------------------------
+/**
+ * 驗證 `ToolResultEvent.structuredResult` 是否符合
+ * `apps/desktop/src/views/chat/DiffHunkView.tsx` 的 `parseDiffResult()` 期待
+ * 的形狀(`{filePath: string, structuredPatch: [{oldStart, oldLines,
+ * newStart, newLines, lines: string[]}]}`),並把所有 hunk 的 `lines` 攤平
+ * 抽出 "+"/"-" 開頭的行(去掉前綴)方便比對實際新增/刪除的內容。刻意**不**
+ * 逐行斷言 hunk 是否含 `"\ No newline at end of file"` 這類中性 metadata
+ * 行——那是 `diff` 套件(jsdiff)的既有輸出慣例,不是 AcpAdapter 自己的邏輯,
+ * 鎖住它只會讓這個測試對套件版本升級過度敏感。回傳 `undefined` 代表形狀不符
+ * (呼叫端據此視為「沒有可用的 diff 資訊」,等同 UI 端 `parseDiffResult()`
+ * 回傳 `null` 時的 fallback 語意)。
+ */
+function summarizeStructuredPatch(structuredResult) {
+  if (typeof structuredResult !== "object" || structuredResult === null) return undefined;
+  const { filePath, structuredPatch } = structuredResult;
+  if (typeof filePath !== "string" || !Array.isArray(structuredPatch)) return undefined;
+  const added = [];
+  const removed = [];
+  for (const hunk of structuredPatch) {
+    if (
+      typeof hunk !== "object" ||
+      hunk === null ||
+      typeof hunk.oldStart !== "number" ||
+      typeof hunk.oldLines !== "number" ||
+      typeof hunk.newStart !== "number" ||
+      typeof hunk.newLines !== "number" ||
+      !Array.isArray(hunk.lines)
+    ) {
+      return undefined;
+    }
+    for (const line of hunk.lines) {
+      if (typeof line !== "string") return undefined;
+      if (line.startsWith("+")) added.push(line.slice(1));
+      else if (line.startsWith("-")) removed.push(line.slice(1));
+    }
+  }
+  return { filePath, added, removed, hunkCount: structuredPatch.length };
+}
+
+// ---------------------------------------------------------------------
 // 步驟 9: AcpAdapter + fake ACP agent(決定性測試,不依賴外部模型)
 // ---------------------------------------------------------------------
 async function acpFakeAgentSmokeTest(client, workspaceDir) {
@@ -596,6 +641,22 @@ async function acpFakeAgentSmokeTest(client, workspaceDir) {
       sawPermissionRequest && sawToolCall && sawToolResult && toolCallBeforeResult && completedOk && fileExists && contentOk,
       `permission-request=${sawPermissionRequest}, tool-call=${sawToolCall}(idx=${toolCallIdx}), tool-result=${sawToolResult}(idx=${toolResultIdx}), toolCallBeforeResult=${toolCallBeforeResult}, completed=${completedOk}, fileExists=${fileExists}, content=${JSON.stringify(fileContent)}`,
     );
+
+    // ---- 9c-diff: 同一輪 tool-result 事件驗證 diff 顯示路徑 B(檔案快照
+    // fallback,Codex ACP 橋接切換 Phase 3)—— handleWriteFile() 的 tool_call
+    // 帶 kind:"edit"+locations,但 tool_call_update 完成時不附帶原生
+    // type:"diff" 內容區塊(見 scripts/fake-acp-agent.mjs),AcpAdapter 必須
+    // 靠自己在呼叫前後各讀一次檔案合成 structuredResult。這個檔案在呼叫前
+    // 不存在,預期是一個「全新檔案」的全綠 hunk。 ----
+    const toolResultEvent = sawToolResult ? collected[toolResultIdx].event : undefined;
+    const diffSummary = summarizeStructuredPatch(toolResultEvent?.structuredResult);
+    const diffPathOk = diffSummary?.filePath === allowFilePosix;
+    const diffContentOk = diffSummary !== undefined && diffSummary.added.join("\n") === expectedContent && diffSummary.removed.length === 0;
+    record(
+      "步驟9c-diff ACP diff 顯示路徑 B(檔案快照 fallback):沒有原生 diff 區塊時 AcpAdapter 自行讀檔前後合成 structuredResult",
+      diffSummary !== undefined && diffPathOk && diffContentOk,
+      `structuredResult=${JSON.stringify(toolResultEvent?.structuredResult)}, 解析結果=${JSON.stringify(diffSummary)}, path 是否符合=${diffPathOk}, 內容是否符合(全新檔案、僅新增 ${JSON.stringify(expectedContent)})=${diffContentOk}`,
+    );
   } catch (err) {
     record("步驟9c ACP 權限 allow 路徑", false, String(err));
   }
@@ -627,6 +688,42 @@ async function acpFakeAgentSmokeTest(client, workspaceDir) {
     );
   } catch (err) {
     record("步驟9d ACP 權限 deny 路徑", false, String(err));
+  }
+
+  // ---- 9d2: diff 顯示路徑 A(原生 diff 內容區塊,Codex ACP 橋接切換 Phase 3)----
+  try {
+    const diffFilePosix = path.join(workspaceDir, "acp-diff-a.txt").split(path.sep).join("/");
+    const oldText = "line1\nline2\nline3\n";
+    const newText = "line1\nCHANGED\nline3\n";
+    const diffPrompt = `${DIFF_CONTENT_PREFIX}${JSON.stringify({ path: diffFilePosix, oldText, newText })}`;
+
+    const { finalEvent, collected } = await client.drivePrompt(acpSessionId, diffPrompt, {
+      onPermission: async () => "deny", // 這個情境不觸發 session/request_permission
+      timeoutMs: 20_000,
+    });
+
+    const toolResultIdx = collected.findIndex((e) => e.event.type === "tool-result");
+    const sawToolResult = toolResultIdx !== -1;
+    const completedOk = finalEvent.event.type === "completed";
+    const toolResultEvent = sawToolResult ? collected[toolResultIdx].event : undefined;
+    const diffSummary = summarizeStructuredPatch(toolResultEvent?.structuredResult);
+    const diffPathOk = diffSummary?.filePath === diffFilePosix;
+    // 對應 oldText/newText 的字面差異:第 2 行從 "line2" 換成 "CHANGED",
+    // 第 1/3 行不變——預期恰好一個新增行、一個刪除行,不多不少。
+    const diffContentOk =
+      diffSummary !== undefined &&
+      diffSummary.added.length === 1 &&
+      diffSummary.added[0] === "CHANGED" &&
+      diffSummary.removed.length === 1 &&
+      diffSummary.removed[0] === "line2";
+
+    record(
+      "步驟9d2 ACP diff 顯示路徑 A(原生 ToolCallContent 的 type:\"diff\" 區塊,不觸碰真實檔案系統)",
+      sawToolResult && completedOk && diffSummary !== undefined && diffPathOk && diffContentOk,
+      `tool-result=${sawToolResult}, 完成=${completedOk}, structuredResult=${JSON.stringify(toolResultEvent?.structuredResult)}, 解析結果=${JSON.stringify(diffSummary)}, path 是否符合=${diffPathOk}, 內容是否符合(+CHANGED/-line2)=${diffContentOk}`,
+    );
+  } catch (err) {
+    record("步驟9d2 ACP diff 顯示路徑 A", false, String(err));
   }
 
   // ---- 9e: 清理 ----
@@ -2946,6 +3043,689 @@ async function slashCommandSmokeTest(client, workspaceDir) {
 }
 
 // ---------------------------------------------------------------------
+// 步驟 32: ACP scoped MCP bridge token(Phase 2,決定性測試,不依賴任何真實
+// 模型/真實 codex-acp/gemini)。
+//
+// 核心手法:用 fake-acp-agent.mjs 建立真實的 `software:"acp"` session(團隊
+// 成員或個人單機皆有),送出 `REPORT_MCP_SERVERS_PREFIX` 這個確定性 prompt,
+// 讓假 agent 把它在 `session/new` 收到的 `mcpServers`(AcpAdapter.spawn() 真
+// 的呼叫 `WsGateway.mintMcpBridgeToken()` 核發、透過 `SessionBuilder.
+// withMcpServer()` 掛上的那組設定,含真實 scoped token)原樣回顯——藉此拿到
+// 一個「真的由生產程式碼核發」的 token,而不是自己在測試裡憑空捏造一個假的
+// grant。拿到之後分兩路驗證:
+//   (a) 32b-32f:直接用這個 token 開一條新的 WS 連線(重用既有
+//       `GatewayClient`),打各種白名單內/外、綁定範圍內/外、過期、撤銷後的
+//       請求,決定性地驗證 apps/core/src/gateway/ws-gateway.ts 的
+//       `checkScopedGrantAccess()`/`matchScopedToken()` 邏輯——這是最關鍵的
+//       安全機制本身,不透過 MCP 協議繞一圈,斷言更直接、更快。
+//   (b) 32g:用 `CALL_BRIDGE_TOOL_PREFIX` 讓假 agent **真的**把
+//       mcp-bridge-server.ts 的編譯產物 spawn 成子行程,用真正的 MCP client
+//       連上去呼叫一個工具——證明(a)驗證過的 token 真的能驅動完整的
+//       ACP→bridge→WS→gateway→MessageBus 管線,產生真實可見的 side effect
+//       (team_messages 多一筆),不是紙上談兵。
+//
+// `AcpAdapter` 的 `subagentPort` 這輪(見 apps/core/src/index.ts)已改成與
+// `claudeAdapter` 共用同一個實例,全域生效——所以這裡建立的**任何** ACP
+// session(不論有沒有 team)都會拿到 subagent 系列方法的授權,32d 特別驗證
+// 「沒有 team 的 session,它的 token 確實拿不到 team-bus 系列方法」,確保
+// scope 是真的照請求核發、不是無條件全授權。
+// ---------------------------------------------------------------------
+
+/** 把 `REPORT_MCP_SERVERS_PREFIX` 回覆的 `"MCP_SERVERS:[...]"` 文字轉成
+ *  `{token, gatewayUrl, sessionId, teamId?, memberId?, subagentEnabled}`。
+ *  沒有掛任何 MCP server 時(mcpServers 是空陣列)回傳 undefined。 */
+function parseBridgeEnvFromReport(fullText) {
+  const marker = "MCP_SERVERS:";
+  const idx = fullText.indexOf(marker);
+  if (idx === -1) return undefined;
+  const mcpServers = JSON.parse(fullText.slice(idx + marker.length));
+  if (!Array.isArray(mcpServers) || mcpServers.length === 0) return undefined;
+  const server = mcpServers[0];
+  const env = Object.fromEntries((server.env ?? []).map((e) => [e.name, e.value]));
+  return {
+    command: server.command,
+    args: server.args ?? [],
+    rawEnv: server.env ?? [],
+    token: env.DESKMONY_MCP_BRIDGE_TOKEN,
+    gatewayUrl: env.DESKMONY_MCP_BRIDGE_GATEWAY_URL,
+    sessionId: env.DESKMONY_MCP_BRIDGE_SESSION_ID,
+    teamId: env.DESKMONY_MCP_BRIDGE_TEAM_ID,
+    memberId: env.DESKMONY_MCP_BRIDGE_MEMBER_ID,
+    subagentEnabled: env.DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED === "1",
+  };
+}
+
+/** 建一個 ACP session(fake-acp-agent.mjs),送出 REPORT_MCP_SERVERS_PREFIX,
+ *  回傳解析後的 bridge env(見上方)——`undefined` 代表這個 session 沒有掛
+ *  任何 MCP server(不應該發生,除非 tokenMinter/subagentPort 都沒注入)。 */
+async function createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, title, teamMemberId) {
+  const created = await client.rpc(
+    "session.create",
+    { agentProfileId: acpProfileId, workingDir: workspaceDir, title, ...(teamMemberId ? { teamMemberId } : {}) },
+    30_000,
+  );
+  const sessionId = created.session.id;
+  const { finalEvent, collected } = await client.drivePrompt(sessionId, REPORT_MCP_SERVERS_PREFIX, {
+    onPermission: async () => "deny",
+    timeoutMs: 20_000,
+  });
+  if (finalEvent.event.type !== "completed") {
+    throw new Error(`REPORT_MCP_SERVERS 未正常 completed: ${JSON.stringify(finalEvent.event)}`);
+  }
+  const { groups } = analyzeMessageDeltas(collected);
+  const fullText = groups.map((g) => g.text).join("");
+  return { sessionId, bridgeEnv: parseBridgeEnvFromReport(fullText) };
+}
+
+/** 開一條新的 WS 連線,用給定的 token 認證。回傳 `{client, ok, error}`——
+ *  認證失敗時 `ok:false`,`client` 仍然回傳(連線可能已被 server 端關閉,
+ *  呼叫端不需要再手動 close)。 */
+async function connectAndAuth(gatewayUrl, token) {
+  const c = new GatewayClient(gatewayUrl);
+  await c.connect();
+  try {
+    await c.rpc("auth", { token });
+    return { client: c, ok: true };
+  } catch (err) {
+    return { client: c, ok: false, error: String(err) };
+  }
+}
+
+async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
+  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
+
+  // ---- 32a: 準備——team(Coder/Reviewer)+ ACP profile + 兩個 session
+  //           (team 成員一個、沒有 team 的個人單機一個),各自取得真實核發的
+  //           bridge env。----
+  let teamId, coderMemberId, reviewerMemberId, teamSessionId, soloSessionId, repoDir, taskId;
+  let teamBridgeEnv, soloBridgeEnv;
+  try {
+    const profileCreated = await client.rpc("profile.create", {
+      name: "E2E Scoped MCP Bridge Token",
+      software: "acp",
+      workingDir: workspaceDir,
+      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
+    });
+    const acpProfileId = profileCreated.profile.id;
+
+    // MessageBus.sendMessage()/broadcast() 的 contextId 推導(S2
+    // message-budget)要求發送者當下有一個進行中的任務(assigned/
+    // in-progress/review/merging),否則會被拒收(比照步驟13a 的既有先例)
+    // ——這裡的 team 需要真的 git repo 當 workingDir 才能 task.assign。
+    const gitVersion = runGitSync(["--version"], process.cwd());
+    if (gitVersion.status !== 0) {
+      record("步驟32(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
+      return;
+    }
+    repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-scoped-token-"));
+    runGitSync(["init"], repoDir);
+    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
+    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
+    writeFileSync(path.join(repoDir, "README.md"), "# e2e scoped mcp bridge token repo\n", "utf8");
+    runGitSync(["add", "."], repoDir);
+    runGitSync(["commit", "-m", "initial commit"], repoDir);
+
+    const team = await client.rpc("team.create", { name: "E2E Scoped Token Team", workingDir: repoDir });
+    teamId = team.team.id;
+    const coder = await client.rpc("team.addMember", {
+      teamId,
+      agentProfileId: acpProfileId,
+      name: "Coder",
+      role: "Coder",
+      canInterrupt: false,
+      lifecycle: "persistent",
+    });
+    coderMemberId = coder.member.id;
+    const reviewer = await client.rpc("team.addMember", {
+      teamId,
+      agentProfileId: acpProfileId,
+      name: "Reviewer",
+      role: "Reviewer",
+      canInterrupt: false,
+      lifecycle: "persistent",
+    });
+    reviewerMemberId = reviewer.member.id;
+
+    // 指派一個任務給 coderMemberId(assigned 狀態),讓 message.sendMessage/
+    // broadcast 的 contextId 能被推導出來(見上方註解)。
+    const task = await client.rpc("task.create", { teamId, title: "E2E Scoped Token Task" });
+    taskId = task.task.id;
+    await client.rpc("task.assign", { taskId, memberId: coderMemberId });
+
+    const teamResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-team", coderMemberId);
+    teamSessionId = teamResult.sessionId;
+    teamBridgeEnv = teamResult.bridgeEnv;
+
+    const soloResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-solo", undefined);
+    soloSessionId = soloResult.sessionId;
+    soloBridgeEnv = soloResult.bridgeEnv;
+
+    const ok =
+      Boolean(teamBridgeEnv?.token) &&
+      teamBridgeEnv.token.startsWith("dmbt_") &&
+      teamBridgeEnv.teamId === teamId &&
+      teamBridgeEnv.memberId === coderMemberId &&
+      teamBridgeEnv.sessionId === teamSessionId &&
+      teamBridgeEnv.subagentEnabled === true &&
+      Boolean(soloBridgeEnv?.token) &&
+      soloBridgeEnv.teamId === undefined &&
+      soloBridgeEnv.sessionId === soloSessionId &&
+      soloBridgeEnv.subagentEnabled === true;
+    record(
+      "步驟32a 建立 team 成員與個人單機兩種 ACP session,AcpAdapter.spawn() 真的核發 scoped token(dmbt_ 前綴)且內容正確綁定各自的 session/team/member",
+      ok,
+      `team=${JSON.stringify({ ...teamBridgeEnv, token: teamBridgeEnv?.token ? "(redacted)" : undefined })}, solo=${JSON.stringify({ ...soloBridgeEnv, token: soloBridgeEnv?.token ? "(redacted)" : undefined })}`,
+    );
+  } catch (err) {
+    record("步驟32a 準備 team + 兩種 ACP session 並取得真實核發的 scoped token", false, String(err));
+    return; // 後續子步驟都依賴這裡的結果,拿不到就整組略過。
+  }
+
+  // ---- 32b: 白名單內的方法(team-bus + subagent 兩類)用 team session 的
+  //           token 呼叫,一律成功。----
+  try {
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(teamBridgeEnv.gatewayUrl, teamBridgeEnv.token);
+    if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
+
+    const sendResult = await bridgeClient.rpc("message.sendMessage", {
+      teamId,
+      fromMemberId: coderMemberId,
+      to: "Reviewer",
+      content: "步驟32b 白名單內方法測試",
+    });
+    const listChildrenResult = await bridgeClient.rpc("session.listChildren", { parentSessionId: teamSessionId });
+    const listProfilesResult = await bridgeClient.rpc("profile.listForSubagent", {});
+    const teammatesResult = await bridgeClient.rpc("team.teammates", { teamId });
+
+    bridgeClient.close();
+
+    const ok =
+      Boolean(sendResult?.message?.id) &&
+      Array.isArray(listChildrenResult?.children) &&
+      Array.isArray(listProfilesResult?.profiles) &&
+      Array.isArray(teammatesResult?.teammates);
+    record(
+      "步驟32b scoped token 呼叫白名單內的方法(message.sendMessage/session.listChildren/profile.listForSubagent/team.teammates)全部成功",
+      ok,
+      `sendResult=${JSON.stringify(sendResult)}, listChildren=${JSON.stringify(listChildrenResult)}, listProfiles 數=${listProfilesResult?.profiles?.length}, teammates 數=${teammatesResult?.teammates?.length}`,
+    );
+  } catch (err) {
+    record("步驟32b scoped token 呼叫白名單內方法全部成功", false, String(err));
+  }
+
+  // ---- 32c: 白名單外的方法一律被拒絕(errorCode 對應
+  //           GATEWAY_SCOPED_TOKEN_FORBIDDEN,訊息含「無權呼叫」)。----
+  try {
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(teamBridgeEnv.gatewayUrl, teamBridgeEnv.token);
+    if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
+
+    const forbiddenMethods = [
+      ["session.create", { agentProfileId: "whatever", workingDir: workspaceDir }],
+      ["profile.delete", { id: "whatever" }],
+      ["config.setFile", { log: { level: "warn" } }],
+      ["session.setPermissionMode", { sessionId: teamSessionId, mode: "auto-accept-all" }],
+    ];
+    const rejections = [];
+    for (const [method, params] of forbiddenMethods) {
+      try {
+        await bridgeClient.rpc(method, params);
+        rejections.push({ method, rejected: false });
+      } catch (err) {
+        rejections.push({ method, rejected: true, message: String(err) });
+      }
+    }
+    bridgeClient.close();
+
+    const ok = rejections.every((r) => r.rejected && r.message.includes("無權呼叫"));
+    record(
+      "步驟32c scoped token 呼叫白名單外的方法(session.create/profile.delete/config.setFile/session.setPermissionMode)全部被拒絕",
+      ok,
+      JSON.stringify(rejections),
+    );
+  } catch (err) {
+    record("步驟32c scoped token 呼叫白名單外方法全部被拒絕", false, String(err));
+  }
+
+  // ---- 32d: 綁定範圍檢查——同樣是白名單內的方法,但參數指向別的
+  //           session/team/member 時一律被拒絕。----
+  try {
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(teamBridgeEnv.gatewayUrl, teamBridgeEnv.token);
+    if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
+
+    const otherTeam = await client.rpc("team.create", { name: "E2E Scoped Token Other Team" });
+    const cases = [
+      // teamId 對,但 fromMemberId 冒充 Reviewer(不是這個 token 綁定的 coderMemberId)。
+      ["message.sendMessage", { teamId, fromMemberId: reviewerMemberId, to: "Coder", content: "冒名" }, "fromMemberId 不符"],
+      // fromMemberId 對,但 teamId 指向別的 team。
+      ["message.broadcast", { teamId: otherTeam.team.id, fromMemberId: coderMemberId, content: "冒名" }, "teamId 不符"],
+      ["team.teammates", { teamId: otherTeam.team.id }, "teamId 不符(team.teammates)"],
+      // parentSessionId 指向不是這個 token 綁定的 soloSessionId。
+      ["session.listChildren", { parentSessionId: soloSessionId }, "parentSessionId 不符"],
+      ["session.spawnChildForSubagent", { parentSessionId: soloSessionId, prompt: "冒名" }, "parentSessionId 不符(spawn)"],
+    ];
+    const rejections = [];
+    for (const [method, params, label] of cases) {
+      try {
+        await bridgeClient.rpc(method, params);
+        rejections.push({ label, rejected: false });
+      } catch (err) {
+        rejections.push({ label, rejected: true, message: String(err) });
+      }
+    }
+    bridgeClient.close();
+
+    const ok = rejections.every((r) => r.rejected && r.message.includes("不符"));
+    record(
+      "步驟32d scoped token 呼叫白名單內方法,但參數指向不屬於自己綁定的 session/team/member 時一律被拒絕(冒名防護)",
+      ok,
+      JSON.stringify(rejections),
+    );
+  } catch (err) {
+    record("步驟32d scoped token 綁定範圍檢查(冒名防護)", false, String(err));
+  }
+
+  // ---- 32e: 沒有 team 的 session,它的 token 拿不到 team-bus 系列方法
+  //           (即使 subagentPort 全域生效、team-bus 與 subagent 是各自獨立
+  //           判斷的兩組範圍),但拿得到 subagent 系列方法。----
+  try {
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(soloBridgeEnv.gatewayUrl, soloBridgeEnv.token);
+    if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
+
+    let teamBusRejected = false;
+    try {
+      await bridgeClient.rpc("message.sendMessage", { teamId, fromMemberId: coderMemberId, to: "Reviewer", content: "不該成功" });
+    } catch (err) {
+      teamBusRejected = String(err).includes("無權呼叫");
+    }
+
+    const listProfilesResult = await bridgeClient.rpc("profile.listForSubagent", {});
+    bridgeClient.close();
+
+    const ok = teamBusRejected && Array.isArray(listProfilesResult?.profiles);
+    record(
+      "步驟32e 沒有 team 的 ACP session,其 scoped token 呼叫 team-bus 方法(message.sendMessage)被拒絕,但 subagent 方法(profile.listForSubagent)仍然成功——scope 精確反映核發時的請求,不是全有全無",
+      ok,
+      `teamBusRejected=${teamBusRejected}, listProfiles 數=${listProfilesResult?.profiles?.length}`,
+    );
+  } catch (err) {
+    record("步驟32e 無 team session 的 token 精確反映 scope(team-bus 拒絕/subagent 允許)", false, String(err));
+  }
+
+  // ---- 32f: session dispose 後,對應 token 立即失效(呼叫任何方法都被拒絕)。----
+  try {
+    // 用一個獨立的 session(不是 32a 那兩個,避免影響後面步驟還要用到
+    // teamSessionId/soloSessionId)。
+    const profileList = await client.rpc("profile.list", {});
+    const acpProfile = profileList.profiles.find((p) => p.name === "E2E Scoped MCP Bridge Token");
+    const { sessionId: disposableSessionId, bridgeEnv: disposableBridgeEnv } = await createAcpSessionAndGetBridgeEnv(
+      client,
+      acpProfile.id,
+      workspaceDir,
+      "e2e-scoped-dispose",
+      undefined,
+    );
+
+    // 先確認 token 一開始確實可用(排除「本來就核發失敗」這個混淆變因)。
+    const { client: beforeClient, ok: beforeOk } = await connectAndAuth(disposableBridgeEnv.gatewayUrl, disposableBridgeEnv.token);
+    if (!beforeOk) throw new Error("dispose 前 scoped token 認證失敗,預期應該成功");
+    await beforeClient.rpc("profile.listForSubagent", {});
+    beforeClient.close();
+
+    await client.rpc("session.delete", { sessionId: disposableSessionId });
+
+    // session.delete 內部會 await adapter.dispose(handle)(見
+    // SessionManager.deleteSession()),而 AcpAdapter.dispose() 會在其中同步
+    // 呼叫 tokenMinter.revokeForSession()——RPC resolve 時撤銷理論上已完成,
+    // 不需要額外等待;仍用一個新連線重新嘗試認證,確認被拒絕。
+    const { client: afterClient, ok: afterOk, error: afterError } = await connectAndAuth(
+      disposableBridgeEnv.gatewayUrl,
+      disposableBridgeEnv.token,
+    );
+    afterClient.close();
+
+    const ok = !afterOk && Boolean(afterError) && afterError.includes("認證失敗");
+    record(
+      "步驟32f session.delete(觸發 AcpAdapter.dispose())後,對應的 scoped token 立即失效,重新認證被拒絕",
+      ok,
+      `afterOk=${afterOk}, afterError=${afterError}`,
+    );
+  } catch (err) {
+    record("步驟32f session dispose 後 token 立即失效", false, String(err));
+  }
+
+  // ---- 32f-2: 外部安全審查抓到的真實漏洞的迴歸測試(見
+  //             checkScopedGrantAccess() 頂端註解)——32f 只驗證了「用同一個
+  //             token 開全新連線重新認證」會被拒絕,**沒有**驗證「dispose 前
+  //             就已經完成 auth handshake、且連線本身一直沒關」的既有連線,
+  //             之後再送 request 是否也會被擋下。早期實作只檢查連線建立當下
+  //             快取的 grant 物件(從未回頭查活著的 map),這個情境下撤銷完全
+  //             不會生效,直到 token 的絕對 TTL(預設 24 小時)才會失效——不
+  //             需要任何惡意行為,單純 dispose() 到子行程真的被殺掉之間的正常
+  //             等待窗口就會踩到。這裡刻意讓 bridgeClient **在 dispose 之後才
+  //             送出下一個 request**(不重新認證),驗證的是「同一條連線」而
+  //             非「新連線」這個關鍵差異。 ----
+  try {
+    const profileList = await client.rpc("profile.list", {});
+    const acpProfile = profileList.profiles.find((p) => p.name === "E2E Scoped MCP Bridge Token");
+    const { sessionId: disposableSessionId2, bridgeEnv: disposableBridgeEnv2 } = await createAcpSessionAndGetBridgeEnv(
+      client,
+      acpProfile.id,
+      workspaceDir,
+      "e2e-scoped-dispose-live-conn",
+      undefined,
+    );
+
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(disposableBridgeEnv2.gatewayUrl, disposableBridgeEnv2.token);
+    if (!authOk) throw new Error("dispose 前 scoped token 認證失敗,預期應該成功");
+    await bridgeClient.rpc("profile.listForSubagent", {}); // dispose 前:確認這條連線本來就能正常呼叫。
+
+    await client.rpc("session.delete", { sessionId: disposableSessionId2 });
+
+    // 關鍵:不重新連線/認證,直接用同一個(dispose 前就已認證過的)連線再送
+    // 一次 request——這正是舊實作(只信任快取物件)會誤放行的情境。
+    let liveConnRejected = false;
+    let liveConnMessage = "";
+    try {
+      await bridgeClient.rpc("profile.listForSubagent", {});
+    } catch (err) {
+      liveConnRejected = true;
+      liveConnMessage = String(err);
+    }
+    bridgeClient.close();
+
+    const ok = liveConnRejected && liveConnMessage.includes("已撤銷或已過期");
+    record(
+      "步驟32f-2 session dispose 後,dispose 前就已認證完成、且連線本身沒關閉的既有連線,下一次請求也會被拒絕(不只擋新連線重新認證)",
+      ok,
+      `liveConnRejected=${liveConnRejected}, liveConnMessage=${liveConnMessage}`,
+    );
+  } catch (err) {
+    record("步驟32f-2 session dispose 後,既有已認證連線的下一次請求被拒絕", false, String(err));
+  }
+
+  // ---- 32g: 端到端——真的透過 mcp-bridge-server.ts 子行程呼叫 MCP 工具,
+  //           真的透過 WS 打回 gateway,真的觸發 MessageBus.sendMessage(),
+  //           team_messages 真的多一筆。----
+  try {
+    const fixedContent = `步驟32g 端到端 bridge 工具呼叫 ${randomUUID()}`;
+    const callPayload = { tool: "send_message", args: { to: "Reviewer", content: fixedContent } };
+    const prompt = `${CALL_BRIDGE_TOOL_PREFIX}${JSON.stringify(callPayload)}`;
+    const { finalEvent, collected } = await client.drivePrompt(teamSessionId, prompt, {
+      onPermission: async () => "deny",
+      timeoutMs: 30_000,
+    });
+    if (finalEvent.event.type !== "completed") {
+      throw new Error(`ACP_CALL_BRIDGE_TOOL 未正常 completed: ${JSON.stringify(finalEvent.event)}`);
+    }
+    const { groups } = analyzeMessageDeltas(collected);
+    const fullText = groups.map((g) => g.text).join("");
+    const bridgeSucceeded = fullText.includes("BRIDGE_TOOL_RESULT:") && !fullText.includes("BRIDGE_TOOL_RESULT_ERROR");
+
+    const deadline = Date.now() + 15_000;
+    let found;
+    while (Date.now() < deadline && !found) {
+      const history = await client.rpc("team.messages", { teamId });
+      found = history.messages.find((m) => m.to === "Reviewer" && m.content === fixedContent);
+      if (!found) await sleep(500);
+    }
+
+    record(
+      "步驟32g 端到端:fake-acp-agent 真的 spawn mcp-bridge-server.ts 子行程,用真正的 MCP client 呼叫 send_message 工具,經 WS 打回 gateway 後 team_messages 真的出現這筆訊息",
+      bridgeSucceeded && Boolean(found),
+      `bridgeReply=${JSON.stringify(fullText)}, foundInTeamMessages=${JSON.stringify(found)}`,
+    );
+  } catch (err) {
+    record("步驟32g 端到端 mcp-bridge-server.ts 子行程真實呼叫", false, String(err));
+  }
+
+  // ---- 清理 ----
+  // task.delete 要排在 session.delete 之前(比照步驟13a 的既有先例)——
+  // coderMemberId 是 lifecycle:"persistent",不會被自動 dispose,但
+  // task.delete 本身會清掉 worktree,遲於 session.delete 呼叫沒有順序上的
+  // 風險,這裡仍維持與既有慣例一致的順序。
+  if (taskId) {
+    try {
+      await client.rpc("task.delete", { taskId });
+    } catch (err) {
+      log(`[cleanup] 刪除步驟32任務(含 worktree)時發生錯誤(忽略): ${err}`);
+    }
+  }
+  for (const sessionId of [teamSessionId, soloSessionId]) {
+    if (!sessionId) continue;
+    try {
+      await client.rpc("session.delete", { sessionId });
+    } catch (err) {
+      log(`[cleanup] 刪除步驟32 session(${sessionId})時發生錯誤(忽略): ${err}`);
+    }
+  }
+  if (repoDir) {
+    try {
+      rmSync(repoDir, { recursive: true, force: true });
+    } catch (err) {
+      log(`[cleanup] 刪除步驟32暫存 git repo(${repoDir})時發生錯誤(忽略): ${err}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// 步驟 33: scoped MCP bridge token 的絕對過期時間保底(獨立 core 子程序,用
+// DESKMONY_MCP_BRIDGE_TOKEN_TTL_MS 縮短到 300ms,決定性測試)。
+// ---------------------------------------------------------------------
+async function scopedTokenTtlSmokeTest() {
+  if (!shouldRun("deterministic")) {
+    skipNote("步驟33 scoped MCP bridge token 絕對過期", "deterministic");
+    return;
+  }
+
+  const PORT = 4333;
+  const url = `ws://localhost:${PORT}`;
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-ttl-data-"));
+  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-ttl-ws-"));
+  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
+  let coreProc;
+  let client;
+
+  try {
+    coreProc = startCore({
+      port: PORT,
+      dataDir,
+      workspaceDir,
+      permissionTimeoutMs: PERMISSION_TIMEOUT_MS,
+      // 300ms 太短——光是 profile.create → session.create → 真的 spawn 一個
+      // fake-acp-agent.mjs 子行程做 ACP initialize/session-new/prompt 握手
+      // 拿到 bridgeEnv,實測就可能已經逼近甚至超過這個時間,導致「過期前」
+      // 這個檢查點本身就先失敗(steps 32a 全程平均耗時觀察後訂出的值,留足
+      // 安全邊際)。5 秒對這段初始化來說綽綽有餘,睡 6 秒確保跨過 TTL。
+      extraEnv: { DESKMONY_MCP_BRIDGE_TOKEN_TTL_MS: "5000" },
+    });
+    await waitForPort(url, 20_000);
+    client = new GatewayClient(url);
+    await client.connect();
+
+    const profileCreated = await client.rpc("profile.create", {
+      name: "E2E Token TTL",
+      software: "acp",
+      workingDir: workspaceDir,
+      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
+    });
+    const { bridgeEnv } = await createAcpSessionAndGetBridgeEnv(client, profileCreated.profile.id, workspaceDir, "e2e-ttl", undefined);
+    if (!bridgeEnv?.token) throw new Error("未能取得 scoped token(bridgeEnv 為空)");
+
+    // ---- 33a: 過期前,一條已認證的連線正常可用。----
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(bridgeEnv.gatewayUrl, bridgeEnv.token);
+    if (!authOk) throw new Error("過期前 scoped token 認證失敗,預期應該成功");
+    await bridgeClient.rpc("profile.listForSubagent", {});
+    record("步驟33a scoped token 在 TTL 過期前,認證與方法呼叫皆正常", true);
+
+    await sleep(6_000); // TTL 5000ms,睡到肯定已過期。
+
+    // ---- 33b: 同一條(已認證的)連線,過期後下一次請求被拒絕——證明
+    //           checkScopedGrantAccess() 對每一次請求都重新檢查過期時間,
+    //           不是只在認證當下檢查一次。----
+    let existingConnRejected = false;
+    let existingConnMessage = "";
+    try {
+      await bridgeClient.rpc("profile.listForSubagent", {});
+    } catch (err) {
+      existingConnRejected = true;
+      existingConnMessage = String(err);
+    }
+    bridgeClient.close();
+    record(
+      "步驟33b 已認證連線在 token 過期後,下一次請求被拒絕(每次請求都重新檢查過期時間,不只認證當下檢查一次)",
+      existingConnRejected && existingConnMessage.includes("已過期"),
+      existingConnMessage,
+    );
+
+    // ---- 33c: 過期後用同一個 token 重新認證(全新連線),也被拒絕。----
+    const { client: freshClient, ok: freshOk, error: freshError } = await connectAndAuth(bridgeEnv.gatewayUrl, bridgeEnv.token);
+    freshClient.close();
+    record(
+      "步驟33c token 過期後,用同一個 token 開全新連線重新認證也被拒絕",
+      !freshOk && Boolean(freshError),
+      `freshOk=${freshOk}, freshError=${freshError}`,
+    );
+  } catch (err) {
+    record("步驟33 scoped MCP bridge token 絕對過期(整體設置失敗)", false, String(err));
+  } finally {
+    client?.close();
+    await killProcessTree(coreProc, "core(步驟33 scoped token TTL)");
+    try {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(workspaceDir, { recursive: true, force: true });
+    } catch (err) {
+      log(`[cleanup] 刪除步驟33暫存目錄時發生錯誤(忽略): ${err}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// 步驟 34: scoped MCP bridge token 與既有 DESKMONY_AUTH_TOKEN(master token)
+// 認證機制的交互——確認這輪新增的程式碼完全不影響既有行為(獨立 core 子
+// 程序,設定 DESKMONY_AUTH_TOKEN,決定性測試)。
+// ---------------------------------------------------------------------
+async function scopedTokenAuthInterplaySmokeTest() {
+  if (!shouldRun("deterministic")) {
+    skipNote("步驟34 scoped token 與 master token 認證交互", "deterministic");
+    return;
+  }
+
+  const PORT = 4334;
+  const url = `ws://localhost:${PORT}`;
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-interplay-data-"));
+  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-interplay-ws-"));
+  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
+  const MASTER_TOKEN = `e2e-master-${randomUUID()}`;
+  let coreProc;
+  let client;
+
+  try {
+    coreProc = startCore({ port: PORT, dataDir, workspaceDir, permissionTimeoutMs: PERMISSION_TIMEOUT_MS, authToken: MASTER_TOKEN });
+    await waitForPort(url, 20_000);
+    client = new GatewayClient(url);
+    await client.connect();
+    await client.rpc("auth", { token: MASTER_TOKEN });
+
+    const profileCreated = await client.rpc("profile.create", {
+      name: "E2E Token Interplay",
+      software: "acp",
+      workingDir: workspaceDir,
+      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
+    });
+    const { bridgeEnv } = await createAcpSessionAndGetBridgeEnv(client, profileCreated.profile.id, workspaceDir, "e2e-interplay", undefined);
+    if (!bridgeEnv?.token) throw new Error("未能取得 scoped token(bridgeEnv 為空)");
+
+    // ---- 34a: 即使 core 已設定 DESKMONY_AUTH_TOKEN,scoped token 仍然能
+    //           正常認證並受限於自己的白名單(不會被誤判成一般連線、也不會
+    //           被要求改用 master token)。----
+    {
+      const { client: bridgeClient, ok: authOk } = await connectAndAuth(bridgeEnv.gatewayUrl, bridgeEnv.token);
+      let listOk = false;
+      let createRejected = false;
+      if (authOk) {
+        try {
+          const r = await bridgeClient.rpc("profile.listForSubagent", {});
+          listOk = Array.isArray(r?.profiles);
+        } catch {
+          // listOk 維持 false
+        }
+        try {
+          await bridgeClient.rpc("session.create", { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir });
+        } catch (err) {
+          createRejected = String(err).includes("無權呼叫");
+        }
+      }
+      bridgeClient.close();
+      record(
+        "步驟34a 已設定 DESKMONY_AUTH_TOKEN 的 core 上,scoped token 仍能正常認證、白名單內方法成功、白名單外方法被拒絕",
+        authOk && listOk && createRejected,
+        `authOk=${authOk}, listOk=${listOk}, createRejected=${createRejected}`,
+      );
+    }
+
+    // ---- 34b: 一個帶 scoped token 前綴、但不是真的核發過的偽造 token,
+    //           不會被誤判成「未設定 master token」而放行,一律拒絕。----
+    {
+      const forged = `dmbt_${"0".repeat(64)}`;
+      const { client: forgedClient, ok, error } = await connectAndAuth(bridgeEnv.gatewayUrl, forged);
+      forgedClient.close();
+      record(
+        "步驟34b 帶 scoped token 前綴但從未核發過的偽造 token 一律被拒絕(不會誤判成 master token 未設定的免認證模式)",
+        !ok && Boolean(error),
+        `ok=${ok}, error=${error}`,
+      );
+    }
+
+    // ---- 34c: master token 本身的既有行為完全不受影響——認證後可呼叫任何
+    //           方法(不受這輪新增的白名單限制,因為 connState.scopedGrant
+    //           對這種連線是 undefined)。----
+    {
+      const masterClient = new GatewayClient(url);
+      await masterClient.connect();
+      await masterClient.rpc("auth", { token: MASTER_TOKEN });
+      const sessionsResult = await masterClient.rpc("session.list", {});
+      masterClient.close();
+      record(
+        "步驟34c master token 認證後的連線,行為與這輪之前完全相同——可呼叫任何方法(不受 scoped token 白名單限制)",
+        Array.isArray(sessionsResult?.sessions),
+        `sessions 數=${sessionsResult?.sessions?.length}`,
+      );
+    }
+
+    // ---- 34d: 錯誤的一般(非 scoped)token,既有的「認證失敗」行為不受影響。----
+    {
+      const wrongClient = new GatewayClient(url);
+      await wrongClient.connect();
+      let rejected = false;
+      let message = "";
+      try {
+        await wrongClient.rpc("auth", { token: `wrong-${randomUUID()}` });
+      } catch (err) {
+        rejected = true;
+        message = String(err);
+      }
+      wrongClient.close();
+      record(
+        "步驟34d 一般(非 dmbt_ 前綴)錯誤 token 在已設定 master token 的 core 上,既有的認證失敗行為不受影響",
+        rejected && message.includes("認證失敗"),
+        message,
+      );
+    }
+  } catch (err) {
+    record("步驟34 scoped token 與 master token 認證交互(整體設置失敗)", false, String(err));
+  } finally {
+    client?.close();
+    await killProcessTree(coreProc, "core(步驟34 scoped token 與 master token 交互)");
+    try {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(workspaceDir, { recursive: true, force: true });
+    } catch (err) {
+      log(`[cleanup] 刪除步驟34暫存目錄時發生錯誤(忽略): ${err}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
 // 步驟 30: 機器驗收閘(S4,決定性測試,真實 git 子程序 + 真實 node 子程序,
 // 不依賴任何真實模型)
 //
@@ -3612,10 +4392,13 @@ async function detectAgentsGatewaySmokeTest(client) {
 // 每個選項都必須映射到可建立的 (software, command)」——這裡驗證的正是那個
 // 推導邏輯本身:claude-agent-sdk 內嵌項不需要 command;偵測分類為
 // "opencode" 的項目這輪映射成 software="opencode"(OpenCodeAdapter 已實作,
-// 見步驟24);其餘偵測分類(acp/codex/pty)一律預設映射成 software="pty" +
-// command=偵測到的路徑(codex 目前仍無對應 adapter,不會產生
+// 見步驟24);key==="codex-acp" 的項目(Codex ACP 橋接切換 Phase 1 新增)映射
+// 成 software="acp"(見 22b-3);其餘偵測分類(acp/codex/pty)一律預設映射成
+// software="pty" + command=偵測到的路徑(codex 這個 software 分類值目前已無
+// 任何偵測項會產生,型別上仍保留防禦性 fallback,不會產生
 // software="codex" 這種 AdapterRegistry 建不起來的 profile);只有偵測分類
-// 本身就是 "acp" 的項目才有「進階:改用 ACP」的候選可用。
+// 本身就是 "acp" 且 key !== "codex-acp" 的項目才有「進階:改用 ACP」的候選
+// 可用(見 22d)。
 // ---------------------------------------------------------------------
 async function agentTargetDerivationSmokeTest() {
   if (!shouldRun("deterministic")) {
@@ -3694,6 +4477,23 @@ async function agentTargetDerivationSmokeTest() {
     record("步驟22b-2 deriveDefaultAgentTarget(opencode 分類)", false, String(err));
   }
 
+  // ---- 22b-3: key==="codex-acp"(Codex ACP 橋接切換 Phase 1 新增)一律映射
+  //             成 software="acp",不受 pty fallback 規則影響——即使 software
+  //             欄位本身也已經是 "acp"(detectCodexAcp() 的實際回傳值),這裡
+  //             刻意驗證的是「用 key 判斷」這條路徑本身有效,不是巧合命中
+  //             既有的 acp 分類。command 帶入偵測到的路徑。----
+  try {
+    const entry = makeEntry({ key: "codex-acp", software: "acp", path: "C:\\fake\\node.exe" });
+    const target = mod.deriveDefaultAgentTarget(entry);
+    record(
+      '步驟22b-3 deriveDefaultAgentTarget(key="codex-acp") → software="acp",command=偵測到的路徑',
+      target.software === "acp" && target.command === "C:\\fake\\node.exe",
+      `target=${JSON.stringify(target)}`,
+    );
+  } catch (err) {
+    record('步驟22b-3 deriveDefaultAgentTarget(key="codex-acp")', false, String(err));
+  }
+
   // ---- 22c: 沒有偵測到路徑的項目 → command 為 undefined(呼叫端只應讓
   //           installed=true 且有 path 的項目可被選取,這裡驗證推導函式本身
   //           不會憑空捏造一個 command)----
@@ -3711,25 +4511,37 @@ async function agentTargetDerivationSmokeTest() {
 
   // ---- 22d: canUseAcpAdvanced/deriveAcpAdvancedTarget 只對偵測分類本身是
   //           "acp" 且有 path 的項目開放進階選項(opencode/codex/aider 沒有
-  //           這個選項)----
+  //           這個選項);key==="codex-acp" 這個特例即使 software==="acp" 也要
+  //           被排除(Codex ACP 橋接切換 Phase 1 新增——預設已經是 acp 了,
+  //           不需要多一個形同雞肋的「進階」選項,見 agent-target.ts
+  //           canUseAcpAdvanced() 的排除條件)----
   try {
     const acpEntry = makeEntry({ software: "acp", path: "C:\\fake\\claude.exe" });
     const opencodeEntry = makeEntry({ software: "opencode", path: "C:\\fake\\opencode.exe" });
     const acpNoPathEntry = makeEntry({ software: "acp", path: undefined });
+    const codexAcpEntry = makeEntry({ key: "codex-acp", software: "acp", path: "C:\\fake\\node.exe" });
 
     const acpAdvancedOk = mod.canUseAcpAdvanced(acpEntry) === true;
     const opencodeAdvancedOk = mod.canUseAcpAdvanced(opencodeEntry) === false;
     const acpNoPathOk = mod.canUseAcpAdvanced(acpNoPathEntry) === false;
+    const codexAcpAdvancedOk = mod.canUseAcpAdvanced(codexAcpEntry) === false;
 
     const acpTarget = mod.deriveAcpAdvancedTarget(acpEntry);
     const acpTargetOk =
       acpTarget?.software === "acp" && typeof acpTarget.command === "string" && acpTarget.command.length > 0;
     const opencodeTargetUndefined = mod.deriveAcpAdvancedTarget(opencodeEntry) === undefined;
+    const codexAcpTargetUndefined = mod.deriveAcpAdvancedTarget(codexAcpEntry) === undefined;
 
     record(
-      "步驟22d canUseAcpAdvanced/deriveAcpAdvancedTarget 只對偵測分類本身是 acp 且有 path 的項目開放「進階:改用 ACP」(opencode/codex/aider 沒有這個選項)",
-      acpAdvancedOk && opencodeAdvancedOk && acpNoPathOk && acpTargetOk && opencodeTargetUndefined,
-      `acpAdvancedOk=${acpAdvancedOk}, opencodeAdvancedOk=${opencodeAdvancedOk}, acpNoPathOk=${acpNoPathOk}, acpTarget=${JSON.stringify(acpTarget)}, opencodeTargetUndefined=${opencodeTargetUndefined}`,
+      "步驟22d canUseAcpAdvanced/deriveAcpAdvancedTarget 只對偵測分類本身是 acp 且有 path、key!==\"codex-acp\" 的項目開放「進階:改用 ACP」(opencode/codex/aider 沒有這個選項,codex-acp 預設已是 acp 故也排除)",
+      acpAdvancedOk &&
+        opencodeAdvancedOk &&
+        acpNoPathOk &&
+        codexAcpAdvancedOk &&
+        acpTargetOk &&
+        opencodeTargetUndefined &&
+        codexAcpTargetUndefined,
+      `acpAdvancedOk=${acpAdvancedOk}, opencodeAdvancedOk=${opencodeAdvancedOk}, acpNoPathOk=${acpNoPathOk}, codexAcpAdvancedOk=${codexAcpAdvancedOk}, acpTarget=${JSON.stringify(acpTarget)}, opencodeTargetUndefined=${opencodeTargetUndefined}, codexAcpTargetUndefined=${codexAcpTargetUndefined}`,
     );
   } catch (err) {
     record("步驟22d canUseAcpAdvanced/deriveAcpAdvancedTarget", false, String(err));
@@ -3875,10 +4687,13 @@ async function resolveProvidersSmokeTest() {
   const VALID_SOFTWARE = new Set(["claude-agent-sdk", "acp", "pty", "opencode"]);
 
   // ---- 25a: BUILTIN_PROVIDERS 本身每一項的 software 一定是 AdapterRegistry
-  //           實際註冊過的四種之一——即使 "codex"/"aider" 這種目前沒有專屬
-  //           adapter 的 provider,也只能映射成 "pty",絕不可能是 "codex"
-  //           (呼應步驟22 對 deriveDefaultAgentTarget() 的同一條原則,這裡是
-  //           對 provider 目錄套用)。----
+  //           實際註冊過的四種之一,絕不可能是 "codex" 這個 AgentSoftware 分類
+  //           值(呼應步驟22 對 deriveDefaultAgentTarget() 的同一條原則,這裡是
+  //           對 provider 目錄套用)——"aider" 這種目前沒有專屬 adapter 的
+  //           provider 映射成 "pty";"codex" 這個 provider 這輪(Codex ACP
+  //           橋接切換)起改映射成 "acp"(見 25k,透過
+  //           `@agentclientprotocol/codex-acp` 橋接套件,不是直接映射成
+  //           software="codex" 這個不存在的 adapter)。----
   try {
     const allValid = BUILTIN_PROVIDERS.every((p) => VALID_SOFTWARE.has(p.software));
     const noCodexSoftware = BUILTIN_PROVIDERS.every((p) => p.software !== "codex");
@@ -3920,7 +4735,21 @@ async function resolveProvidersSmokeTest() {
     },
     { key: "gemini-cli", displayName: "Gemini CLI", software: "acp", installed: false, models: [] },
     { key: "opencode-cli", displayName: "OpenCode", software: "opencode", installed: true, path: "C:\\fake\\opencode.exe", models: [] },
-    { key: "codex-cli", displayName: "Codex CLI", software: "codex", installed: true, path: "C:\\fake\\codex.exe", models: [] },
+    // Codex ACP 橋接切換 Phase 1:偵測項改成 key="codex-acp"/software="acp",
+    // path/args 模擬 detectCodexAcp() 真正的回傳形狀(process.execPath + 解析
+    // 出來的橋接套件進入點路徑,見 apps/core/src/detect/agent-detector.ts)。
+    // 25k 用這筆 fixture 驗證 resolveProviders() 把 detected.args 帶進
+    // defaultArgs(取代目錄靜態預設),覆蓋 resolve-providers.ts 這輪新增的
+    // `detected?.args ?? entry.defaultArgs` 那一行。
+    {
+      key: "codex-acp",
+      displayName: "Codex",
+      software: "acp",
+      installed: true,
+      path: "C:\\fake\\node.exe",
+      args: ["C:\\fake\\codex-acp\\dist\\index.js"],
+      models: [],
+    },
     { key: "aider-cli", displayName: "Aider", software: "pty", installed: false, models: [] },
   ];
 
@@ -4095,6 +4924,30 @@ async function resolveProvidersSmokeTest() {
     );
   } catch (err) {
     record("步驟25j 輸出依 order 排序", false, String(err));
+  }
+
+  // ---- 25k: Codex ACP 橋接切換 Phase 1——codex provider 這輪起 software 改
+  //           為 "acp",且 command/defaultArgs 必須反映 fixtureDetection 那筆
+  //           codex-acp 偵測結果(detected.path/detected.args),不是目錄的
+  //           靜態預設(BUILTIN_PROVIDERS 的 codex 項目本身刻意不寫
+  //           defaultArgs,見 provider-catalog.ts)。覆蓋 resolve-providers.ts
+  //           這輪新增的 `defaultArgs: detected?.args ?? entry.defaultArgs`
+  //           那一行——沒有這筆斷言,那一行的邏輯完全沒有測試覆蓋率。----
+  try {
+    const resolved = resolveProviders(BUILTIN_PROVIDERS, fixtureDetection, {});
+    const codex = resolved.find((p) => p.id === "codex");
+    record(
+      '步驟25k resolveProviders() 的 codex provider software="acp",command/defaultArgs 反映偵測結果的 path/args(不是目錄靜態預設)',
+      codex?.software === "acp" &&
+        codex?.installed === true &&
+        codex?.command === "C:\\fake\\node.exe" &&
+        Array.isArray(codex?.defaultArgs) &&
+        codex.defaultArgs.length === 1 &&
+        codex.defaultArgs[0] === "C:\\fake\\codex-acp\\dist\\index.js",
+      `codex=${JSON.stringify(codex)}`,
+    );
+  } catch (err) {
+    record("步驟25k resolveProviders() codex provider 反映 codex-acp 偵測結果", false, String(err));
   }
 }
 
@@ -5280,6 +6133,18 @@ async function main() {
     } else {
       skipNote("步驟30 機器驗收閘(S4)", "deterministic");
     }
+
+    // ---- 步驟 32: ACP scoped MCP bridge token(Phase 2,決定性測試,不依賴
+    // 任何真實模型/真實 codex-acp/gemini)----
+    if (shouldRun("deterministic")) {
+      await scopedMcpBridgeTokenSmokeTest(client, workspaceDir);
+    } else {
+      skipNote("步驟32 ACP scoped MCP bridge token", "deterministic");
+    }
+    // ---- 步驟 33/34: scoped token 絕對過期 + 與 master token 認證交互
+    // (各自獨立 core 子程序,函式內部自行處理 --only 過濾)----
+    await scopedTokenTtlSmokeTest();
+    await scopedTokenAuthInterplaySmokeTest();
 
     // ---- 步驟 19: 刪除對話(M5 Round C 功能2,決定性測試,不依賴任何真實模型)----
     if (shouldRun("deterministic")) {

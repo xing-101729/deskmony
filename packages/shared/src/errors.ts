@@ -42,6 +42,9 @@ export const ErrorCodes = {
   AUTH_RATE_LIMITED: "auth.rateLimited",
   GATEWAY_LOCAL_ONLY_METHOD: "gateway.localOnlyMethod", // params: {method}
   GATEWAY_INVALID_REQUEST: "gateway.invalidRequest", // params: {detail}
+  // Phase 2(ACP scoped MCP bridge token):scoped token 呼叫了不在白名單內的
+  // 方法,或試圖操作不屬於自己綁定範圍(session/team)的資源,或 token 已過期。
+  GATEWAY_SCOPED_TOKEN_FORBIDDEN: "gateway.scopedTokenForbidden", // params: {method, reason}
   BUDGET_DAILY_LIMIT: "budget.dailyLimitReached",
   BUDGET_TASK_LIMIT: "budget.taskLimitReached", // params: {taskTitle}
   RECOVERY_DISCARD_CONFIRM_REQUIRED: "recovery.discardConfirmRequired",

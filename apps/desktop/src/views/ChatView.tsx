@@ -367,11 +367,20 @@ function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
       const todos = parseTodoWriteInput(item.input);
       if (todos) return <TodoListView todos={todos} />;
     }
-    if ((item.toolName === "Edit" || item.toolName === "Write") && !item.isError) {
+    if (!item.isError) {
       // isError 時不嘗試 diff 渲染,即使 structuredResult 剛好驗證通過——失敗
       // 的編輯/寫入沒有真的套用變更,顯示 diff 只會誤導;fallback 回
       // ToolCallBubble 才能看到實際的錯誤訊息(在 output 裡)。這個分支的
       // 錯誤實際形狀未經真實 session 實測驗證,採保守處理。
+      //
+      // 不再限定 item.toolName === "Edit"/"Write":那是 claude-agent-sdk 寫死
+      // 的工具名,ACP 後端(AcpAdapter,見 Codex ACP 橋接切換 Phase 3)的工具
+      // title 是被 spawn 的 agent 自訂的自由格式字串(例如 "Write file"),
+      // 精確比對永遠不會命中,會讓已經正確組出 structuredResult 的 ACP diff
+      // 從未顯示。parseDiffResult() 本身的形狀驗證(filePath 字串 +
+      // structuredPatch 陣列)已經是足夠嚴謹的守門——非 diff 的 structuredResult
+      // (絕大多數工具呼叫,包含未涉及檔案的 ACP 結果)一律驗證失敗、自然
+      // fallback 回 ToolCallBubble,不需要再靠 toolName 這層額外限制。
       const diff = parseDiffResult(item.structuredResult);
       if (diff) return <DiffHunkView item={item} diff={diff} />;
     }

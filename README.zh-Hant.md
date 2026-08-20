@@ -153,11 +153,11 @@ flowchart TB
 | Adapter | 對接方式 | 目前涵蓋的後端 | 能力等級 |
 |---|---|---|---|
 | `ClaudeAgentSdkAdapter` | Claude Agent SDK,程式內嵌 | Claude Code | 最深 —— hooks、子 agent、細粒度權限事件、對話中換 model 與 effort |
-| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、其他 ACP-native agent | 結構化事件 |
+| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件——官方 `codex` 執行檔本身不原生講 ACP)、其他 ACP-native agent | 結構化事件 |
 | `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用 |
-| `GenericPtyAdapter` | 原始 `node-pty` 直通 | Claude Code CLI、Codex、Aider、任意互動式 CLI | **保底 —— 沒有權限事件** |
+| `GenericPtyAdapter` | 原始 `node-pty` 直通 | Claude Code CLI、Aider、任意互動式 CLI | **保底 —— 沒有權限事件** |
 
-使用者看到的那一層是七項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`codex` → PTY、`aider` → PTY、`custom-pty`。
+使用者看到的那一層是七項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY、`custom-pty`。
 
 **PTY 這層缺的權限事件是安全邊界,不是待辦事項。** 它是 raw stdin 直通,**結構上**沒辦法被政策引擎管。在真正的執行沙箱做出來之前,PTY agent 一律唯讀、不給無人值守的自主權。Deskmony 刻意**不做** shell 指令攔截:`bash -c`、`$()`、base64 幾秒就能繞過,做了只是 security theater。
 
@@ -201,7 +201,7 @@ stateDiagram-v2
 
 - **Node.js ≥ 20** 與 **pnpm 10**(repo 釘死 `pnpm@10.13.1`,跑 `corepack enable` 就會抓到)
 - 目前封裝安裝檔是 Windows 專屬。core 與 adapter 都是純 Node/TypeScript,其他平台主要是打包工程問題。
-- 至少一個 agent 後端:登入 Claude Code CLI、安裝 Codex 或 OpenCode,或把某個 profile 透過 PTY adapter 指向任何互動式 CLI。**Deskmony 負責調度 agent,不提供 model 存取本身。**
+- 至少一個 agent 後端:登入 Claude Code CLI;Codex 只需設定 `OPENAI_API_KEY`/`CODEX_API_KEY`(或改用 ChatGPT 登入)——它透過內附的 `@agentclientprotocol/codex-acp` 橋接套件運作,不需要另外安裝 codex CLI;安裝 OpenCode;或把某個 profile 透過 PTY adapter 指向任何互動式 CLI。**Deskmony 負責調度 agent,不提供 model 存取本身。**
 
 ### 安裝
 
