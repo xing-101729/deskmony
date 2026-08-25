@@ -35,9 +35,15 @@ export type PermissionLevel = z.infer<typeof PermissionLevelSchema>;
  * `SessionPermissionState`),不落地 DB,也不是 `AgentProfile.permissionLevel`
  * 的合法值。一個 session 建立時的初值 = `profile.permissionLevel`(必為
  * `"always-ask"`/`"auto-accept-edits"` 之一),之後可透過
- * `session.setPermissionMode` gateway 方法(僅本機可呼叫,見
- * auto-mode-and-yolo_detail.md §5.1 的 `LOCAL_ONLY_METHODS`)提升到
- * `"auto-accept-all"`(YOLO),30 分鐘後惰性過期回落 `"always-ask"`。
+ * `session.setPermissionMode` gateway 方法提升到 `"auto-accept-all"`(YOLO),
+ * 30 分鐘後惰性過期回落 `"always-ask"`。
+ *
+ * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`session.setPermissionMode`
+ * **本機與遠端皆可呼叫**——已從 `LOCAL_ONLY_METHODS` 移除(原文件寫「僅本機」
+ * 已過時)。額外的「真.無限制」層(疊在 `"auto-accept-all"` 之上,連
+ * hard-deny 都繞過)透過獨立的 `session.setTrueUnrestricted` 方法控制,同樣
+ * 本機遠端皆可,見 apps/core/src/session/session-manager.ts 的
+ * `setTrueUnrestricted()`。
  */
 export const SessionPermissionModeSchema = z.enum(["always-ask", "auto-accept-edits", "auto-accept-all"]);
 export type SessionPermissionMode = z.infer<typeof SessionPermissionModeSchema>;

@@ -65,6 +65,17 @@ export const SessionSchema = z.object({
    *  `"always-ask"`(見 policy-engine_detail.md §6:惰性檢查,不用計時器)。 */
   yoloExpiresAt: z.number().optional(),
   /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):疊在 YOLO 之上的「真.無限制」
+   * 層——開啟時連 hard-deny 四類(force-push/讀秘密路徑/worktree 外刪除/
+   * 非白名單外連)都會被繞過。跟 `permissionMode`/`yoloExpiresAt` 同一個
+   * ephemeral 待遇:只存 `SessionManager` 記憶體,不落地 DB,`SessionManager`
+   * 在每次回傳 Session 物件前即時補上。只有 `permissionMode ===
+   * "auto-accept-all"` 時可能為 `true`——mode 降級(含 YOLO 30 分鐘惰性到期)
+   * 會連帶清掉這個欄位,見 session-manager.ts 的 `checkAndExpireYolo()`/
+   * `setSessionPermissionMode()` 都建構全新 state 物件,不沿用舊值。
+   */
+  trueUnrestricted: z.boolean().optional(),
+  /**
    * S6(crash-recovery)新增:對帳標記的時間(epoch ms)——只有
    * `status === "interrupted"` 時有意義,見 crash-recovery_detail.md §1。
    */

@@ -6,8 +6,16 @@ import { extractCommandFromInput, extractPathCandidates, isPathUnder, resolveRea
  * policy-engine.ts(S1:PolicyEngine 主體)。
  *
  * 對應 docs/LAYER-4-detail-design/policy-engine_detail.md §2、§4。
- * **default-deny 是整個檔案唯一不可違反的鐵則**:任何判斷不出來的情況一律
- * `escalate`,絕不 `allow`——見 `decide()` 最底部的 fallback。
+ * **default-deny 是整個檔案的鐵則**:任何判斷不出來的情況一律 `escalate`,
+ * 絕不 `allow`——見 `decide()` 最底部的 fallback。
+ *
+ * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):這條鐵則現在有**唯一一個**
+ * 明確、opt-in、需要使用者逐次主動確認的例外——`ctx.trueUnrestricted` 為真時
+ * `decide()` 一開頭就直接 allow,見該方法最前面的短路與其上方註解。這不是
+ * default-deny 精神的放棄,而是使用者在充分了解後果後,對單一 session 明確
+ * 授權的例外,且這個例外本身不能靠遠端/本機身份或 autoMode 隱性觸發——只有
+ * 顯式呼叫 `session.setTrueUnrestricted({enabled:true})` 且前置條件(已是
+ * `"auto-accept-all"`)成立才會出現。
  */
 
 export type PolicyEffect = "allow" | "deny" | "escalate" | "escalate-strong";
@@ -60,6 +68,15 @@ export interface ExecContext {
    * 的 session-manager)行為完全相同,不需要跟著改。
    */
   yolo?: boolean;
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):`true` 僅當 session 暫態模式
+   * 為 `"auto-accept-all"` **且**額外開啟了「真.無限制」層(見
+   * session-manager.ts 的 `SessionPermissionState.trueUnrestricted`)。這是
+   * **唯一**能讓 `decide()` 跳過 hard-deny(第 1 步)的欄位——`yolo` 本身
+   * 永遠不能,見上方 `yolo` 註解與下方 `decide()` 最開頭的短路。省略視為
+   * `false`。
+   */
+  trueUnrestricted?: boolean;
 }
 
 export interface PolicyEngineOptions {
@@ -105,6 +122,30 @@ export class PolicyEngine {
   }
 
   /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):依 `id` 移除一條規則,in-memory
+   * 立即生效——呼叫端(session-manager.ts 的 `removePolicyRule()`)必須同時呼叫
+   * `apps/core/src/config/config-file-writer.ts` 的 `removePolicyRule()` 把
+   * 同一筆刪除動作寫回 config.json,兩者不可只做一邊(比照 `addRule()` 與
+   * `appendPolicyRule()` 既有的雙寫紀律)。回傳被刪除的規則本身(不是
+   * boolean)——稽核記錄與 RPC 回應都需要完整內容,不只是「有沒有刪到」,見
+   * `apps/core/src/enforcement/audit-log.ts` 的 `PolicyRuleChangeDetail`。
+   * id 不存在時回傳 `undefined`,不拋例外(呼叫端可能與另一個 client 對同一份
+   * 清單並行操作)。
+   */
+  removeRule(id: string): PolicyRule | undefined {
+    const index = this.rules.findIndex((rule) => rule.id === id);
+    if (index === -1) return undefined;
+    const [removed] = this.rules.splice(index, 1);
+    return removed;
+  }
+
+  /** 2026-08-25 新增:回傳目前規則陣列的淺拷貝(不外洩內部可變陣列的參照)——
+   *  供 `policy.listRules` RPC 使用,見該 method 註解。 */
+  getRules(): PolicyRule[] {
+    return [...this.rules];
+  }
+
+  /**
    * 優先序(不可調換,見 §2):
    *   1. hard-deny 命中 → **遠端 或 autoMode 優先判斷**(不論是否 attended)
    *      → deny(硬地板,F4:HLD §3「情境相依的 hard-deny」把 auto/YOLO 與
@@ -122,8 +163,22 @@ export class PolicyEngine {
    *      讓 audit 的 `reason` 更精確地反映「命中哪條規則」)。
    *   4. autoMode → allow(中間地帶,hard-deny 已在第 1 步優先處理過)。
    *   5. 皆否 → escalate(default-deny)。
+   *
+   * ⚠️ 2026-08-25 新增第 0 步(見 docs/DECISIONS.md §G):`ctx.trueUnrestricted`
+   * 為真時,在**呼叫 `checkHardDeny()` 之前**就直接回傳 allow——這是整個檔案
+   * 唯一能繞過 hard-deny 的路徑,刻意放在函式最開頭而不是塞進下面 hard-deny
+   * 判斷的分支裡:grep `trueUnrestricted` 找到的就是這個入口,審查時一眼看到,
+   * 不需要先看懂 hard-deny 邏輯才發現這裡有例外。這是使用者 2026-08-25 明確
+   * 決定的翻案,不是預設行為——只有 session 已經是 `"auto-accept-all"` 且
+   * 額外開啟這個開關時 `ctx.trueUnrestricted` 才會是 `true`(見
+   * session-manager.ts 的 `setTrueUnrestricted()` 前置條件檢查),default-deny
+   * 對所有其餘情況(包含一般 YOLO)仍是唯一不可違反的鐵則。
    */
   decide(req: PermissionRequest, ctx: ExecContext): PolicyDecision {
+    if (ctx.trueUnrestricted) {
+      return { effect: "allow", reason: "trueUnrestricted 開啟:繞過一切(含 hard-deny),見 docs/DECISIONS.md §G" };
+    }
+
     const hardDeny = checkHardDeny({
       toolName: req.toolName,
       input: req.input,

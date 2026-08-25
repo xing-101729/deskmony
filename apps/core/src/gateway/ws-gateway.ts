@@ -14,6 +14,7 @@ import {
   type McpBridgeTokenGrant,
   type McpBridgeTokenScope,
   type PermissionResolvedPush,
+  type PolicyUpdatedPush,
   type ServerResponse as GatewayServerResponse,
   type ServerPush,
   type Session,
@@ -204,10 +205,17 @@ function resolveMcpBridgeConnectHost(bindHost: string): string {
  * method 的 raw request,一律在 dispatch 之前被擋下(不是靠 UI 隱藏按鈕)。
  * 之後 S3b 的預算設定 method 也要加進這個清單。`profile.update` 目前尚未
  * 實作(見 packages/shared/src/gateway.ts),等實作後也要加進來。
+ *
+ * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`session.setPermissionMode`
+ * 已移除——使用者明確翻案原 F3/C6「遠端不可切 auto/YOLO」的限制,本機與遠端
+ * 現在同等對待。新增的 `session.setTrueUnrestricted`/`policy.addRule`/
+ * `policy.removeRule`/`policy.listRules` 四個方法**刻意不加進這個清單**
+ * (同一次翻案的一部分)。`config.setFile`(daemon/workspace/features/log 這類
+ * 一般設定,不含 policy)、`profile.create`、`profile.delete` 三項使用者沒有
+ * 要求開放,維持 local-only。
  */
 const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
-  "session.setPermissionMode", // auto / YOLO
-  "config.setFile", // 政策與設定
+  "config.setFile", // 一般設定(daemon/workspace/features/log,不含 policy)
   "profile.create",
   "profile.delete",
 ]);
@@ -410,6 +418,12 @@ export class WsGateway {
     this.sessionManager.on("user-dialog-resolved", (payload: UserDialogResolvedPush) => {
       this.broadcast({ kind: "event", channel: "user-dialog-resolved", payload });
     });
+    // 2026-08-25 新增(見 docs/DECISIONS.md §G):`policy.addRule`/`removeRule`
+    // 成功後轉播給所有已認證 client,讓「權限」設定頁在其他視窗/其他 client
+    // 也能即時看到允許清單變化(比照上面幾個 broadcast 的既有模式)。
+    this.sessionManager.on("policy-updated", (payload: PolicyUpdatedPush) => {
+      this.broadcast({ kind: "event", channel: "policy-updated", payload });
+    });
     this.messageBus.on("team-message", (message: TeamMessage) => {
       this.broadcast({ kind: "event", channel: "team-message", payload: message });
     });
@@ -510,9 +524,26 @@ export class WsGateway {
     return false;
   }
 
-  /** S7 L4 §5.3:握手能力集,四項皆等於 `isLocal`(見上方 `ConnectionState.isLocal`)。 */
+  /**
+   * S7 L4 §5.3:握手能力集。
+   *
+   * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`canToggleAuto`/
+   * `canEnableYolo`/`canEditPolicy` 不再等於 `isLocal`,改成恆 `true`——使用者
+   * 明確翻案,遠端與本機同權。`canManageProfiles` 維持 `isLocal`,未變動
+   * (使用者這輪沒有要求開放 profile 管理)。新增 `canEnableTrueUnrestricted`
+   * (恆 `true`,真正的把關是每次呼叫時的 session-mode 前置條件,不是連線
+   * 類型)與 `isRemoteConnection`(純顯示用,見 `GatewayCapabilitiesSchema` 的
+   * 完整說明)。
+   */
   private buildCapabilities(isLocal: boolean): GatewayCapabilities {
-    return { canToggleAuto: isLocal, canEnableYolo: isLocal, canEditPolicy: isLocal, canManageProfiles: isLocal };
+    return {
+      canToggleAuto: true,
+      canEnableYolo: true,
+      canEditPolicy: true,
+      canManageProfiles: isLocal,
+      canEnableTrueUnrestricted: true,
+      isRemoteConnection: !isLocal,
+    };
   }
 
   /**
@@ -912,25 +943,14 @@ export class WsGateway {
       return;
     }
 
-    // ---- S7(自行判斷,保守方向,見最終報告):`permission.resolve` 本身不在
-    // 上面的 LOCAL_ONLY_METHODS(遠端使用者也該能核可一般 escalate 請求),但
-    // 「順便把這次決定寫成永久 policy 規則」屬於修改安全罩本身,與其餘 policy
-    // 設定同等對待——L4 §5.1 沒有明講這個 field-level 的情況,選最保守的方向:
-    // 僅本機可用(escalate-strong 的 rememberRule 已在 SessionManager 端強制擋,
-    // 這裡額外擋的是「一般 escalate + 遠端 client」這個 L4 沒直接點名的組合)。
-    if (parsed.method === "permission.resolve" && parsed.params.rememberRule !== undefined && !connState?.isLocal) {
-      console.warn(
-        `[gateway][security] 拒絕遠端連線(${connState?.remoteAddress ?? "unknown"})的 permission.resolve 帶 rememberRule(requestId=${parsed.params.requestId})`,
-      );
-      this.send(socket, {
-        kind: "response",
-        id: parsed.id,
-        ok: false,
-        error: "「永遠允許」規則僅限本機連線設定",
-        errorCode: "gateway.rememberRuleLocalOnly",
-      });
-      return;
-    }
+    // ---- 2026-08-25 移除(見 docs/DECISIONS.md §G):原本這裡有一道獨立於
+    // LOCAL_ONLY_METHODS 的擋——`permission.resolve` 帶 rememberRule 時遠端一律
+    // 拒絕,當初是 S7 自行判斷選的保守方向。使用者這輪明確翻案「遠端可編輯
+    // allowlist」之後,繼續擋這一條會變成「同一件事,從對話框順手記一條可以
+    // (policy.addRule),從即時權限提示按『永遠允許』卻不行」的不一致——已經
+    // 沒有理由存在,移除。escalate-strong 的 rememberRule 仍然一律被
+    // SessionManager 端強制忽略(C4 紀律③,不因為這道擋移除而變寬,見
+    // session-manager.ts 的 `resolvePermission()`)。
 
     try {
       const result = await this.dispatch(parsed, connState?.isLocal ?? false);
@@ -1024,8 +1044,31 @@ export class WsGateway {
        */
       case "session.setPermissionMode": {
         const state = this.sessionManager.setSessionPermissionMode(request.params.sessionId, request.params.mode);
-        return { mode: state.mode, yoloExpiresAt: state.yoloExpiresAt };
+        return { mode: state.mode, yoloExpiresAt: state.yoloExpiresAt, trueUnrestricted: state.trueUnrestricted };
       }
+      /**
+       * 2026-08-25 新增(見 docs/DECISIONS.md §G):在 YOLO 之上疊加/解除
+       * 「真.無限制」層。`isLocal` 只用來組出 `isRemote` 傳給
+       * `SessionManager.setTrueUnrestricted()` 做稽核/通知內容,**不**用來
+       * gate 是否放行這次呼叫——這個方法本機遠端一視同仁,見上方
+       * `LOCAL_ONLY_METHODS` 的修訂註解。
+       */
+      case "session.setTrueUnrestricted": {
+        const state = this.sessionManager.setTrueUnrestricted(request.params.sessionId, request.params.enabled, !isLocal);
+        return { trueUnrestricted: state.trueUnrestricted ?? false };
+      }
+      /** 2026-08-25 新增:新增一條政策允許清單規則。見 gateway.ts 對應 case 的完整說明。 */
+      case "policy.addRule":
+        return { rule: this.sessionManager.addPolicyRule(request.params, !isLocal) };
+      /** 2026-08-25 新增:依 id 刪除一條政策允許清單規則。 */
+      case "policy.removeRule": {
+        const removed = this.sessionManager.removePolicyRule(request.params.id, !isLocal);
+        return { removed: removed !== undefined, rule: removed };
+      }
+      /** 2026-08-25 新增:讀取目前完整的政策允許清單(直接讀 in-memory,見
+       *  gateway.ts 對應 case 說明「為什麼不能改讀 config.getEffective」)。 */
+      case "policy.listRules":
+        return { rules: this.sessionManager.listPolicyRules() };
       /**
        * S12(session-subagent):從 parent session spawn child subagent session。
        * child completed 時會自動透過 "child-result" push 回傳結果。

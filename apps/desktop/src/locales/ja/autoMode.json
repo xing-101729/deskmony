@@ -12,5 +12,18 @@
   "risk1": "config に設定されたすべてのポリシールール(自分で追加した deny ルールを含む)をバイパスします。",
   "risk2": "30 分後に自動的にオフになり、通常の確認モードに戻ります。",
   "risk3Bold": "ハードデナイ(hard-deny)項目には影響しません",
-  "risk3Rest": "——worktree 外への書き込み、シークレットパスの読み取り、force-push などの操作は引き続き拒否されるか、強制確認が必要です。"
+  "risk3Rest": "——worktree 外への書き込み、シークレットパスの読み取り、force-push などの操作は引き続き拒否されるか、強制確認が必要です。",
+  "unrestrictedEnabledTitle": "真.無制限が有効:hard-deny の4種類もすべてバイパスされます",
+  "unrestrictedToggleTitle": "真.無制限:force-push、シークレットパスの読み取り、worktree 外の削除、非許可リストのネットワーク接続をすべてバイパスします。先に YOLO を有効にする必要があります",
+  "unrestrictedOnLabel": "真.無制限を有効にする",
+  "unrestrictedOffLabel": "真.無制限をオフにする",
+  "unrestrictedConfirmDialogTitle": "真.無制限を有効にしますか?",
+  "unrestrictedRisk1": "YOLO でも突破できない4種類のハードデナイ項目をバイパスします:",
+  "unrestrictedRiskCategory1": "force-push などの危険な git コマンド",
+  "unrestrictedRiskCategory2": "~/.ssh、.env、credentials などシークレットパスの読み取り",
+  "unrestrictedRiskCategory3": "worktree 外のファイル削除",
+  "unrestrictedRiskCategory4": "許可リストにないホストへのネットワーク接続",
+  "unrestrictedRisk2": "YOLO と同じ 30 分タイマーを共有します——YOLO が期限切れになると一緒にオフになります。独立したタイマーではありません。",
+  "unrestrictedRiskRemote": "リモート接続からこれを有効にしようとしています——有効にすると、この接続に限らずどの接続からのリクエストにも適用されます。",
+  "unrestrictedTypeToConfirm": "「{{phrase}}」と入力して確認してください"
 }

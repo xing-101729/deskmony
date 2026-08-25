@@ -18,7 +18,9 @@ import {
   type EffortLevel,
   type MessageRecord,
   type PermissionResolvedPush,
+  type PolicyAddRuleInput,
   type PolicyRule,
+  type PolicyUpdatedPush,
   type PromptAttachment,
   type PromptInput,
   type Session,
@@ -38,7 +40,7 @@ import { getProviderEnv, type SettingsStore } from "../settings/settings-store.j
 import type { PolicyEngine, PermissionRequest, ExecContext } from "../permissions/policy-engine.js";
 import type { AuditLog } from "../enforcement/audit-log.js";
 import type { Notifier } from "../enforcement/notifier.js";
-import { appendPolicyRule } from "../config/config-file-writer.js";
+import { appendPolicyRule, removePolicyRule as removePolicyRuleFile } from "../config/config-file-writer.js";
 import type { TurnLimiter } from "../cost/turn-limiter.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
 
@@ -60,10 +62,17 @@ export const DEFAULT_YOLO_DURATION_MS = 30 * 60_000;
 
 /** S7:一個 session 目前的暫態權限模式(auto/YOLO)——只存在記憶體,不落地
  *  DB(見 packages/shared/src/agent-profile.ts 的 `SessionPermissionModeSchema`
- *  註解)。`yoloExpiresAt` 只有 `mode === "auto-accept-all"` 時有值。 */
+ *  註解)。`yoloExpiresAt` 只有 `mode === "auto-accept-all"` 時有值。
+ *  `trueUnrestricted`(2026-08-25 新增,見 docs/DECISIONS.md §G)只有
+ *  `mode === "auto-accept-all"` 時可能為 `true`——`setSessionPermissionMode()`
+ *  與 `checkAndExpireYolo()` 都建構全新的 state 物件(不 spread 舊值),
+ *  任何脫離 `"auto-accept-all"` 的 mode 變化都會自動、免額外程式碼地把這個
+ *  欄位一併清掉;只有 `setTrueUnrestricted()` 刻意 spread 舊 state 只 patch
+ *  這一個欄位,見該方法。 */
 export interface SessionPermissionState {
   mode: SessionPermissionMode;
   yoloExpiresAt?: number;
+  trueUnrestricted?: boolean;
 }
 
 /**
@@ -647,9 +656,22 @@ export class SessionManager extends EventEmitter {
             "帶 rememberRule,已忽略(僅套用本次 decision,不寫入 policy;這通常代表 UI bug 或惡意 client)。",
         );
       } else {
-        this.policyEngine.addRule(rememberRule);
+        // 2026-08-25 補的既有缺口(見 docs/DECISIONS.md §G):`addedBy`/`id`
+        // 這兩個欄位過去從未被任何程式碼真正設過值(schema 裡定義了但沒人
+        // 填)——這裡補上,讓新的「權限」設定頁清單能顯示正確來源(這條規則是
+        // 從對話框「永遠允許」按出來的,不是設定頁手動新增的),也讓
+        // `policy.removeRule` 之後有穩定 id 可以定位到這一條。不覆寫呼叫端
+        // 已經帶了 id 的情況(理論上不會發生,`PermissionModal.tsx` 目前不會
+        // 自己組 id,這裡是防禦性寫法)。
+        const finalizedRule: PolicyRule = {
+          ...rememberRule,
+          id: rememberRule.id ?? randomUUID(),
+          addedBy: "ui-remember",
+          addedAt: rememberRule.addedAt ?? Date.now(),
+        };
+        this.policyEngine.addRule(finalizedRule);
         try {
-          appendPolicyRule(this.configPath, rememberRule);
+          appendPolicyRule(this.configPath, finalizedRule);
         } catch (err) {
           console.error(
             `[policy] rememberRule 寫入 config.json 失敗(in-memory 已生效,但重啟後會與這次的行為不一致): ${String(err)}`,
@@ -682,11 +704,18 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * S7:切換一個 session 的暫態權限模式(auto/YOLO)。**遠端一律拒絕**——這個
-   * 檢查在 gateway 層(`LOCAL_ONLY_METHODS`,見 ws-gateway.ts),這裡不重複
-   * 判斷連線來源(SessionManager 本身不知道是哪個連線呼叫的)。
-   * `mode === "auto-accept-all"` 時設定 30 分鐘後過期(惰性檢查,不用計時器,
-   * 見 `checkAndExpireYolo()`)。
+   * S7:切換一個 session 的暫態權限模式(auto/YOLO)。
+   *
+   * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):**本機與遠端皆可呼叫**——
+   * 已從 gateway 層的 `LOCAL_ONLY_METHODS` 移除(原 F3/C6 限制,使用者明確
+   * 翻案)。這裡刻意仍不判斷連線來源(SessionManager 本身不知道是哪個連線
+   * 呼叫的,這不是這個方法的職責)。`mode === "auto-accept-all"` 時設定 30
+   * 分鐘後過期(惰性檢查,不用計時器,見 `checkAndExpireYolo()`)。
+   *
+   * 這裡建構的 `state` 物件永遠是全新的(不 spread 舊 state)——這個寫法本身
+   * 就是「任何 mode 變化都會清掉 `trueUnrestricted`」的機制,見上方
+   * `SessionPermissionState.trueUnrestricted` 註解,不需要額外程式碼特別
+   * 處理「離開 auto-accept-all 時要記得清掉真.無限制層」這件事。
    */
   setSessionPermissionMode(sessionId: string, mode: SessionPermissionMode): SessionPermissionState {
     if (!this.runtime.has(sessionId)) {
@@ -707,6 +736,125 @@ export class SessionManager extends EventEmitter {
       if (session) this.emit("session-updated", session);
     });
     return state;
+  }
+
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):在 YOLO 之上疊加/解除「真.無
+   * 限制」層——`enabled:true` 時連 hard-deny 四類都會被繞過(見
+   * apps/core/src/permissions/policy-engine.ts 的 `decide()` 短路)。**本機與
+   * 遠端皆可呼叫**(比照 `setSessionPermissionMode()`)。
+   *
+   * `enabled:true` 時強制檢查目前 `permissionMode` 必須已經是
+   * `"auto-accept-all"`——不能讓呼叫端跳過 `setSessionPermissionMode()` 直接
+   * 開最高層級(這是「疊在 YOLO 之上」這個設計意圖的伺服器端保證,不只是 UI
+   * 上「YOLO 開了才顯示按鈕」的視覺層級)。`enabled:false` 永遠允許,不檢查
+   * 前置條件——降級方向不該被擋。
+   *
+   * 與 `setSessionPermissionMode()` 不同,這裡**刻意 spread 現有 state**只
+   * patch `trueUnrestricted` 這一個欄位——這是唯一需要保留 `mode`/
+   * `yoloExpiresAt` 的呼叫端,其餘方法(`setSessionPermissionMode()`/
+   * `checkAndExpireYolo()`)建構全新 state 物件都是為了讓這個欄位在 mode
+   * 變化時自動清除。
+   *
+   * `isRemote` 由呼叫端(ws-gateway.ts)依連線本身判定後傳入,只用於稽核/
+   * 通知內容,不影響是否放行這次呼叫本身(F3 修訂後這個能力本機遠端一視同
+   * 仁)。啟用時觸發稽核 + 桌面推播(使用者明確要求的「啟用當下要警告」);
+   * 關閉只寫稽核,不推播(回到安全方向不需要打斷使用者)。
+   */
+  setTrueUnrestricted(sessionId: string, enabled: boolean, isRemote: boolean): SessionPermissionState {
+    if (!this.runtime.has(sessionId)) {
+      throw new DeskmonyError(
+        ErrorCodes.SESSION_NOT_RUNNING,
+        { sessionId },
+        `session 尚未啟動或已結束,無法設定 true-unrestricted: ${sessionId}`,
+      );
+    }
+    const current = this.permissionState.get(sessionId) ?? { mode: "always-ask" as const };
+    if (enabled && current.mode !== "auto-accept-all") {
+      throw new DeskmonyError(
+        ErrorCodes.SESSION_TRUE_UNRESTRICTED_REQUIRES_YOLO,
+        { sessionId },
+        `session 必須先開啟 YOLO(auto-accept-all)才能啟用 true-unrestricted: ${sessionId}`,
+      );
+    }
+    const state: SessionPermissionState = { ...current, trueUnrestricted: enabled };
+    this.permissionState.set(sessionId, state);
+
+    const ts = Date.now();
+    this.auditLog.appendTrueUnrestrictedToggle({ sessionId, enabled, isRemote, ts });
+    if (enabled) {
+      void this.notifier.deliverTrueUnrestrictedEnabled({ sessionId, isRemote, ts }).catch((err) => {
+        console.error(`[enforcement] deliverTrueUnrestrictedEnabled 失敗(不影響已生效的模式切換): ${String(err)}`);
+      });
+    }
+
+    void this.getSession(sessionId).then((session) => {
+      if (session) this.emit("session-updated", session);
+    });
+    return state;
+  }
+
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):新增一條政策允許清單規則
+   * (「權限」設定頁的「單項選擇」功能)。**本機與遠端皆可呼叫**——政策編輯從
+   * 這輪起不再是 local-only。`id`/`addedBy`/`addedAt` 一律由這裡生成/填入
+   * (見 `PolicyAddRuleInput` 型別——呼叫端不能提供這三個欄位),`addedBy`
+   * 固定 `"user"`,與 `resolvePermission()` 的 rememberRule 路徑固定寫
+   * `"ui-remember"` 區分兩種來源。
+   *
+   * 寫檔失敗就回滾 in-memory 那份——與 `resolvePermission()` 的 rememberRule
+   * 刻意不同(那裡吞掉寫檔失敗只印警告):這支方法**唯一的目的**就是把規則
+   * 持久化,吞掉失敗會讓呼叫端以為規則真的存在,重啟後卻悄悄消失。
+   */
+  addPolicyRule(input: PolicyAddRuleInput, isRemote: boolean): PolicyRule {
+    const ruleId = randomUUID();
+    const rule: PolicyRule = { ...input, id: ruleId, addedBy: "user", addedAt: Date.now() };
+    this.policyEngine.addRule(rule);
+    try {
+      appendPolicyRule(this.configPath, rule);
+    } catch (err) {
+      this.policyEngine.removeRule(ruleId);
+      throw new DeskmonyError(
+        "policy.addRuleWriteFailed",
+        { detail: err instanceof Error ? err.message : String(err) },
+        `新增政策規則失敗(寫入 config.json 失敗,已回滾): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    this.auditLog.appendPolicyRuleChange({ action: "add", ruleId, rule, isRemote, ts: Date.now() });
+    const push: PolicyUpdatedPush = { action: "add", rule };
+    this.emit("policy-updated", push);
+    return rule;
+  }
+
+  /**
+   * 2026-08-25 新增:刪除一條政策允許清單規則(依 id)。本機與遠端皆可呼叫,
+   * 理由同 `addPolicyRule()`。id 不存在時回傳 `undefined`,不拋例外——呼叫端
+   * 可能與另一個 client 對同一份清單並行操作,「已經被別人刪過了」不是錯誤。
+   * 同樣是「寫檔失敗就回滾 in-memory」,理由同 `addPolicyRule()`。
+   */
+  removePolicyRule(id: string, isRemote: boolean): PolicyRule | undefined {
+    const removed = this.policyEngine.removeRule(id);
+    if (!removed) return undefined;
+    try {
+      removePolicyRuleFile(this.configPath, id);
+    } catch (err) {
+      this.policyEngine.addRule(removed);
+      throw new DeskmonyError(
+        "policy.removeRuleWriteFailed",
+        { detail: err instanceof Error ? err.message : String(err) },
+        `刪除政策規則失敗(寫入 config.json 失敗,已回滾): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    this.auditLog.appendPolicyRuleChange({ action: "remove", ruleId: id, rule: removed, isRemote, ts: Date.now() });
+    const push: PolicyUpdatedPush = { action: "remove", rule: removed };
+    this.emit("policy-updated", push);
+    return removed;
+  }
+
+  /** 2026-08-25 新增:`policy.listRules` RPC 用,見該方法在 gateway.ts 的註解
+   *  (為什麼不能改讀 `config.getEffective` 的快照)。 */
+  listPolicyRules(): PolicyRule[] {
+    return this.policyEngine.getRules();
   }
 
   /**
@@ -1832,7 +1980,12 @@ export class SessionManager extends EventEmitter {
   private attachPermissionState(session: Session): Session {
     const state = this.permissionState.get(session.id);
     if (!state) return session;
-    return { ...session, permissionMode: state.mode, yoloExpiresAt: state.yoloExpiresAt };
+    return {
+      ...session,
+      permissionMode: state.mode,
+      yoloExpiresAt: state.yoloExpiresAt,
+      trueUnrestricted: state.trueUnrestricted,
+    };
   }
 
   /**
@@ -1878,6 +2031,11 @@ export class SessionManager extends EventEmitter {
       // YOLO 與一般 auto 唯一的差別:是否連 config 的 deny-list 也繞過
       // (見 policy-engine.ts 的 decide() 註解)。
       yolo: state.mode === "auto-accept-all",
+      // 2026-08-25 新增(見 docs/DECISIONS.md §G):唯一能讓 decide() 跳過
+      // hard-deny 的欄位——`state.trueUnrestricted` 只有在 mode 已經是
+      // "auto-accept-all" 時才可能為 true(見 setTrueUnrestricted() 的前置
+      // 條件檢查),這裡原樣傳遞,不重複驗證。
+      trueUnrestricted: state.trueUnrestricted === true,
     };
   }
 
@@ -1886,6 +2044,12 @@ export class SessionManager extends EventEmitter {
    * 不做任何 I/O/emit(那些副作用由呼叫端在 `justExpired` 為 true 時自行處理,
    * 見 `consumeEvents()` 的 `permission-request` case)。找不到任何暫態記錄
    * (理論上不會發生,`createSession()` 一定會設)時保守視為 `"always-ask"`。
+   *
+   * `downgraded` 是全新建構的物件(不 spread 舊 state)——這個既有寫法在
+   * 2026-08-25 之後多了一個附帶效果:YOLO 一到期,`trueUnrestricted`(若曾經
+   * 開啟)也跟著自動清除,不需要額外程式碼特別處理「真.無限制層不能在沒有
+   * YOLO 的情況下殘留」這件事,見 `SessionPermissionState.trueUnrestricted`
+   * 註解。
    */
   private checkAndExpireYolo(sessionId: string): { state: SessionPermissionState; justExpired: boolean } {
     const state = this.permissionState.get(sessionId) ?? { mode: "always-ask" as const };

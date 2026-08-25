@@ -12,5 +12,18 @@
   "risk1": "Bypasses every policy rule set in config (including your own custom deny rules).",
   "risk2": "Turns off automatically after 30 minutes, returning to normal confirmation mode.",
   "risk3Bold": "Hard-deny items are not affected",
-  "risk3Rest": " — writes outside the worktree, reads of secret paths, force-push, and similar actions are still denied or require a forced confirmation."
+  "risk3Rest": " — writes outside the worktree, reads of secret paths, force-push, and similar actions are still denied or require a forced confirmation.",
+  "unrestrictedEnabledTitle": "True-unrestricted is enabled: even the four hard-deny categories are bypassed",
+  "unrestrictedToggleTitle": "True-unrestricted: bypasses force-push, secret-path reads, deletes outside the worktree, and non-allowlisted network connections; requires YOLO to be on first",
+  "unrestrictedOnLabel": "Enable true-unrestricted",
+  "unrestrictedOffLabel": "Turn off true-unrestricted",
+  "unrestrictedConfirmDialogTitle": "Enable true-unrestricted?",
+  "unrestrictedRisk1": "This bypasses the four hard-deny categories that even YOLO can't cross, including:",
+  "unrestrictedRiskCategory1": "force-push and other dangerous git commands",
+  "unrestrictedRiskCategory2": "reading secret paths such as ~/.ssh, .env, credentials",
+  "unrestrictedRiskCategory3": "deleting files outside the worktree",
+  "unrestrictedRiskCategory4": "network connections to non-allowlisted hosts",
+  "unrestrictedRisk2": "Shares YOLO's 30-minute timer — turns off together when YOLO expires, not a separate timer.",
+  "unrestrictedRiskRemote": "You're enabling this from a remote connection — once on, it applies to requests from any connection, not just this one.",
+  "unrestrictedTypeToConfirm": "Type \"{{phrase}}\" to confirm"
 }

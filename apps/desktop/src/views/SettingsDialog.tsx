@@ -9,6 +9,7 @@ import { Badge, SectionLabel } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
 import { softwareLabel } from "../ui/status.js";
 import { translateError } from "../lib/error-i18n.js";
+import { PermissionsSection } from "./PermissionsSection.js";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -481,7 +482,10 @@ export function SettingsDialog({ onClose }: SettingsDialogProps): JSX.Element {
       }
     >
       <div className="space-y-2">
-        <SectionLabel>{t("settings:sections.global")}</SectionLabel>
+        <SectionLabel>{t("settings:sections.permission")}</SectionLabel>
+        <PermissionsSection />
+
+        <SectionLabel className="pt-1">{t("settings:sections.global")}</SectionLabel>
         {effectiveConfig ? <GlobalConfigSection config={effectiveConfig} /> : <p className="py-2 text-center text-2xs text-fg-faint">{t("common:loading")}</p>}
 
         <SectionLabel className="pt-1">{t("settings:sections.notification")}</SectionLabel>

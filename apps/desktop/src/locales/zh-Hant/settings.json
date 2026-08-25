@@ -4,6 +4,7 @@
   "providerCountFooter": "共 {{count}} 項",
   "redetect": "重新偵測",
   "sections": {
+    "permission": "權限",
     "global": "全域設定",
     "notification": "通知設定",
     "provider": "Provider 管理"
@@ -59,5 +60,28 @@
     "enabledValue": "已啟用",
     "disabledValue": "已停用",
     "notSet": "(未設定)"
+  },
+  "permission": {
+    "description": "目前生效的政策允許清單(default-deny 中間地帶的 allow/deny 規則)。這裡管不到 hard-deny(force-push、讀密鑰路徑、worktree 外刪除、非白名單外連)——那四類無論這裡設什麼都仍是地板;要繞過它們,請到對話視窗標頭裡個別 session 的「真.無限制」開關。",
+    "remoteNotice": "你正在透過遠端連線編輯這份清單,寫入後對所有連線都生效。",
+    "emptyList": "目前沒有任何規則",
+    "toolLabel": "工具",
+    "effectLabel": "效果",
+    "effectAllow": "允許",
+    "effectDeny": "拒絕",
+    "whenKindLabel": "條件類型",
+    "whenKindNone": "無(比對工具本身)",
+    "whenKindCommandEquals": "指令完全等於",
+    "whenKindCommandMatches": "指令符合正規表達式",
+    "whenKindPathUnder": "路徑位於此前綴之下",
+    "whenValueLabel": "條件值",
+    "scopeProfileLabel": "限定 Profile ID(選填)",
+    "scopeRoleLabel": "限定角色(選填)",
+    "scopeProfile": "profile:{{id}}",
+    "scopeRole": "角色:{{role}}",
+    "addedByUser": "手動新增",
+    "addedByRemember": "來自「永遠允許」",
+    "toolRequired": "請填寫工具名稱(輸入 * 代表任意工具)",
+    "addRuleButton": "新增規則"
   }
 }

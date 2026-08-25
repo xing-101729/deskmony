@@ -84,6 +84,9 @@ interface SessionPermissionState {
 **Gateway method**:`session.setPermissionMode({ sessionId, mode })`
 - `mode === "auto-accept-all"` 時,Core 設定 `yoloExpiresAt = now + 30min`。
 - **遠端呼叫一律拒絕**(§5)。
+  > ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):此限制已
+  > 取消,遠端現在可呼叫 `session.setPermissionMode`,與本機同權。§5.1 的
+  > `LOCAL_ONLY_METHODS` 樣本已同步更新。
 
 **餵給 S1**:`buildExecContext()` 改為讀此狀態 —
 
@@ -140,6 +143,11 @@ local:    !gateway.hasRemoteClient()            // 見下
 **YOLO 的「繞過一切」在哪實作**:`decide()` 第 4 步(`autoMode → allow`)已涵蓋中間地帶;YOLO 與 auto 的差別**僅在於**是否連 config `effect:"deny"` 規則也繞過。
 - `auto`:仍受 config deny-list 約束(第 2 步)。
 - `YOLO`:跳過第 2 步。**但 hard-deny(第 1 步)永遠不跳**。
+  > ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):「永遠不跳」
+  > 現在有一個顯式 opt-in 例外——`trueUnrestricted`(前提是已處於 YOLO)會讓
+  > `decide()` 在第 0 步就跳過 hard-deny,見 §5.1 修訂註記與
+  > [S1 L4 §2](./policy-engine_detail.md)。單純的 YOLO(未額外開
+  > `trueUnrestricted`)本身仍不影響 hard-deny 判斷。
 
 ---
 
@@ -187,9 +195,15 @@ local:    !gateway.hasRemoteClient()            // 見下
 
 在 `ws-gateway.ts` 的 method dispatch 前加一道檢查:
 
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):
+> `session.setPermissionMode` 已從下面這份清單移除——使用者明確翻案原「遠端
+> 不可切 auto/YOLO」的限制,本機與遠端現在同權;新增的
+> `session.setTrueUnrestricted`/`policy.addRule`/`policy.removeRule`/
+> `policy.listRules` 四個方法也**刻意不列入**這份清單,同一次翻案的一部分。
+> 以下樣本已更新以反映現況,實際定義見 `ws-gateway.ts` 的 `LOCAL_ONLY_METHODS`。
+
 ```ts
 const LOCAL_ONLY_METHODS = new Set([
-  "session.setPermissionMode",     // auto / YOLO
   "config.setFile",                // 政策與設定
   "profile.create", "profile.update", "profile.delete",
   // 之後 S3b 的預算設定 method 也要加入
@@ -198,6 +212,14 @@ if (!conn.isLocal && LOCAL_ONLY_METHODS.has(method)) → 回錯誤 + audit
 ```
 
 **`escalate-strong` 的覆寫**:不在 method 層擋(它走既有的 `permission.resolve`),而是在 **S1 的 `decide()`** 擋——S1 已實作 `!local ⇒ hard-deny 直接 deny`,遠端根本收不到 strong 請求。**兩層一致,無需額外程式碼。**
+
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):上面這段講的
+> 是 `escalate-strong` 這一條路徑——遠端確實仍然拿不到 hard-deny 的「強確認
+> 覆寫」提示,這點沒變。但這不代表遠端**完全**碰不到 hard-deny 的例外:新增
+> 的 `trueUnrestricted`([S1 L4 §2](./policy-engine_detail.md))是另一條**獨立
+> 、explicit opt-in** 的路徑,本機與遠端皆可觸發,見 `decide()` 最前面的
+> 第 0 步短路。「遠端拿不到 escalate-strong」與「遠端完全碰不到 hard-deny 的
+> 例外」不再是同一件事。
 
 ### 5.2 `isLocal` 判定(硬規則:絕不採信 client)
 
@@ -221,6 +243,14 @@ capabilities: {
 ```
 UI **純依此渲染**(遠端隱藏這些控制項)。**安全仍由 §5.1 的每次檢查保證**,握手只是讓 UI 正確。
 
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):`canToggleAuto`
+> /`canEnableYolo`/`canEditPolicy` 三者不再等於 `isLocal`,已改成恆為
+> `true`;「遠端隱藏這些控制項」不再成立,遠端現在會看到並可使用這些控制項。
+> `canManageProfiles` 未變,仍等於 `isLocal`。另新增 `canEnableTrueUnrestricted`
+> (恆 `true`,真正的把關在呼叫當下的 session-mode 前置條件,不是連線類型)
+> 與 `isRemoteConnection`(純顯示用)兩個欄位。現況見 `ws-gateway.ts` 的
+> `buildCapabilities()`。
+
 ---
 
 ## 6. 實作檢查清單
@@ -234,7 +264,7 @@ UI **純依此渲染**(遠端隱藏這些控制項)。**安全仍由 §5.1 的�
 - [ ] Core 強制檢查:strong 請求不得帶 `rememberRule`
 - [ ] `gateway.ts` + `ws-gateway.ts`:`session.setPermissionMode`、`LOCAL_ONLY_METHODS`、`isLocal`、握手 capabilities
 - [ ] `PermissionModal.tsx`:三種 UX、範圍選擇區塊
-- [ ] `ChatView.tsx`:session 標頭的 auto 常駐標記(HLD §2.2 補償防護)+ auto/YOLO 切換鈕(遠端隱藏)
+- [ ] `ChatView.tsx`:session 標頭的 auto 常駐標記(HLD §2.2 補償防護)+ auto/YOLO 切換鈕(⚠️ 2026-08-25 起不再遠端隱藏,見 DECISIONS.md §G)
 - [ ] e2e:auto 放行中間地帶、YOLO 跳過 config deny、**hard-deny 在 YOLO 下仍 deny**、YOLO 過期回落、遠端呼叫 local-only method 被拒、strong 請求帶 rememberRule 被拒
 
 ---

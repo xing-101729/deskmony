@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { CORE_CONFIG_VERSION, DeskmonyError, type ConfigSetFilePatchInput, type PolicyRule } from "@deskmony/shared";
 
 /**
@@ -151,4 +152,93 @@ export function appendPolicyRule(configPath: string, rule: PolicyRule): void {
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, `${JSON.stringify(existing, null, 2)}\n`, "utf8");
+}
+
+/**
+ * 2026-08-25 新增(見 docs/DECISIONS.md §G):`PolicyRule.id` 這個欄位新增前
+ * 就已經寫進 `config.json` 的舊規則沒有 id——啟動時呼叫一次,補上
+ * `randomUUID()` 並整批寫回,讓 `policy.removeRule` 之後可以用穩定的 id 定位
+ * 任何一條規則(而不是容易因為其他規則新增/刪除而位移的陣列 index)。
+ *
+ * **冪等**:傳入的 `rules` 若每一條都已經有 `id`(全新安裝、或已經跑過一次
+ * 這個函式),直接原樣回傳,完全不碰檔案——比照
+ * `apps/core/src/settings/settings-store.ts` 的 `migrateLegacyEnabledModelIds()`
+ * 同一種「已經是目標狀態就不做任何 I/O」的早退寫法(那個是 DB row,這個是
+ * config.json 檔案,機制不同但精神一致)。
+ *
+ * 呼叫端(`apps/core/src/index.ts`)必須把這個函式的回傳值(不是原始
+ * `config.policy.rules`)拿去建構 `PolicyEngine`,否則記憶體裡的規則會跟剛
+ * 寫回檔案的版本不一致(記憶體那份還是缺 id 的舊版)。
+ */
+export function backfillPolicyRuleIds(configPath: string, rules: PolicyRule[]): PolicyRule[] {
+  if (rules.every((rule) => rule.id !== undefined)) return rules;
+
+  const backfilled = rules.map((rule) => (rule.id !== undefined ? rule : { ...rule, id: randomUUID() }));
+
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw = fs.readFileSync(configPath, "utf8");
+    existing = JSON.parse(raw) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      // 理論上不該發生(core 啟動時的 readConfigFile() 早就會先因為解析失敗
+      // 拒絕啟動)——保守起見仍不覆寫,直接把記憶體版本的 backfill 結果回傳,
+      // 讓這次啟動至少行為正確,下次啟動時再重試落地。
+      console.error(`[config] id backfill 無法讀取設定檔以寫回(不影響這次啟動的 in-memory 規則): ${String(err)}`);
+      return backfilled;
+    }
+  }
+
+  if (existing.version === undefined) existing.version = CORE_CONFIG_VERSION;
+  if (existing.$schema === undefined) existing.$schema = SCHEMA_REFERENCE;
+  const existingPolicy =
+    typeof existing.policy === "object" && existing.policy !== null && !Array.isArray(existing.policy)
+      ? (existing.policy as Record<string, unknown>)
+      : {};
+  existing.policy = { ...existingPolicy, rules: backfilled };
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, `${JSON.stringify(existing, null, 2)}\n`, "utf8");
+
+  return backfilled;
+}
+
+/**
+ * 2026-08-25 新增:依 `id` 刪除一條政策規則——**整批讀回寫**(與只 append 一條
+ * 的 `appendPolicyRule()`不同,刪除必須先找到、拿掉那一條,不能只靠
+ * unshift/push)。id 不存在時視為 no-op(不拋例外,呼叫端
+ * `SessionManager.removePolicyRule()` 依「陣列長度是否變短」判斷有沒有真的
+ * 刪到,見該方法)。
+ */
+export function removePolicyRule(configPath: string, id: string): PolicyRule[] {
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw = fs.readFileSync(configPath, "utf8");
+    existing = JSON.parse(raw) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new DeskmonyError(
+        "config.policyRuleWriteFailed",
+        { configPath, detail: err instanceof Error ? err.message : String(err) },
+        `設定檔(${configPath})目前無法解析,拒絕寫入刪除規則的結果以避免覆蓋既有內容: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  if (existing.version === undefined) existing.version = CORE_CONFIG_VERSION;
+  if (existing.$schema === undefined) existing.$schema = SCHEMA_REFERENCE;
+
+  const existingPolicy =
+    typeof existing.policy === "object" && existing.policy !== null && !Array.isArray(existing.policy)
+      ? (existing.policy as Record<string, unknown>)
+      : {};
+  const existingRules = Array.isArray(existingPolicy.rules) ? (existingPolicy.rules as PolicyRule[]) : [];
+  const remainingRules = existingRules.filter((rule) => rule.id !== id);
+
+  existing.policy = { ...existingPolicy, rules: remainingRules };
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, `${JSON.stringify(existing, null, 2)}\n`, "utf8");
+
+  return remainingRules;
 }

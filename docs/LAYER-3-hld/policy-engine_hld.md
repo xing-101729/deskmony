@@ -69,7 +69,14 @@ ExecContext = { attended: boolean;   // 有人看(always-ask)還是無人值守
 5. 皆否(未分類長尾)                  → escalate        (= default-deny,C2)
 ```
 
-**情境相依的 hard-deny(S1 grill 定案)**:S1 **擁有規則**,S7/remote 層**供給 `ExecContext` 旗標**。在最該守的地方(無人值守、auto/YOLO、遠端、token 外洩)hard-deny 維持硬地板不可覆寫(F4);只有「本機 + 有人看」時降級為 `escalate-strong`,讓罕見的合法邊界案不必改內建規則重編。`escalate-strong` 的確認 UX(更嚇人、與一般核可視覺區隔、不可「永遠允許」)由 **S7** 實作。
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):上面五步仍
+> 是主流程,但現在有一個**第 0 步**,先於第 1 步的 hard-deny 判斷執行——
+> session 顯式開啟「真.無限制」(`ctx.trueUnrestricted`)時直接 `allow`,
+> 是唯一能跳過 hard-deny 的路徑。這不是「遠端或 auto/YOLO 自動觸發」,而是
+> 需要 session 已處於 YOLO、且額外顯式再開一層的 opt-in 動作,本機與遠端皆可
+> 觸發。細節見 [S1 L4 §2](../LAYER-4-detail-design/policy-engine_detail.md)。
+
+**情境相依的 hard-deny(S1 grill 定案)**:S1 **擁有規則**,S7/remote 層**供給 `ExecContext` 旗標**。在最該守的地方(無人值守、auto/YOLO、遠端、token 外洩)hard-deny 維持硬地板不可覆寫(F4;⚠️ 2026-08-25 起有 `trueUnrestricted` 這個顯式 opt-in 例外,見上方修訂註記);只有「本機 + 有人看」時降級為 `escalate-strong`,讓罕見的合法邊界案不必改內建規則重編。`escalate-strong` 的確認 UX(更嚇人、與一般核可視覺區隔、不可「永遠允許」)由 **S7** 實作。
 
 - **escalate** 交給共用底座:發 `escalation` 事件 → Notification(S11)送達人類 → 人回 `allow/deny`(可帶 `remember`,C4:寫回 config allowlist)→ PolicyEngine 呼叫 adapter `resolvePermission()`。
 - **逾時:情境相依**(⚠️ **S11 grill 反向修正**,見 [S11 §4](./notification_hld.md)):
@@ -139,7 +146,7 @@ type EnforcementEvent =                                                  // 一�
 | adapter 無 `permissionRequests`(PTY) | 無請求可決策;該 tier 唯讀(C7),不在 S1 範圍。 |
 | escalate / escalate-strong 逾時無人回 | **情境相依**(S11 §4):attended → deny;無人值守 → 掛起 `waiting-permission`,由 S3b 預算止損。 |
 | Notification 送不出去 | 稽核 log 記「未送達」;逾時行為同上。**不因通知失敗而放行**。 |
-| hard-deny 誤傷正常操作 | **本機+attended** → `escalate-strong`,人可當場強確認放行(不需重編)。**遠端/auto/YOLO** → 直接 deny,無覆寫(F4)。 |
+| hard-deny 誤傷正常操作 | **本機+attended** → `escalate-strong`,人可當場強確認放行(不需重編)。**遠端/auto/YOLO** → 直接 deny,無覆寫(F4)。⚠️ **2026-08-25 起的例外**:「無覆寫」不再絕對——session 顯式開啟 `trueUnrestricted`(前提是已處於 YOLO)可繞過,本機與遠端皆可,見 [DECISIONS.md §G](../DECISIONS.md)。 |
 | shell 指令無法分類(常態) | escalate。頻繁 escalate 是 Phase 1 的**已知代價**,見 §4.1;緩解靠 S11 通知 + S12 沙箱。 |
 
 ---
@@ -154,13 +161,13 @@ C2 default-deny · C3 policy agent 不可寫、存家目錄 · C4 escalate 可 r
 
 1. **match 語法的精確度**(L4):`command` regex 夠嗎?路徑比對如何處理符號連結逃逸?host allowlist 如何涵蓋 IP/DNS?
 2. **per-agent/role 寬鬆度**:`permissionLevel` 之外,要不要 per-role 的 allowlist 繼承?
-3. **S7 銜接**:session auto 暫態如何覆寫 profile 的 `permissionLevel` 並供給 `ExecContext`;`escalate-strong` 的確認 UX;YOLO 如何在遠端被禁用(F3)。
+3. **S7 銜接**:session auto 暫態如何覆寫 profile 的 `permissionLevel` 並供給 `ExecContext`;`escalate-strong` 的確認 UX;YOLO 如何在遠端被禁用(F3)。(⚠️ 2026-08-25:此問題的前提已翻案——YOLO 不再遠端禁用,見 [DECISIONS.md §G](../DECISIONS.md)。)
 4. **attended 的逾時 deny 是否該同時發 trip 事件**,讓人知道「有東西卡住被拒了」。(無人值守的掛起分支已由 S11 §4 定案。)
 
 ---
 
 > **S1 grill 已完成(2026-07-24)**,3 項定案:
 > ① **shell 決策 = 指令分類 + escalate 長尾**,並承認「shell 低打擾無人值守受制於 S12 沙箱」(§4.1),S12 與 Phase 1 承諾的耦合已回寫 L2。
-> ② **hard-deny 情境相依**:遠端/auto/YOLO → 硬 deny;本機+attended → `escalate-strong`。S1 擁有規則,S7 供 `ExecContext` 與確認 UX。
+> ② **hard-deny 情境相依**:遠端/auto/YOLO → 硬 deny;本機+attended → `escalate-strong`。S1 擁有規則,S7 供 `ExecContext` 與確認 UX。(⚠️ 2026-08-25 起多一個 opt-in 例外,見 §6 修訂註記與 [DECISIONS.md §G](../DECISIONS.md)。)
 > ③ **kernel 拆成共用底座**(Notifier / AuditLog / EnforcementEvent schema)+ escalate/trip 兩條流程,不硬併成單一物件。
 > **下一步**:S7(auto/YOLO,與本 HLD 耦合最緊)或 S11(Notification,底座的送達端);或 S1 進 L4。

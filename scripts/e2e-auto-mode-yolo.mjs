@@ -14,16 +14,35 @@
  *   B. auto 仍受 config deny-list 約束;YOLO 跳過 config deny-list
  *   C. 【關鍵】hard-deny 在 YOLO 下仍 deny(不降級、不放行)
  *   D. YOLO 30 分鐘(這裡用 DESKMONY_YOLO_DURATION_MS 縮短)惰性過期回落 always-ask
- *   E. 【關鍵】遠端連線呼叫 LOCAL_ONLY_METHODS(以 session.setPermissionMode
- *      為例)被拒;本機連線(即使 bindHost=0.0.0.0)正常。
+ *      D2(2026-08-25 新增,見 docs/DECISIONS.md §G):過期連帶清掉
+ *      trueUnrestricted,不需要另外呼叫 setTrueUnrestricted(enabled:false)。
+ *   E. 遠端連線呼叫 LOCAL_ONLY_METHODS(以 config.setFile 為例)被拒;本機連線
+ *      (即使 bindHost=0.0.0.0)正常。⚠️ 2026-08-25 修訂(docs/DECISIONS.md
+ *      §G):`session.setPermissionMode` 已從 LOCAL_ONLY_METHODS 移除,不再是
+ *      這條規則的例子——E-1/E-2 現在驗證的是「遠端呼叫也成功」,E-3 的
+ *      config.setFile 才是仍然 local-only 的例子。
  *      E-4/E-5(S7 L4 §2.1 的 `local` 修正):**有遠端 client 連線中時**,
- *      hard-deny 不降級為 escalate-strong(直接 deny);遠端斷線後恢復降級。
+ *      hard-deny 不降級為 escalate-strong(直接 deny);遠端斷線後恢復降級
+ *      ——這是與「真.無限制層」無關的既有保證,E-6/E-7 插在 E-3 與 E-4 之間
+ *      不影響這一對的相鄰性。
+ *      E-6【關鍵案例④,2026-08-25 新增】:遠端連線一路做完
+ *      setPermissionMode(YOLO)→ setTrueUnrestricted(enabled:true)→ 同一個
+ *      session 的 hard-deny 請求直接 allow——證明繞過短路對遠端與本機同樣
+ *      生效,是本檔案除了 C/E-4/E-5 之外最該守住的安全斷言。
+ *      E-7(2026-08-25 新增):遠端連線呼叫 policy.addRule/listRules/removeRule
+ *      三個新方法皆成功(同一次翻案,刻意不列入 LOCAL_ONLY_METHODS)。
  *   F. 【關鍵】escalate-strong 請求帶 rememberRule 被 Core 拒絕(decision 仍套用,
  *      但規則不寫入/不生效);一般 escalate 帶 rememberRule 正常寫入
  *      config.json 且 in-memory 立即生效
- *   G. 握手能力集(gateway.capabilities)依 isLocal 正確回報
+ *   G. 握手能力集(gateway.capabilities)依 isLocal 正確回報。⚠️ 2026-08-25
+ *      修訂:canToggleAuto/canEnableYolo/canEditPolicy/canEnableTrueUnrestricted
+ *      現在本機遠端皆恆為 true;canManageProfiles 未變動,仍只有本機 true。
  *   H. DB 遷移:舊資料 permission_level="auto-accept-all" 被降級為
  *      "auto-accept-edits",且 console.warn 有印
+ *   J(2026-08-25 新增,見 docs/DECISIONS.md §G):session 還在 always-ask
+ *      (未曾開過 YOLO)時直接呼叫 session.setTrueUnrestricted({enabled:true})
+ *      被拒(errorCode=session.trueUnrestrictedRequiresYolo),且之後這個
+ *      session 的 hard-deny 判斷完全沒被動過手腳(仍正常 escalate-strong)。
  *
  * 前置需求:`pnpm build` 已跑過。
  * 用法:node scripts/e2e-auto-mode-yolo.mjs
@@ -107,8 +126,18 @@ class MiniGatewayClient {
       const pending = this.pendingRpc.get(msg.id);
       if (pending) {
         this.pendingRpc.delete(msg.id);
-        if (msg.ok) pending.resolve(msg.result);
-        else pending.reject(new Error(msg.error ?? "unknown gateway error"));
+        if (msg.ok) {
+          pending.resolve(msg.result);
+        } else {
+          // 2026-08-25 新增:把 errorCode(見 apps/core/src/gateway/ws-gateway.ts
+          // 的 `toErrorResponse()`)一併掛到 rejected Error 上——新的 J 測試
+          // (session.setTrueUnrestricted 前置條件被拒)需要斷言確切的
+          // errorCode,不能只看 message 這段給人看的中文說明。既有呼叫端一律
+          // 只用 String(err) 讀 .message,多掛一個 .code 屬性不影響任何既有斷言。
+          const err = new Error(msg.error ?? "unknown gateway error");
+          err.code = msg.errorCode;
+          pending.reject(err);
+        }
       }
       return;
     }
@@ -506,6 +535,54 @@ async function testAutoAndYolo() {
       );
     }
 
+    // ---- J(2026-08-25 新增,見 docs/DECISIONS.md §G):`session.setTrueUnrestricted`
+    //          的伺服器端前置條件——session 還在 always-ask(從未開過 YOLO)時
+    //          直接呼叫 setTrueUnrestricted({enabled:true}) 必須被拒絕
+    //          (errorCode=SESSION_TRUE_UNRESTRICTED_REQUIRES_YOLO),不能讓
+    //          呼叫端跳過 setPermissionMode("auto-accept-all") 直接開最高層級。
+    //          光是 RPC 呼叫失敗還不構成完整證明:還要證明這個 session 上的
+    //          hard-deny 判斷完全沒被動過手腳(短路真的沒有裝上,不只是「這次
+    //          呼叫剛好失敗」)——所以緊接著送一筆 worktree 外寫入,必須維持
+    //          「本機+attended+非autoMode」原本該有的 escalate-strong(走
+    //          waiting、strong:true),不能是 allow。 ----
+    {
+      const sessionId = await createAttendedSession("J-true-unrestricted-requires-yolo-precondition");
+
+      let rejected = false;
+      let rejectedCode;
+      try {
+        await client.rpc("session.setTrueUnrestricted", { sessionId, enabled: true });
+      } catch (err) {
+        rejected = true;
+        rejectedCode = err?.code;
+      }
+
+      const targetFile = path.join(outsideDir, "j-precondition-still-escalates.txt");
+      const permEvent = await triggerWritePermission(sessionId, targetFile);
+      await sleep(500);
+      const listDuring = await client.rpc("session.list", {});
+      const sessionDuring = listDuring.sessions.find((s) => s.id === sessionId);
+      const wentWaiting = sessionDuring?.status === "waiting";
+      const isStrong = permEvent.strong === true;
+      const trueUnrestrictedNeverArmed = sessionDuring?.trueUnrestricted !== true;
+
+      await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "deny" });
+      await waitCompleted(sessionId).catch(() => {});
+      const fileNotWritten = !existsSync(targetFile);
+
+      record(
+        "J: session 還在 always-ask(未曾開過 YOLO)時,直接呼叫 session.setTrueUnrestricted({enabled:true}) 被拒(errorCode=session.trueUnrestrictedRequiresYolo)——之後對同一個 session 的 hard-deny(worktree 外寫入)請求仍走正常的 escalate-strong(waiting、strong:true),不是 allow,證明短路真的沒被裝上",
+        rejected &&
+          rejectedCode === "session.trueUnrestrictedRequiresYolo" &&
+          wentWaiting &&
+          isStrong &&
+          trueUnrestrictedNeverArmed &&
+          fileNotWritten,
+        `rejected=${rejected}, rejectedCode=${rejectedCode}, wentWaiting=${wentWaiting}, isStrong=${isStrong}, ` +
+          `trueUnrestrictedNeverArmed=${trueUnrestrictedNeverArmed}, fileNotWritten=${fileNotWritten}`,
+      );
+    }
+
     for (const sid of createdSessions) {
       try {
         await client.rpc("session.delete", { sessionId: sid });
@@ -539,6 +616,9 @@ async function testYoloExpiry() {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-expiry-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-expiry-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-expiry-ws-"));
+  /** D2 用:worktree 之外的目錄(寫入這裡必定命中 hard-deny),比照
+   *  testAutoAndYolo()/testRemoteRejection() 的既有 outsideDir 慣例。 */
+  const outsideDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-expiry-outside-"));
   const unclassifiedSubDir = path.join(workspaceDir, "unclassified-sub");
   mkdirSync(unclassifiedSubDir, { recursive: true });
 
@@ -603,6 +683,74 @@ async function testYoloExpiry() {
       yoloArmed && wentWaiting && modeReportedAsAlwaysAsk,
       `yoloArmed=${yoloArmed}, wentWaiting=${wentWaiting}(status=${sessionAfter?.status}), permissionMode=${sessionAfter?.permissionMode}`,
     );
+
+    // ---- D2(2026-08-25 新增,見 docs/DECISIONS.md §G):YOLO 惰性過期一併清掉
+    //          trueUnrestricted,不需要額外程式碼特別處理——checkAndExpireYolo()
+    //          過期時建構全新的 `{ mode: "always-ask" }` state(不 spread 舊
+    //          值,見 session-manager.ts 該方法的既有寫法/註解),trueUnrestricted
+    //          這個欄位跟著自動消失。這裡用一個全新 session 驗證:開 YOLO →
+    //          開 trueUnrestricted → 不呼叫 setTrueUnrestricted(enabled:false)、
+    //          只是讓 YOLO 自然過期 → 之後對這個 session 送一筆 hard-deny
+    //          (worktree 外寫入)請求,必須恢復成「本機+attended+非autoMode」
+    //          原本該有的 escalate-strong(走 waiting、strong:true),不是
+    //          allow——如果 trueUnrestricted 殘留未清,這筆請求會被直接放行。 ----
+    {
+      const { profile: profile2 } = await client.rpc("profile.create", {
+        name: "E2E YOLO Expiry Clears TrueUnrestricted",
+        software: "acp",
+        workingDir: workspaceDir,
+        acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
+        permissionLevel: "always-ask",
+      });
+      const { session: session2 } = await client.rpc(
+        "session.create",
+        { agentProfileId: profile2.id, workingDir: workspaceDir, title: "D2-expiry-clears-true-unrestricted" },
+        30_000,
+      );
+      const sessionId2 = session2.id;
+
+      await client.rpc("session.setPermissionMode", { sessionId: sessionId2, mode: "auto-accept-all" });
+      const trueUnrestrictedResult = await client.rpc("session.setTrueUnrestricted", { sessionId: sessionId2, enabled: true });
+      const armedCorrectly = trueUnrestrictedResult.trueUnrestricted === true;
+
+      await sleep(YOLO_DURATION_MS + 800); // 超過縮短後的存活時間,讓 YOLO(連帶 trueUnrestricted)過期
+
+      // 過期是惰性檢查,只在下一次 decide() 前才真的發生——送一筆會命中
+      // hard-deny 的 worktree 外寫入請求觸發。
+      const startIdx2 = client.events.length;
+      const targetFile2 = path.join(outsideDir, "d2-after-expiry-harddeny.txt");
+      const posixPath2 = targetFile2.split(path.sep).join("/");
+      await client.rpc("session.sendPrompt", {
+        sessionId: sessionId2,
+        prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath2, content: "x" })}` },
+      });
+      const permEnvelope2 = await client.waitForEvent(
+        (e) => e.sessionId === sessionId2 && e.event.type === "permission-request",
+        15_000,
+        startIdx2,
+      );
+      const permEvent2 = permEnvelope2.event;
+      await sleep(500);
+      const listDuring2 = await client.rpc("session.list", {});
+      const sessionDuring2 = listDuring2.sessions.find((s) => s.id === sessionId2);
+      const wentWaiting2 = sessionDuring2?.status === "waiting";
+      const isStrong2 = permEvent2.strong === true;
+      const trueUnrestrictedClearedInState = sessionDuring2?.trueUnrestricted !== true;
+
+      // 清理:手動 deny 這筆掛著的 escalate-strong 請求。
+      await client.rpc("permission.resolve", { requestId: permEvent2.requestId, decision: "deny" });
+      await client
+        .waitForEvent((e) => e.sessionId === sessionId2 && (e.event.type === "completed" || e.event.type === "error"), 15_000)
+        .catch(() => {});
+      const fileNotWritten2 = !existsSync(targetFile2);
+
+      record(
+        "D2: YOLO 惰性過期一併清掉 trueUnrestricted(沒有另外呼叫 setTrueUnrestricted(enabled:false))——過期後對這個 session 送 hard-deny(worktree 外寫入)請求,恢復成正常的 escalate-strong(走 waiting、strong:true),不是 allow;session.trueUnrestricted 欄位也回報非 true",
+        armedCorrectly && wentWaiting2 && isStrong2 && trueUnrestrictedClearedInState && fileNotWritten2,
+        `armedCorrectly=${armedCorrectly}, wentWaiting=${wentWaiting2}, isStrong=${isStrong2}, ` +
+          `trueUnrestrictedClearedInState=${trueUnrestrictedClearedInState}(session.trueUnrestricted=${sessionDuring2?.trueUnrestricted}), fileNotWritten=${fileNotWritten2}`,
+      );
+    }
   } catch (err) {
     record("D: YOLO 惰性過期 執行過程發生未預期錯誤", false, String(err));
   } finally {
@@ -610,7 +758,7 @@ async function testYoloExpiry() {
     await killProcessTree(coreProc);
   }
 
-  for (const dir of [dataDir, homeDir, workspaceDir]) {
+  for (const dir of [dataDir, homeDir, workspaceDir, outsideDir]) {
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -661,20 +809,42 @@ async function testRemoteRejection() {
     remoteClient = new MiniGatewayClient(`ws://${remoteIp}:${PORT}`, TOKEN);
     await remoteClient.connect();
 
-    // ---- G: 握手能力集依 isLocal 正確回報 ----
+    // ---- G【2026-08-25 修訂,見 docs/DECISIONS.md §G】: 握手能力集——
+    //          canToggleAuto/canEnableYolo/canEditPolicy/canEnableTrueUnrestricted
+    //          這輪翻案後本機遠端皆恆為 true(F3 舊限制解除,見
+    //          ws-gateway.ts 的 buildCapabilities() 修訂註解);canManageProfiles
+    //          未變動,仍只有本機 true(profile 管理這輪沒有翻案);
+    //          isRemoteConnection 純顯示連線類型本身(本機 false、遠端 true,
+    //          不是安全邊界,真正的把關在每次呼叫時 Gateway 的伺服器端檢查)。----
     const localCapsViaAuth = localClient.capabilities;
     const remoteCapsViaAuth = remoteClient.capabilities;
     const localCapsViaMethod = (await localClient.rpc("gateway.capabilities", {})).capabilities;
     const remoteCapsViaMethod = (await remoteClient.rpc("gateway.capabilities", {})).capabilities;
 
+    const expectedLocalCaps = {
+      canToggleAuto: true,
+      canEnableYolo: true,
+      canEditPolicy: true,
+      canManageProfiles: true,
+      canEnableTrueUnrestricted: true,
+      isRemoteConnection: false,
+    };
+    const expectedRemoteCaps = {
+      canToggleAuto: true,
+      canEnableYolo: true,
+      canEditPolicy: true,
+      canManageProfiles: false,
+      canEnableTrueUnrestricted: true,
+      isRemoteConnection: true,
+    };
+    const capsMatch = (caps, expected) => Object.keys(expected).every((key) => caps?.[key] === expected[key]);
+
     record(
-      "G: 握手能力集(auth 回應 + 獨立的 gateway.capabilities)依 isLocal 正確回報——本機連線全 true,遠端連線(經真實非 loopback 位址連入)全 false",
-      localCapsViaAuth?.canToggleAuto === true &&
-        localCapsViaAuth?.canEnableYolo === true &&
-        localCapsViaMethod?.canToggleAuto === true &&
-        remoteCapsViaAuth?.canToggleAuto === false &&
-        remoteCapsViaAuth?.canEnableYolo === false &&
-        remoteCapsViaMethod?.canToggleAuto === false,
+      "G: 握手能力集(auth 回應 + 獨立的 gateway.capabilities)——canToggleAuto/canEnableYolo/canEditPolicy/canEnableTrueUnrestricted 本機遠端皆恆為 true;canManageProfiles 仍只有本機 true;isRemoteConnection 本機 false、遠端 true",
+      capsMatch(localCapsViaAuth, expectedLocalCaps) &&
+        capsMatch(localCapsViaMethod, expectedLocalCaps) &&
+        capsMatch(remoteCapsViaAuth, expectedRemoteCaps) &&
+        capsMatch(remoteCapsViaMethod, expectedRemoteCaps),
       `localCapsViaAuth=${JSON.stringify(localCapsViaAuth)}, remoteCapsViaAuth=${JSON.stringify(remoteCapsViaAuth)}, ` +
         `localCapsViaMethod=${JSON.stringify(localCapsViaMethod)}, remoteCapsViaMethod=${JSON.stringify(remoteCapsViaMethod)}`,
     );
@@ -690,17 +860,21 @@ async function testRemoteRejection() {
     });
     const { session } = await localClient.rpc("session.create", { agentProfileId: profile.id, workingDir: workspaceDir, title: "E-remote" }, 30_000);
 
-    // ---- E(關鍵)-1: 遠端連線呼叫 session.setPermissionMode 被拒 ----
-    let remoteRejected = false;
+    // ---- E-1【2026-08-25 修訂,見 docs/DECISIONS.md §G】: session.setPermissionMode
+    //          已從 LOCAL_ONLY_METHODS 移除(原 F3/C6「遠端不可切 auto/YOLO」
+    //          限制翻案)——遠端連線(經真實非 loopback IP 連入,即使
+    //          bindHost=0.0.0.0)呼叫現在應該正常成功,不再被拒。----
+    let remoteSucceeded = false;
     let remoteErrorMsg = "";
     try {
-      await remoteClient.rpc("session.setPermissionMode", { sessionId: session.id, mode: "auto-accept-all" });
+      const r = await remoteClient.rpc("session.setPermissionMode", { sessionId: session.id, mode: "auto-accept-all" });
+      remoteSucceeded = r.mode === "auto-accept-all" && typeof r.yoloExpiresAt === "number";
     } catch (err) {
-      remoteRejected = true;
       remoteErrorMsg = String(err);
     }
 
-    // ---- E-2: 同一個方法,本機連線(即使 core 綁在 0.0.0.0)正常成功 ----
+    // ---- E-2: 同一個方法,本機連線一樣正常成功(修訂前後都是這樣;這裡改設
+    //          另一個 mode 純粹是避免跟上面 E-1 剛設的 YOLO 互相干擾判讀)。----
     let localSucceeded = false;
     try {
       const r = await localClient.rpc("session.setPermissionMode", { sessionId: session.id, mode: "auto-accept-edits" });
@@ -710,9 +884,9 @@ async function testRemoteRejection() {
     }
 
     record(
-      "【關鍵】E: 遠端連線(經真實非 loopback IP 連入,即使 bindHost=0.0.0.0)呼叫 session.setPermissionMode(LOCAL_ONLY_METHODS)被拒;本機連線同一方法正常成功——這是唯一的安全保證,不是 UI 隱藏按鈕",
-      remoteRejected && localSucceeded,
-      `remoteRejected=${remoteRejected}(${remoteErrorMsg}), localSucceeded=${localSucceeded}`,
+      "E: session.setPermissionMode 已從 LOCAL_ONLY_METHODS 移除——遠端連線(經真實非 loopback IP 連入,即使 bindHost=0.0.0.0)呼叫現在正常成功,本機連線同樣成功(遠端本機同權;下面 E-3 的 config.setFile 才是仍然 local-only、遠端會被拒的例子)",
+      remoteSucceeded && localSucceeded,
+      `remoteSucceeded=${remoteSucceeded}(err=${remoteErrorMsg}), localSucceeded=${localSucceeded}`,
     );
 
     // ---- E-3: config.setFile 也是 LOCAL_ONLY_METHODS 之一,一併驗證遠端被拒。 ----
@@ -751,6 +925,90 @@ async function testRemoteRejection() {
       );
       return s.id;
     };
+
+    // ---- E-6【關鍵案例④,2026-08-25 新增,見 docs/DECISIONS.md §G】:這是
+    //          本檔案除了 C/E-4/E-5 之外最該守住的安全斷言——「真.無限制層」
+    //          的短路對**遠端**連線與本機一樣生效,而且從 session 建立、切到
+    //          YOLO、開啟 trueUnrestricted,到觸發 hard-deny 請求本身,**全部
+    //          都經由這條遠端連線完成**(不假手 localClient),證明這不是
+    //          「UI 剛好把按鈕做在本機才看得到的地方」,而是伺服器端真的把
+    //          遠端與本機同權看待。目標路徑沿用 outsideDir(worktree 外),
+    //          與 E-4/E-5 使用同一種 hard-deny(worktree-escape)手法。 ----
+    {
+      const { session: trueUnrestrictedSession } = await remoteClient.rpc(
+        "session.create",
+        { agentProfileId: profile.id, workingDir: workspaceDir, title: "E6-remote-true-unrestricted-bypasses-harddeny" },
+        30_000,
+      );
+      const sessionId = trueUnrestrictedSession.id;
+
+      const setModeResult = await remoteClient.rpc("session.setPermissionMode", { sessionId, mode: "auto-accept-all" });
+      const yoloSetRemotely = setModeResult.mode === "auto-accept-all";
+
+      const setTrueUnrestrictedResult = await remoteClient.rpc("session.setTrueUnrestricted", { sessionId, enabled: true });
+      const trueUnrestrictedSetRemotely = setTrueUnrestrictedResult.trueUnrestricted === true;
+
+      const startIdx = remoteClient.events.length;
+      const targetFile = path.join(outsideDir, "e6-remote-true-unrestricted-bypass.txt");
+      const posixPath = targetFile.split(path.sep).join("/");
+      await remoteClient.rpc("session.sendPrompt", {
+        sessionId,
+        prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath, content: "x" })}` },
+      });
+      await remoteClient.waitForEvent(
+        (e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error"),
+        15_000,
+        startIdx,
+      );
+      await sleep(300);
+
+      const resolvedAllow = remoteClient.permissionResolvedEvents.some(
+        (r) => r.sessionId === sessionId && r.decision === "allow" && r.source === "policy",
+      );
+      const fileWritten = existsSync(targetFile);
+      const listAfter = await remoteClient.rpc("session.list", {});
+      const neverWaiting = listAfter.sessions.find((s) => s.id === sessionId)?.status !== "waiting";
+
+      record(
+        "【關鍵案例④】E-6: 遠端連線建立 session、切到 YOLO、開啟 trueUnrestricted 全部經由遠端連線完成且成功;之後同一個 session 對 worktree 外寫入(hard-deny)請求的 effect=allow(不是 deny/escalate-strong、不進 waiting)——證明繞過短路確實排在 checkHardDeny() 之前生效,即使在『遠端』這個 hard-deny 本來待最嚴的情境下也一樣",
+        yoloSetRemotely && trueUnrestrictedSetRemotely && resolvedAllow && fileWritten && neverWaiting,
+        `yoloSetRemotely=${yoloSetRemotely}, trueUnrestrictedSetRemotely=${trueUnrestrictedSetRemotely}, resolvedAllow=${resolvedAllow}, fileWritten=${fileWritten}, neverWaiting=${neverWaiting}`,
+      );
+    }
+
+    // ---- E-7(2026-08-25 新增):遠端連線呼叫三個新的政策管理方法
+    //          (policy.addRule/policy.listRules/policy.removeRule)皆成功——這
+    //          三個方法刻意不列入 LOCAL_ONLY_METHODS(同一次翻案的一部分,見
+    //          ws-gateway.ts 的 LOCAL_ONLY_METHODS 修訂註解)。規則刻意用
+    //          Bash/commandEquals(而非 outsideDir 那種 pathUnder),與
+    //          E-4/E-5/E-6 的 hard-deny 情境完全無關——即使沒有在測試結束前
+    //          把 removeRule 清乾淨,也不會讓其他測試多出一條可以蓋過
+    //          hard-deny 的 allow 規則(hard-deny 永遠先於 config 規則比對,
+    //          見 policy-engine.ts 的 decide() 步驟順序)。 ----
+    {
+      const newRule = { tool: "Bash", when: { commandEquals: "echo e2e-remote-policy-rule-e7" }, effect: "allow" };
+      const addResult = await remoteClient.rpc("policy.addRule", newRule);
+      const addOk =
+        addResult.rule?.tool === "Bash" &&
+        typeof addResult.rule?.id === "string" &&
+        addResult.rule.id.length > 0 &&
+        addResult.rule?.addedBy === "user";
+
+      const listResult = await remoteClient.rpc("policy.listRules", {});
+      const appearsInList = (listResult.rules ?? []).some((r) => r.id === addResult.rule?.id);
+
+      const removeResult = await remoteClient.rpc("policy.removeRule", { id: addResult.rule.id });
+      const removedOk = removeResult.removed === true && removeResult.rule?.id === addResult.rule.id;
+
+      const removeAgainResult = await remoteClient.rpc("policy.removeRule", { id: addResult.rule.id });
+      const removeAgainOk = removeAgainResult.removed === false && removeAgainResult.rule === undefined;
+
+      record(
+        "E-7: 遠端連線呼叫 policy.addRule/policy.listRules/policy.removeRule 全部成功——新增規則有 server 生成的 id 與 addedBy:\"user\"、出現在 listRules、可用該 id 刪除(removed:true),對同一個 id 再刪一次回傳 removed:false(不是錯誤)",
+        addOk && appearsInList && removedOk && removeAgainOk,
+        `addResult=${JSON.stringify(addResult)}, appearsInList=${appearsInList}, removeResult=${JSON.stringify(removeResult)}, removeAgainResult=${JSON.stringify(removeAgainResult)}`,
+      );
+    }
 
     // ---- E-4(關鍵案例③,S7 L4 §2.1 的 `local` 修正):**只要有任何遠端
     //      client 連線中**,hard-deny 就不得降級為 escalate-strong,一律直接

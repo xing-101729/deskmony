@@ -12,7 +12,7 @@ import {
 import { AdapterCapabilitiesSchema } from "./adapter-capabilities.js";
 import { AgentDetectionEntrySchema } from "./detect.js";
 import { MaskedProviderPrefsSchema, ProviderPrefsPatchInputSchema } from "./provider-catalog.js";
-import { ConfigSetFilePatchSchema, EffectiveCoreConfigSchema } from "./core-config.js";
+import { ConfigSetFilePatchSchema, EffectiveCoreConfigSchema, PolicyAddRuleInputSchema, PolicyRuleSchema } from "./core-config.js";
 import {
   AddTeamMemberInputSchema,
   CreateTeamInputSchema,
@@ -215,18 +215,75 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   }),
   /**
    * S7(auto-mode-and-yolo)L4 §2 新增:切換一個 session 的暫態權限模式
-   * (auto/YOLO)。**遠端一律拒絕**(見 apps/core/src/gateway/ws-gateway.ts 的
-   * `LOCAL_ONLY_METHODS`)——這是「使用者能放寬安全限制」的操作,只能由本機
-   * 操作者觸發(F3/F4)。`mode: "auto-accept-all"` 時 Core 會設定 30 分鐘後
-   * 惰性過期(見 policy-engine_detail.md §6),`mode` 不含 hard-deny 相關語意
-   * ——auto/YOLO 都不能繞過 hard-deny,只差在是否繞過 config 的 deny-list
-   * (見 auto-mode-and-yolo_detail.md §2)。
+   * (auto/YOLO)。`mode: "auto-accept-all"` 時 Core 會設定 30 分鐘後惰性過期
+   * (見 policy-engine_detail.md §6),`mode` 不含 hard-deny 相關語意——auto/
+   * YOLO 都不能繞過 hard-deny,只差在是否繞過 config 的 deny-list(見
+   * auto-mode-and-yolo_detail.md §2)。
+   *
+   * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):**本機與遠端皆可呼叫**——
+   * 已從 `apps/core/src/gateway/ws-gateway.ts` 的 `LOCAL_ONLY_METHODS` 移除。
+   * 這是使用者明確決定的翻案(原 F3/C6「遠端不可切 auto/YOLO」),不是疏漏。
+   * hard-deny 仍是地板,見下方 `session.setTrueUnrestricted` 才是真正繞過
+   * hard-deny 的開關,且需要先有這裡的 `"auto-accept-all"` 當前置條件。
    */
   z.object({
     ...baseRequest,
     method: z.literal("session.setPermissionMode"),
     params: z.object({ sessionId: z.string(), mode: SessionPermissionModeSchema }),
   }),
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):在 YOLO 之上疊加「真.無限制」
+   * ——`enabled:true` 時連 hard-deny 四類(force-push/讀秘密路徑/worktree 外
+   * 刪除/非白名單外連)都會被繞過,見 apps/core/src/permissions/
+   * policy-engine.ts 的 `decide()` 短路。**本機與遠端皆可呼叫**,這是使用者
+   * 明確要求的能力(比照 `session.setPermissionMode`)。Core 端強制檢查:
+   * `enabled:true` 時該 session 目前的 `permissionMode` 必須已經是
+   * `"auto-accept-all"`,否則拋 `SESSION_TRUE_UNRESTRICTED_REQUIRES_YOLO`——
+   * 不能讓呼叫端跳過 YOLO 直接開最高層級,`session.setPermissionMode`
+   * 才是唯一能把 mode 帶到 `"auto-accept-all"` 的入口。`enabled:false` 永遠
+   * 允許,不檢查前置條件(降級方向不該被擋)。啟用時會觸發稽核記錄與桌面推播
+   * (見 apps/core/src/enforcement/notifier.ts 的 `deliverTrueUnrestrictedEnabled()`)。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.setTrueUnrestricted"),
+    params: z.object({ sessionId: z.string(), enabled: z.boolean() }),
+  }),
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):新增一條政策允許清單規則
+   * (「權限」設定頁的「單項選擇」功能)。**本機與遠端皆可呼叫**——政策編輯
+   * 從這輪起不再是 local-only(見 `GatewayCapabilitiesSchema.canEditPolicy`
+   * 修訂)。`params` 用 `PolicyAddRuleInputSchema`(不是 `PolicyRuleSchema`
+   * 本身)——`id`/`addedBy`/`addedAt` 一律由 server 端生成/填入,不信任呼叫端
+   * 提供的值(見 core-config.ts 該 schema 的說明)。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("policy.addRule"),
+    params: PolicyAddRuleInputSchema,
+  }),
+  /**
+   * 2026-08-25 新增:刪除一條政策允許清單規則(依 `id`,見 `PolicyRuleSchema.id`
+   * 的穩定識別碼說明)。本機與遠端皆可呼叫,理由同 `policy.addRule`。刪除不存在
+   * 的 `id` 不是錯誤——回傳 `removed:false`(見下方 `PolicyRemoveRuleResultSchema`),
+   * 不拋例外(呼叫端可能剛好與另一個 client 同時操作同一份清單)。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("policy.removeRule"),
+    params: z.object({ id: z.string() }),
+  }),
+  /**
+   * 2026-08-25 新增:讀取目前完整的政策允許清單。**刻意獨立於**
+   * `config.getEffective`(那個方法回傳的 `effective` 是 `WsGateway` 建構當下
+   * 就凍結的 snapshot,沒有熱重載——見該方法註解——若權限頁的清單接
+   * `config.getEffective`,使用者透過 `policy.addRule`/`removeRule` 改過之後
+   * 清單不會更新,除非重啟 core)。這裡改讀
+   * `apps/core/src/permissions/policy-engine.ts` 的 `PolicyEngine.getRules()`,
+   * 反映的是目前真正在跑的 in-memory 規則陣列,`policy.addRule`/`removeRule`
+   * 之後立即可見。`params` 刻意是空物件。
+   */
+  z.object({ ...baseRequest, method: z.literal("policy.listRules"), params: z.object({}).default({}) }),
   /**
    * S12(session-subagent):從一個既有的 parent session 建立 child subagent
    * session。params 為 SpawnChildSessionInputSchema(含 parentSessionId/
@@ -663,6 +720,13 @@ export const ServerPushSchema = z.object({
      * 讓 AskUserQuestionWidget 從 pendingUserDialogs 移除該筆待答狀態)。
      */
     "user-dialog-resolved",
+    /**
+     * 2026-08-25 新增:`policy.addRule`/`policy.removeRule` 成功後推播給所有
+     * client(payload 見下方 `PolicyUpdatedPushSchema`)——讓其他已連線的 client
+     * (第二個視窗、或現在也能編輯政策的遠端 client)即時看到允許清單變化,
+     * 不用自己重新呼叫 `policy.listRules` 才發現。
+     */
+    "policy-updated",
   ]),
   payload: z.unknown(),
 });
@@ -704,29 +768,56 @@ export const UserDialogResolvedPushSchema = z.object({
 });
 export type UserDialogResolvedPush = z.infer<typeof UserDialogResolvedPushSchema>;
 
+/** 2026-08-25 新增:`policy-updated` channel 的 payload。 */
+export const PolicyUpdatedPushSchema = z.object({
+  action: z.enum(["add", "remove"]),
+  rule: PolicyRuleSchema,
+});
+export type PolicyUpdatedPush = z.infer<typeof PolicyUpdatedPushSchema>;
+
 export const ServerMessageSchema = z.union([ServerResponseSchema, ServerPushSchema]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 
 // ---- Typed result shapes (used by both core & desktop for narrowing) ----
 
 /**
- * S7(auto-mode-and-yolo)L4 §5.3:握手能力集,四項皆等於 `isLocal`(見
- * apps/core/src/gateway/ws-gateway.ts 的 `WsGateway.buildCapabilities()`)——
- * **由 Core 依連線本身(loopback 正規化後比對)判定,絕不採信 client 自稱**。
- * 隧道連線(Tailscale/WireGuard 等)不是 loopback,視為遠端——這是刻意的,
- * 隧道只解決傳輸安全,不代表操作者在本機(F1/F3)。
+ * S7(auto-mode-and-yolo)L4 §5.3:握手能力集——**由 Core 依連線本身(loopback
+ * 正規化後比對)判定,絕不採信 client 自稱**。隧道連線(Tailscale/WireGuard
+ * 等)不是 loopback,視為遠端——這是刻意的,隧道只解決傳輸安全,不代表操作者
+ * 在本機(F1)。
+ *
+ * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`canToggleAuto`/`canEnableYolo`/
+ * `canEditPolicy` 三項**不再等於 `isLocal`**,改成恆為 `true`(使用者明確決定
+ * 遠端與本機同等)。`canManageProfiles` 維持 `isLocal`(未變動)。這裡的欄位
+ * **仍然只是 UI 顯示用**,不是安全邊界本身——真正的把關在每次呼叫時 Gateway
+ * 的伺服器端檢查(`LOCAL_ONLY_METHODS`、`session.setTrueUnrestricted` 的
+ * mode 前置條件),即使這裡回傳的值被竄改,後端也不會因此放行。
  */
 export const GatewayCapabilitiesSchema = z.object({
-  /** 能否切換 session 的 auto 模式(`session.setPermissionMode` 設成 `"auto-accept-edits"`)。 */
+  /** 能否切換 session 的 auto 模式(`session.setPermissionMode` 設成 `"auto-accept-edits"`)。恆 `true`,見上方 2026-08-25 修訂說明。 */
   canToggleAuto: z.boolean(),
-  /** 能否啟用 YOLO(`session.setPermissionMode` 設成 `"auto-accept-all"`)。 */
+  /** 能否啟用 YOLO(`session.setPermissionMode` 設成 `"auto-accept-all"`)。恆 `true`,見上方 2026-08-25 修訂說明。 */
   canEnableYolo: z.boolean(),
-  /** 能否編輯 policy(目前 policy 完全不能透過任何 gateway 方法遠端編輯,見
-   *  core-config.ts 的 `ConfigSetFilePatchSchema` 說明——這個欄位純粹給 UI
-   *  預留未來若開放本機 policy 編輯介面時使用,現況恆與 isLocal 一致)。 */
+  /** 能否編輯 policy 允許清單(`policy.addRule`/`removeRule`)。恆 `true`,見上方 2026-08-25 修訂說明。 */
   canEditPolicy: z.boolean(),
-  /** 能否管理 agent profile(`profile.create`,之後的 `profile.update`/`delete`)。 */
+  /** 能否管理 agent profile(`profile.create`,之後的 `profile.update`/`delete`)。維持 `isLocal`,未變動。 */
   canManageProfiles: z.boolean(),
+  /**
+   * 2026-08-25 新增:能否啟用「真.無限制」層(`session.setTrueUnrestricted`)。
+   * 目前恆為 `true`——這個能力沒有連線類型層面的門檻,真正的把關是每次呼叫時
+   * 「該 session 是否已經是 `auto-accept-all`」的伺服器端檢查(見
+   * `session.setTrueUnrestricted` 的 method 註解)。這個欄位存在只是比照
+   * `canEditPolicy` 當初的先例(保留給未來真的需要按連線類型/安裝層級門檻時
+   * 用),不代表現在真的有門檻。
+   */
+  canEnableTrueUnrestricted: z.boolean(),
+  /**
+   * 2026-08-25 新增:純顯示用——這個連線是否為遠端(`!isLocal`)。**不是**
+   * gating 欄位(上面四個 `can*` 欄位才是),這個欄位單純讓 UI 知道要不要在
+   * 危險操作的警告文案裡多提醒一句「你正在遠端啟用」。同樣由 Core 依連線本身
+   * 判定,絕不採信 client 自稱。
+   */
+  isRemoteConnection: z.boolean(),
 });
 export type GatewayCapabilities = z.infer<typeof GatewayCapabilitiesSchema>;
 
@@ -767,11 +858,27 @@ export const SessionSetModelResultSchema = z.object({ session: SessionSchema });
 /** 比照上面的 `SessionSetModelResultSchema`:`session.setEffort` 的回應。 */
 export const SessionSetEffortResultSchema = z.object({ session: SessionSchema });
 /** S7:`session.setPermissionMode` 的回應——回傳套用後的模式與(若為 YOLO)
- *  到期時間戳,讓呼叫端不需要再等一次 "session-updated" 推播就能更新 UI。 */
+ *  到期時間戳,讓呼叫端不需要再等一次 "session-updated" 推播就能更新 UI。
+ *  2026-08-25 新增 `trueUnrestricted`:切換 mode 一定會連帶清掉這個欄位(見
+ *  session.ts 的 `Session.trueUnrestricted` 註解),一併回傳讓呼叫端一次拿到
+ *  三個欄位,不需要再等 "session-updated" 推播才知道它被清掉了。 */
 export const SessionSetPermissionModeResultSchema = z.object({
   mode: SessionPermissionModeSchema,
   yoloExpiresAt: z.number().optional(),
+  trueUnrestricted: z.boolean().optional(),
 });
+/** 2026-08-25 新增:`session.setTrueUnrestricted` 的回應。 */
+export const SessionSetTrueUnrestrictedResultSchema = z.object({ trueUnrestricted: z.boolean() });
+/** 2026-08-25 新增:`policy.addRule` 的回應——回傳 server 端組好的完整規則
+ *  (含生成的 `id`/`addedBy:"user"`/`addedAt`),呼叫端不需要再多一次
+ *  `policy.listRules` 往返才知道最終存進去的內容。 */
+export const PolicyAddRuleResultSchema = z.object({ rule: PolicyRuleSchema });
+/** 2026-08-25 新增:`policy.removeRule` 的回應——`removed:false` 代表這個 id
+ *  本來就不存在(不是錯誤,見該 method 的註解);`rule` 只在 `removed:true`
+ *  時有值,回傳被刪掉的完整內容供 UI 顯示/undo 提示用。 */
+export const PolicyRemoveRuleResultSchema = z.object({ removed: z.boolean(), rule: PolicyRuleSchema.optional() });
+/** 2026-08-25 新增:`policy.listRules` 的回應。 */
+export const PolicyListRulesResultSchema = z.object({ rules: z.array(PolicyRuleSchema) });
 /**
  * `adapter.capabilities` 的回應(M2 Round B):讓 UI 在建立 session 前
  * (依 `AgentProfile.software`)或拿到 session 之後(依 `Session.adapterType`)

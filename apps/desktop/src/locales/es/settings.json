@@ -4,6 +4,7 @@
   "providerCountFooter": "{{count}} en total",
   "redetect": "Redetectar",
   "sections": {
+    "permission": "Permisos",
     "global": "Configuración global",
     "notification": "Configuración de notificaciones",
     "provider": "Gestión de provider"
@@ -59,5 +60,28 @@
     "enabledValue": "Activado",
     "disabledValue": "Desactivado",
     "notSet": "(no configurado)"
+  },
+  "permission": {
+    "description": "La lista blanca de políticas actualmente en vigor (reglas allow/deny para el terreno intermedio de default-deny). Esta lista no tiene poder sobre hard-deny (force-push, lectura de rutas secretas, borrados fuera del worktree, conexiones de red a hosts no permitidos) — esas cuatro categorías siguen siendo un límite infranqueable sin importar lo que se configure aquí; para omitirlas, usa el interruptor de \"sin restricciones\" en una sesión individual desde el encabezado del chat.",
+    "remoteNotice": "Estás editando esta lista desde una conexión remota — una vez guardada, se aplica a todas las conexiones.",
+    "emptyList": "Todavía no hay reglas",
+    "toolLabel": "Herramienta",
+    "effectLabel": "Efecto",
+    "effectAllow": "Permitir",
+    "effectDeny": "Denegar",
+    "whenKindLabel": "Tipo de condición",
+    "whenKindNone": "Ninguna (coincide con la herramienta en sí)",
+    "whenKindCommandEquals": "El comando es exactamente igual a",
+    "whenKindCommandMatches": "El comando coincide con una expresión regular",
+    "whenKindPathUnder": "La ruta está bajo este prefijo",
+    "whenValueLabel": "Valor de la condición",
+    "scopeProfileLabel": "Limitar a Profile ID (opcional)",
+    "scopeRoleLabel": "Limitar a role (opcional)",
+    "scopeProfile": "profile: {{id}}",
+    "scopeRole": "role: {{role}}",
+    "addedByUser": "Añadida manualmente",
+    "addedByRemember": "Desde \"permitir siempre\"",
+    "toolRequired": "Indica un nombre de herramienta (usa * para cualquier herramienta)",
+    "addRuleButton": "Añadir regla"
   }
 }

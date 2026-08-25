@@ -12,5 +12,18 @@
   "risk1": "Omitirá todas las reglas de política definidas en config (incluidas tus reglas deny personalizadas).",
   "risk2": "Se desactivará automáticamente después de 30 minutos, volviendo al modo de confirmación normal.",
   "risk3Bold": "Los elementos hard-deny no se ven afectados",
-  "risk3Rest": " — las escrituras fuera del worktree, la lectura de rutas con secretos, force-push y acciones similares se seguirán denegando o requerirán confirmación forzada."
+  "risk3Rest": " — las escrituras fuera del worktree, la lectura de rutas con secretos, force-push y acciones similares se seguirán denegando o requerirán confirmación forzada.",
+  "unrestrictedEnabledTitle": "Modo sin restricciones activado: incluso las cuatro categorías hard-deny se omiten",
+  "unrestrictedToggleTitle": "Sin restricciones: omite force-push, lecturas de rutas secretas, borrados fuera del worktree y conexiones de red no permitidas; requiere tener YOLO activado primero",
+  "unrestrictedOnLabel": "Activar modo sin restricciones",
+  "unrestrictedOffLabel": "Desactivar modo sin restricciones",
+  "unrestrictedConfirmDialogTitle": "¿Activar modo sin restricciones?",
+  "unrestrictedRisk1": "Esto omite las cuatro categorías hard-deny que ni siquiera YOLO puede cruzar, incluyendo:",
+  "unrestrictedRiskCategory1": "force-push y otros comandos git peligrosos",
+  "unrestrictedRiskCategory2": "lectura de rutas con secretos como ~/.ssh, .env, credentials",
+  "unrestrictedRiskCategory3": "borrado de archivos fuera del worktree",
+  "unrestrictedRiskCategory4": "conexiones de red a hosts no permitidos",
+  "unrestrictedRisk2": "Comparte el temporizador de 30 minutos de YOLO — se desactiva junto con YOLO al expirar, no es un temporizador independiente.",
+  "unrestrictedRiskRemote": "Estás activando esto desde una conexión remota — una vez activado, se aplica a las solicitudes de cualquier conexión, no solo esta.",
+  "unrestrictedTypeToConfirm": "Escribe «{{phrase}}» para confirmar"
 }

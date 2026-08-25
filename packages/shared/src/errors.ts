@@ -45,6 +45,10 @@ export const ErrorCodes = {
   // Phase 2(ACP scoped MCP bridge token):scoped token 呼叫了不在白名單內的
   // 方法,或試圖操作不屬於自己綁定範圍(session/team)的資源,或 token 已過期。
   GATEWAY_SCOPED_TOKEN_FORBIDDEN: "gateway.scopedTokenForbidden", // params: {method, reason}
+  // 2026-08-25(真.無限制層):`session.setTrueUnrestricted({enabled:true})`
+  // 但該 session 目前的 permissionMode 不是 "auto-accept-all"——不能讓 client
+  // 跳過 YOLO 直接開最高層級,見 docs/DECISIONS.md §G。
+  SESSION_TRUE_UNRESTRICTED_REQUIRES_YOLO: "session.trueUnrestrictedRequiresYolo", // params: {sessionId}
   BUDGET_DAILY_LIMIT: "budget.dailyLimitReached",
   BUDGET_TASK_LIMIT: "budget.taskLimitReached", // params: {taskTitle}
   RECOVERY_DISCARD_CONFIRM_REQUIRED: "recovery.discardConfirmRequired",

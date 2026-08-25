@@ -79,6 +79,12 @@ policy: z.object({
 
 **遠端不可改**:`policy` **不得**加入 `ConfigSetFilePatchSchema` 的安全子集(既有機制,core-config.ts L236–272)——與 `daemon.port`/`bindHost` 同等對待(F3/F4)。
 
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):上一句僅對
+> `config.setFile` 這條路徑仍成立(`policy` 確實還是沒被排進它的安全子集)。
+> 但政策現在有了**專屬**的遠端可呼叫 method——`policy.addRule`/
+> `policy.removeRule`/`policy.listRules`——不再是「遠端完全不可改 policy」。
+> F3/F4 對「遠端能否改 policy」的原始結論已翻案,細節見 DECISIONS.md §G。
+
 **agent 不可寫**(C3):policy 在家目錄、worktree 外;且 §3 的 hard-deny 會擋掉對 `~/.deskmony/` 的寫入。
 
 ---
@@ -102,6 +108,13 @@ decide(req: PermissionRequest, ctx: ExecContext): PolicyDecision
 | 4 | `ctx.autoMode`(S7) | `allow`(中間地帶自動放行) |
 | 5 | 皆否 | **`escalate`**(default-deny) |
 
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):上表仍成立,但
+> 現在有一個**第 0 步**,先於這五步全部執行——`ctx.trueUnrestricted` 為真時
+> 直接 `allow`,連 hard-deny(第 1 步)也跳過。這是唯一的例外路徑,不透過
+> config、不透過 `autoMode` 觸發;只有 session 已處於 YOLO 且額外顯式開啟才
+> 會為真。實作見 `apps/core/src/permissions/policy-engine.ts` 的 `decide()`
+> 開頭的短路。
+
 **比對規則(釘死,回答 HLD 開放問題 #1)**:
 - `tool`:精確字串比對(或 `"*"`)。
 - `commandEquals`:**完整字串相等**,trim 後比對。這是「永遠允許」的預設產物(最窄)。
@@ -114,6 +127,11 @@ decide(req: PermissionRequest, ctx: ExecContext): PolicyDecision
 ---
 
 ## 3. Hard-deny 清單(內建,config 不可關 — F4)
+
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):「config 不可
+> 關」仍成立——這份清單本身沒有變寬、沒有減類,`hard-deny.ts` 未動。但新增了
+> 一條**不經 config** 的 session 級例外:`ExecContext.trueUnrestricted` 為真
+> 時,`decide()` 會在檢查這份清單之前就直接 `allow`(見 §2 上方的修訂註記)。
 
 寫死在 `apps/core/src/permissions/hard-deny.ts`:
 

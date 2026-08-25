@@ -12,5 +12,18 @@
   "risk1": "將繞過 config 裡設定的所有政策規則(包含你自訂的 deny 規則)。",
   "risk2": "30 分鐘後自動關閉,回到一般確認模式。",
   "risk3Bold": "硬性禁止項(hard-deny)不受影響",
-  "risk3Rest": "——worktree 外寫入、讀取密鑰路徑、force-push 等操作仍會被拒絕或需要強制確認。"
+  "risk3Rest": "——worktree 外寫入、讀取密鑰路徑、force-push 等操作仍會被拒絕或需要強制確認。",
+  "unrestrictedEnabledTitle": "真.無限制已啟用:連 hard-deny 四類都會被繞過",
+  "unrestrictedToggleTitle": "真.無限制:連 force-push、讀密鑰、worktree 外刪除、非白名單外連都會被繞過,需先開啟 YOLO",
+  "unrestrictedOnLabel": "啟用真.無限制",
+  "unrestrictedOffLabel": "關閉真.無限制",
+  "unrestrictedConfirmDialogTitle": "啟用真.無限制?",
+  "unrestrictedRisk1": "這會繞過連 YOLO 都攔得住的四類硬性禁止操作,包括:",
+  "unrestrictedRiskCategory1": "force-push 等危險 git 指令",
+  "unrestrictedRiskCategory2": "讀取 ~/.ssh、.env、credentials 等秘密路徑",
+  "unrestrictedRiskCategory3": "worktree 外的檔案刪除",
+  "unrestrictedRiskCategory4": "對非白名單主機的網路連線",
+  "unrestrictedRisk2": "與 YOLO 共用同一個 30 分鐘計時器,YOLO 到期時一併關閉,不是獨立的計時器。",
+  "unrestrictedRiskRemote": "你正在透過遠端連線啟用這個功能——開啟後,之後任何連線(不只是你這個)送出的請求都會適用。",
+  "unrestrictedTypeToConfirm": "輸入「{{phrase}}」以確認"
 }

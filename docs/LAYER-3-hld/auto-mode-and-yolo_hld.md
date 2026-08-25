@@ -50,6 +50,13 @@ session auto 狀態(暫態,按鈕可切;不寫 config)  ──┐
 | **auto**(`auto-accept-edits`) | **只把「未分類中間地帶」轉 allow**;**hard-deny 類仍走 S1 步驟 1** | profile 預設 / session 暫態 |
 | **YOLO**(`auto-accept-all`) | 繞過一切(僅本機、強確認、遠端禁用) | **僅 session 暫態,不可持久化**(§2.1),且**會過期**(§2.2) |
 
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):YOLO 列的
+> 「遠端禁用」已翻案——`session.setPermissionMode` 現在本機與遠端同權,
+> 「強確認」本身不變(啟用仍需獨立確認對話框,§3)。另新增一層更深、可繞過
+> hard-deny 的「真.無限制」(`trueUnrestricted`)開關,同樣本機與遠端皆可
+> 啟用,但要求 session 已先處於 YOLO,且啟用時需強警告確認 + 稽核,見 §5
+> 修訂註記。
+
 - `attended` = `permissionLevel === "always-ask"` 且非 auto/YOLO。
 - `local` = **由 Core 依連線本身判定**(見 §5),絕不採信 client 自稱。
 - **auto/YOLO 皆 session 暫態**:session 結束即消失,**不寫 config.json**;唯一會寫持久政策的是「永遠允許」(§4)。
@@ -131,6 +138,14 @@ session auto 狀態(暫態,按鈕可切;不寫 config)  ──┐
 | 改 allowlist / 政策、建改 agent profile | ✅ | ❌ |
 | 改預算上限、改綁介面 | ✅ | ❌ |
 
+> ⚠️ **2026-08-25 修訂**(見 [DECISIONS.md §G](../DECISIONS.md)):上表**切換
+> session auto mode**、**啟用 YOLO**、**改 allowlist / 政策**三列的「遠端」欄
+> 已翻案為 ✅(本機遠端同權)。**建改 agent profile**(原與「改 allowlist/
+> 政策」同列,現已拆開,行為不同)維持 ❌。**hard-deny 覆寫(escalate-strong)**
+> 不變,遠端依然拿不到這個確認提示——但新增一項表上沒有的能力:**啟用
+> 「真.無限制」(`trueUnrestricted`)**,本機與遠端皆 ✅,前提是 session 已
+> 處於 YOLO,啟用需強警告確認 + 稽核。**改預算上限、改綁介面**不變,仍為 ❌。
+
 **執行點(S7 grill 定案:握手能力集 + Gateway 硬拒)**:
 
 1. **Gateway 每次 method 檢查**是唯一的安全保證——遠端送來被禁 method 一律拒絕 + 記稽核。UI 隱藏只是體驗,**不構成保證**(token 外洩者會直接打 WS API,完全不經過你的 UI)。
@@ -138,6 +153,11 @@ session auto 狀態(暫態,按鈕可切;不寫 config)  ──┐
 3. **`local` 判定寫死規則**:**只能由 Core 依連線本身判定**(loopback / 隧道來源),**絕不採信 client 自稱**——否則整個矩陣可被一個欄位偽造繞過。
 
 **原則**:遠端能在安全罩內幹活,但不能改動安全罩本身(F4)。
+
+> ⚠️ **2026-08-25 起的例外**(見 [DECISIONS.md §G](../DECISIONS.md)):這條原則
+> 對**權限**斷路器不再完全成立——auto/YOLO 切換與 allowlist 編輯現在遠端也
+> 能做,等於讓遠端碰到了「安全罩本身」的一部分設定。**訊息、成本兩條斷路器
+> 不受影響**,原則對它們仍完全成立。
 
 ---
 
@@ -148,7 +168,7 @@ session auto 狀態(暫態,按鈕可切;不寫 config)  ──┐
 | session 崩潰/重啟 | auto/YOLO 暫態**消失**,回落 profile 預設(fail-safe:不會「復活成 auto/YOLO」;§2.1 已確保 profile 不可能是 YOLO)。 |
 | 同一 session 同時有本機與遠端 client | 以**該決策回應來源**判定 `local`;被禁操作即使 UI 顯示也在 Gateway 被拒。 |
 | 遠端送出被禁 method | Gateway 拒絕 + 記稽核(可能是 token 外洩訊號)。 |
-| auto 開著但撞到 hard-deny | 走 S1 步驟 1 → **deny**(auto 下 hard-deny 是硬地板,不降級為 escalate-strong)。 |
+| auto 開著但撞到 hard-deny | 走 S1 步驟 1 → **deny**(auto 下 hard-deny 是硬地板,不降級為 escalate-strong)。⚠️ **2026-08-25 起的例外**:若該 session **額外**顯式開啟 `trueUnrestricted`(前提是已處於 YOLO),則改走新增的第 0 步 → `allow`,見 [DECISIONS.md §G](../DECISIONS.md)。 |
 | YOLO 到期 | 回落 `always-ask` + 通知(§2.2)。 |
 | 遷移:既有 profile 存有 `auto-accept-all` | **降級為 `auto-accept-edits`** 並告知使用者(§2.1)。 |
 

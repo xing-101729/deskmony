@@ -21,13 +21,22 @@
  * 中**」推導,不再是 `autoMode` 的補數——Part 2 的 2f/2g 就是這個 2×2 的兩個
  * 「未開 auto」象限,靠真的把 WS 連線關掉/接著來製造,不偽造任何欄位。
  *
+ * 2026-08-25 新增(見 docs/DECISIONS.md §G):Part 1 的 1j/1k 驗證
+ * `ctx.trueUnrestricted` 在 `decide()` 最開頭的短路(唯一能跳過 hard-deny 的
+ * 路徑),1l/1m 驗證 `PolicyEngine.removeRule()`/`getRules()` 這兩個新方法的
+ * in-memory 規則管理語意;Part 2 的 2i 驗證啟動時 `backfillPolicyRuleIds()`
+ * 幫舊規則(config.json 裡沒有 `id` 的)補 id 並整批寫回檔案這條路徑。
+ * `session.setTrueUnrestricted`/`policy.addRule`/`removeRule`/`listRules` 這幾個
+ * gateway RPC 本身(含遠端可達性、前置條件、YOLO 過期連帶清除)的即時 e2e 驗證
+ * 在 scripts/e2e-auto-mode-yolo.mjs(該檔案的 E-6/E-7/J/D2),不在這裡重複。
+ *
  * 前置需求:`pnpm build` 已跑過(apps/core/dist、packages/db/dist 存在)。
  *
  * 用法:node scripts/e2e-policy-engine.mjs
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
@@ -243,6 +252,103 @@ async function unitTests() {
         attendedWithAuto.effect === "allow",
       `unattended+noAuto=${unattendedNoAuto.effect}(必須是 escalate,這是被救回來的象限), ` +
         `attended+noAuto=${attendedNoAuto.effect}, unattended+auto=${unattendedWithAuto.effect}, attended+auto=${attendedWithAuto.effect}`,
+    );
+  }
+
+  // ---- 1j【2026-08-25 新增,docs/DECISIONS.md §G】:`ctx.trueUnrestricted`
+  //         繞過 hard-deny——即使是整個矩陣裡「最嚴」的組合(遠端/`local:false`
+  //         + `attended:true` + `autoMode:false`。這個組合原本連 attended 都
+  //         救不了:decide() 第 1 步一看到 `!ctx.local` 就直接 deny,見 1f 的
+  //         remote-or-auto 案例,連降級成 escalate-strong 的機會都沒有),一樣
+  //         被繞過變成 allow——證明第 0 步短路確實排在 checkHardDeny() 呼叫
+  //         之前,而不是塞進 hard-deny 分支裡的某個條件判斷。 ----
+  {
+    const engine = new PolicyEngine({ rules: [], allowedHosts: [] });
+    const escapeReq = baseReq({ toolName: "Write", input: { file_path: path.join(outsideDir, "true-unrestricted-hard-deny.txt") } });
+
+    const withoutBypass = engine.decide(escapeReq, { attended: true, local: false, autoMode: false });
+    const withBypass = engine.decide(escapeReq, { attended: true, local: false, autoMode: false, trueUnrestricted: true });
+
+    record(
+      "1j trueUnrestricted=true 繞過 hard-deny——矩陣裡最嚴的組合(遠端+非autoMode,原本連 attended 都救不了、直接 deny)一樣變成 allow",
+      withoutBypass.effect === "deny" && withBypass.effect === "allow",
+      `withoutBypass(無 trueUnrestricted)=${withoutBypass.effect}, withBypass(trueUnrestricted:true)=${withBypass.effect}`,
+    );
+  }
+
+  // ---- 1k:`trueUnrestricted` 不是 hard-deny 專屬的特殊處理——完全沒命中
+  //         hard-deny/config 規則、原本會落到第 5 步 escalate(default-deny)
+  //         的未分類長尾,一樣直接變成 allow,證明短路在 decide() 最開頭就已經
+  //         return,不分請求種類。 ----
+  {
+    const engine = new PolicyEngine({ rules: [], allowedHosts: [] });
+    const req = baseReq({ toolName: "SomeUnknownTool", input: {} });
+
+    const withoutBypass = engine.decide(req, { attended: true, local: true, autoMode: false });
+    const withBypass = engine.decide(req, { attended: true, local: true, autoMode: false, trueUnrestricted: true });
+
+    record(
+      "1k trueUnrestricted=true 不只繞過 hard-deny——原本會落到 escalate(default-deny)的未分類長尾也一樣直接 allow,證明短路在函式最開頭、不分請求種類",
+      withoutBypass.effect === "escalate" && withBypass.effect === "allow",
+      `withoutBypass(無 trueUnrestricted)=${withoutBypass.effect}, withBypass(trueUnrestricted:true)=${withBypass.effect}`,
+    );
+  }
+
+  // ---- 1l【2026-08-25 新增】:`PolicyEngine.removeRule()`——依 id 移除中間一條
+  //         規則,其餘規則保留且相對順序不變;移除不存在的 id 回傳
+  //         `undefined`,不拋例外(見該方法註解:呼叫端可能與另一個 client 並行
+  //         操作同一份清單)。 ----
+  {
+    const rules = [
+      { id: "rule-a", tool: "Bash", effect: "allow" },
+      { id: "rule-b", tool: "Write", effect: "deny" },
+      { id: "rule-c", tool: "Read", effect: "allow" },
+    ];
+    const engine = new PolicyEngine({ rules, allowedHosts: [] });
+
+    const removed = engine.removeRule("rule-b");
+    const afterRemove = engine.getRules();
+    const orderPreserved = afterRemove.length === 2 && afterRemove[0].id === "rule-a" && afterRemove[1].id === "rule-c";
+
+    let removeNonexistentThrew = false;
+    let removedNonexistent;
+    try {
+      removedNonexistent = engine.removeRule("does-not-exist");
+    } catch {
+      removeNonexistentThrew = true;
+    }
+
+    record(
+      "1l PolicyEngine.removeRule():依 id 移除中間一條規則,其餘兩條保留且相對順序不變;移除不存在的 id 回傳 undefined、不拋例外",
+      removed?.id === "rule-b" &&
+        removed?.tool === "Write" &&
+        orderPreserved &&
+        !removeNonexistentThrew &&
+        removedNonexistent === undefined,
+      `removed=${JSON.stringify(removed)}, afterRemove=${JSON.stringify(afterRemove)}, removeNonexistentThrew=${removeNonexistentThrew}, removedNonexistent=${removedNonexistent}`,
+    );
+  }
+
+  // ---- 1m【2026-08-25 新增】:`PolicyEngine.getRules()` 回傳目前規則陣列的
+  //         淺拷貝,不外洩內部可變陣列的參照——mutate 回傳值(push/清空)不得
+  //         影響引擎的內部狀態,下次呼叫 getRules() 仍要回報原本的規則。 ----
+  {
+    const rules = [
+      { id: "rule-x", tool: "Bash", effect: "allow" },
+      { id: "rule-y", tool: "Write", effect: "deny" },
+    ];
+    const engine = new PolicyEngine({ rules, allowedHosts: [] });
+
+    const firstCopy = engine.getRules();
+    firstCopy.push({ id: "injected", tool: "*", effect: "deny" });
+    firstCopy.length = 0; // 更進一步:連清空回傳值都不該影響內部狀態(不是同一個陣列參照)
+
+    const secondCopy = engine.getRules();
+
+    record(
+      "1m PolicyEngine.getRules() 回傳淺拷貝——外部 mutate(push/清空)回傳的陣列不影響引擎內部狀態,下次呼叫仍回報原本兩條規則",
+      secondCopy.length === 2 && secondCopy[0].id === "rule-x" && secondCopy[1].id === "rule-y",
+      `firstCopy(mutate 後)=${JSON.stringify(firstCopy)}, secondCopy=${JSON.stringify(secondCopy)}`,
     );
   }
 
@@ -719,6 +825,40 @@ async function liveE2e() {
         "2g 有 client 連線(attended)+ 未開 auto:未分類請求走 escalate(waiting),逾時未回應 → 自動 deny(source=\"timeout\"),既有行為不變",
         wentWaiting && timedOutDeny && fileNotWritten,
         `wentWaiting=${wentWaiting}, timedOutDeny=${timedOutDeny}, fileNotWritten=${fileNotWritten}`,
+      );
+    }
+
+    // ---- 2i【2026-08-25 新增,docs/DECISIONS.md §G】:啟動時的 id backfill
+    //          ——這個檔案最上面寫入的 configJson 兩條規則(deny/allow)刻意都
+    //          沒有帶 `id`(比照這個欄位新增前就已存在的舊資料)。core 啟動時
+    //          `apps/core/src/index.ts` 呼叫 `backfillPolicyRuleIds()` 補上
+    //          `randomUUID()` 並整批寫回 config.json(見
+    //          apps/core/src/config/config-file-writer.ts)。這裡用已經連上的
+    //          live client 驗證兩件事:`policy.listRules` 回傳的規則都已經有
+    //          id(in-memory PolicyEngine 那份),以及 config.json 檔案本身也
+    //          真的被重寫(不只是 in-memory 補上而已)。刻意放在 try 區塊尾端
+    //          (2g 之後)而不是連線後立刻驗證,純粹是行文方便——這個檔案的
+    //          Part 2 沒有任何測試會呼叫 addRule/rememberRule 改動規則陣列,
+    //          放哪裡驗證結果都一樣。 ----
+    {
+      const listResult = await client.rpc("policy.listRules", {});
+      const rules = listResult.rules ?? [];
+      const deniedRule = rules.find((r) => r.when?.pathUnder === deniedSubDir && r.effect === "deny");
+      const allowedRule = rules.find((r) => r.when?.pathUnder === allowedSubDir && r.effect === "allow");
+      const bothHaveIdsInMemory =
+        typeof deniedRule?.id === "string" &&
+        deniedRule.id.length > 0 &&
+        typeof allowedRule?.id === "string" &&
+        allowedRule.id.length > 0;
+
+      const configOnDisk = JSON.parse(readFileSync(path.join(homeDir, "config.json"), "utf8"));
+      const rulesOnDisk = configOnDisk.policy?.rules ?? [];
+      const diskBackfilled = rulesOnDisk.length === 2 && rulesOnDisk.every((r) => typeof r.id === "string" && r.id.length > 0);
+
+      record(
+        "2i 啟動時 id backfill:寫入時沒帶 id 的舊規則,core 啟動後 policy.listRules 回傳的規則都已補上 id,config.json 檔案本身也被重寫(不只是 in-memory 補上)",
+        bothHaveIdsInMemory && diskBackfilled,
+        `deniedRule.id=${deniedRule?.id}, allowedRule.id=${allowedRule?.id}, rulesOnDisk=${JSON.stringify(rulesOnDisk)}`,
       );
     }
 

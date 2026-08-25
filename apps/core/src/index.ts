@@ -22,6 +22,7 @@ import { TaskService } from "./tasks/task-service.js";
 import { createStaticRequestHandler } from "./http/static-server.js";
 import { SettingsStore, migrateLegacyEnabledModelIds } from "./settings/settings-store.js";
 import { applyConsoleLogLevel, loadConfig } from "./config/load-config.js";
+import { backfillPolicyRuleIds } from "./config/config-file-writer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -171,10 +172,20 @@ async function main(): Promise<void> {
   const permissionGateway = new PermissionGateway(config.daemon.permissionTimeoutMs);
   // S1(PolicyEngine + Enforcement 底座):policy.rules/allowedHosts 只吃啟動時
   // 合併好的設定(見 packages/shared/src/core-config.ts 的 `ConfigSetFilePatchSchema`
-  // 不含 `policy` 的說明——F4,遠端不可改,也因此不需要熱重載機制,比照其餘
-  // 沒有 `config.setFile` 覆寫路徑的欄位)。AuditLog 落地到 `enforcement_audit`
+  // 不含 `policy` 的說明——`config.setFile` 這條「一般設定 patch」通道遠端仍不可
+  // 改政策,也因此這裡的「啟動時讀一次」不需要熱重載機制;但 in-memory 的
+  // `PolicyEngine.rules` 本身**不是**靜態的——`addRule()`/`removeRule()` 讓它
+  // 在 session 內即時變化,2026-08-25 起 `policy.addRule`/`removeRule` 這兩個
+  // gateway 方法(見 docs/DECISIONS.md §G)讓本機與遠端都能觸發這個既有的
+  // 即時生效機制,只是新增了「除了 rememberRule 這個既有入口,現在多一個
+  // 獨立的管理入口」,不是新發明熱重載)。AuditLog 落地到 `enforcement_audit`
   // 表,Notifier 這輪是 stub(S11 才接真通道)。
-  const policyEngine = new PolicyEngine({ rules: config.policy.rules, allowedHosts: config.policy.allowedHosts });
+  //
+  // 2026-08-25 新增:`backfillPolicyRuleIds()` 補上舊規則缺少的 `id`(見該函式
+  // 註解)——**必須**用它的回傳值(而不是原始 `config.policy.rules`)建構
+  // `PolicyEngine`,否則記憶體裡的規則會跟剛寫回 config.json 的版本不一致。
+  const backfilledPolicyRules = backfillPolicyRuleIds(configPath, config.policy.rules);
+  const policyEngine = new PolicyEngine({ rules: backfilledPolicyRules, allowedHosts: config.policy.allowedHosts });
   const auditLog = new SqliteAuditLog(db);
   // S11(Notification):`DESKMONY_NOTIFICATION_BATCH_INTERVAL_MS` 比照
   // `DESKMONY_YOLO_DURATION_MS` 的既有慣例——純粹讓 e2e 能在合理時間內驗證

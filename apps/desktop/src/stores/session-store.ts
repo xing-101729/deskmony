@@ -17,7 +17,9 @@ import {
   type MessageRecord,
   type PermissionRequestEvent,
   type PermissionResolvedPush,
+  type PolicyAddRuleInput,
   type PolicyRule,
+  type PolicyUpdatedPush,
   type PromptAttachment,
   type ProviderModel,
   type ProviderPrefs,
@@ -41,6 +43,9 @@ import {
   formatEnforcementNotificationText,
   GatewayCapabilitiesResultSchema,
   mergeModelsById,
+  PolicyAddRuleResultSchema,
+  PolicyListRulesResultSchema,
+  PolicyRemoveRuleResultSchema,
   ProfileCreateResultSchema,
   ProfileListResultSchema,
   resolveCapabilitySupport,
@@ -52,6 +57,7 @@ import {
   SessionSetEffortResultSchema,
   SessionSetModelResultSchema,
   SessionSetPermissionModeResultSchema,
+  SessionSetTrueUnrestrictedResultSchema,
   SettingsGetEnabledModelsResultSchema,
   SettingsGetProviderPrefsResultSchema,
   SettingsSetEnabledModelsResultSchema,
@@ -227,8 +233,25 @@ interface SessionStoreState {
    * `gateway.capabilities`(獨立於 `auth`,見 lib/gateway-client.ts 的
    * `configure()`/`connect()`:未設定 `authToken` 時完全跳過 `auth` 請求,故
    * 不能只靠 `auth` 回應拿 capabilities)。初始值全 `false`(最保守:尚未確認
-   * 是本機連線前,不顯示任何 auto/YOLO/policy/profile 管理控制項)。 */
+   * 連線狀態前,不顯示任何控制項)。
+   *
+   * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`canToggleAuto`/
+   * `canEnableYolo`/`canEditPolicy`/`canEnableTrueUnrestricted` 現在**恆為
+   * `true`**(本機遠端同權,使用者明確翻案)——這幾個欄位不再用來決定要不要
+   * 隱藏對應的控制項,只有 `canManageProfiles` 仍然是真正的顯示門檻。
+   * `isRemoteConnection` 純顯示用,給危險操作的警告文案多加一句「這是遠端
+   * 連線」提醒,不是任何門檻。
+   */
   gatewayCapabilities: GatewayCapabilities;
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):目前完整的政策允許清單快取
+   * (`policy.listRules`)。**刻意不接 `effectiveConfig.policy.rules`**——那個
+   * 快照在 `WsGateway` 建構當下就凍結,沒有熱重載,`addPolicyRule()`/
+   * `removePolicyRule()` 之後不會反映在裡面(見 gateway.ts 對應 RPC 的完整
+   * 說明)。`connect()` 載入一次,之後靠 `"policy-updated"` 推播 + 本地樂觀
+   * 更新維持同步(比照 `sessions` 陣列的既有模式)。
+   */
+  policyRules: PolicyRule[];
 
   connect: () => void;
   refreshProfiles: () => Promise<void>;
@@ -307,12 +330,37 @@ interface SessionStoreState {
    */
   resolveUserDialog: (sessionId: string, requestId: string, result: DialogAnswer) => void;
   /**
-   * S7:切換目前 session 的暫態權限模式(auto/YOLO)。**遠端連線呼叫這個方法
-   * 會被 Gateway 擋下**(見 `gatewayCapabilities.canToggleAuto`/`canEnableYolo`
-   * ——UI 應先依此隱藏切換按鈕,但即使按鈕沒隱藏,Core 端仍會拒絕,見
-   * ws-gateway.ts 的 `LOCAL_ONLY_METHODS`)。
+   * S7:切換目前 session 的暫態權限模式(auto/YOLO)。
+   *
+   * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):**本機與遠端皆可呼叫**——
+   * 已從 gateway 的 `LOCAL_ONLY_METHODS` 移除(原本這裡寫「遠端會被擋下」已
+   * 過時)。
    */
   setSessionPermissionMode: (sessionId: string, mode: SessionPermissionMode) => Promise<void>;
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G):在 YOLO 之上疊加/解除「真.無
+   * 限制」層(`session.setTrueUnrestricted`)——開啟時連 hard-deny 四類都會被
+   * 繞過。**本機與遠端皆可呼叫**。Core 端強制要求該 session 目前的
+   * `permissionMode` 必須已經是 `"auto-accept-all"`,否則這個 Promise 會
+   * reject(`SESSION_TRUE_UNRESTRICTED_REQUIRES_YOLO`)——呼叫端
+   * (`AutoModeControl.tsx`)只在 YOLO 已開啟時才顯示這顆按鈕,但即使按鈕
+   * 邏輯有 bug,Core 端仍是真正的把關。
+   */
+  setSessionTrueUnrestricted: (sessionId: string, enabled: boolean) => Promise<void>;
+  /** 2026-08-25 新增:載入(並快取)目前完整的政策允許清單,見上方
+   *  `policyRules` 欄位註解。`connect()` 呼叫一次;`"policy-updated"` 推播與
+   *  `addPolicyRule()`/`removePolicyRule()` 的樂觀更新之後維持同步。 */
+  loadPolicyRules: () => Promise<void>;
+  /**
+   * 2026-08-25 新增:新增一條政策允許清單規則(「權限」設定頁的「單項選擇」
+   * 功能,`policy.addRule`)。**本機與遠端皆可呼叫**。`id`/`addedBy`/`addedAt`
+   * 由 Core 端生成/填入,不需要(也不能)由呼叫端提供,見
+   * `PolicyAddRuleInput` 型別。回傳 server 端組好的完整規則。
+   */
+  addPolicyRule: (input: PolicyAddRuleInput) => Promise<PolicyRule>;
+  /** 2026-08-25 新增:依 id 刪除一條政策允許清單規則(`policy.removeRule`)。
+   *  本機與遠端皆可呼叫。 */
+  removePolicyRule: (id: string) => Promise<void>;
   /** 查詢(並快取)某個 software 的 adapter 能力。 */
   fetchCapabilities: (software: AgentSoftware) => Promise<AdapterCapabilities | undefined>;
   /**
@@ -691,7 +739,15 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
   effectiveConfig: null,
   costSummaryBySession: {},
   slashCommandsBySession: {},
-  gatewayCapabilities: { canToggleAuto: false, canEnableYolo: false, canEditPolicy: false, canManageProfiles: false },
+  gatewayCapabilities: {
+    canToggleAuto: false,
+    canEnableYolo: false,
+    canEditPolicy: false,
+    canManageProfiles: false,
+    canEnableTrueUnrestricted: false,
+    isRemoteConnection: false,
+  },
+  policyRules: [],
 
   connect: () => {
     client.onStatus((status) => set({ status }));
@@ -713,6 +769,16 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         handleUserDialogResolved(set, push.payload as UserDialogResolvedPush);
       } else if (push.channel === "enforcement-notification") {
         handleEnforcementNotification(push.payload as EnforcementNotificationPush);
+      } else if (push.channel === "policy-updated") {
+        const { action, rule } = push.payload as PolicyUpdatedPush;
+        set((state) => ({
+          policyRules:
+            action === "add"
+              ? state.policyRules.some((r) => r.id === rule.id)
+                ? state.policyRules
+                : [...state.policyRules, rule]
+              : state.policyRules.filter((r) => r.id !== rule.id),
+        }));
       }
     });
     client.connect();
@@ -723,6 +789,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void get().loadProviderPrefs();
     void get().loadEffectiveConfig();
     void get().loadGatewayCapabilities();
+    void get().loadPolicyRules();
   },
 
   refreshProfiles: async () => {
@@ -897,14 +964,52 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
 
   setSessionPermissionMode: async (sessionId, mode) => {
     const raw = await client.call("session.setPermissionMode", { sessionId, mode });
-    const { mode: appliedMode, yoloExpiresAt } = SessionSetPermissionModeResultSchema.parse(raw);
+    const { mode: appliedMode, yoloExpiresAt, trueUnrestricted } = SessionSetPermissionModeResultSchema.parse(raw);
     // 樂觀地立即更新本地 sessions 陣列(不等下一次 "session-updated" 推播)
-    // ——即使晚一點推播抵達,內容會是一樣的值,不會互相打架。
+    // ——即使晚一點推播抵達,內容會是一樣的值,不會互相打架。`trueUnrestricted`
+    // 一併更新(通常是離開 "auto-accept-all" 時被清掉,見 core 端
+    // SessionPermissionState 的註解)。
     set((state) => ({
       sessions: state.sessions.map((s) =>
-        s.id === sessionId ? { ...s, permissionMode: appliedMode, yoloExpiresAt } : s,
+        s.id === sessionId ? { ...s, permissionMode: appliedMode, yoloExpiresAt, trueUnrestricted } : s,
       ),
     }));
+  },
+
+  setSessionTrueUnrestricted: async (sessionId, enabled) => {
+    const raw = await client.call("session.setTrueUnrestricted", { sessionId, enabled });
+    const { trueUnrestricted } = SessionSetTrueUnrestrictedResultSchema.parse(raw);
+    set((state) => ({
+      sessions: state.sessions.map((s) => (s.id === sessionId ? { ...s, trueUnrestricted } : s)),
+    }));
+  },
+
+  loadPolicyRules: async () => {
+    try {
+      const raw = await client.call("policy.listRules", {});
+      const { rules } = PolicyListRulesResultSchema.parse(raw);
+      set({ policyRules: rules });
+    } catch {
+      // 尚未連線/RPC 失敗:保留舊值(初始為空陣列)。
+    }
+  },
+
+  addPolicyRule: async (input) => {
+    const raw = await client.call("policy.addRule", input);
+    const { rule } = PolicyAddRuleResultSchema.parse(raw);
+    // 樂觀更新——「policy-updated」推播稍後抵達時是同一筆規則,`push.channel
+    // === "policy-updated"` 分支已用 `some(r => r.id === rule.id)` 去重,不會
+    // 重複附加。
+    set((state) => (state.policyRules.some((r) => r.id === rule.id) ? state : { policyRules: [...state.policyRules, rule] }));
+    return rule;
+  },
+
+  removePolicyRule: async (id) => {
+    const raw = await client.call("policy.removeRule", { id });
+    const { removed } = PolicyRemoveRuleResultSchema.parse(raw);
+    // `removed:false` = 這個 id 本來就不存在(可能已被另一個 client 刪過)——
+    // 不是錯誤,本地清單原本就不該有它,filter 是冪等的收尾。
+    if (removed) set((state) => ({ policyRules: state.policyRules.filter((r) => r.id !== id) }));
   },
 
   deleteSession: async (sessionId) => {

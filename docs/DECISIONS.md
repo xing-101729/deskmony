@@ -7,6 +7,16 @@
 > [`ARCHITECTURE-legacy-2026-07.md`](./ARCHITECTURE-legacy-2026-07.md)(當時的
 > 早期概念草圖,現已封存)。**[`ARCHITECTURE.md`](./ARCHITECTURE.md) 已依實際
 > 原始碼重寫**,那些更正都已納入,不再需要靠這一節去修補。
+>
+> ⚠️ **2026-08-25 更新**:使用者在被完整攤開「F3/C6 的遠端限制、hard-deny
+> 可繞過性各自防的是什麼」後(兩輪追問確認),明確決定翻案部分規則:遠端連線
+> 現在可切 session 的 auto/YOLO 模式、可編輯政策 allowlist(原 F3/C6 的
+> 「遠端禁止」已取消);另新增一層比 YOLO 更深、**可繞過 C5 四類 hard-deny**
+> 的「真.無限制」(`trueUnrestricted`)開關,本機與遠端皆可用,啟用需強警告
+> 確認 + 稽核。落地於 `apps/core/src/gateway/ws-gateway.ts` 的
+> `LOCAL_ONLY_METHODS`(已移除 `session.setPermissionMode`)與
+> `apps/core/src/permissions/policy-engine.ts` 的 `decide()`(新增
+> `ctx.trueUnrestricted` 短路)。完整範圍與「沒改什麼」見文末 **§G**。
 
 ---
 
@@ -22,6 +32,10 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 | **成本** | token 一夜燒爆 | usage 量測 + 任務預算 + 每日 kill-switch(§E) |
 
 三條線各自獨立,任一條都能單獨叫停失控。**這三者的設定,遠端一律不可停用(§F)。**
+
+> ⚠️ **2026-08-25 起的例外**:上一句對**權限**斷路器不再完全成立——auto/YOLO
+> 切換與 allowlist 編輯現在遠端也能做;**訊息、成本兩條斷路器不受影響**,
+> 遠端依然無法停用。完整原因與範圍見 **§G**。
 
 ---
 
@@ -53,7 +67,7 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 | C3 | **政策存 `~/.deskmony/config.json`,agent 永不可寫** | 家目錄在 agent worktree 外;靠「worktree 外一律 deny」+ config 在家目錄雙重保護。 |
 | C4 | **allowlist 靠 UI 學習 + 手改並存** | 三條硬紀律:①「永遠允許」預設**記窄的**(this tool + arg pattern,非整類) ②UI 寫的全落**同一份可讀 config**,可手動稽核/砍 ③**硬性 deny 類永不給「永遠允許」**。 |
 | C5 | **硬性 deny 類(永遠升級、不學習)** | force-push、讀秘密路徑(`~/.ssh`、`.env`、憑證庫)、worktree 外刪除、對非白名單主機的網路外連。 |
-| C6 | **每 session auto 按鈕 = 語意 (ii)** | 只把「未分類中間地帶」變自動放行;**硬性 deny 類即使 auto mode 也一律升級**。真 YOLO(繞過一切)拆成**獨立、更難按、要更強確認、遠端禁用**的開關。auto 是 **session 暫態,不寫 config**;會寫持久政策的只有 C4 的「永遠允許」。 |
+| C6 | **每 session auto 按鈕 = 語意 (ii)** | 只把「未分類中間地帶」變自動放行;**硬性 deny 類即使 auto mode 也一律升級**。真 YOLO(繞過一切)拆成**獨立、更難按、要更強確認**的開關,**本機與遠端皆可啟用**(⚠️ 原「遠端禁用」已於 2026-08-25 翻案;另新增可繞過硬性 deny 類的「真.無限制」層,啟用需強警告確認 + 稽核,詳見 §G)。auto 是 **session 暫態,不寫 config**;會寫持久政策的只有 C4 的「永遠允許」。 |
 | C7 | **PTY 沙箱前一律唯讀、不給自主權** | `GenericPtyAdapter` 是 raw stdin 直通、`permissionRequests:false`,結構上無法被政策管。建出環境沙箱(Windows:WSL2/容器/鎖死 VM)前,PTY agent 不給自主權。**不做 shell 指令攔截**(被 `bash -c`/`$()`/base64 秒破,是 security theater)。 |
 
 > **無人值守 vs 有人看**:auto 按鈕是「有人看著單一 session」時的省事開關;無人值守的安全**只能**來自 C4 的窄 allowlist,不能靠「把全部 session 按成 auto 然後走人」——那只是繞遠路的 default-allow ×N。
@@ -83,8 +97,8 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 |---|---|---|
 | F1 | **不自己搞 TLS** | 預設綁 localhost;要遠端強制走 Tailscale/WireGuard/SSH 隧道(給你加密 + 網路層認證 + 不公開曝露)。 |
 | F2 | **明文綁非 loopback 要明確確認** | 硬規則:`ws://` 綁非 loopback 介面必須有「我知道這在隧道後面」的明確確認,否則拒絕。 |
-| F3 | **遠端能力受限** | 遠端**可**:觀察、送 prompt、逐一核可/拒絕權限升級。遠端**不可**:開 YOLO、切 auto mode、改 allowlist/政策、建改 agent profile、改綁介面、改預算上限。 |
-| F4 | **安全罩本身遠端不可停用** | 三斷路器(權限/訊息/成本)及其設定,遠端一律不可停用。原則:**遠端能在安全罩內幹活,但不能改動安全罩本身。** |
+| F3 | **遠端能力受限** | 遠端**可**:觀察、送 prompt、逐一核可/拒絕權限升級、切 auto/YOLO 模式、改 allowlist/政策(⚠️ 後三項 2026-08-25 起開放,原屬「不可」,詳見 §G)。遠端**不可**:建改 agent profile、改綁介面、改預算上限。 |
+| F4 | **安全罩本身遠端不可停用** | 三斷路器(權限/訊息/成本)及其設定,遠端一律不可停用。原則:**遠端能在安全罩內幹活,但不能改動安全罩本身。** ⚠️ **2026-08-25 起的例外**:權限斷路器新增兩條遠端可達的鬆綁路徑(auto/YOLO 切換、allowlist 編輯),另有本機與遠端皆可用、可繞過 hard-deny 的 `trueUnrestricted` 層;**訊息(A5)與成本(E1–E3)兩條斷路器完全不受影響**,遠端仍無法停用。詳見 §G。 |
 
 ---
 
@@ -112,3 +126,33 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 - ❌ **「ACP-first 省下逐家客製」** → 你最肥的 adapter(OpenCode 36KB)是全客製(B3)。
 - ⚠️ **PermissionGateway 被畫成核心元件** → 實際是 57 行 timeout-and-forward 空殼,政策引擎還沒寫(淨新增 #1)。
 - ⚠️ **adapter set 含 Gemini CLI / Antigravity** → 核心 set 收斂為 {Claude Code, Codex, OpenCode},放棄 Antigravity(B1)。
+
+---
+
+## G. 2026-08-25 修訂:遠端與真.無限制層
+
+> 使用者在被完整攤開「F3/C6 的遠端限制、C5 hard-deny 各自防的是什麼」後
+> (兩輪追問確認),明確決定翻案以下規則。這是**有意識的決定**,不是遺漏或
+> 倒退——C2(default-deny 鐵則)與 C5(hard-deny 四類的**定義**)本身未變,
+> 變的是「誰能碰、能碰多深」。
+
+**改了什麼**:
+
+| 項目 | 舊規則 | 新規則 | 落地位置 |
+|---|---|---|---|
+| 遠端切 session auto/YOLO 模式 | 遠端禁止(原 F3/C6) | 遠端與本機同權 | `apps/core/src/gateway/ws-gateway.ts`:`LOCAL_ONLY_METHODS` 已移除 `session.setPermissionMode` |
+| 遠端編輯政策 allowlist | 遠端禁止(原 F3) | 遠端與本機同權 | 新增 `policy.addRule`/`policy.removeRule`/`policy.listRules`,刻意不列入 `LOCAL_ONLY_METHODS` |
+| 握手能力集 | `canToggleAuto`/`canEnableYolo`/`canEditPolicy` 恆等於 `isLocal` | 三者恆為 `true` | `WsGateway.buildCapabilities()` |
+| **新增**「真.無限制」層(`trueUnrestricted`) | 不存在 | YOLO 之上再加一層,**可繞過 C5 四類 hard-deny**(worktree 外刪除、讀秘密路徑、force-push、非白名單外連);本機與遠端皆可啟用;前提是該 session 已處於 YOLO(`auto-accept-all`),否則拒絕啟用(`SESSION_TRUE_UNRESTRICTED_REQUIRES_YOLO`);啟用當下強制 UI 強警告確認 + 桌面通知 + 稽核記錄(關閉時只記稽核、不推播) | `apps/core/src/permissions/policy-engine.ts`:`decide()` 新增第 0 步,`ctx.trueUnrestricted` 為真時直接 `allow`——唯一能跳過 hard-deny 判斷的路徑;`apps/core/src/session/session-manager.ts`:`setTrueUnrestricted()` |
+
+**沒改什麼**(使用者這輪未要求,維持 local-only):
+
+- Profile 建立/刪除(`profile.create`/`profile.delete`)。
+- daemon 綁定介面(bind host)變更。
+- 預算上限變更(`config.setFile` 既有安全子集)。
+- **C5 四類 hard-deny 的定義本身**——`hard-deny.ts` 未動,沒有變寬、沒有減類。變的只是「有沒有一個明確 opt-in 的開關能繞過它」,不是這四類的範圍或判定方式。
+- MCP-bridge agent token 的 method allowlist(`computeAllowedMethods()`)——刻意未動;agent 無法透過自己的工具呼叫取得 `trueUnrestricted` 或改 allowlist 的能力,這仍然是人類/UI-only 的操作。
+
+**為何 `trueUnrestricted` 不算打破 C2 的 default-deny 鐵則**:它不是新的「未分類自動放行」規則,而是**單一 session、需先已處於 YOLO、且要求額外顯式開啟**的例外閘門——沒有規則比對或 autoMode 能觸發它。`decide()` 把這個短路刻意放在函式最開頭(第 0 步,先於 hard-deny 判斷本身),不是埋在 hard-deny 分支裡——grep `trueUnrestricted` 找到的就是這個唯一入口,審查者不需要先看懂 hard-deny 邏輯才發現這裡有例外。
+
+**對應修訂**:**C6**「真 YOLO…遠端禁用」已改為本機遠端同權;**F3**「遠端不可:開 YOLO、切 auto mode、改 allowlist/政策」三項已移至「遠端可」;**F4**——三斷路器中只有**權限**這條新增遠端可達的鬆綁路徑,訊息(A5)、成本(E1–E3)不受影響。

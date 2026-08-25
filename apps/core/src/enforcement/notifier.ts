@@ -35,8 +35,22 @@ import type { AuditLog } from "./audit-log.js";
  *     幾乎立即 resolve,呼叫端(session-manager.ts)也刻意不 await 其結果
  *     (`void this.notifier.deliver(...).catch(...)`)。
  */
+/**
+ * 2026-08-25 新增(見 docs/DECISIONS.md §G):啟用「真.無限制」層時需要立即
+ * 推播,不能靠使用者自己記得——這是使用者明確要求的「設定時要警告」。只在
+ * `enabled:true` 時呼叫這個方法;關閉(回到安全方向)不需要打斷使用者,只寫
+ * 稽核(見 session-manager.ts 的呼叫處)。
+ */
+export interface TrueUnrestrictedEnabledDetail {
+  sessionId: string;
+  isRemote: boolean;
+  ts: number;
+}
+
 export interface Notifier {
   deliver(event: EnforcementEvent): Promise<void>;
+  /** 2026-08-25 新增,見上方 `TrueUnrestrictedEnabledDetail` 註解。 */
+  deliverTrueUnrestrictedEnabled(detail: TrueUnrestrictedEnabledDetail): Promise<void>;
 }
 
 /** S1 階段的 stub:只 console.log,不接任何真實送達管道。保留給測試/未設定
@@ -45,6 +59,12 @@ export class ConsoleNotifier implements Notifier {
   async deliver(event: EnforcementEvent): Promise<void> {
     console.log(
       `[enforcement] ${event.kind} 事件(尚未接上真實通知管道,S11 才會實作真正的 Notifier): ${JSON.stringify(event)}`,
+    );
+  }
+
+  async deliverTrueUnrestrictedEnabled(detail: TrueUnrestrictedEnabledDetail): Promise<void> {
+    console.log(
+      `[enforcement] true-unrestricted 已啟用(${detail.isRemote ? "遠端" : "本機"},session=${detail.sessionId},尚未接上真實通知管道)`,
     );
   }
 }
@@ -220,6 +240,32 @@ export class RealNotifier extends EventEmitter implements Notifier {
       sessionId: event.sessionId,
       toolName: event.toolName,
     });
+  }
+
+  /**
+   * 2026-08-25 新增(見 docs/DECISIONS.md §G、`Notifier.deliverTrueUnrestrictedEnabled`
+   * 介面註解):比照 trip 的急迫程度——直接 `sendNow()`,**跳過批次佇列與靜音
+   * 時段**(不是走 `handleEscalation()`)。這是唯一「開啟一個能繞過 hard-deny
+   * 的模式」的時刻,使用者的「啟用當下要警告」要求就是要立即看到,被靜音時段
+   * 吃掉或延遲到批次視窗才送,會讓警告本身失去意義。
+   *
+   * 對外沿用既有的 `kind:"escalation"` payload(不擴充
+   * `EnforcementNotificationPushSchema` 的封閉 `kind` enum,比照
+   * `buildTaskReviewPayload()` 的既有先例——那裡也是把一個不是「工具權限請求」
+   * 的警示塞進同一個 kind),`toolNames` 借來放一句描述,而不是真正的工具名。
+   */
+  async deliverTrueUnrestrictedEnabled(detail: TrueUnrestrictedEnabledDetail): Promise<void> {
+    const [name] = await this.resolveSessionNames([detail.sessionId]);
+    const payload: EnforcementNotificationPush = {
+      kind: "escalation",
+      count: 1,
+      sessionNames: [name ?? detail.sessionId],
+      toolNames: [`已啟用真.無限制模式(繞過 hard-deny)${detail.isRemote ? "・遠端觸發" : ""}`],
+      ts: detail.ts,
+      link: this.linkBase ? `${this.linkBase}/#/session/${detail.sessionId}` : "",
+      sessionId: detail.sessionId,
+    };
+    this.sendNow(payload);
   }
 
   /**

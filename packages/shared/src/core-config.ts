@@ -160,6 +160,16 @@ export type PolicyRuleScope = z.infer<typeof PolicyRuleScopeSchema>;
 
 export const PolicyRuleSchema = z
   .object({
+    /**
+     * 2026-08-25 新增(見 docs/DECISIONS.md §G):穩定識別碼,供
+     * `policy.removeRule` 精確定位單一規則(陣列 index 會因為其他規則新增/
+     * 刪除而位移,不能拿來當長期參照)。舊規則(這個欄位新增前就已寫入
+     * config.json 的)沒有這個值——Core 啟動時由
+     * `config-file-writer.ts` 的 `backfillPolicyRuleIds()` 補上並整批寫回,
+     * 之後就恆有值,這裡維持 optional 只是為了讓「檔案裡剛好還沒補過」這個
+     * 短暫狀態型別上合法,不代表這個欄位長期允許缺席。
+     */
+    id: z.string().optional(),
     /** 工具名;`"*"` 表示任意工具。 */
     tool: z.string(),
     when: PolicyRuleWhenSchema.optional(),
@@ -171,6 +181,17 @@ export const PolicyRuleSchema = z
   })
   .strict();
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
+
+/**
+ * 2026-08-25 新增:`policy.addRule` 的輸入形狀——**刻意不是** `PolicyRuleSchema`
+ * 本身,拿掉 `id`/`addedBy`/`addedAt` 三個欄位,server 端一律自己生成/填入
+ * (見 apps/core/src/session/session-manager.ts 的 `addPolicyRule()`),不信任
+ * 呼叫端送來的值——`id` 若讓 client 自訂可能與既有規則衝突,`addedBy`/`addedAt`
+ * 若讓 client 自訂就失去稽核意義(client 可以偽稱是很久以前加的、或偽稱是
+ * `"user"` 手動加的)。
+ */
+export const PolicyAddRuleInputSchema = PolicyRuleSchema.omit({ id: true, addedBy: true, addedAt: true });
+export type PolicyAddRuleInput = z.infer<typeof PolicyAddRuleInputSchema>;
 
 export const PolicyConfigSchema = z
   .object({

@@ -4,6 +4,7 @@
   "providerCountFooter": "全 {{count}} 件",
   "redetect": "再検出",
   "sections": {
+    "permission": "権限",
     "global": "全体設定",
     "notification": "通知設定",
     "provider": "Provider 管理"
@@ -59,5 +60,28 @@
     "enabledValue": "有効",
     "disabledValue": "無効",
     "notSet": "(未設定)"
+  },
+  "permission": {
+    "description": "現在有効なポリシー許可リスト(default-deny の中間領域に対する allow/deny ルール)です。このリストは hard-deny(force-push、シークレットパスの読み取り、worktree 外の削除、許可リストにないホストへのネットワーク接続)には影響しません——ここで何を設定してもこの4種類は地板のままです。これらをバイパスするには、チャット画面ヘッダーの各 session にある「真.無制限」トグルを使用してください。",
+    "remoteNotice": "リモート接続からこのリストを編集しています——保存するとすべての接続に適用されます。",
+    "emptyList": "ルールはまだありません",
+    "toolLabel": "ツール",
+    "effectLabel": "効果",
+    "effectAllow": "許可",
+    "effectDeny": "拒否",
+    "whenKindLabel": "条件の種類",
+    "whenKindNone": "なし(ツール自体に一致)",
+    "whenKindCommandEquals": "コマンドが完全一致",
+    "whenKindCommandMatches": "コマンドが正規表現に一致",
+    "whenKindPathUnder": "パスがこのプレフィックス配下",
+    "whenValueLabel": "条件の値",
+    "scopeProfileLabel": "Profile ID で限定(任意)",
+    "scopeRoleLabel": "role で限定(任意)",
+    "scopeProfile": "profile: {{id}}",
+    "scopeRole": "role: {{role}}",
+    "addedByUser": "手動で追加",
+    "addedByRemember": "「常に許可」から追加",
+    "toolRequired": "ツール名を入力してください(任意のツールは * で指定)",
+    "addRuleButton": "ルールを追加"
   }
 }

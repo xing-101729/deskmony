@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { NexusDb } from "@deskmony/db";
 import { enforcementAudit as enforcementAuditTable } from "@deskmony/db";
-import type { EnforcementEvent } from "@deskmony/shared";
+import type { EnforcementEvent, PolicyRule } from "@deskmony/shared";
 
 /**
  * audit-log.ts(S1 Enforcement 底座,見 policy-engine_detail.md §5/§5.1)。
@@ -45,12 +45,46 @@ export interface RecoveryReconcileDetail {
   ts: number;
 }
 
+/**
+ * 2026-08-25 新增(見 docs/DECISIONS.md §G):一個 session 的「真.無限制」層
+ * 被開啟/關閉。獨立於 `append(EnforcementEvent)`——理由與
+ * `NotificationFailureDetail`/`RecoveryReconcileDetail` 相同(不是三斷路器的
+ * 一次決策/升級/熔斷事件,不擴充那個判別聯集),見這兩者的既有註解。
+ * `isRemote` 記錄觸發連線是不是遠端——這是這次翻案(F3 修訂)最需要事後稽核
+ * 得到的欄位:一旦真的發生「不是本人開的」爭議,這是唯一能回答「當時是從
+ * 哪種連線觸發的」的紀錄。
+ */
+export interface TrueUnrestrictedToggleDetail {
+  sessionId: string;
+  enabled: boolean;
+  isRemote: boolean;
+  ts: number;
+}
+
+/**
+ * 2026-08-25 新增:政策允許清單被新增/刪除一條規則。`rule` 帶完整內容
+ * (不只是 `ruleId`)——尤其是 `action:"remove"` 時,規則本身刪掉之後就從
+ * `PolicyEngine`/config.json 消失了,稽核紀錄是事後唯一還查得到「當初這條
+ * 規則到底允許/擋掉了什麼」的地方(D5 稽核精神)。
+ */
+export interface PolicyRuleChangeDetail {
+  action: "add" | "remove";
+  ruleId: string;
+  rule?: PolicyRule;
+  isRemote: boolean;
+  ts: number;
+}
+
 export interface AuditLog {
   append(event: EnforcementEvent): void;
   /** S11 新增,見上方 `NotificationFailureDetail` 註解。 */
   appendNotificationFailure(detail: NotificationFailureDetail): void;
   /** S6 新增,見上方 `RecoveryReconcileDetail` 註解。 */
   appendRecoveryReconcile(detail: RecoveryReconcileDetail): void;
+  /** 2026-08-25 新增,見上方 `TrueUnrestrictedToggleDetail` 註解。 */
+  appendTrueUnrestrictedToggle(detail: TrueUnrestrictedToggleDetail): void;
+  /** 2026-08-25 新增,見上方 `PolicyRuleChangeDetail` 註解。 */
+  appendPolicyRuleChange(detail: PolicyRuleChangeDetail): void;
 }
 
 /** 落地到 SQLite 的 `enforcement_audit` 表。 */
@@ -124,6 +158,48 @@ export class SqliteAuditLog implements AuditLog {
         .run();
     } catch (err) {
       console.error(`[recovery] 啟動對帳稽核落地失敗(不影響對帳本身已完成的標記): ${String(err)}`);
+    }
+  }
+
+  appendTrueUnrestrictedToggle(detail: TrueUnrestrictedToggleDetail): void {
+    try {
+      void this.db
+        .insert(enforcementAuditTable)
+        .values({
+          id: randomUUID(),
+          ts: detail.ts,
+          kind: "true-unrestricted-toggle",
+          sessionId: detail.sessionId,
+          requestId: null,
+          toolName: null,
+          effect: detail.enabled ? "allow" : null,
+          reason: `${detail.isRemote ? "遠端" : "本機"}${detail.enabled ? "啟用" : "關閉"} true-unrestricted`,
+          payload: JSON.stringify(detail),
+        })
+        .run();
+    } catch (err) {
+      console.error(`[enforcement] 「true-unrestricted 切換」稽核落地失敗(不影響已生效的模式切換): ${String(err)}`);
+    }
+  }
+
+  appendPolicyRuleChange(detail: PolicyRuleChangeDetail): void {
+    try {
+      void this.db
+        .insert(enforcementAuditTable)
+        .values({
+          id: randomUUID(),
+          ts: detail.ts,
+          kind: "policy-rule-changed",
+          sessionId: null,
+          requestId: null,
+          toolName: detail.rule?.tool ?? null,
+          effect: detail.rule?.effect ?? null,
+          reason: `${detail.isRemote ? "遠端" : "本機"}${detail.action === "add" ? "新增" : "刪除"}允許清單規則(id=${detail.ruleId})`,
+          payload: JSON.stringify(detail),
+        })
+        .run();
+    } catch (err) {
+      console.error(`[enforcement] 「政策規則變更」稽核落地失敗(不影響已生效的規則變更): ${String(err)}`);
     }
   }
 }

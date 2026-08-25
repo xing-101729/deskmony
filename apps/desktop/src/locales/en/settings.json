@@ -4,6 +4,7 @@
   "providerCountFooter": "{{count}} total",
   "redetect": "Redetect",
   "sections": {
+    "permission": "Permissions",
     "global": "Global settings",
     "notification": "Notification settings",
     "provider": "Provider management"
@@ -59,5 +60,28 @@
     "enabledValue": "Enabled",
     "disabledValue": "Disabled",
     "notSet": "(not set)"
+  },
+  "permission": {
+    "description": "The policy allowlist currently in effect (allow/deny rules for the default-deny middle ground). This list has no power over hard-deny (force-push, secret-path reads, deletes outside the worktree, non-allowlisted network connections) — those four categories remain a floor no matter what's set here; to bypass them, use the \"true-unrestricted\" toggle on an individual session in the chat header.",
+    "remoteNotice": "You're editing this list over a remote connection — once saved, it applies to every connection.",
+    "emptyList": "No rules yet",
+    "toolLabel": "Tool",
+    "effectLabel": "Effect",
+    "effectAllow": "Allow",
+    "effectDeny": "Deny",
+    "whenKindLabel": "Condition type",
+    "whenKindNone": "None (match the tool itself)",
+    "whenKindCommandEquals": "Command equals exactly",
+    "whenKindCommandMatches": "Command matches a regex",
+    "whenKindPathUnder": "Path is under this prefix",
+    "whenValueLabel": "Condition value",
+    "scopeProfileLabel": "Limit to Profile ID (optional)",
+    "scopeRoleLabel": "Limit to role (optional)",
+    "scopeProfile": "profile: {{id}}",
+    "scopeRole": "role: {{role}}",
+    "addedByUser": "Added manually",
+    "addedByRemember": "From \"always allow\"",
+    "toolRequired": "Enter a tool name (use * for any tool)",
+    "addRuleButton": "Add rule"
   }
 }

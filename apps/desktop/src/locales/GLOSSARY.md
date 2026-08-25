@@ -20,6 +20,13 @@ team, provider, slash command.
 `スラッシュコマンド` 是該語言技術寫作已經非常標準的外來語慣用形式(同「セッション/
 トークン」的既有例外),見 `ja/chat.json` 的 `slashCommands` 區塊。
 
+**UNRESTRICTED**(2026-08-25 新增,見 docs/DECISIONS.md §G):`AutoModeControl.tsx`
+新增的第三層危險模式徽章(疊在 YOLO 之上,連 hard-deny 都繞過)——比照既有
+「AUTO」/「YOLO」徽章的慣例,四語言一律保留英文全大寫原文,不翻譯,理由同這兩個
+既有詞:這是產品專有的模式名稱縮寫,不是一般語句。確認對話框裡要求輸入的固定
+比對字串同樣固定用這個英文字串,不隨語言變動(見該元件內
+`UNRESTRICTED_CONFIRM_PHRASE` 的完整理由)。
+
 **修正(見下方時間戳記)**:`task` **不**在上面清單裡——已完成的批次(`recovery.json`/
 `chat.json`/`notifications.json`/`errors-tasks.json`/`sessionList.json`/`app.json`
 等)一致把它翻譯成 ja「タスク」、es「tarea」,不是保留英文。這份文件原本誤把
