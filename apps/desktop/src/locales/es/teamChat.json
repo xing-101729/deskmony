@@ -31,6 +31,8 @@
     "normalOption": "Normal",
     "interruptOption": "Interrumpir (interrupt)",
     "placeholder": "Interviene como humano… (Enter para enviar, Shift+Enter para salto de línea)",
-    "sendAriaLabel": "Enviar"
+    "sendAriaLabel": "Enviar",
+    "noSessionWarning": "\"{{to}}\" no tiene ninguna session activa en este momento. Este mensaje quedará en su buzón hasta que se conecte.",
+    "noSessionWarningBroadcast": "Ningún miembro está en línea en este momento. Este mensaje quedará en sus buzones hasta que alguien se conecte."
   }
 }

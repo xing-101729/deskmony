@@ -31,6 +31,8 @@
     "normalOption": "Normal",
     "interruptOption": "Interrupt (interrupt)",
     "placeholder": "Chime in as a human… (Enter to send, Shift+Enter for a new line)",
-    "sendAriaLabel": "Send"
+    "sendAriaLabel": "Send",
+    "noSessionWarning": "\"{{to}}\" has no active session right now. This message will stay in its mailbox until it comes online.",
+    "noSessionWarningBroadcast": "No member is currently online. This message will stay in their mailboxes until someone comes online."
   }
 }

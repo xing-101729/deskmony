@@ -726,10 +726,9 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
    * DB 驅動的 Mailbox 裡(不再需要額外的記憶體 `enqueue()`)。
    */
   private async deliverToMember(member: TeamMember, message: TeamMessage): Promise<TeamBusSendOutcome["delivered"]> {
-    const sessionId = this.sessionManager.getSessionIdForMember(member.id);
-    if (!sessionId) return "no-session";
-    const session = await this.sessionManager.getSession(sessionId);
+    const session = await this.resolveSessionForDelivery(member, message.teamId);
     if (!session) return "no-session";
+    const sessionId = session.id;
 
     if (message.priority === "interrupt") {
       return this.withMemberLock(member.id, async () => {
@@ -756,6 +755,50 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
     }
 
     return "queued";
+  }
+
+  /**
+   * 查出 member 目前綁定的 session。長命(persistent)成員沒有 session 時視為
+   * 「該在線卻還沒上線」,自動建立一個(理由見 docs/LAYER-3-hld/
+   * agent-lifecycle_hld.md §2.0「長命 = 為了在線可達,不是為了記憶」——這裡只是
+   * 補上文件本來就要求的行為)。短命(ephemeral)成員維持原設計:不在線是刻意
+   * 允許的狀態(同文件 §3「worker 不在線完全可接受,訊息落 Mailbox」),不自動
+   * 建,留給任務指派或人工「建立 session」處理。
+   *
+   * workingDir 取不到(team 與 profile 都沒設定)或 `createSession()` 本身失敗
+   * (例如 adapter spawn 失敗)時,靜默降級回 `undefined`——呼叫端會如實回報
+   * "no-session",訊息安全留在 Mailbox,不讓自動上線的失敗變成整個 sendMessage
+   * 的硬錯誤。
+   */
+  private async resolveSessionForDelivery(member: TeamMember, teamId: string): Promise<Session | undefined> {
+    const existingId = this.sessionManager.getSessionIdForMember(member.id);
+    if (existingId) return this.sessionManager.getSession(existingId);
+    if (member.lifecycle !== "persistent") return undefined;
+
+    return this.withMemberLock(member.id, async () => {
+      // 鎖內重查一次:避免兩則訊息幾乎同時抵達、都看到「沒有 session」而各自
+      // 建立一個(同一手法比照 flushPendingForMember 對 mailboxLocks 的用法)。
+      const raceCheckId = this.sessionManager.getSessionIdForMember(member.id);
+      if (raceCheckId) return this.sessionManager.getSession(raceCheckId);
+
+      const [team, profile] = await Promise.all([
+        this.teamManager.getTeam(teamId),
+        this.profiles.get(member.agentProfileId),
+      ]);
+      const workingDir = team?.workingDir || profile?.workingDir;
+      if (!workingDir) return undefined;
+
+      try {
+        return await this.sessionManager.createSession({
+          title: `${member.name}(自動上線)`,
+          agentProfileId: member.agentProfileId,
+          workingDir,
+          teamMemberId: member.id,
+        });
+      } catch {
+        return undefined;
+      }
+    });
   }
 
   /**

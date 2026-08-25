@@ -102,6 +102,7 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   const [priority, setPriority] = useState<MessagePriority>("normal");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const team = teams.find((t2) => t2.id === currentTeamId);
@@ -135,9 +136,17 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
     if (!content || !currentTeamId) return;
     setSending(true);
     setError(null);
+    setWarning(null);
     try {
-      await sendTeamMessage({ teamId: currentTeamId, to, content, priority });
+      const { delivered } = await sendTeamMessage({ teamId: currentTeamId, to, content, priority });
       setDraft("");
+      // "no-session":收件者目前沒有任何活躍 session(短命成員的正常狀態,或
+      // 長命成員自動建立失敗)——訊息安全留在 Mailbox,但使用者應該被告知,
+      // 而不是看著自己的訊息送出後就此石沉大海。"queued"(對象忙碌中,等回合
+      // 結束就會送達)是正常狀態,不需要提示。
+      if (delivered === "no-session") {
+        setWarning(to === "broadcast" ? t("teamChat:composer.noSessionWarningBroadcast") : t("teamChat:composer.noSessionWarning", { to }));
+      }
     } catch (err) {
       setError(translateError(err, t));
     } finally {
@@ -230,6 +239,7 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
 
       <div className="flex-shrink-0 border-t border-line-subtle p-3 sm:p-4">
         {error && <div className="mb-2 rounded-md bg-danger/10 px-2.5 py-1.5 text-xs text-danger">{error}</div>}
+        {warning && <div className="mb-2 rounded-md bg-warn/10 px-2.5 py-1.5 text-xs text-warn">{warning}</div>}
         <div className="flex items-end gap-2 rounded-lg border border-line bg-surface p-2 transition focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20">
           <div className="flex flex-shrink-0 flex-col gap-1">
             <Select aria-label={t("teamChat:composer.toAriaLabel")} value={to} onChange={(e) => setTo(e.target.value)}>

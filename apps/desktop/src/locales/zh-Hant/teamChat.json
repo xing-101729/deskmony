@@ -31,6 +31,8 @@
     "normalOption": "一般",
     "interruptOption": "中斷(interrupt)",
     "placeholder": "以人類身分插話…(Enter 送出,Shift+Enter 換行)",
-    "sendAriaLabel": "送出"
+    "sendAriaLabel": "送出",
+    "noSessionWarning": "「{{to}}」目前沒有上線中的 session,這則訊息會留在收件匣,要等它上線才會被看到。",
+    "noSessionWarningBroadcast": "目前沒有任何成員在線,這則訊息會留在收件匣,要等有人上線才會被看到。"
   }
 }

@@ -55,7 +55,7 @@ interface TeamStoreState {
     content: string;
     priority?: MessagePriority;
     fromName?: string;
-  }) => Promise<void>;
+  }) => Promise<{ delivered: "immediate" | "queued" | "no-session" }>;
   /** S2:查詢並快取一個 contextId 目前的訊息額度狀態;"legacy"(不參與預算
    *  計算的訊息)刻意不查,呼叫端(TeamChatView)本來就會先過濾掉。 */
   refreshContextBudget: (contextId: string) => Promise<void>;
@@ -139,9 +139,13 @@ export const useTeamStore = create<TeamStoreState>((set, get) => ({
     const raw = await client.call("message.send", input);
     // 訊息本身會透過 "team-message" 推播抵達(persistAndPush 在
     // deliverToMember 之前就 emit,見 apps/core/src/bus/message-bus.ts),
-    // 這裡解析回應只是為了讓呼叫端(表單送出當下)能立即拿到錯誤或降級提示,
+    // 這裡解析回應主要是為了讓呼叫端(表單送出當下)能立即拿到錯誤或降級提示,
     // 不需要手動把訊息塞進 messagesByTeam(避免與推播重複、順序不一致)。
-    MessageSendResultSchema.parse(raw);
+    // `delivered` 額外回傳給呼叫端——"no-session" 代表收件者目前沒有任何活躍
+    // session(短命成員的正常狀態,或長命成員自動建立失敗),訊息雖然安全留在
+    // Mailbox,但呼叫端(TeamChatView)應該要能提示使用者,而不是靜默無反應。
+    const { delivered } = MessageSendResultSchema.parse(raw);
+    return { delivered };
   },
 
   refreshContextBudget: async (contextId) => {

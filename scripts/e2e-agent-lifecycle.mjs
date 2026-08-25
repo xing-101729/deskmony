@@ -26,6 +26,9 @@
  *      該 member 被重新指派任務(自動 respawn)時補投。
  *   E. §4.2:長命(persistent)member 的 context 使用率達 85% → 觸發「寫筆記」
  *      prompt → 該回合結束後走「接手」(沿用同一個 DB session id)→ 只觸發一次。
+ *   F.(S8 之後補充,非原始 spec 範圍)長命成員收到訊息時若無活躍 session 自動
+ *      建立並立即投遞;短命成員維持原設計不自動建;對已上線的長命成員再次
+ *      傳訊不會重複建立 session。見 message-bus.ts `resolveSessionForDelivery()`。
  *
  * 前置需求:`pnpm build` 已跑過。
  * 用法:node scripts/e2e-agent-lifecycle.mjs
@@ -806,6 +809,114 @@ async function testContextCheckpointRestart() {
 }
 
 // =======================================================================
+// F(S8 之後的補充,非原始 spec 範圍):長命(persistent)成員收到訊息時,若
+// 尚無活躍 session,MessageBus 自動建立一個(理由見 message-bus.ts 的
+// `resolveSessionForDelivery()` 註解:§2.0「長命 = 為了在線可達」,原本只在
+// 團隊啟動/人工建立時才有 session,等於「該在線卻要等人手動點一下才真的在
+// 線」)。短命(ephemeral)成員維持原設計,不自動建、訊息留 Mailbox(§3)。
+// =======================================================================
+async function testPersistentAutoSpawnOnMessage() {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-life-f-data-"));
+  const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-life-f-home-"));
+  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-life-f-ws-"));
+
+  let core, client;
+  try {
+    core = startCore({ port: 4705, dataDir, homeDir, workspaceDir });
+    await waitForPort("ws://127.0.0.1:4705", 20_000);
+    client = new MiniGatewayClient("ws://127.0.0.1:4705");
+    await client.connect();
+
+    const { team } = await client.rpc("team.create", { name: "E2E Lifecycle Team F", workingDir: workspaceDir });
+    const profile = await createAcpProfile(client, "E2E Lifecycle Profile F", workspaceDir);
+
+    const { member: lead } = await client.rpc("team.addMember", {
+      teamId: team.id,
+      agentProfileId: profile.id,
+      name: "Lead",
+      role: "Lead",
+      lifecycle: "persistent",
+    });
+    const { member: worker } = await client.rpc("team.addMember", {
+      teamId: team.id,
+      agentProfileId: profile.id,
+      name: "Worker",
+      role: "Coder",
+      lifecycle: "ephemeral",
+    });
+
+    const { teammates: teammatesBefore } = await client.rpc("team.teammates", { teamId: team.id });
+    const bothOfflineBefore =
+      teammatesBefore.find((t) => t.memberId === lead.id)?.hasActiveSession === false &&
+      teammatesBefore.find((t) => t.memberId === worker.id)?.hasActiveSession === false;
+
+    // ---- F1: 人類傳訊給長命成員 → 自動建立 session 並立即投遞 --------------
+    const markerLead = `persistent-auto-spawn-marker-${randomUUID().slice(0, 8)}`;
+    const sendToLead = await client.rpc("message.send", { teamId: team.id, to: lead.name, content: markerLead });
+
+    const { teammates: teammatesAfterLead } = await client.rpc("team.teammates", { teamId: team.id });
+    const leadNowOnline = teammatesAfterLead.find((t) => t.memberId === lead.id)?.hasActiveSession === true;
+
+    const { messages: messagesAfterLead } = await client.rpc("team.messages", { teamId: team.id });
+    const leadMsgDelivered = messagesAfterLead.find((m) => m.content === markerLead)?.deliveredAt !== undefined;
+
+    record(
+      "F1(長命成員無 session 時收到訊息 → 自動建立並立即投遞): delivered≠no-session,team.teammates 顯示已上線,訊息 deliveredAt 已標記",
+      sendToLead.delivered !== "no-session" && leadNowOnline && leadMsgDelivered,
+      `delivered=${sendToLead.delivered}, hasActiveSession=${leadNowOnline}, deliveredAt 已標記=${leadMsgDelivered}`,
+    );
+
+    // ---- F2: 短命成員維持原設計,不自動建,訊息留 Mailbox --------------------
+    const markerWorker = `ephemeral-no-auto-spawn-marker-${randomUUID().slice(0, 8)}`;
+    const sendToWorker = await client.rpc("message.send", { teamId: team.id, to: worker.name, content: markerWorker });
+
+    const { teammates: teammatesAfterWorker } = await client.rpc("team.teammates", { teamId: team.id });
+    const workerStillOffline = teammatesAfterWorker.find((t) => t.memberId === worker.id)?.hasActiveSession === false;
+
+    const { messages: messagesAfterWorker } = await client.rpc("team.messages", { teamId: team.id });
+    const workerMsgQueued = messagesAfterWorker.find((m) => m.content === markerWorker)?.deliveredAt === undefined;
+
+    record(
+      "F2(短命成員收到訊息 → 不自動建 session,維持 §3 原設計): delivered=no-session,team.teammates 仍顯示未上線,訊息留在 Mailbox(未標記 deliveredAt)",
+      sendToWorker.delivered === "no-session" && workerStillOffline && workerMsgQueued,
+      `delivered=${sendToWorker.delivered}, hasActiveSession=${!workerStillOffline}, 未送達=${workerMsgQueued}`,
+    );
+
+    // ---- F3: 對長命成員第二次傳訊 → 沿用同一個 session,不重複建立 ----------
+    const { sessions: sessionsBeforeSecond } = await client.rpc("session.list", {});
+    const leadSessionCountBefore = sessionsBeforeSecond.filter((s) => s.workingDir === workspaceDir && s.status !== "closed").length;
+
+    await client.rpc("message.send", { teamId: team.id, to: lead.name, content: `${markerLead}-second` });
+
+    const { sessions: sessionsAfterSecond } = await client.rpc("session.list", {});
+    const leadSessionCountAfter = sessionsAfterSecond.filter((s) => s.workingDir === workspaceDir && s.status !== "closed").length;
+
+    record(
+      "F3(對已上線的長命成員再次傳訊 → 沿用既有 session,不重複自動建立)",
+      leadSessionCountBefore === 1 && leadSessionCountAfter === 1,
+      `sessionCountBefore=${leadSessionCountBefore}, sessionCountAfter=${leadSessionCountAfter}`,
+    );
+
+    record(
+      "F0(前置狀態:兩位成員一開始都沒有活躍 session)",
+      bothOfflineBefore,
+      `bothOfflineBefore=${bothOfflineBefore}`,
+    );
+
+    client.close();
+    await killProcessTreeHard(core);
+    core = null;
+  } catch (err) {
+    record("F 執行過程發生未預期錯誤", false, String(err));
+  } finally {
+    client?.close();
+    if (core) await killProcessTreeHard(core);
+  }
+
+  rmDirs([dataDir, homeDir, workspaceDir]);
+}
+
+// =======================================================================
 async function main() {
   if (!existsSync(CORE_ENTRY)) {
     console.error(`找不到 ${CORE_ENTRY} —— 請先執行 pnpm build`);
@@ -826,6 +937,9 @@ async function main() {
 
   console.log("\n=== S8 e2e:E(§4.2 長命 agent 的 context checkpoint 重啟,只觸發一次)===");
   await testContextCheckpointRestart();
+
+  console.log("\n=== S8 e2e:F(補充,非原始 spec:長命成員收訊息時自動建立 session)===");
+  await testPersistentAutoSpawnOnMessage();
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n\n========== 總結:${results.length - failed.length}/${results.length} 通過 ==========`);

@@ -31,6 +31,8 @@
     "normalOption": "通常",
     "interruptOption": "中断(interrupt)",
     "placeholder": "人として割り込み発言…(Enter で送信、Shift+Enter で改行)",
-    "sendAriaLabel": "送信"
+    "sendAriaLabel": "送信",
+    "noSessionWarning": "「{{to}}」は現在アクティブな session がありません。このメッセージは受信箱に残り、オンラインになるまで見られません。",
+    "noSessionWarningBroadcast": "現在オンラインのメンバーがいません。このメッセージは受信箱に残り、誰かがオンラインになるまで見られません。"
   }
 }
