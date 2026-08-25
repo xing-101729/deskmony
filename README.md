@@ -29,7 +29,7 @@ That isn't a marketing line. The four directories that exist purely to serve the
 
 ## ✨ Highlights
 
-- 🛡️ **Three independent circuit breakers** — permissions, messages, and cost. Default-deny throughout, with a hard-deny list that no auto-mode can bypass.
+- 🛡️ **Three independent circuit breakers** — permissions, messages, and cost. Default-deny throughout, with a hard-deny list that no auto-mode can bypass — the one deliberate exception is an explicit, typed-confirmation "true-unrestricted" tier, covered below.
 - 🤝 **Agent teams, not a single chatbot** — roles (PM / Architect / Coder / Reviewer / QA), each bound to a different backend and model.
 - 💬 **Agents message each other** — a built-in `team-bus` MCP server gives every agent `send_message`, `broadcast`, `request_review`, `report_status`, and `list_teammates`. Humans watch the live team chat and can interject at any time.
 - 🌱 **Agents can spawn sub-agents** — a second `subagent` MCP server lets a session delegate to children and collect their results. Spawning is deliberately *not* auto-approved.
@@ -37,7 +37,7 @@ That isn't a marketing line. The four directories that exist purely to serve the
 - 🗂️ **Git-worktree isolation** — every task gets its own worktree; merging back to the trunk always takes a human click.
 - 🔌 **Four adapters, one interface** — embedded Claude Agent SDK, ACP, OpenCode HTTP/SSE, and a raw PTY fallback for anything else.
 - 🔄 **Crash recovery that doesn't guess** — orphaned sessions are reconciled on startup and triaged by a human. Nothing auto-resumes, by design.
-- 🌐 **Remote-capable, not remote-weakenable** — connect from a browser or phone over token auth; remote clients can *never* disable the shield.
+- 🌐 **Remote-capable, with a clear line on what stays local** — connect from a browser or phone over token auth; remote now shares session control and policy edits with local (2026-08-25), but never profile management, network binding, or budget caps.
 - 🌍 **Localized** — English, Traditional Chinese, Japanese, Spanish.
 
 ## 🛡️ The safety shield
@@ -48,7 +48,9 @@ Every tool call an agent makes runs this ladder. The order is fixed and cannot b
 
 ```mermaid
 flowchart TB
-    Req["Tool call<br/>(name, input, workingDir, profile, role)"] --> HD{"1 · hard-deny hit?"}
+    Req["Tool call<br/>(name, input, workingDir, profile, role)"] --> TU{"0 · true-unrestricted?"}
+    TU -- yes --> Allow0["ALLOW — bypasses everything,<br/>including hard-deny"]
+    TU -- no --> HD{"1 · hard-deny hit?"}
     HD -- no --> Rules{"2 · config rules,<br/>in order"}
     HD -- "yes + remote or auto-mode" --> Deny["DENY — hard floor"]
     HD -- "yes + local + human present<br/>+ auto-mode off" --> Strong["ESCALATE-STRONG<br/>red-framed confirm<br/>never eligible for 'always allow'"]
@@ -68,6 +70,7 @@ A few properties worth stating plainly:
 - **Anything the engine can't classify escalates.** Never allows. That's the last line of `decide()`.
 - **Timeout semantics depend on who's around.** Someone watching → a pending request times out into a deny. Nobody watching → **no timer at all**; the session sits in `waiting` until a human answers. Treating "no reply" as "denied" would throw away an entire night's work. The cost breaker is what stops that from hanging forever.
 - **"Always allow" has three rules**: write the narrowest possible rule (`commandEquals` / `pathUnder`); write it to both the config file and memory so behaviour is identical before and after a restart; and hard-deny escalations are **never** eligible — the core strips `rememberRule` even if a client sends one.
+- **One explicit, audited exception can cross the hard-deny floor**: a session-scoped "true-unrestricted" tier, layered on top of YOLO, gated behind a typed confirmation phrase, available locally *and* remotely since 2026-08-25 (see [`DECISIONS.md` §G](docs/DECISIONS.md)). It's the only path through `decide()` that skips hard-deny — it only arms per session, only once that session is already in YOLO, and only after a human types the confirmation phrase; enabling it fires a desktop notification and an audit-log entry.
 
 ### Breaker 2 — Messages
 
@@ -94,7 +97,7 @@ Two gates in front of the existing delivery strategy:
 
 `isLocal` is decided by the core from the connection's own address and is **never taken from the client's word for it**. Tunnelled connections (Tailscale, WireGuard) are not loopback and count as **remote** — a tunnel secures transport, it doesn't put an operator in the room.
 
-Remote clients **can** watch, send prompts, and approve or deny escalations. They **cannot** switch a session to auto/YOLO, edit policy or config, manage profiles, or attach an "always allow" rule to an approval. That's enforced at the dispatch layer, not by hiding buttons in the UI — a raw request bypassing the UI gets rejected the same way.
+Remote clients **can** watch, send prompts, approve or deny escalations, switch a session to auto/YOLO, edit the policy allowlist, and attach an "always allow" rule to an approval — parity with local as of 2026-08-25, a deliberate, documented reversal of the earlier remote restriction (see [`DECISIONS.md` §G](docs/DECISIONS.md)). Remote can even arm the "true-unrestricted" tier described above, through the same typed-confirmation gate as local. What remote still **cannot** do: manage agent profiles, change the network bind address, or raise budget caps. That's enforced at the dispatch layer, not by hiding buttons in the UI — a raw request bypassing the UI gets rejected the same way.
 
 Binding to a non-loopback address without `DESKMONY_AUTH_TOKEN` **refuses to start**. The token is deliberately not a config-file field, so editing config can't widen exposure.
 
@@ -111,7 +114,7 @@ flowchart TB
     end
 
     subgraph CORE["apps/core — headless orchestration server"]
-        GW["gateway/ — 58 RPC methods + 10 push channels"]
+        GW["gateway/ — 63 RPC methods + 11 push channels"]
         subgraph DOMAIN["domain"]
             direction LR
             Sess["session/"]
@@ -295,7 +298,7 @@ Three fake backends — `fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo
 
 ## 🗺️ Status
 
-Built and end-to-end tested: team and profile management, cross-agent messaging, the desktop IDE, git-worktree isolation, browser/remote access with token auth, the full three-breaker safety shield, crash recovery, desktop and webhook notifications, the machine acceptance gate, and session sub-agents.
+Built and end-to-end tested: team and profile management, cross-agent messaging, the desktop IDE, git-worktree isolation, browser/remote access with token auth, the full three-breaker safety shield, crash recovery, desktop and webhook notifications, the machine acceptance gate, session sub-agents, a self-service policy allowlist UI, and the true-unrestricted bypass tier.
 
 Open by design, and worth knowing before you rely on it:
 

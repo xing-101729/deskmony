@@ -35,7 +35,7 @@ Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 | 任務級 git worktree 隔離 | `apps/core/src/workspace/` |
 | **無人值守安全罩(權限 / 訊息 / 成本三斷路器)** | `apps/core/src/permissions/`、`bus/`、`cost/`、`enforcement/` |
 | 崩潰復原(對帳 + 人工分流) | `apps/core/src/recovery/` |
-| 遠端存取(瀏覽器/手機),且遠端不可削弱安全罩 | `apps/core/src/gateway/`、`apps/core/src/http/` |
+| 遠端存取(瀏覽器/手機)——安全罩機制本身遠端關不掉,但 2026-08-25 起遠端可與本機同權操作 auto/YOLO 與允許清單(見 §5.5) | `apps/core/src/gateway/`、`apps/core/src/http/` |
 
 ---
 
@@ -52,7 +52,7 @@ flowchart TB
 
     subgraph CORE["apps/core — headless orchestration server(Node.js)"]
         direction TB
-        GW["gateway/ WsGateway — 59 個 RPC + 10 個 push channel"]
+        GW["gateway/ WsGateway — 63 個 RPC + 11 個 push channel"]
         subgraph DOMAIN["領域模組"]
             direction LR
             Sess["session/"]
@@ -202,7 +202,9 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    Req["權限請求<br/>(toolName, input, workingDir, profileId, role)"] --> HD{"① hard-deny 命中?"}
+    Req["權限請求<br/>(toolName, input, workingDir, profileId, role)"] --> TU{"⓪ trueUnrestricted?"}
+    TU -- 是 --> Allow0["allow(繞過一切,含 hard-deny)"]
+    TU -- 否 --> HD{"① hard-deny 命中?"}
     HD -- 否 --> Rules{"②③ config 規則<br/>依序比對"}
     HD -- "是 + 遠端 或 autoMode" --> Deny["deny(硬地板)"]
     HD -- "是 + 本機 + attended + 非 autoMode" --> Strong["escalate-strong<br/>紅框二次確認<br/>不得「永遠允許」"]
@@ -227,6 +229,12 @@ flowchart TB
   ②同時寫進 config.json 與 in-memory(`PolicyEngine.addRule()`),重啟前後行為
   一致 ③escalate-strong 的請求,Core 端**強制忽略** `rememberRule`,即使 client
   硬塞。
+- ⚠️ **2026-08-25 新增第 ⓪ 步**(見 [`DECISIONS.md` §G](./DECISIONS.md)):
+  `ctx.trueUnrestricted` 為真時,`decide()` 一開頭就直接 `allow`,連
+  `checkHardDeny()` 都不呼叫——這是**唯一**能繞過 hard-deny 的路徑。只有該
+  session 已經是 `"auto-accept-all"`(YOLO)且額外經 `session.setTrueUnrestricted`
+  顯式開啟時才會是真,本機與遠端皆可觸發,啟用當下強制 UI 打字確認 + 桌面
+  通知 + 稽核記錄。
 
 ### 5.2 訊息斷路器 — `MessageBus`
 
@@ -273,16 +281,28 @@ DELETE,記錄權限決策、三斷路器 trip、啟動對帳。**這不是 event
               ↓
 handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS 檢查
                                                     ↓
-                              session.setPermissionMode / config.setFile
-                              / profile.create / profile.delete → 遠端一律拒絕
-                              permission.resolve 帶 rememberRule → 遠端一律拒絕
+                              config.setFile / profile.create / profile.delete
+                              → 遠端一律拒絕(2026-08-25 起清單只剩這三項)
 ```
 
 - **`isLocal` 只由 Core 依連線本身判定,絕不採信 client 自稱。**
 - **隧道連線(Tailscale/WireGuard)不是 loopback,一律視為遠端**——刻意的:
   隧道只解決傳輸安全,不代表操作者在本機。
-- `gateway.capabilities` 握手回傳四個布林(皆等於 `isLocal`),**只讓 UI 顯示
-  正確,不是安全邊界本身**;真正的保證是每次呼叫時的 `LOCAL_ONLY_METHODS` 檢查。
+- ⚠️ **2026-08-25 修訂**(見 [`DECISIONS.md` §G](./DECISIONS.md)):上面這張圖
+  原本還列著 `session.setPermissionMode`(已從 `LOCAL_ONLY_METHODS` 移除)與
+  一道獨立的「`permission.resolve` 帶 `rememberRule` 遠端一律拒絕」檢查
+  (已整條移除)。這是使用者明確決定的翻案,不是疏漏——遠端與本機現在對
+  「切 session 的 auto/YOLO 模式」「編輯政策允許清單」完全同權。新增的
+  `session.setTrueUnrestricted`/`policy.addRule`/`policy.removeRule`/
+  `policy.listRules` 四個方法**刻意不列入** `LOCAL_ONLY_METHODS`。
+  `session.setTrueUnrestricted` 改用另一種把關:不看連線類型,而是伺服器端
+  檢查該 session 是否已經處於 `"auto-accept-all"`(YOLO)——見 §5.1 第 ⓪ 步。
+- `gateway.capabilities` 握手回傳六個布林:`canToggleAuto`/`canEnableYolo`/
+  `canEditPolicy`/`canEnableTrueUnrestricted` **恆為 `true`**(2026-08-25 起
+  不再等於 `isLocal`);`canManageProfiles` 仍等於 `isLocal`,未變動;新增
+  `isRemoteConnection`(`!isLocal`,純顯示用)。**這些欄位只讓 UI 顯示正確,
+  不是安全邊界本身**;真正的保證是每次呼叫時的 `LOCAL_ONLY_METHODS` 檢查
+  (與 `session.setTrueUnrestricted` 的 session-mode 前置條件檢查)。
 - 綁定安全檢查用**合併後**的 `config.daemon.bindHost`:非 loopback 綁定且未設
   `DESKMONY_AUTH_TOKEN` → **拒絕啟動**。改設定檔一樣擋得住。
 - token 用 `crypto.timingSafeEqual()` 常數時間比對;認證失敗 5 次 / 30 秒冷卻。
@@ -383,14 +403,16 @@ ACP,見 `docs/DECISIONS.md` B2):
 
 ## 7. Gateway 協議
 
-`ws://` 上的 request/response + server push。**59 個 RPC 方法**,分組:
+`ws://` 上的 request/response + server push。**63 個 RPC 方法**(2026-08-25 新增
+4 個政策/真.無限制相關方法,見下方「政策」列與 Session 列),分組:
 
 | 分組 | 方法 |
 |---|---|
 | 連線 | `auth`、`gateway.capabilities` |
 | Profile | `profile.list` / `.create` / `.delete` 🔒 |
-| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode` 🔒 / `.spawnChild` / `.terminalInput` / `.resizeTerminal` |
+| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode`(2026-08-25 起遠端可用,已從 🔒 移除)/ `.setTrueUnrestricted`(2026-08-25 新增,遠端可用)/ `.spawnChild` / `.terminalInput` / `.resizeTerminal` |
 | 權限 | `permission.resolve`、`dialog.resolve` |
+| 政策 | `policy.addRule` / `.removeRule` / `.listRules`(2026-08-25 新增,遠端可用) |
 | Team | `team.create` / `.list` / `.addMember` / `.removeMember` / `.messages` / `.teammates` |
 | 訊息 | `message.send` / `.sendMessage` / `.broadcast` / `.reportStatus` / `.requestReview` / `.getContextBudget` |
 | 任務 | `task.create` / `.list` / `.get` / `.assign` / `.updateStatus` / `.delete` / `.merge` / `.setAcceptance` / `.runAcceptance` / `.approveReview`、`workspace.get` |
@@ -398,11 +420,16 @@ ACP,見 `docs/DECISIONS.md` B2):
 | 復原 | `recovery.list` / `.continue` / `.takeover` / `.rerun` / `.gitStatus` / `.resolveDirtyWorktree` / `.abandon` |
 | 設定 | `settings.getEnabledModels` / `.setEnabledModels` / `.getProviderPrefs` / `.setProviderPrefs`、`config.getEffective` / `config.setFile` 🔒、`env.detectAgents`、`adapter.capabilities` |
 
-🔒 = `LOCAL_ONLY_METHODS`,遠端一律拒絕。
+🔒 = `LOCAL_ONLY_METHODS`,遠端一律拒絕——2026-08-25 起清單只剩
+`config.setFile`/`profile.create`/`profile.delete` 三項(見
+[`DECISIONS.md` §G](./DECISIONS.md))。`config.setFile` 本身仍**不含**
+`policy` 欄位(見 §12「設定系統」),新的 `policy.*` 三個方法是另一條獨立、
+較窄、有稽核的通道,不是把 `config.setFile` 的安全子集放寬。
 
-**10 個 push channel**:`session-event`、`session-updated`、`session-list-updated`、
+**11 個 push channel**:`session-event`、`session-updated`、`session-list-updated`、
 `permission-resolved`、`team-message`、`task-updated`、`task-deleted`、
-`enforcement-notification`、`child-result`、`user-dialog-resolved`。
+`enforcement-notification`、`child-result`、`user-dialog-resolved`、
+`policy-updated`(2026-08-25 新增)。
 
 協議定義在 `packages/shared/src/gateway.ts`,zod discriminated union 是
 **單一事實來源**——core 與 desktop 兩端都從這裡取型別,不會漂移。錯誤回應除了
@@ -617,7 +644,10 @@ defaults(packages/shared/src/core-config.ts 的 CoreConfigSchema)
 2. **`config.setFile` 只允許安全子集**:`workspace.*` / `features.staticDir` /
    `log.level` / `daemon.permissionTimeoutMs` / `daemon.authRateLimit.*`。
    **刻意不允許 `daemon.port` / `daemon.bindHost`**(決定網路曝露面)與 `policy`
-   (F4:遠端不可改安全罩)——這些只能手動編輯設定檔。
+   ——這兩個欄位只能手動編輯設定檔。⚠️ `policy`(政策允許清單)本身 2026-08-25
+   起已有另一條獨立的遠端可用通道(`policy.addRule`/`.removeRule`/`.listRules`,
+   見 §7、[`DECISIONS.md` §G](./DECISIONS.md))——這裡指的是「不透過
+   `config.setFile` 這個通道整批 patch」不變,不是「policy 完全不能遠端碰」。
 3. **`validateBindSafety()` 看合併後的值**,防止改設定檔就意外把無認證的 core
    曝露到區網。
 
@@ -698,7 +728,7 @@ RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
 | **mid-turn 成本熔斷** | 未實作 | 目前唯一會發 `usage` 的 adapter 在回合結束前才發一次,沒有可觀測的「回合進行中收到 usage」情境可驗證,強行分岔只是憑空編造行為 |
 | **OpenCode / PTY 掛載 MCP** | 未實作 | 只有 Claude SDK 成員與 ACP 成員(codex/gemini,經 `packages/adapters/src/mcp-bridge-server.ts` 橋接子行程 + scoped token,見 `AcpAdapter.spawn()`)能**主動**呼叫傳訊/子 agent 工具;但**接收端是跨 software 的**(注入 prompt 對任何 session 都有效) |
 | **`session ↔ team member` 持久化** | 只在記憶體 | `sessions` 表沒有欄位記錄這條 session 屬於哪個 team member,崩潰重啟後 `RecoveryService` 只能用 `agentProfileId` 盡力反查(假設一個 profile 只被一個 member 引用) |
-| **遠端能力矩陣的細粒度版本** | 部分 | `LOCAL_ONLY_METHODS` 已擋住 auto/YOLO/policy/profile;DECISIONS F3 列的其餘項目(改預算上限、改綁定介面)尚未有對應的可遠端呼叫方法,因此暫時無需額外閘門 |
+| **遠端能力矩陣的細粒度版本** | 部分 | `LOCAL_ONLY_METHODS` 現在只擋 profile 管理(`profile.create`/`.delete`)與一般設定(`config.setFile`);2026-08-25 起 auto/YOLO 切換與 policy allowlist 編輯已開放遠端,另加一層本機遠端皆可用、但需先處於 YOLO 才能開的「真.無限制」層(見 [`DECISIONS.md` §G](./DECISIONS.md))。DECISIONS F3 列的其餘項目(改預算上限、改綁定介面)尚未有對應的可遠端呼叫方法,因此暫時無需額外閘門 |
 | **`profile.update`** | 未實作 | 只能建立/刪除;實作後必須同步加進 `LOCAL_ONLY_METHODS` |
 | **provider env 的靜態加密** | 未做 | 對外(gateway)一律遮罩成 `"***"`,但本機 SQLite 檔案本身是明文(與 Paseo 把金鑰寫進 `~/.paseo/config.json` 同一類取捨) |
 | **非 Windows 打包** | 未做 | core 與 adapters 是純 Node/TypeScript,主要是打包工程而非程式碼問題 |

@@ -29,7 +29,7 @@ Deskmony 讓你跑一整支 AI coding agent **團隊**,而不是側邊欄裡的�
 
 ## ✨ 亮點
 
-- 🛡️ **三個獨立斷路器** —— 權限、訊息、成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單。
+- 🛡️ **三個獨立斷路器** —— 權限、訊息、成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
 - 🤝 **是一支團隊,不是一個聊天機器人** —— 角色(PM / Architect / Coder / Reviewer / QA),每個可綁不同後端與 model。
 - 💬 **agent 之間互相傳訊** —— 內建 `team-bus` MCP server,提供 `send_message`、`broadcast`、`request_review`、`report_status`、`list_teammates`。人類看著即時群聊,隨時可以插話。
 - 🌱 **agent 可以開子 agent** —— 第二個 `subagent` MCP server 讓 session 把子任務委派出去並收回結果。開子 agent **刻意不自動放行**。
@@ -37,7 +37,7 @@ Deskmony 讓你跑一整支 AI coding agent **團隊**,而不是側邊欄裡的�
 - 🗂️ **git worktree 隔離** —— 每個任務一個 worktree;合併回主幹永遠需要人類親手點一下。
 - 🔌 **四個 adapter,同一套介面** —— 內嵌 Claude Agent SDK、ACP、OpenCode HTTP/SSE,以及保底的原始 PTY。
 - 🔄 **不靠猜的崩潰復原** —— 孤兒 session 在啟動時對帳,由人逐一分流。**刻意不做任何自動續接。**
-- 🌐 **可遠端,但遠端削弱不了安全罩** —— 瀏覽器或手機經 token 認證連上;遠端**永遠**關不掉安全罩。
+- 🌐 **可遠端,但清楚劃出哪些事只能留在本機** —— 瀏覽器或手機經 token 認證連上;2026-08-25 起遠端在 session 控制與政策編輯上與本機同權,但 profile 管理、綁定介面、預算上限永遠只能本機動。
 - 🌍 **多語系** —— 英文、繁體中文、日文、西班牙文。
 
 ## 🛡️ 安全罩
@@ -48,7 +48,9 @@ agent 的每一次工具呼叫都走這道階梯。**順序寫死,不可設定**
 
 ```mermaid
 flowchart TB
-    Req["工具呼叫<br/>(名稱、參數、workingDir、profile、角色)"] --> HD{"1 · 命中 hard-deny?"}
+    Req["工具呼叫<br/>(名稱、參數、workingDir、profile、角色)"] --> TU{"0 · 真.無限制?"}
+    TU -- 是 --> Allow0["ALLOW —— 繞過一切,<br/>包含 hard-deny"]
+    TU -- 否 --> HD{"1 · 命中 hard-deny?"}
     HD -- 否 --> Rules{"2 · 依序比對<br/>config 規則"}
     HD -- "是 + 遠端 或 auto 模式" --> Deny["DENY —— 硬地板"]
     HD -- "是 + 本機 + 有人在場<br/>+ 未開 auto" --> Strong["ESCALATE-STRONG<br/>紅框二次確認<br/>永不得「永遠允許」"]
@@ -68,6 +70,7 @@ flowchart TB
 - **引擎判不出來的一律 escalate**,絕不 allow。這是 `decide()` 的最後一行。
 - **逾時語意取決於現場有沒有人。** 有人看著 → 待決請求逾時後轉成 deny。沒人看著 → **完全不設計時器**,session 停在 `waiting` 等人回答。把「沒人回應」解讀成「拒絕」,等於把整晚的工作丟掉。真正防止它無限期懸著的是成本斷路器。
 - **「永遠允許」有三條紀律**:寫最窄的規則(`commandEquals` / `pathUnder`);同時寫進設定檔與記憶體,讓重啟前後行為一致;hard-deny 升級來的請求**永遠**不符資格 —— 就算 client 硬塞 `rememberRule`,core 也會把它拔掉。
+- **唯一能跨過 hard-deny 地板的例外,是刻意設計、有稽核的**:疊在 YOLO 之上的「真.無限制」層,需要打對一段確認字串才能啟用,2026-08-25 起本機與遠端皆可用(見 [`DECISIONS.md` §G](docs/DECISIONS.md))。這是 `decide()` 裡唯一能跳過 hard-deny 的路徑 —— 只在該 session 已經開著 YOLO 時才能開、只能逐 session 開、且一定要人打對確認字串;啟用當下會跳桌面通知,也會寫進稽核紀錄。
 
 ### 斷路器二 —— 訊息
 
@@ -94,7 +97,7 @@ flowchart TB
 
 `isLocal` 由 core 依連線本身的位址判定,**絕不採信 client 自稱**。隧道連線(Tailscale、WireGuard)不是 loopback,一律算**遠端** —— 隧道保護的是傳輸,不代表現場有個操作者。
 
-遠端 client **可以**旁觀、送 prompt、核准或拒絕升級請求。**不可以**把 session 切成 auto/YOLO、改政策或設定、管理 profile、或在核准時附帶「永遠允許」規則。這道閘擋在 dispatch 層,**不是靠 UI 藏按鈕** —— 繞過 UI 直接送 raw request 一樣會被擋。
+遠端 client **可以**旁觀、送 prompt、核准或拒絕升級請求、把 session 切成 auto/YOLO、編輯政策允許清單、在核准時附帶「永遠允許」規則 —— 2026-08-25 起與本機同權,這是有意識、有記錄的翻案(見 [`DECISIONS.md` §G](docs/DECISIONS.md)),推翻了先前的遠端限制。遠端甚至能透過與本機相同的打字確認閘門,開啟上面提到的「真.無限制」層。遠端**仍然不可以**:管理 agent profile、改網路綁定位址、調高預算上限。這道閘擋在 dispatch 層,**不是靠 UI 藏按鈕** —— 繞過 UI 直接送 raw request 一樣會被擋。
 
 綁非 loopback 位址又沒設 `DESKMONY_AUTH_TOKEN` 會**直接拒絕啟動**。token 刻意不是設定檔欄位,所以改設定檔擴大不了曝露面。
 
@@ -111,7 +114,7 @@ flowchart TB
     end
 
     subgraph CORE["apps/core —— headless orchestration server"]
-        GW["gateway/ —— 58 個 RPC + 10 個 push channel"]
+        GW["gateway/ —— 63 個 RPC + 11 個 push channel"]
         subgraph DOMAIN["領域"]
             direction LR
             Sess["session/"]
@@ -295,7 +298,7 @@ Deskmony/
 
 ## 🗺️ 現況
 
-已完成並有端到端測試把關:團隊與 profile 管理、跨 agent 傳訊、桌面 IDE、git worktree 隔離、帶 token 認證的瀏覽器/遠端存取、完整的三斷路器安全罩、崩潰復原、桌面與 webhook 通知、機器驗收閘、session 子 agent。
+已完成並有端到端測試把關:團隊與 profile 管理、跨 agent 傳訊、桌面 IDE、git worktree 隔離、帶 token 認證的瀏覽器/遠端存取、完整的三斷路器安全罩、崩潰復原、桌面與 webhook 通知、機器驗收閘、session 子 agent、自助式政策允許清單管理介面、真.無限制繞過層。
 
 **刻意留白的部分,在你依賴它之前值得先知道:**
 
