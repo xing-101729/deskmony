@@ -897,11 +897,25 @@ function formatInjectedPrompt(messages: TeamMessage[]): string {
   return `你收到 ${messages.length} 則隊友訊息(session 忙碌時累積,現在一次補上):\n${lines.join("\n")}`;
 }
 
+/**
+ * 使用者實測回報:團隊聊天室收不到 agent 的回覆,因為注入的 prompt 只有
+ * 內容本身,agent 不知道「用文字回答」只會留在自己的 session、不會被發送者
+ * 看到——必須明講該呼叫哪個 team-bus 工具才能讓回覆真的出現在團隊聊天。
+ * 人類插話沒有對應的 TeamMember(見 sendHumanMessage() 註解),沒有名字可以
+ * 傳給 send_message(),只能用 broadcast() 讓「正在看團隊聊天室」的人類看到;
+ * 隊友發的訊息則直接指名 send_message(to: m.from)回過去。
+ */
+function replyHint(m: TeamMessage): string {
+  return m.source === "human"
+    ? "(回覆請呼叫 broadcast 工具——單純用文字回答只會留在你自己的 session,人類看不到)"
+    : `(回覆請呼叫 send_message 工具、對象填 "${m.from}"——單純用文字回答只會留在你自己的 session,對方看不到)`;
+}
+
 function formatSingle(m: TeamMessage): string {
   const roleLabel = m.fromRole ? `(${m.fromRole})` : "";
   const broadcastLabel = m.to === "broadcast" ? "[廣播] " : "";
   const downgradeLabel = m.note ? `[${m.note}] ` : "";
-  return `${downgradeLabel}${broadcastLabel}來自 @${m.from}${roleLabel} 的訊息:${m.content}`;
+  return `${downgradeLabel}${broadcastLabel}來自 @${m.from}${roleLabel} 的訊息:${m.content}\n${replyHint(m)}`;
 }
 
 function rowToMessage(row: typeof teamMessagesTable.$inferSelect): TeamMessage {
