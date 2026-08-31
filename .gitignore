@@ -16,6 +16,10 @@ Thumbs.db
 .vite/
 .turbo/
 core-bundle/
+# scripts/bundle-core.mjs 的暫存目錄:建立 → 複製到 core-bundle/ → 立刻刪除。
+# 只在打包途中短暫存在,但那段時間內 `git add -A` 會把數百 MB 的中間產物一起
+# 加進來(打包過程本來就常跟其他 git 操作交錯),所以比照 core-bundle/ 一併忽略。
+core-bundle-tmp/
 .deskmony/
 scratchpad-tmp/
 .claude/settings.local.json
