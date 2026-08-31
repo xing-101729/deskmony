@@ -1,8 +1,38 @@
 import { z } from "zod";
-import { AgentSoftwareSchema } from "./agent-profile.js";
+import { AgentSoftwareSchema, type AgentSoftware } from "./agent-profile.js";
 import { SessionStatusSchema } from "./session.js";
 import type { MessagePriority, TeamMessage } from "./team.js";
 import type { TaskStatus } from "./task.js";
+
+/**
+ * 哪些 agent 軟體**實際掛載了** team-bus MCP 工具(`send_message`/`broadcast`/
+ * `list_teammates`/`report_status`/`request_review`)。
+ *
+ * **這是一份「實作現況」的宣告,不是願望清單**——權威來源是這兩個 adapter:
+ *   - `claude-agent-sdk` → packages/adapters/src/claude-sdk-adapter.ts
+ *     (`createTeamBusMcpServer()` 直接掛進 SDK 的 `mcpServers`)
+ *   - `acp`              → packages/adapters/src/acp-adapter.ts
+ *     (透過 `mcp-bridge-server.ts`,以 scoped token 掛進 `session/new`)
+ *
+ * `opencode`(走自己的 HTTP server API,adapter 內沒有任何 MCP 掛載)與
+ * `pty`(純終端位元組直通,**架構上根本沒有工具通道**,見 pty-adapter.ts 檔頭)
+ * 都沒有掛。這兩種 software 的成員**仍然收得到**注入的訊息,但沒有任何工具能把
+ * 回覆送回團隊聊天——回覆只會留在它自己的 session 裡。
+ *
+ * 用途(2026-08-28,使用者實測回報的真實問題):注入訊息時據此決定要不要告訴
+ * agent「該呼叫哪個工具回覆」。對**沒有**這些工具的成員謊稱有,只會讓它反覆
+ * 呼叫不存在的工具、然後困惑地卡住——寧可如實告訴它回覆到不了對方那邊。
+ *
+ * 註:OpenCode 使用者若想要完整的團隊功能,可改用 `opencode acp`(實測
+ * OpenCode 1.18.7 以 stdio 說 ACP 且確實會連上 stdio 型 MCP server),
+ * 走 `software: "acp"` 這條已經掛好 team-bus 的路。
+ */
+export const SOFTWARE_WITH_TEAM_BUS: readonly AgentSoftware[] = ["claude-agent-sdk", "acp"];
+
+/** 見 `SOFTWARE_WITH_TEAM_BUS`。 */
+export function hasTeamBusTools(software: AgentSoftware): boolean {
+  return SOFTWARE_WITH_TEAM_BUS.includes(software);
+}
 
 /**
  * TeamBusPort:MessageBus 對外(給 team-bus MCP 工具薄層使用)的注入介面。

@@ -17,7 +17,11 @@
  * 的既有先例)。
  *
  * 涵蓋(§7 檢查清單「e2e」項目逐一對應):
- *   A. 未綁任務 → 拒收(sendMessage / broadcast 都要擋)
+ *   A.(2026-08-28 更新)未綁任務時 sendMessage/broadcast 不再拒收,改落一個
+ *      穩定、Core 推導、agent 無法指定的 per-member contextId(不同 member
+ *      彼此隔離、依然受既有訊息數上限管制——見 message-bus.ts 頂端「2026-08-28
+ *      補充」說明,原因是使用者實測發現原本的「一律拒收」連帶擋住了沒有任務
+ *      在身的成員回覆人類/隊友隨口訊息的正常情境)
  *   B. agent 無法偽造 contextId(gateway 參數多塞 contextId 完全無效;換了
  *      綁定的任務,下一則訊息的 contextId 自動跟著換,不需要、也無法由呼叫端
  *      指定)
@@ -319,7 +323,7 @@ async function waitForMessageContaining(client, sessionId, substring, timeoutMs)
 // =======================================================================
 // A: 未綁任務 → sendMessage / broadcast 皆拒收;但 report_status 完全不受影響。
 // =======================================================================
-async function testNoContextRejection() {
+async function testNoTaskOwnBudget() {
   const gitVersion = runGitSync(["--version"], process.cwd());
   if (gitVersion.status !== 0) {
     record("A(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
@@ -330,6 +334,11 @@ async function testNoContextRejection() {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-msgbudget-a-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-msgbudget-a-home-"));
   const repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-msgbudget-a-repo-"));
+  const configPath = path.join(homeDir, "config.json");
+  // 夠大讓 A1 的 3 則(send1/send2/broadcast)不會提前撞頂,又夠小讓 A2 能在
+  // 幾則之內把它送到頂驗證確實會 trip。
+  const MAX = 5;
+  writeConfigWithMessageBudget(configPath, MAX);
 
   let coreProc;
   let client;
@@ -350,6 +359,13 @@ async function testNoContextRejection() {
       role: "Coder",
       canInterrupt: false,
     });
+    const { member: otherMember } = await client.rpc("team.addMember", {
+      teamId,
+      agentProfileId: profile.id,
+      name: "OtherNoTaskMember",
+      role: "Coder",
+      canInterrupt: false,
+    });
     await client.rpc("team.addMember", {
       teamId,
       agentProfileId: profile.id,
@@ -358,28 +374,28 @@ async function testNoContextRejection() {
       canInterrupt: false,
     });
 
-    // ---- sendMessage:沒有綁定任何進行中任務 → 拒收 ----
-    let sendRejected = false;
-    let sendErr = "";
-    try {
-      await client.rpc("message.sendMessage", { teamId, fromMemberId: member.id, to: "Target", content: "hello" });
-    } catch (err) {
-      sendRejected = true;
-      sendErr = String(err);
-    }
-    const sendErrMentionsTask = sendErr.includes("進行中的任務");
+    // ---- A1: 沒有綁定任何進行中任務 → 不再拒收,落一個穩定的 per-member
+    // contextId(同一 member 重複使用同一個桶;broadcast 也走同一套推導)----
+    const expectedContextId = `member:${member.id}`;
+    const send1 = await client.rpc("message.sendMessage", { teamId, fromMemberId: member.id, to: "Target", content: "hello" });
+    const send2 = await client.rpc("message.sendMessage", { teamId, fromMemberId: member.id, to: "Target", content: "hello again" });
+    const contextIdStableAcrossSends = send1.message.contextId === expectedContextId && send2.message.contextId === expectedContextId;
 
-    // ---- broadcast:同樣拒收 ----
-    let broadcastRejected = false;
-    let broadcastErr = "";
+    let broadcastOk = false;
+    let broadcastContextId;
     try {
-      await client.rpc("message.broadcast", { teamId, fromMemberId: member.id, content: "hello all" });
-    } catch (err) {
-      broadcastRejected = true;
-      broadcastErr = String(err);
+      const broadcastResult = await client.rpc("message.broadcast", { teamId, fromMemberId: member.id, content: "hello all" });
+      broadcastOk = true;
+      broadcastContextId = broadcastResult.message.contextId;
+    } catch {
+      broadcastOk = false;
     }
 
-    // ---- report_status:完全不受影響,沒有 taskId 也能正常回報 ----
+    // 不同、同樣沒有任務的成員 → 各自獨立的桶,不會互相混在一起。
+    const otherSend = await client.rpc("message.sendMessage", { teamId, fromMemberId: otherMember.id, to: "Target", content: "hi from other" });
+    const isolatedPerMember = otherSend.message.contextId === `member:${otherMember.id}` && otherSend.message.contextId !== expectedContextId;
+
+    // report_status 完全不受影響,固定走 "legacy"、不佔用任何 per-member 額度。
     let reportStatusOk = false;
     try {
       const { message } = await client.rpc("message.reportStatus", {
@@ -394,9 +410,45 @@ async function testNoContextRejection() {
     }
 
     record(
-      "A: session 未綁定任何進行中任務時,send_message/broadcast 一律拒收(訊息從未寫入 team_messages),但 report_status 完全不受影響",
-      sendRejected && sendErrMentionsTask && broadcastRejected && reportStatusOk,
-      `sendRejected=${sendRejected}(${sendErr}), broadcastRejected=${broadcastRejected}(${broadcastErr}), reportStatusOk=${reportStatusOk}`,
+      "A1: 沒有進行中任務時,send_message/broadcast 不再拒收,改落一個穩定、Core 推導、agent 無法指定的 per-member contextId(同一 member 重複使用同一個桶,不同 member 彼此隔離);report_status 不受影響",
+      contextIdStableAcrossSends && broadcastOk && broadcastContextId === expectedContextId && isolatedPerMember && reportStatusOk,
+      `send1.contextId=${send1.message.contextId}(應=${expectedContextId}), send2.contextId=${send2.message.contextId}, ` +
+        `broadcastOk=${broadcastOk}(contextId=${broadcastContextId}), otherMember.contextId=${otherSend.message.contextId}, reportStatusOk=${reportStatusOk}`,
+    );
+
+    // ---- A2: 無任務的 per-member 桶依然受既有訊息數上限管制,不是繞過 S2 的
+    // 後門。動態查目前已用額度、精準補到頂,不寫死 A1 究竟消耗了幾則(對 A1
+    // 之後的改動更不脆弱)。----
+    const budgetBefore = await client.rpc("message.getContextBudget", { contextId: expectedContextId });
+    const remaining = MAX - budgetBefore.count;
+    for (let i = 0; i < remaining; i++) {
+      await client.rpc("message.sendMessage", { teamId, fromMemberId: member.id, to: "Target", content: `fill-${i}` });
+    }
+
+    let overLimitRejected = false;
+    let overLimitErr = "";
+    try {
+      await client.rpc("message.sendMessage", { teamId, fromMemberId: member.id, to: "Target", content: "over-limit" });
+    } catch (err) {
+      overLimitRejected = true;
+      overLimitErr = String(err);
+    }
+    const overLimitErrClear = overLimitErr.includes("額度已用盡") && overLimitErr.includes(`${MAX}/${MAX}`);
+
+    // otherMember 的桶完全獨立,只送過 1 則(離 MAX 還遠),不受 member 觸發
+    // trip 的牽連,應該仍能正常送出。
+    let otherStillOk = false;
+    try {
+      await client.rpc("message.sendMessage", { teamId, fromMemberId: otherMember.id, to: "Target", content: "still fine" });
+      otherStillOk = true;
+    } catch {
+      otherStillOk = false;
+    }
+
+    record(
+      "A2: 無任務的 per-member contextId 依然受既有訊息數上限管制(不是繞過 S2 的無限暢聊後門)——補到上限後 send_message 明確拒收;其他成員各自獨立的桶不受牽連",
+      overLimitRejected && overLimitErrClear && otherStillOk,
+      `budgetBefore=${JSON.stringify(budgetBefore)}, overLimitRejected=${overLimitRejected}(${overLimitErr}), otherStillOk=${otherStillOk}`,
     );
   } catch (err) {
     record("A 執行過程發生未預期錯誤", false, String(err));
@@ -1077,8 +1129,8 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("=== S2 e2e:A(未綁任務 → 拒收)===");
-  await testNoContextRejection();
+  console.log("=== S2 e2e:A(未綁任務 → per-member 獨立 contextId,不再拒收)===");
+  await testNoTaskOwnBudget();
 
   console.log("\n=== S2 e2e:B(contextId 無法偽造/由 Core 推導)===");
   await testContextCannotBeSpoofed();

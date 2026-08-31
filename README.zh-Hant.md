@@ -25,13 +25,13 @@ Deskmony 讓你跑一整支 AI coding agent **團隊**,而不是側邊欄裡的�
 
 論點很簡單:**讓 agent 無人值守運作,靠的不是「更信任它」,而是不管你信不信任它、斷路器都一樣會跳。** 三個各自獨立的斷路器罩住每個 agent、每則訊息、每一分花費。任一條都能單獨叫停失控,而且**沒有一條可以從遠端關掉**。
 
-這不是行銷話術。純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **2,268 行,佔 orchestration core 的 23%**,這還沒算上散在 session manager 與 message bus 裡的決策編排。
+這不是行銷話術。純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **2,267 行(不含空行),佔 orchestration core 的 22%**,這還沒算上散在 session manager 與 message bus 裡的決策編排。
 
 ## ✨ 亮點
 
 - 🛡️ **三個獨立斷路器** —— 權限、訊息、成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
 - 🤝 **是一支團隊,不是一個聊天機器人** —— 角色(PM / Architect / Coder / Reviewer / QA),每個可綁不同後端與 model。
-- 💬 **agent 之間互相傳訊** —— 內建 `team-bus` MCP server,提供 `send_message`、`broadcast`、`request_review`、`report_status`、`list_teammates`。人類看著即時群聊,隨時可以插話。
+- 💬 **agent 之間互相傳訊** —— 內建 `team-bus` MCP server,提供 `send_message`、`broadcast`、`request_review`、`report_status`、`list_teammates`。人類看著即時群聊,隨時可以插話。長命成員收到訊息時若還沒有 session,會自動幫它開一條;每則注入的訊息也會直接點名該用哪個工具回覆,回話才會回到群聊,而不是卡在 agent 自己的對話紀錄裡。這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸上(後者涵蓋 Codex、Gemini,以及走 `opencode acp` 的 OpenCode);`pty` 直通**架構上沒有工具通道**,這類成員仍然收得到訊息,但會被如實告知「回覆傳不回去」,而不是被交付一個根本不存在的工具。
 - 🌱 **agent 可以開子 agent** —— 第二個 `subagent` MCP server 讓 session 把子任務委派出去並收回結果。開子 agent **刻意不自動放行**。
 - 🖥️ **貨真價實的桌面 IDE** —— 串流 markdown、行內 diff、內嵌終端機、todo 追蹤、圖片工具輸出、互動式提問元件。
 - 🗂️ **git worktree 隔離** —— 每個任務一個 worktree;合併回主幹永遠需要人類親手點一下。
@@ -76,7 +76,7 @@ flowchart TB
 
 在既有投遞策略前面加兩道閘:
 
-1. **contextId 由 core 推導,agent 給不了。** 它來自發送者當下綁定的任務;推不出來就直接拒收。讓被管制的對象自己申報管制欄位,等於讓它換個名字就能把預算歸零。
+1. **contextId 由 core 推導,agent 給不了。** 它來自發送者當下綁定的任務;沒有進行中的任務時,則落在 `member:<memberId>` 這個同樣由 core 推導的專屬桶。讓被管制的對象自己申報管制欄位,等於讓它換個名字就能把預算歸零。*(2026-08-28 之前推不出任務一律拒收,但那連帶擋掉了「手上沒任務的成員回覆人類或隊友」——人類插話天然有速度上限,不是同一種風險。現在無任務的情況改成獨立計費的一桶,照樣吃同一條上限,成員之間也互不相干。)*
 2. **每 context 的訊息預算。** 燒完就熔斷,拒收該 context 後續的 `send_message` / `broadcast` / `request_review`。
 
 **只切橫向閒聊,不切縱向進度** —— `report_status` 與 `list_teammates` 照常運作,已熔斷的 context 仍然回報得了自己做到哪。
@@ -114,7 +114,7 @@ flowchart TB
     end
 
     subgraph CORE["apps/core —— headless orchestration server"]
-        GW["gateway/ —— 63 個 RPC + 11 個 push channel"]
+        GW["gateway/ —— 67 個 RPC + 11 個 push channel"]
         subgraph DOMAIN["領域"]
             direction LR
             Sess["session/"]
@@ -123,7 +123,7 @@ flowchart TB
             Team["team/"]
             Work["workspace/"]
         end
-        subgraph SHIELD["安全罩 · 佔 core 23%"]
+        subgraph SHIELD["安全罩 · 佔 core 22%"]
             direction LR
             Perm["permissions/"]
             Cost["cost/"]
@@ -283,7 +283,7 @@ Deskmony/
 
 ## 🧪 測試
 
-**11 支端到端測試、451 個斷言**,全部直接對真實的 headless core 打 WebSocket gateway —— **從不經過 Electron**。主套件切成 *deterministic* 組(驗收閘門,必須 100% PASS)與 *model-behavior* 組(斷言依賴真實模型當輪自由選擇怎麼講)。
+**11 支端到端測試、456 個斷言**,全部直接對真實的 headless core 打 WebSocket gateway —— **從不經過 Electron**。主套件切成 *deterministic* 組(驗收閘門,必須 100% PASS)與 *model-behavior* 組(斷言依賴真實模型當輪自由選擇怎麼講)。
 
 三個 fake 後端 —— `fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo` —— 讓 deterministic 組不需要真實模型也不需要外部 CLI 就能跑。`package-smoke.mjs` 是打包迴歸測試,驗證建出來的執行檔能解析所有依賴。
 
@@ -305,7 +305,7 @@ Deskmony/
 - **PTY 層沒有執行沙箱。** 在做出來之前,PTY agent 就是唯讀 —— 這是誠實的後果,不是疏忽。
 - **沒有 LLM lead。** 任務拆解目前純人工,`TaskService` 是完全確定性的。
 - **沒有回合中途的成本熔斷。** 唯一會發 usage 的 adapter 是在回合結束時才發,根本沒有可觀測的「回合進行中收到 usage」情境可以對著做。硬分岔只是憑空編造行為。
-- **只有 Claude SDK 的 session 能「主動」傳訊。** ACP、OpenCode、PTY 還沒掛上 MCP server —— 不過「接收」注入的訊息在所有後端都能運作。
+- **只有 Claude SDK 與 ACP 的 session 能「主動」傳訊。** ACP agent(Codex、Gemini CLI)透過一個持有 scoped、逐 session token 的橋接子行程接到同樣那兩個 MCP server;OpenCode、PTY 尚未掛載 —— 不過「接收」注入的訊息在所有後端都能運作。
 - **provider 的密鑰對外遮罩,本機是明文儲存**,與 Paseo 對它的設定檔採取同一種取捨。
 - **目前只支援 Windows 打包。**
 

@@ -25,13 +25,13 @@ Most multi-agent coding tools give you two options: approve every permission pro
 
 The thesis is simple: **letting agents run unattended isn't about trusting them more — it's about circuit breakers that don't care how much you trust them.** Three independent breakers sit underneath every agent, every message, and every dollar spent. Any one of them can halt a runaway on its own, and none of them can be switched off from a remote client.
 
-That isn't a marketing line. The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **2,268 lines, 23% of the orchestration core**, before counting the decision plumbing inside the session manager and message bus.
+That isn't a marketing line. The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **2,267 non-blank lines, 22% of the orchestration core**, before counting the decision plumbing inside the session manager and message bus.
 
 ## ✨ Highlights
 
 - 🛡️ **Three independent circuit breakers** — permissions, messages, and cost. Default-deny throughout, with a hard-deny list that no auto-mode can bypass — the one deliberate exception is an explicit, typed-confirmation "true-unrestricted" tier, covered below.
 - 🤝 **Agent teams, not a single chatbot** — roles (PM / Architect / Coder / Reviewer / QA), each bound to a different backend and model.
-- 💬 **Agents message each other** — a built-in `team-bus` MCP server gives every agent `send_message`, `broadcast`, `request_review`, `report_status`, and `list_teammates`. Humans watch the live team chat and can interject at any time.
+- 💬 **Agents message each other** — a built-in `team-bus` MCP server offers `send_message`, `broadcast`, `request_review`, `report_status`, and `list_teammates`. Humans watch the live team chat and can interject at any time. A persistent member with no session yet gets one spawned on delivery, and every injected message names the tool to reply with, so answers land back in the team chat instead of being stranded in the agent's own transcript. The tools are mounted on the `claude-agent-sdk` and `acp` transports (the latter covers Codex, Gemini, and OpenCode via `opencode acp`); a `pty` passthrough has no tool channel at all, so members on it still *receive* messages but are told plainly that their reply cannot get back — never handed a tool that isn't there.
 - 🌱 **Agents can spawn sub-agents** — a second `subagent` MCP server lets a session delegate to children and collect their results. Spawning is deliberately *not* auto-approved.
 - 🖥️ **A real desktop IDE** — streaming markdown, inline diffs, an embedded terminal, todo tracking, image tool output, and interactive question prompts.
 - 🗂️ **Git-worktree isolation** — every task gets its own worktree; merging back to the trunk always takes a human click.
@@ -76,7 +76,7 @@ A few properties worth stating plainly:
 
 Two gates in front of the existing delivery strategy:
 
-1. **The context id is derived by the core, never supplied by the agent.** It comes from whichever task the sender is currently bound to; if it can't be derived, the message is refused. Letting the thing being rate-limited declare its own bucket means it can reset the budget by renaming it.
+1. **The context id is derived by the core, never supplied by the agent.** It comes from whichever task the sender is currently bound to — and when the sender has no live task, from `member:<memberId>`, a per-member bucket the core derives exactly the same way. Letting the thing being rate-limited declare its own bucket means it can reset the budget by renaming it. *(Until 2026-08-28 a message with no derivable task was refused outright. That also silenced a member with no task in hand answering a human or a teammate — a case with a human's own speed limit on it — so the no-task path now gets its own metered bucket instead of a wall. It is still metered by the same per-context ceiling, and members stay isolated from each other.)*
 2. **Per-context message budget.** Blow through it and the breaker trips, refusing further `send_message` / `broadcast` / `request_review` for that context.
 
 **It severs lateral chatter, not vertical progress** — `report_status` and `list_teammates` keep working, so a tripped context can still report where it got to.
@@ -114,7 +114,7 @@ flowchart TB
     end
 
     subgraph CORE["apps/core — headless orchestration server"]
-        GW["gateway/ — 63 RPC methods + 11 push channels"]
+        GW["gateway/ — 67 RPC methods + 11 push channels"]
         subgraph DOMAIN["domain"]
             direction LR
             Sess["session/"]
@@ -123,7 +123,7 @@ flowchart TB
             Team["team/"]
             Work["workspace/"]
         end
-        subgraph SHIELD["safety shield · 23% of core"]
+        subgraph SHIELD["safety shield · 22% of core"]
             direction LR
             Perm["permissions/"]
             Cost["cost/"]
@@ -283,7 +283,7 @@ Deskmony/
 
 ## 🧪 Testing
 
-**11 end-to-end suites, 451 assertions**, all driving a real headless core over the WebSocket gateway — **never through Electron**. The main suite splits into a *deterministic* group, which is the acceptance gate and must pass 100%, and a *model-behavior* group whose assertions depend on what a real model chose to say that run.
+**11 end-to-end suites, 456 assertions**, all driving a real headless core over the WebSocket gateway — **never through Electron**. The main suite splits into a *deterministic* group, which is the acceptance gate and must pass 100%, and a *model-behavior* group whose assertions depend on what a real model chose to say that run.
 
 Three fake backends — `fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo` — let the deterministic group run without real models or external CLIs. `package-smoke.mjs` is a packaging regression test that verifies the built executable resolves all its dependencies.
 
@@ -305,7 +305,7 @@ Open by design, and worth knowing before you rely on it:
 - **No execution sandbox for the PTY tier.** Until there is one, PTY agents stay read-only — that's the honest consequence, not an oversight.
 - **No LLM lead.** Task decomposition is manual; `TaskService` is fully deterministic.
 - **No mid-turn cost cutoff.** The only adapter that emits usage does so as a turn ends, so there is no observable "usage arrived mid-turn" case to build against. Branching on it would be inventing behaviour.
-- **Only Claude SDK sessions can *initiate* messages.** ACP, OpenCode, and PTY don't mount the MCP servers yet — though *receiving* injected messages works across every backend.
+- **Only Claude SDK and ACP sessions can *initiate* messages.** ACP agents (Codex, Gemini CLI) reach the same two MCP servers through a bridge subprocess holding a scoped, per-session token; OpenCode and PTY don't mount them yet — though *receiving* injected messages works across every backend.
 - **Provider secrets are masked over the wire but stored in plaintext locally**, the same trade-off Paseo makes with its config file.
 - **Windows packaging only** so far.
 

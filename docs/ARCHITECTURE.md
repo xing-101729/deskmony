@@ -20,8 +20,9 @@ Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 
 這句話決定了整個架構的重心。「多 agent 能互聊」只是功能,不是護城河;真正的主軸是
 **由三個獨立斷路器組成的安全罩**(見 §5)。專門服務安全罩的四個目錄
-(`permissions/`、`cost/`、`enforcement/`、`recovery/`)合計 **2,268 行,佔
-`apps/core` 的 23%**;若再算上散在 `session-manager.ts` 的決策編排
+(`permissions/`、`cost/`、`enforcement/`、`recovery/`)合計 **2,267 行(不含
+空行;含空行 2,445 行),佔 `apps/core` 的 22%**;若再算上散在
+`session-manager.ts` 的決策編排
 (`buildExecContext()`、`checkAndExpireYolo()`、`resolvePermission()`)與
 `MessageBus` 的訊息預算閘,實際比重更高。
 
@@ -52,7 +53,7 @@ flowchart TB
 
     subgraph CORE["apps/core — headless orchestration server(Node.js)"]
         direction TB
-        GW["gateway/ WsGateway — 63 個 RPC + 11 個 push channel"]
+        GW["gateway/ WsGateway — 67 個 RPC + 11 個 push channel"]
         subgraph DOMAIN["領域模組"]
             direction LR
             Sess["session/"]
@@ -241,8 +242,13 @@ flowchart TB
 兩道閘,加在既有投遞策略之前:
 
 1. **contextId 由 Core 推導,agent 不可指定**(`deriveContextId()`)——依發送者
-   當下綁定的任務推導,推不出來(沒有進行中的任務)一律拒收。讓被管制者自己
-   申報管制欄位,等於讓它換個 id 就能重置預算。
+   當下綁定的任務推導。讓被管制者自己申報管制欄位,等於讓它換個 id 就能重置
+   預算。
+   **2026-08-28 修正**:沒有進行中任務時原本一律拒收,使用者實測發現這連帶擋掉
+   了「沒有任務在身的成員回覆人類或隊友」這個正常情境。現在改成落在
+   `member:<memberId>`——同樣由 Core 推導、agent 一樣指定不了,每個成員各自
+   一桶、彼此隔離,並且照樣吃同一條訊息數上限(e2e `A2` 專門守這一點),
+   不是繞過斷路器的無限暢聊後門。
 2. **每 context 的 agent 訊息數上限**——超過即 trip + 拒收該 context 後續的
    `send_message` / `broadcast` / `request_review`。
 
@@ -403,14 +409,15 @@ ACP,見 `docs/DECISIONS.md` B2):
 
 ## 7. Gateway 協議
 
-`ws://` 上的 request/response + server push。**63 個 RPC 方法**(2026-08-25 新增
-4 個政策/真.無限制相關方法,見下方「政策」列與 Session 列),分組:
+`ws://` 上的 request/response + server push。**67 個 RPC 方法**(連同 `auth` 一起
+算;2026-08-25 新增 4 個政策/真.無限制相關方法,見下方「政策」列與 Session
+列),分組:
 
 | 分組 | 方法 |
 |---|---|
 | 連線 | `auth`、`gateway.capabilities` |
-| Profile | `profile.list` / `.create` / `.delete` 🔒 |
-| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode`(2026-08-25 起遠端可用,已從 🔒 移除)/ `.setTrueUnrestricted`(2026-08-25 新增,遠端可用)/ `.spawnChild` / `.terminalInput` / `.resizeTerminal` |
+| Profile | `profile.list` / `.create` / `.delete` 🔒 / `.listForSubagent`(S12,供子 agent 挑 profile) |
+| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode`(2026-08-25 起遠端可用,已從 🔒 移除)/ `.setTrueUnrestricted`(2026-08-25 新增,遠端可用)/ `.spawnChild` / `.listChildren` / `.sendToChild` / `.spawnChildForSubagent`(S12 子 agent,見 §9.3)/ `.terminalInput` / `.resizeTerminal` |
 | 權限 | `permission.resolve`、`dialog.resolve` |
 | 政策 | `policy.addRule` / `.removeRule` / `.listRules`(2026-08-25 新增,遠端可用) |
 | Team | `team.create` / `.list` / `.addMember` / `.removeMember` / `.messages` / `.teammates` |
@@ -481,8 +488,21 @@ erDiagram
 
 ### 9.1 兩個內建 MCP server
 
-只掛在 `ClaudeAgentSdkAdapter`(其餘 adapter 這輪不掛;ACP 協議雖然也能承載
-MCP,但需要另外設計橋接):
+掛在 **`claude-agent-sdk`** 與 **`acp`** 兩種傳輸上(見
+`packages/shared/src/team-bus.ts` 的 `SOFTWARE_WITH_TEAM_BUS`——那是這件事的
+單一事實來源):前者由 `ClaudeAgentSdkAdapter` 直接把 SDK MCP server 放進
+`mcpServers`;後者由 `AcpAdapter` 透過 `mcp-bridge-server.ts`(stdio 型 MCP,
+以 scoped token 綁定該 session)掛進 `session/new`。
+
+**`opencode`(HTTP server API)與 `pty`(純終端位元組直通)沒有掛。** `pty`
+是架構上不可能——它沒有任何工具通道;`opencode` 則有一條現成的替代路:
+provider 目錄的「OpenCode(ACP,支援團隊訊息)」改用 `opencode acp` 走
+`software: "acp"`,即可沿用上面那條已經掛好的橋(2026-08-28 對 opencode
+1.18.7 實測:它以 stdio 說 ACP,且確實會啟動 stdio 型 MCP server)。
+
+因此 `MessageBus` 注入訊息時會**依收訊者的 software 決定回覆指引**:沒有工具
+的成員收到的是「你的回覆只會留在自己的 session」的如實告知,絕不會被叫去呼叫
+不存在的工具(e2e 步驟 12b/12f 分別守住正反兩面)。
 
 | MCP server | 工具 | 進 `allowedTools`(自動放行)? |
 |---|---|---|
@@ -519,7 +539,9 @@ sequenceDiagram
             BUS->>BUS: 留在 Mailbox,回合結束後批次注入
         else priority=interrupt 且 canInterrupt
             BUS->>B: await interrupt() 確實生效,才注入
-        else 無活躍 session
+        else 無活躍 session 且 lifecycle=persistent
+            BUS->>BUS: 自動建立 session(雙重檢查鎖)後注入
+        else 無活躍 session 且 lifecycle=ephemeral
             BUS->>BUS: 留在 Mailbox,session 建立後補投
         end
         BUS->>DB: 標記 deliveredAt
@@ -528,6 +550,22 @@ sequenceDiagram
 
 **interrupt 必須先 `await` 確實生效才注入** —— `AgentAdapter.interrupt()` 回傳
 Promise 的語意就是「resolve 才代表真的停了」,不 await 會與尚未停下的回合競爭。
+
+**長命成員沒有 session 時自動上線**(2026-08-25,`resolveSessionForDelivery()`)
+——`lifecycle: "persistent"` 的成員本來就以「在線可達」為存在理由
+([agent-lifecycle_hld.md §2.0](./LAYER-3-hld/agent-lifecycle_hld.md)),但過去
+只有團隊啟動或人工點擊才會給它 session,使用者實測回報訊息因此石沉大海。現在
+投遞前查不到 session 就依 team(其次 profile)的 `workingDir` 自動建一條,同一
+member 用雙重檢查鎖,避免兩則幾乎同時抵達的訊息各建一個 session。短命
+(ephemeral)成員維持原設計**不**自動建——不在線是刻意允許的狀態(同文件 §3)。
+`workingDir` 取不到或 `createSession()` 失敗時靜默降級回 `"no-session"`,訊息
+安全留在 Mailbox,前端 `TeamChatView` 顯示一則非阻斷提示,不讓自動上線的失敗
+變成整個 `sendMessage` 的硬錯誤。
+
+**注入的 prompt 會附上「該怎麼回」**(2026-08-27,`replyHint()`)——agent 無從
+得知「直接用文字回答」只會留在自己的 session、發送者永遠看不到,所以注入內容
+後面直接點名該呼叫哪個工具:人類插話沒有對應的 `TeamMember` 可以指名,提示用
+`broadcast`;隊友來的訊息則提示 `send_message(to: <發送者>)`。
 
 ### 9.3 Session 子 agent(獨立於 team/看板的另一條路)
 

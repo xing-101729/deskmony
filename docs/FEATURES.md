@@ -27,9 +27,19 @@ Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊�
 - **agent 互傳訊息**:內建 `team-bus` MCP server,agent 能呼叫
   `send_message`、`broadcast`、`report_status`、`request_review`、
   `list_teammates`。人類在「團隊群聊」視圖看即時對話,隨時能插話。
+  這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸(後者涵蓋 Codex、Gemini,
+  以及走 `opencode acp` 的 OpenCode);`pty` 直通沒有工具通道,該類成員收得到
+  訊息但回覆傳不回群聊——注入時會如實告知,不會叫它呼叫不存在的工具。
+  權威清單見 `packages/shared/src/team-bus.ts` 的 `SOFTWARE_WITH_TEAM_BUS`。
 - **投遞策略**:目標 idle → 立即注入;busy → 排隊,回合結束後批次注入;
-  `priority=interrupt` 且對方允許被中斷 → 先確實中斷才注入;沒有活躍
-  session → 落 Mailbox(DB 持久化,不是純記憶體),session 建立後補投。
+  `priority=interrupt` 且對方允許被中斷 → 先確實中斷才注入;沒有活躍 session
+  的長命(persistent)成員 → **自動幫它開一條 session 再投遞**(「長命」的定義
+  就是在線可達;同一成員有雙重檢查鎖,不會被兩則同時到的訊息開出兩條);短命
+  (ephemeral)成員或自動上線失敗 → 落 Mailbox(DB 持久化,不是純記憶體),
+  session 建立後補投,群聊介面會提示「對方目前不在線」。
+- **注入的訊息會告訴 agent 怎麼回**:agent 不會知道「直接用文字回答」只留在自己
+  的 session,所以注入內容後面會點名該呼叫的工具——人類插話提示用 `broadcast`
+  (人類沒有對應的 team member 可以指名),隊友訊息提示 `send_message(to: …)`。
 - **Session 子 agent**:任一 session 可透過 `subagent` MCP server 呼叫
   `spawn_subagent`/`send_to_subagent`,把工作委派給子 session 並收集結果
   (完成後自動把結果當 prompt 注回父 session)。**刻意不自動放行**——會多跑
@@ -89,10 +99,14 @@ Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊�
 
 ### 3.2 訊息斷路器
 
-- 每個 context(綁在進行中的任務)自帶訊息數上限,燒完就對該 context 的
+- 每個 context 自帶訊息數上限,燒完就對該 context 的
   `send_message`/`broadcast`/`request_review` 一律拒收熔斷。
 - context id 由 Core 依當下綁定的任務推導,agent 不可自己指定——避免被管制
   的一方能透過換 id 重置額度。
+- **手上沒有進行中任務時**(2026-08-28 修正):不再一律拒收,改落
+  `member:<memberId>` 這個同樣由 Core 推導、agent 一樣指定不了的專屬桶——每位
+  成員各自一桶、彼此隔離,而且照樣吃同一條訊息數上限。原本的「無任務即拒收」
+  連帶擋掉了沒有任務在身的成員回覆人類或隊友,那不是斷路器要防的失控形態。
 - 只斷橫向閒聊,不斷縱向進度回報:`report_status`/`list_teammates` 不受影響。
 
 ### 3.3 成本斷路器

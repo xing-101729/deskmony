@@ -880,14 +880,19 @@ async function messageBusSmokeTest(client, workspaceDir) {
     const ev = await waitForMessageContaining(client, coderSessionId, content, 15_000);
     const echoed = ev.event.delta;
     const wrapperOk = echoed.includes("來自 @Tester") && echoed.includes(content);
+    // 2026-08-28:注入的 prompt 會附一句「回覆指引」。收訊者是 acp(有掛
+    // team-bus 工具,見 SOFTWARE_WITH_TEAM_BUS),且發送者是人類(沒有對應的
+    // TeamMember 可以被 send_message 指名),所以應該指引它用 broadcast——
+    // 且**不可**出現「沒有團隊訊息工具」那句(那是給 opencode/pty 的,見 12f)。
+    const replyHintOk = echoed.includes("broadcast") && !echoed.includes("沒有團隊訊息工具");
 
     const historyResult = await client.rpc("team.messages", { teamId });
     const persisted = historyResult.messages.find((m) => m.content === content);
 
     record(
-      "步驟12b MessageBus:idle 成員立即以 prompt 注入(fake ACP agent 回顯驗證確實收到)",
-      sendResult.delivered === "immediate" && wrapperOk && Boolean(persisted) && persisted?.to === "Coder",
-      `delivered=${sendResult.delivered}, echoed=${JSON.stringify(echoed)}, persisted=${JSON.stringify(persisted)}`,
+      "步驟12b MessageBus:idle 成員立即以 prompt 注入(fake ACP agent 回顯驗證確實收到),且附上正確的回覆指引(acp 有 team-bus 工具 → 指引用 broadcast)",
+      sendResult.delivered === "immediate" && wrapperOk && replyHintOk && Boolean(persisted) && persisted?.to === "Coder",
+      `delivered=${sendResult.delivered}, replyHintOk=${replyHintOk}, echoed=${JSON.stringify(echoed)}, persisted=${JSON.stringify(persisted)}`,
     );
   } catch (err) {
     record("步驟12b MessageBus:idle 成員立即以 prompt 注入", false, String(err));
@@ -997,8 +1002,69 @@ async function messageBusSmokeTest(client, workspaceDir) {
     record("步驟12e MessageBus:目標成員沒有活躍 session 時留在 Mailbox,session 建立後自動補投", false, String(err));
   }
 
-  // ---- 12f: 清理 ----
-  const createdSessions = [coderSessionId, reviewerSessionId, qaSessionId].filter(Boolean);
+  // ---- 12f: 回覆指引依收訊者的 software 而變(2026-08-28,使用者實測回報)----
+  // 12b 已驗證正向情境(acp,有掛 team-bus → 指引呼叫 broadcast)。這裡驗證
+  // **負向**情境:software="pty" 的成員架構上沒有任何工具通道(見
+  // packages/adapters/src/pty-adapter.ts 檔頭),絕不能叫它去呼叫不存在的
+  // 工具——否則它會反覆嘗試然後困惑地卡住(這正是這輪要修的真實問題)。
+  // 用既有的 fake-pty-echo.mjs(步驟10 的同一支)把注入的 prompt 回顯出來,
+  // 走 terminal-data 事件斷言,不依賴任何真實模型行為。
+  let ptyBusSessionId;
+  try {
+    const ptyBusProfile = await client.rpc("profile.create", {
+      name: "E2E Bus PTY Member",
+      software: "pty",
+      workingDir: workspaceDir,
+      ptyConfig: { command: process.execPath, args: [path.join(REPO_ROOT, "scripts", "fake-pty-echo.mjs")] },
+    });
+    const ptyMember = await client.rpc("team.addMember", {
+      teamId,
+      agentProfileId: ptyBusProfile.profile.id,
+      name: "PtyMember",
+      role: "Coder",
+      canInterrupt: false,
+    });
+    const ptySession = await client.rpc(
+      "session.create",
+      {
+        agentProfileId: ptyBusProfile.profile.id,
+        workingDir: workspaceDir,
+        title: "e2e-bus-pty",
+        teamMemberId: ptyMember.member.id,
+      },
+      30_000,
+    );
+    ptyBusSessionId = ptySession.session.id;
+
+    await waitForTerminalText(client, ptyBusSessionId, (buf) => buf.includes("READY"), 15_000);
+
+    const ptyContent = `pty-hint-${randomUUID().slice(0, 8)}`;
+    await client.rpc("message.send", { teamId, to: "PtyMember", content: ptyContent, fromName: "Tester" });
+
+    const terminalBuf = await waitForTerminalText(
+      client,
+      ptyBusSessionId,
+      (buf) => buf.includes(ptyContent),
+      15_000,
+    );
+    // 訊息本體照樣送達(pty 成員仍然收得到訊息,只是回不了話),但指引必須是
+    // 「沒有工具」那句,且**絕不能**出現叫它呼叫 broadcast/send_message 的字樣。
+    const contentDelivered = terminalBuf.includes(ptyContent);
+    const saysNoTools = terminalBuf.includes("沒有團隊訊息工具");
+    const noToolInstruction = !terminalBuf.includes("回覆請呼叫");
+
+    record(
+      "步驟12f MessageBus:回覆指引依收訊者 software 而變——pty 成員(架構上沒有工具通道)收到的是「沒有團隊訊息工具」的如實告知,不會被叫去呼叫不存在的工具",
+      contentDelivered && saysNoTools && noToolInstruction,
+      `contentDelivered=${contentDelivered}, saysNoTools=${saysNoTools}, noToolInstruction=${noToolInstruction}, ` +
+        `terminal=${JSON.stringify(terminalBuf.slice(-400))}`,
+    );
+  } catch (err) {
+    record("步驟12f MessageBus:回覆指引依收訊者 software 而變(pty 負向情境)", false, String(err));
+  }
+
+  // ---- 12g: 清理 ----
+  const createdSessions = [coderSessionId, reviewerSessionId, qaSessionId, ptyBusSessionId].filter(Boolean);
   try {
     for (const sid of createdSessions) {
       try {
@@ -1010,7 +1076,7 @@ async function messageBusSmokeTest(client, workspaceDir) {
     const listAfter = await client.rpc("session.list", {});
     const stillThere = createdSessions.filter((sid) => listAfter.sessions.some((s) => s.id === sid));
     record(
-      "步驟12f MessageBus 測試清理 session",
+      "步驟12g MessageBus 測試清理 session",
       stillThere.length === 0,
       `已嘗試刪除 ${createdSessions.length} 個 session,刪除後仍存在: ${JSON.stringify(stillThere)}`,
     );

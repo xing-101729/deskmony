@@ -15,7 +15,7 @@ import type {
   TeamMessage,
   TeammateInfo,
 } from "@deskmony/shared";
-import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes, hasTeamBusTools } from "@deskmony/shared";
 import type { ProfileStore } from "../profiles.js";
 import type { TeamManager } from "../team/team-manager.js";
 import type { SessionManager } from "../session/session-manager.js";
@@ -52,10 +52,16 @@ import { enforcementTrip } from "../enforcement/trip.js";
  *   1. **contextId 綁定(L4 §2)**:`sendMessage`/`broadcast`/`requestReview`
  *      在真的持久化訊息之前,由 `deriveContextId()` 依發送者(`fromMemberId`)
  *      當下綁定的任務推導出 `contextId`——**agent 完全無法指定**(MCP 工具
- *      簽章本來就沒有這個參數),推不出來(沒有進行中的任務)一律拒收。這是
- *      本 spec 最重要的完整性要求:讓被管制的對象自己申報管制欄位,等於
- *      讓它換個 id 就能重置預算,與 C3(政策 agent 不可寫)/S4(acceptance
- *      agent 不可寫)是同一種漏洞形狀。
+ *      簽章本來就沒有這個參數)。這是本 spec 最重要的完整性要求:讓被管制的
+ *      對象自己申報管制欄位,等於讓它換個 id 就能重置預算,與 C3(政策 agent
+ *      不可寫)/S4(acceptance agent 不可寫)是同一種漏洞形狀。
+ *      **2026-08-28 補充(使用者實測回報)**:沒有進行中任務時,原本一律拒收
+ *      ——但連帶擋住了「沒有任務在身的成員回覆人類/隊友的隨口訊息」(S2 grill
+ *      當時討論的是「agent 互相對話失控」;人類手動插話天然有速度上限,不是
+ *      同一種風險,見 docs/LAYER-3-hld/message-budget_hld.md §0 的定位敘述)。
+ *      現在改成 `deriveContextId()` 回傳 `member:${fromMemberId}`——同樣是
+ *      Core 推導、agent 無法指定,一樣套用既有訊息數上限,只是多開一個跟任務
+ *      無關的固定桶,「熔斷一定會斷」的保證不變。
  *   2. **context 訊息數上限(L4 §3/§4)**:每個 contextId 的 `source="agent"`
  *      訊息數超過 `messageBudgetConfig.maxMessagesPerContext` 時,`trip`(共用
  *      底座,通知 + 稽核,比照 S3b `CostGovernor` 的先例)並拒收該 context
@@ -104,7 +110,8 @@ import { enforcementTrip } from "../enforcement/trip.js";
 /** L4 §6:同一 context 高頻拒收(agent 卡在重試迴圈)時,每幾次拒收再發一次通知。 */
 const RETRY_STORM_NOTIFY_EVERY = 10;
 
-/** 訊息無法關聯到任何進行中任務時的拒收錯誤(L4 §2「零個 → 拒收」)。 */
+/** `request_review` 明確指定 taskId,但該任務不是指派給發送者時的拒收錯誤
+ *  ——防止冒用別人的任務當 context(見 `deriveContextIdForRequestReview()`)。 */
 class NoContextTaskError extends Error {}
 
 /** context 訊息預算已用盡時的拒收錯誤(L4 §4,錯誤訊息需明確可理解)。 */
@@ -524,22 +531,21 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
   // ---- S2:contextId 推導 + 預算閘(L4 §2/§3/§4)---------------------------
 
   /**
-   * L4 §2「推導規則(釘死)」:用 `TaskService` 查
-   * `assigneeMemberId === fromMemberId` 且狀態 ∈ {assigned, in-progress,
-   * review, merging} 的任務——恰好一個就用它;多於一個取 `updatedAt` 最新的
-   * 一筆(保守且可預期);零個(或 `taskService` 根本沒被注入)一律拒收,
-   * **絕不給預設值**。讓 agent 自己填 contextId 等於讓被管制的對象自己申報
-   * 管制欄位,這裡連「找不到就給一個 fallback context」都不做,同一種紀律。
+   * L4 §2「推導規則」:用 `TaskService` 查 `assigneeMemberId === fromMemberId`
+   * 且狀態 ∈ {assigned, in-progress, review, merging} 的任務——恰好一個就用
+   * 它;多於一個取 `updatedAt` 最新的一筆(保守且可預期)。
+   *
+   * 零個(或 `taskService` 根本沒被注入)時,**不再拒收**——改回傳
+   * `member:${fromMemberId}`,一個穩定、Core 推導、agent 依然無法指定的
+   * 「無任務」專屬 contextId(2026-08-28,見檔案頂端補充說明)。這仍然滿足
+   * 原本的紀律:**絕不給 agent 自選的 fallback**,只是 fallback 本身從「拒收」
+   * 換成「一個獨立計費的固定桶」——同一個 member 的無任務訊息永遠落在同一個
+   * contextId,一樣受 `messageBudgetConfig.maxMessagesPerContext` 管制,不會
+   * 因為「沒有任務」就變成無限暢聊的後門。
    */
   private async deriveContextId(fromMemberId: string): Promise<string> {
     const task = await this.taskService?.getMessageContextTaskForMember(fromMemberId);
-    if (!task) {
-      throw new NoContextTaskError(
-        "此訊息無法送出:訊息必須關聯到一個進行中的任務(狀態為 assigned/in-progress/review/merging)," +
-          "你目前沒有這樣的任務。",
-      );
-    }
-    return task.id;
+    return task ? task.id : `member:${fromMemberId}`;
   }
 
   /**
@@ -877,7 +883,13 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
    */
   private async injectAndMarkDelivered(sessionId: string, messages: TeamMessage[]): Promise<void> {
     if (messages.length === 0) return;
-    const text = formatInjectedPrompt(messages);
+    // 收訊者的 software 決定「回覆指引」怎麼寫:只有掛了 team-bus 工具的
+    // adapter 才能真的把回覆送回團隊聊天(見 `SOFTWARE_WITH_TEAM_BUS`)。
+    // 查不到 session 時保守地當成沒有工具——寧可少給一句工具指引,也不要叫
+    // agent 去呼叫一個不存在的工具。
+    const session = await this.sessionManager.getSession(sessionId);
+    const canReplyToTeamChat = session ? hasTeamBusTools(session.adapterType) : false;
+    const text = formatInjectedPrompt(messages, canReplyToTeamChat);
     await this.sessionManager.sendPrompt(sessionId, { text });
     const now = Date.now();
     const ids = messages.map((m) => m.id);
@@ -889,11 +901,11 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
   }
 }
 
-function formatInjectedPrompt(messages: TeamMessage[]): string {
+function formatInjectedPrompt(messages: TeamMessage[], canReplyToTeamChat: boolean): string {
   if (messages.length === 1) {
-    return formatSingle(messages[0]);
+    return formatSingle(messages[0], canReplyToTeamChat);
   }
-  const lines = messages.map((m, i) => `${i + 1}. ${formatSingle(m)}`);
+  const lines = messages.map((m, i) => `${i + 1}. ${formatSingle(m, canReplyToTeamChat)}`);
   return `你收到 ${messages.length} 則隊友訊息(session 忙碌時累積,現在一次補上):\n${lines.join("\n")}`;
 }
 
@@ -904,18 +916,26 @@ function formatInjectedPrompt(messages: TeamMessage[]): string {
  * 人類插話沒有對應的 TeamMember(見 sendHumanMessage() 註解),沒有名字可以
  * 傳給 send_message(),只能用 broadcast() 讓「正在看團隊聊天室」的人類看到;
  * 隊友發的訊息則直接指名 send_message(to: m.from)回過去。
+ *
+ * `canReplyToTeamChat === false`(opencode/pty —— 沒有掛 team-bus 工具,見
+ * `SOFTWARE_WITH_TEAM_BUS`)時**絕不能**給上面那兩句工具指引:那會叫 agent 去
+ * 呼叫一個它根本沒有的工具,讓它反覆嘗試後困惑地卡住。這種情況如實說明「回覆
+ * 到不了對方」,讓 agent 知道別白費力氣,也讓這個限制在對話紀錄裡看得見。
  */
-function replyHint(m: TeamMessage): string {
+function replyHint(m: TeamMessage, canReplyToTeamChat: boolean): string {
+  if (!canReplyToTeamChat) {
+    return "(注意:你目前使用的 agent 軟體沒有團隊訊息工具,你的回覆只會留在自己的 session,發送者看不到——不必嘗試呼叫工具回覆)";
+  }
   return m.source === "human"
     ? "(回覆請呼叫 broadcast 工具——單純用文字回答只會留在你自己的 session,人類看不到)"
     : `(回覆請呼叫 send_message 工具、對象填 "${m.from}"——單純用文字回答只會留在你自己的 session,對方看不到)`;
 }
 
-function formatSingle(m: TeamMessage): string {
+function formatSingle(m: TeamMessage, canReplyToTeamChat: boolean): string {
   const roleLabel = m.fromRole ? `(${m.fromRole})` : "";
   const broadcastLabel = m.to === "broadcast" ? "[廣播] " : "";
   const downgradeLabel = m.note ? `[${m.note}] ` : "";
-  return `${downgradeLabel}${broadcastLabel}來自 @${m.from}${roleLabel} 的訊息:${m.content}\n${replyHint(m)}`;
+  return `${downgradeLabel}${broadcastLabel}來自 @${m.from}${roleLabel} 的訊息:${m.content}\n${replyHint(m, canReplyToTeamChat)}`;
 }
 
 function rowToMessage(row: typeof teamMessagesTable.$inferSelect): TeamMessage {

@@ -235,6 +235,29 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     order: 30,
   },
   {
+    id: "opencode-acp",
+    label: "OpenCode(ACP,支援團隊訊息)",
+    description:
+      "同一個 opencode 執行檔,但改用它內建的 `opencode acp` 子命令以 ACP 對接。" +
+      "與上面的「OpenCode」項目差別只有一個、但很關鍵:ACP 這條路會掛載 team-bus MCP 工具," +
+      "所以這個 provider 建立的成員**能把回覆送回團隊聊天**;走 HTTP server API 的那個不行" +
+      "(adapter 內沒有任何 MCP 掛載,見 SOFTWARE_WITH_TEAM_BUS)。單機使用兩者差異不大。",
+    software: "acp",
+    detectKey: "opencode-cli",
+    // `opencode acp`——2026-08-28 對本機實際安裝的 opencode 1.18.7 實測驗證
+    // (比照本 repo「以實際觀察到的行為為準,不臆測」的一貫紀律):
+    //   ① `opencode acp` 以 **stdio** 說 ACP,initialize 回 protocolVersion 1;
+    //   ② `session/new` 帶 **stdio 型** mcpServers 會成功,且 opencode 真的會
+    //      啟動該 MCP server 並送出 initialize + tools/list。
+    // ②很重要:opencode 的 initialize 只宣告 `mcpCapabilities:{http,sse}`、
+    // 沒有提到 stdio,但 stdio 是 ACP 的基線傳輸,實測確認支援——Deskmony 的
+    // mcp-bridge-server.ts 正是 stdio 型,所以不需要對 AcpAdapter 做任何修改。
+    defaultArgs: ["acp"],
+    models: [],
+    supportsModelSelection: false,
+    order: 31,
+  },
+  {
     id: "codex",
     label: "Codex",
     description:

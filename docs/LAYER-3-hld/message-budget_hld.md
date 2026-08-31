@@ -22,7 +22,7 @@
 ## 1. 職責邊界
 
 **負責**:
-- **context 綁定**:訊息必須掛在 task/review 脈絡下,無脈絡拒收(A5 前半)。
+- **context 綁定**:每則訊息都必須掛在一個由 Core 推導的 context 下(A5 前半)——有進行中任務就是該任務,沒有則是 `member:<memberId>`(2026-08-28 修正,原為「無脈絡拒收」,見 §2.1)。
 - **context 預算**:每個 context 自帶訊息數 / hop 深度上限,燒完 `trip`(A5 後半)。
 - **迴圈偵測**:A↔B 高頻互傳熔斷。
 - **Mailbox 佇列持久化**(D4,S6 移交):讓「未送達」跨崩潰存活。
@@ -49,7 +49,8 @@ request_review(taskId, to)
 ```
 
 - **Core 依「該 session 當下綁定的任務」自動填 contextId**;agent 完全不能指定、也無法偽造。
-- **session 未綁任何任務 → 直接拒收訊息**(取代草稿的「無 contextId → 拒收」)。
+- ~~**session 未綁任何任務 → 直接拒收訊息**(取代草稿的「無 contextId → 拒收」)。~~
+  **2026-08-28 修正(使用者實測回報)**:改為落在 `member:<memberId>` 這個由 Core 推導的專屬 contextId。原本的一律拒收把「手上沒有任務的成員回覆人類或隊友」也一起擋掉了——那是人類插話帶起的對話,天然有速度上限,不是本 spec §0 要防的「agent 之間互相對話失控」。**紀律不變**:contextId 仍然只由 Core 推導、agent 一樣無從指定或偽造,per-member 桶照樣吃 §3 的訊息數上限、成員之間互不共用,不是「沒有任務就無限暢聊」的後門。
 - 語意上也更正確:「這則訊息屬於哪個任務」是**事實**,不是 agent 的意見——Core 本來就知道(session↔member↔task 綁定)。讓 agent 申報一個 Core 已知的事實,只會製造分歧與偽造空間。
 - 效果:壓制無脈絡閒聊;稽核時能回答「**這則訊息為何存在**」。
 
@@ -130,7 +131,7 @@ team_messages 加欄位:
 send_message(to, content)              ← agent 不傳 contextId
    │
    ├─ [S2] Core 由 session 綁定推導 contextId
-   ├─ [S2] session 未綁任務?            → 拒收
+   ├─ [S2] session 未綁任務?            → contextId = member:<memberId>(2026-08-28 修正,原為拒收)
    ├─ [S2] context 訊息數越線?          → trip + 拒收(agent 仍可繼續工作,§3.2)
    │
    ▼ 通過後,走**現況既有**的投遞策略(不動)
@@ -151,7 +152,7 @@ send_message(to, content)              ← agent 不傳 contextId
 | 崩潰時有未送達訊息 | §4 保證存活;重啟後 flush。 |
 | 目標 member 已被 dispose(A4 短命 worker) | 留 Mailbox(`deliveredAt IS NULL`),下次該 member 有 session 時補投——**現況既有機制**。 |
 | broadcast 風暴 | 一次消耗 N 則額度,由訊息數上限放大懲罰(§3.1);冷卻機制延後。 |
-| session 未綁任務就想發訊息 | 拒收 + 明確錯誤(§2.1)。 |
+| session 未綁任務就想發訊息 | 落 `member:<memberId>` 桶,照樣受 §3 上限管制(§2.1,2026-08-28 修正,原為拒收)。 |
 
 ---
 

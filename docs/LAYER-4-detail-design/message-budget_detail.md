@@ -64,14 +64,15 @@ send_message(to, content)          ← MCP 簽章不變,agent 無從指定
 MessageBus 由 fromMemberId 反查:
    memberId → 該 member 目前有無綁定任務
      有 → contextId = taskId
-     無 → **拒收**,回明確錯誤給 agent
+     無 → contextId = `member:<memberId>`(2026-08-28 修正,原為拒收)
 ```
 
 **推導規則(釘死)**:
 - 用 `TaskService` 查 `assigneeMemberId === fromMemberId` 且 `status ∈ {assigned, in-progress, review, merging}` 的任務。
 - **恰好一個** → 用它。
 - **多於一個** → 取 `updatedAt` 最新的那個(**保守且可預期**;S8 之後若允許一 member 多任務,此處需重新設計)。
-- **零個** → 拒收:「訊息必須關聯到一個進行中的任務;你目前沒有被指派任務」。
+- **零個** → ~~拒收:「訊息必須關聯到一個進行中的任務;你目前沒有被指派任務」~~
+  **2026-08-28 修正**:改回傳 `member:${fromMemberId}`(HLD §2.1 同步更新)。實作見 `MessageBus.deriveContextId()`,e2e 見 `scripts/e2e-message-budget.mjs` 的 A1(同一 member 的桶穩定、不同 member 彼此隔離)與 A2(這個桶照樣會撞上限並 trip)。
 
 `request_review(taskId, to)` **天然帶 context**(= 該 taskId),但仍須驗證該 taskId 確實指派給發送者,否則拒收。
 
@@ -160,7 +161,7 @@ messageBudget: {
 | context 預算耗盡但工作未完成 | trip + 通知;**agent 繼續工作**(§4)。人可調高或介入,**不自動放寬** |
 | 崩潰時有未送達訊息 | §5 保證存活;重啟後 flush |
 | 目標 member 已 dispose(S8 短命 worker) | 留 Mailbox(`delivered_at IS NULL`),下次 spawn 時補投——**現況既有機制** |
-| session 未綁任務就發訊息 | 拒收 + 明確錯誤(§2) |
+| session 未綁任務就發訊息 | 落 `member:<memberId>` 桶,照樣受上限管制(§2,2026-08-28 修正,原為拒收) |
 | 一個 member 同時有多個進行中任務 | 取 `updatedAt` 最新者(§2);S8 若放寬約束需重新設計 |
 | `contextId = "legacy"` 的舊訊息 | 不參與預算計算 |
 
@@ -171,7 +172,7 @@ messageBudget: {
 - [ ] `packages/db/src/schema.ts` + `client.ts`:`team_messages` 加 `delivered_at` / `context_id`(冪等)+ §1.1 遷移
 - [ ] `packages/shared/src/core-config.ts`:`messageBudget` 區塊;**確認不在 `ConfigSetFilePatchSchema`**
 - [ ] `apps/core/src/bus/message-bus.ts`:
-  - [ ] contextId 推導(§2),推不出就拒收
+  - [ ] contextId 推導(§2),沒有任務就落 `member:<memberId>` 桶
   - [ ] 發送前檢查訊息數上限(§3),越線 trip + 拒收
   - [ ] broadcast 展開成 N 筆(§5.1)
   - [ ] Mailbox 改查 DB(§5),記憶體 Map 降為快取
@@ -179,7 +180,7 @@ messageBudget: {
 - [ ] `packages/adapters/src/team-bus-mcp.ts`:**簽章不變**;錯誤訊息要明確可理解(§4)
 - [ ] UI 群聊視圖:顯示 context 與額度餘量;trip 狀態
 - [ ] e2e(`scripts/e2e-message-budget.mjs`):
-  - [ ] 未綁任務 → 拒收
+  - [ ] 未綁任務 → per-member 桶(A1:同 member 穩定、不同 member 隔離;A2:照樣會撞上限 trip)
   - [ ] **agent 無法偽造 contextId**(MCP 簽章無此參數,且換任務才會換 context)
   - [ ] 超過上限 → trip + 拒收,但 `report_status` **仍可用**、session 未 halt
   - [ ] 崩潰重啟後未送達訊息仍被投遞(`delivered_at IS NULL` 存活)
