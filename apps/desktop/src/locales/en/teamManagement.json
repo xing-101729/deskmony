@@ -38,6 +38,18 @@
     "adding": "Adding…",
     "submit": "+ Add member"
   },
+  "deleteTeam": {
+    "button": "Delete team",
+    "confirmTitle": "Delete team \"{{name}}\"?",
+    "confirmButton": "Delete",
+    "deleting": "Deleting…",
+    "warnMembers": "Removes all {{count}} member(s) of this team.",
+    "warnSessions": "Stops any session those members are currently running (i.e. kills running agents).",
+    "warnTasks": "Deletes every task in this team along with its git worktree — uncommitted changes in those worktrees go with it.",
+    "warnMessages": "Clears this team's entire chat history.",
+    "summary": "Team deleted: {{tasks}} task(s), {{members}} member(s), {{sessions}} session(s) stopped.",
+    "summaryWithUncommitted": "Team deleted: {{tasks}} task(s), {{members}} member(s), {{sessions}} session(s) stopped. ⚠ These tasks had uncommitted changes in their worktree, removed along with them: {{titles}}"
+  },
   "errors": {
     "teamNameRequired": "Please enter a team name",
     "selectTeamFirst": "Please select a team first",

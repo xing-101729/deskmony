@@ -1170,6 +1170,8 @@ export class WsGateway {
       case "team.removeMember":
         await this.teamManager.removeMember(request.params.teamId, request.params.memberId);
         return { ok: true };
+      case "team.delete":
+        return await this.teamManager.deleteTeam(request.params.teamId);
       case "team.messages":
         return { messages: await this.messageBus.getMessages(request.params.teamId, request.params.limit) };
       case "team.teammates":

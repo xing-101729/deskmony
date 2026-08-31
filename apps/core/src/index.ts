@@ -290,6 +290,17 @@ async function main(): Promise<void> {
   // setter 打破循環」手法(taskService 建構時 sessionManager 還不存在,見上方
   // M4 Round A 註解的建構順序說明)。
   taskService.setSessionControl(sessionManager);
+  // team.delete:TeamManager 需要「刪任務(連同 worktree)」與「dispose 成員
+  // session」兩件事,但 TaskService 的建構子本來就依賴 TeamManager,反向直接
+  // 依賴會形成循環——同一個 setter 注入手法(見 team-manager.ts 的
+  // `TeamCascadePort`,刻意只宣告用得到的四個方法,不是整個 TaskService/
+  // SessionManager)。
+  teamManager.setCascade({
+    listTasks: async (teamId) => (await taskService.listTasks(teamId)).map((t) => ({ id: t.id, title: t.title })),
+    deleteTask: (taskId) => taskService.deleteTask(taskId),
+    getSessionIdForMember: (memberId) => sessionManager.getSessionIdForMember(memberId),
+    disposeSessionForMember: (memberId) => sessionManager.disposeSessionForMember(memberId),
+  });
   // S3b §6「崩潰重啟」:從 DB 還原 rollup 快取與目前是否已超標,必須在任何
   // session 建立/usage 事件抵達之前完成,否則重啟後的空窗期會讓
   // `checkSendPromptAllowed()` 誤判為「未超標」而放行(見 cost-governor.ts 的

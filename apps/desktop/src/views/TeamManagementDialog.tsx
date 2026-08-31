@@ -43,6 +43,7 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
   const createTeam = useTeamStore((s) => s.createTeam);
   const addMember = useTeamStore((s) => s.addMember);
   const removeMember = useTeamStore((s) => s.removeMember);
+  const deleteTeam = useTeamStore((s) => s.deleteTeam);
   const selectTeam = useTeamStore((s) => s.selectTeam);
   const profiles = useSessionStore((s) => s.profiles);
   const createSession = useSessionStore((s) => s.createSession);
@@ -60,6 +61,11 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
   const [memberLifecycle, setMemberLifecycle] = useState<"" | Lifecycle>("");
   const [addingMember, setAddingMember] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 刪除團隊:確認對話框開關 + 刪除中狀態 + 刪完的後果摘要(尤其是「有未提交
+   *  變更的 worktree 被移除了」——那是唯一可能真的失去工作成果的部分)。 */
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deletingTeam, setDeletingTeam] = useState(false);
+  const [deleteSummary, setDeleteSummary] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedTeamId && teams.length > 0) setSelectedTeamId(teams[0].id);
@@ -129,6 +135,42 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
     }
   };
 
+  const handleDeleteTeam = async (): Promise<void> => {
+    if (!selectedTeam) return;
+    setError(null);
+    setDeleteSummary(null);
+    setDeletingTeam(true);
+    try {
+      const result = await deleteTeam(selectedTeam.id);
+      setConfirmingDelete(false);
+      // 選取換到剩下的第一個 team(store 已經把 currentTeamId 清成 null)。
+      const remaining = teams.filter((tm) => tm.id !== selectedTeam.id);
+      setSelectedTeamId(remaining[0]?.id ?? "");
+      if (remaining[0]) void selectTeam(remaining[0].id);
+      // 有未提交變更被丟掉時,訊息必須說得夠具體(列出是哪些任務),這是使用者
+      // 唯一能據以判斷「我剛剛失去了什麼」的資訊。
+      setDeleteSummary(
+        result.tasksWithUncommittedChanges.length > 0
+          ? t("teamManagement:deleteTeam.summaryWithUncommitted", {
+              tasks: result.deletedTasks,
+              members: result.deletedMembers,
+              sessions: result.disposedSessions,
+              titles: result.tasksWithUncommittedChanges.join("、"),
+            })
+          : t("teamManagement:deleteTeam.summary", {
+              tasks: result.deletedTasks,
+              members: result.deletedMembers,
+              sessions: result.disposedSessions,
+            }),
+      );
+    } catch (err) {
+      setError(translateError(err, t));
+      setConfirmingDelete(false);
+    } finally {
+      setDeletingTeam(false);
+    }
+  };
+
   const handleRemoveMember = async (memberId: string): Promise<void> => {
     if (!selectedTeamId) return;
     try {
@@ -194,7 +236,19 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
             <EmptyState icon="users" title={t("teamManagement:memberPanel.emptyTitle")} compact />
           ) : (
             <>
-              <SectionLabel>{t("teamManagement:memberPanel.sectionLabel", { count: selectedTeam.members.length })}</SectionLabel>
+              <div className="flex items-center justify-between">
+                <SectionLabel>{t("teamManagement:memberPanel.sectionLabel", { count: selectedTeam.members.length })}</SectionLabel>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeleteSummary(null);
+                    setConfirmingDelete(true);
+                  }}
+                  className="focus-ring rounded px-1.5 py-0.5 text-2xs text-fg-faint transition hover:text-danger"
+                >
+                  {t("teamManagement:deleteTeam.button")}
+                </button>
+              </div>
               <div className="mb-3 mt-1 flex-1 space-y-1.5 overflow-y-auto">
                 {selectedTeam.members.length === 0 && <p className="text-xs text-fg-faint">{t("teamManagement:memberPanel.noMembers")}</p>}
                 {selectedTeam.members.map((member) => {
@@ -293,8 +347,71 @@ export function TeamManagementDialog({ onClose }: TeamManagementDialogProps): JS
           )}
 
           {error && <Alert tone="danger" className="mt-2">{error}</Alert>}
+          {deleteSummary && <Alert tone="warn" className="mt-2">{deleteSummary}</Alert>}
         </div>
       </div>
+
+      {confirmingDelete && selectedTeam && (
+        <DeleteTeamConfirmDialog
+          teamName={selectedTeam.name}
+          memberCount={selectedTeam.members.length}
+          deleting={deletingTeam}
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={() => void handleDeleteTeam()}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+/**
+ * 刪除團隊的確認對話框。比照 `AutoModeControl.tsx` 的 `YoloConfirmDialog`:
+ * danger tone、不可用 Esc/點遮罩關閉(`dismissible={false}`)、**取消為預設焦點**
+ * ——這是不可復原的操作,預設不應該落在確認鈕上。
+ *
+ * 刻意把「會連帶消失什麼」逐條列出而不是只寫「確定刪除嗎?」:這個操作會中止
+ * 正在跑的 agent、移除任務的 git worktree(含未提交的變更),使用者按下去之前
+ * 有權知道代價。
+ */
+function DeleteTeamConfirmDialog({
+  teamName,
+  memberCount,
+  deleting,
+  onCancel,
+  onConfirm,
+}: {
+  teamName: string;
+  memberCount: number;
+  deleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): JSX.Element {
+  const { t } = useTranslation(["teamManagement", "common"]);
+  return (
+    <Dialog
+      title={t("teamManagement:deleteTeam.confirmTitle", { name: teamName })}
+      icon="alert"
+      tone="danger"
+      size="sm"
+      dismissible={false}
+      onClose={onCancel}
+      footer={
+        <div className="flex w-full justify-end gap-2">
+          <Button variant="secondary" autoFocus disabled={deleting} onClick={onCancel}>
+            {t("common:cancel")}
+          </Button>
+          <Button variant="danger" loading={deleting} onClick={onConfirm}>
+            {deleting ? t("teamManagement:deleteTeam.deleting") : t("teamManagement:deleteTeam.confirmButton")}
+          </Button>
+        </div>
+      }
+    >
+      <ul className="space-y-1.5 text-xs leading-relaxed text-fg-soft">
+        <li>{t("teamManagement:deleteTeam.warnMembers", { count: memberCount })}</li>
+        <li>{t("teamManagement:deleteTeam.warnSessions")}</li>
+        <li className="text-danger">{t("teamManagement:deleteTeam.warnTasks")}</li>
+        <li>{t("teamManagement:deleteTeam.warnMessages")}</li>
+      </ul>
     </Dialog>
   );
 }

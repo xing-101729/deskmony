@@ -440,6 +440,19 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     method: z.literal("team.removeMember"),
     params: z.object({ teamId: z.string(), memberId: z.string() }),
   }),
+  /**
+   * 刪除整個 team(連同成員、群聊訊息、任務一併移除)。**這是破壞性操作**:
+   * 它會 dispose 該 team 所有成員目前活躍的 session(等於中止正在跑的 agent),
+   * 並對每個任務走既有的 `TaskService.deleteTask()`——那會一併移除任務的 git
+   * worktree。worktree 內有未提交變更時不會中止刪除,而是如實回報在
+   * `tasksWithUncommittedChanges`,讓 UI 有機會告訴使用者「有東西被丟掉了」
+   * (比照 `task.delete` 既有的 `hadUncommittedChanges` 語意)。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("team.delete"),
+    params: z.object({ teamId: z.string() }),
+  }),
   z.object({
     ...baseRequest,
     method: z.literal("team.messages"),
@@ -939,6 +952,20 @@ export const TeamListResultSchema = z.object({ teams: z.array(TeamWithMembersSch
 export const TeamAddMemberResultSchema = z.object({ member: TeamMemberSchema });
 export const TeamMessagesResultSchema = z.object({ messages: z.array(TeamMessageSchema) });
 export const TeamTeammatesResultSchema = z.object({ teammates: z.array(TeammateInfoSchema) });
+/**
+ * `team.delete` 的回應。刪除本身一定完成(不會因為有未提交變更就中止),這裡
+ * 回報的是「順帶清掉了什麼」,讓 UI 能誠實告訴使用者代價:
+ *  - `deletedTasks` / `deletedMembers`:一併刪掉的任務數與成員數。
+ *  - `disposedSessions`:被中止的活躍 session 數(等於有幾個 agent 被停掉)。
+ *  - `tasksWithUncommittedChanges`:worktree 內有未提交變更、仍被移除的任務標題
+ *    ——這是唯一「真的可能失去工作成果」的部分,UI 應該明確顯示出來。
+ */
+export const TeamDeleteResultSchema = z.object({
+  deletedTasks: z.number().int().nonnegative(),
+  deletedMembers: z.number().int().nonnegative(),
+  disposedSessions: z.number().int().nonnegative(),
+  tasksWithUncommittedChanges: z.array(z.string()),
+});
 export const MessageSendResultSchema = z.object({
   message: TeamMessageSchema,
   delivered: z.enum(["immediate", "queued", "no-session"]),

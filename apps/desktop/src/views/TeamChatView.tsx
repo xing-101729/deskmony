@@ -104,6 +104,7 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const team = teams.find((t2) => t2.id === currentTeamId);
   const messages = useMemo(
@@ -115,6 +116,22 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
+
+  // 使用者回報:切到團隊群聊後直接打字沒反應,要先切一次視窗(alt-tab)才能
+  // 打——與當初 ChatView / ModalPortal 修過的**同一個根因**,只是這個 view
+  // 從來沒補上焦點處理。兩步驟缺一不可:
+  //   1. `window.deskmony?.focusWindow?.()` 把 **OS 層級**的 BrowserWindow
+  //      焦點要回來——DOM 的 `element.focus()` 只能移動這個視窗**內部**的
+  //      focus,視窗本身沒有輸入焦點時照樣收不到鍵盤事件(見 electron/main.ts
+  //      的 `deskmony:focusWindow` handler 與 ChatView.tsx 同段註解)。
+  //   2. 再把 DOM focus 移到輸入框,否則焦點停在觸發按鈕/body 上。
+  // 純瀏覽器 client 沒有對應的 OS 視窗,`focusWindow` 是 undefined,略過即可。
+  // 依 currentTeamId 觸發:進入這個 view、以及切換團隊時都要重新對焦。
+  useEffect(() => {
+    if (!currentTeamId) return;
+    void window.deskmony?.focusWindow?.();
+    composerRef.current?.focus();
+  }, [currentTeamId]);
 
   // S2(message-budget):訊息列表出現新的 contextId 時,查一次目前的額度用量。
   useEffect(() => {
@@ -256,6 +273,7 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
             </Select>
           </div>
           <textarea
+            ref={composerRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {

@@ -10,6 +10,7 @@ import {
   MessageSendResultSchema,
   TeamAddMemberResultSchema,
   TeamCreateResultSchema,
+  TeamDeleteResultSchema,
   TeamListResultSchema,
   TeamMessagesResultSchema,
   TeamTeammatesResultSchema,
@@ -47,6 +48,14 @@ interface TeamStoreState {
   createTeam: (input: CreateTeamInput) => Promise<void>;
   addMember: (input: AddTeamMemberInput) => Promise<void>;
   removeMember: (teamId: string, memberId: string) => Promise<void>;
+  /** 刪除整個 team(連同成員、群聊訊息、任務與其 worktree)。回傳「順帶清掉了
+   *  什麼」,讓呼叫端能誠實告知代價——尤其是 `tasksWithUncommittedChanges`。 */
+  deleteTeam: (teamId: string) => Promise<{
+    deletedTasks: number;
+    deletedMembers: number;
+    disposedSessions: number;
+    tasksWithUncommittedChanges: string[];
+  }>;
   selectTeam: (teamId: string) => Promise<void>;
   refreshTeammates: (teamId: string) => Promise<void>;
   sendTeamMessage: (input: {
@@ -119,6 +128,28 @@ export const useTeamStore = create<TeamStoreState>((set, get) => ({
     await client.call("team.removeMember", { teamId, memberId });
     await get().refreshTeams();
     await get().refreshTeammates(teamId);
+  },
+
+  deleteTeam: async (teamId) => {
+    const raw = await client.call("team.delete", { teamId });
+    const result = TeamDeleteResultSchema.parse(raw);
+    // 這個 team 的快取(訊息/成員狀態)已經沒有對應的實體,留著只會讓
+    // messagesByTeam 無限增長,也可能被誤讀成「還存在的 team」。
+    set((state) => {
+      const messagesByTeam = { ...state.messagesByTeam };
+      const teammatesByTeam = { ...state.teammatesByTeam };
+      delete messagesByTeam[teamId];
+      delete teammatesByTeam[teamId];
+      return {
+        messagesByTeam,
+        teammatesByTeam,
+        // 刪掉的正好是目前選取的 team 就取消選取,避免整個群聊視圖指向一個
+        // 不存在的 id(下面 refreshTeams() 之後 UI 會自然回到「請選擇團隊」)。
+        currentTeamId: state.currentTeamId === teamId ? null : state.currentTeamId,
+      };
+    });
+    await get().refreshTeams();
+    return result;
   },
 
   selectTeam: async (teamId) => {

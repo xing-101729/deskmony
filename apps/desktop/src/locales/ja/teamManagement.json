@@ -38,6 +38,18 @@
     "adding": "追加中…",
     "submit": "+ メンバーを追加"
   },
+  "deleteTeam": {
+    "button": "team を削除",
+    "confirmTitle": "team「{{name}}」を削除しますか?",
+    "confirmButton": "削除する",
+    "deleting": "削除中…",
+    "warnMembers": "この team のメンバー {{count}} 人をすべて削除します。",
+    "warnSessions": "それらのメンバーが実行中の session を停止します(実行中の agent が止まります)。",
+    "warnTasks": "この team のすべてのタスクを、それぞれの git worktree ごと削除します —— worktree 内の未コミットの変更も一緒に失われます。",
+    "warnMessages": "この team のグループチャット履歴をすべて消去します。",
+    "summary": "team を削除しました:タスク {{tasks}} 件、メンバー {{members}} 人、停止した session {{sessions}} 件。",
+    "summaryWithUncommitted": "team を削除しました:タスク {{tasks}} 件、メンバー {{members}} 人、停止した session {{sessions}} 件。⚠ 次のタスクは worktree に未コミットの変更があり、一緒に削除されました:{{titles}}"
+  },
   "errors": {
     "teamNameRequired": "team 名を入力してください",
     "selectTeamFirst": "先に team を選択してください",

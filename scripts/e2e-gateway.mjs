@@ -3197,6 +3197,169 @@ async function connectAndAuth(gatewayUrl, token) {
   }
 }
 
+/**
+ * 步驟 35:`team.delete`(破壞性操作,決定性驗證,不依賴任何真實模型)。
+ *
+ * 這個操作會**中止正在跑的 agent、移除任務的 git worktree**,所以驗收重點不是
+ * 「有沒有回 ok」,而是**連帶清理有沒有真的做完**——半完成(DB 刪了但 session
+ * 還在跑、worktree 還留在磁碟上)比直接失敗更糟,那正是 `TeamCascadePort` 存在
+ * 的理由。這裡逐項檢查刪除前存在、刪除後消失。
+ */
+async function teamDeleteSmokeTest(client, workspaceDir) {
+  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
+  const gitVersion = runGitSync(["--version"], process.cwd());
+  if (gitVersion.status !== 0) {
+    record("步驟35(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
+    return;
+  }
+
+  let repoDir;
+  try {
+    repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-team-delete-"));
+    runGitSync(["init"], repoDir);
+    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
+    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
+    writeFileSync(path.join(repoDir, "README.md"), "# e2e team delete repo\n", "utf8");
+    runGitSync(["add", "."], repoDir);
+    runGitSync(["commit", "-m", "initial commit"], repoDir);
+
+    const profileCreated = await client.rpc("profile.create", {
+      name: "E2E Team Delete Profile",
+      software: "acp",
+      workingDir: repoDir,
+      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
+    });
+    const profileId = profileCreated.profile.id;
+
+    const team = await client.rpc("team.create", { name: "E2E Team To Delete", workingDir: repoDir });
+    const teamId = team.team.id;
+
+    // worker:ephemeral,指派任務後會自動 spawn session + 建 worktree。
+    const worker = await client.rpc("team.addMember", {
+      teamId,
+      agentProfileId: profileId,
+      name: "DeleteWorker",
+      role: "Coder",
+      lifecycle: "ephemeral",
+    });
+    // lead:persistent,session 由人手動建立——**這個成員沒有任務**,所以它的
+    // session 不會被 deleteTask() 的連帶清理碰到,必須靠 deleteTeam() 第二步
+    // 專門處理。少了那一步這裡就會留下孤兒 session(還在跑的 agent)。
+    const lead = await client.rpc("team.addMember", {
+      teamId,
+      agentProfileId: profileId,
+      name: "DeleteLead",
+      role: "Lead",
+      lifecycle: "persistent",
+    });
+    await client.rpc(
+      "session.create",
+      { agentProfileId: profileId, workingDir: repoDir, title: "e2e-team-delete-lead", teamMemberId: lead.member.id },
+      30_000,
+    );
+
+    const task = await client.rpc("task.create", { teamId, title: "E2E Task To Be Deleted" });
+    const assigned = await client.rpc("task.assign", { taskId: task.task.id, memberId: worker.member.id });
+    const worktreePath = assigned.workspace.worktreePath;
+
+    await client.rpc("message.send", { teamId, to: "DeleteLead", content: "before-delete", fromName: "Tester" });
+
+    // ---- 刪除前的狀態:兩個 session 都活著、worktree 真的在磁碟上 ----
+    const teammatesBefore = await client.rpc("team.teammates", { teamId });
+    const activeBefore = teammatesBefore.teammates.filter((tm) => tm.hasActiveSession).length;
+    const worktreeExistsBefore = existsSync(worktreePath);
+    const messagesBefore = (await client.rpc("team.messages", { teamId })).messages.length;
+
+    // ---- 刪除 ----
+    const result = await client.rpc("team.delete", { teamId }, 60_000);
+
+    // ---- 刪除後:team/成員/訊息/任務/worktree/session 全都要消失 ----
+    const teamsAfter = await client.rpc("team.list", {});
+    const teamGone = !teamsAfter.teams.some((tm) => tm.id === teamId);
+    const worktreeGone = !existsSync(worktreePath);
+
+    // 成員的 session 是否真的被 dispose:team 已經不存在了,不能再用
+    // team.teammates 查,改用 session.list 確認那些 session 不再是活躍狀態。
+    const sessionsAfter = await client.rpc("session.list", {});
+    const liveSessionsInRepo = sessionsAfter.sessions.filter(
+      (s) => (s.workingDir === repoDir || s.workingDir === worktreePath) && s.status !== "closed",
+    );
+
+    // 任務也該連帶消失(team 沒了,task.list 應該查不到任何屬於它的任務)。
+    let tasksGone = false;
+    try {
+      const tasksAfter = await client.rpc("task.list", { teamId });
+      tasksGone = (tasksAfter.tasks ?? []).length === 0;
+    } catch {
+      // team 已不存在時 task.list 直接報錯也是合理的「查不到」語意。
+      tasksGone = true;
+    }
+
+    const countsOk =
+      result.deletedTasks === 1 &&
+      result.deletedMembers === 2 &&
+      result.disposedSessions >= 1 &&
+      Array.isArray(result.tasksWithUncommittedChanges);
+
+    record(
+      "步驟35 team.delete:連帶刪除成員/群聊訊息/任務(含 git worktree)並 dispose 所有成員的活躍 session——包含沒有任務、不會被 deleteTask 連帶處理的長命成員,不留孤兒 session 或殘留 worktree",
+      teamGone && worktreeGone && tasksGone && liveSessionsInRepo.length === 0 && countsOk,
+      `刪除前: 活躍session=${activeBefore}, worktree存在=${worktreeExistsBefore}, 訊息數=${messagesBefore} | ` +
+        `刪除後: teamGone=${teamGone}, worktreeGone=${worktreeGone}, tasksGone=${tasksGone}, ` +
+        `殘留活躍session=${liveSessionsInRepo.length} | result=${JSON.stringify(result)}`,
+    );
+
+    // ---- 35b: 刪不存在的 team → 明確報錯,不是靜默成功 ----
+    let rejected = false;
+    let rejectErr = "";
+    try {
+      await client.rpc("team.delete", { teamId });
+    } catch (err) {
+      rejected = true;
+      rejectErr = String(err);
+    }
+    record(
+      "步驟35b team.delete 對已不存在的 team 明確報錯(不靜默成功)",
+      rejected && rejectErr.includes(teamId),
+      `rejected=${rejected}, err=${rejectErr}`,
+    );
+  } catch (err) {
+    record("步驟35 team.delete", false, String(err));
+  } finally {
+    if (repoDir) {
+      rmTaskWorktreesFor(repoDir);
+      try {
+        rmSync(repoDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+/** 清掉這個 repo 產生的任務 worktree(它們不在 repoDir 底下,見
+ *  workspace-manager.ts 的 createWorkspaceForTask())。只刪前綴對得上的項目,
+ *  `.deskmony-worktrees` 根目錄是所有 e2e 共用的,絕不整個刪掉。 */
+function rmTaskWorktreesFor(repoDir) {
+  const root = path.join(path.dirname(repoDir), ".deskmony-worktrees");
+  if (!existsSync(root)) return;
+  const prefix = `${path.basename(repoDir)}-task-`;
+  let entries;
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    try {
+      rmSync(path.join(root, name), { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
   const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 
@@ -6206,6 +6369,13 @@ async function main() {
       await scopedMcpBridgeTokenSmokeTest(client, workspaceDir);
     } else {
       skipNote("步驟32 ACP scoped MCP bridge token", "deterministic");
+    }
+
+    // ---- 步驟 35: team.delete(破壞性操作的連帶清理,決定性測試)----
+    if (shouldRun("deterministic")) {
+      await teamDeleteSmokeTest(client, workspaceDir);
+    } else {
+      skipNote("步驟35 team.delete 連帶清理", "deterministic");
     }
     // ---- 步驟 33/34: scoped token 絕對過期 + 與 master token 認證交互
     // (各自獨立 core 子程序,函式內部自行處理 --only 過濾)----

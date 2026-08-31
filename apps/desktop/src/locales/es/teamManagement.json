@@ -38,6 +38,18 @@
     "adding": "Añadiendo…",
     "submit": "+ Añadir miembro"
   },
+  "deleteTeam": {
+    "button": "Eliminar team",
+    "confirmTitle": "¿Eliminar el team «{{name}}»?",
+    "confirmButton": "Eliminar",
+    "deleting": "Eliminando…",
+    "warnMembers": "Elimina los {{count}} miembro(s) de este team.",
+    "warnSessions": "Detiene las sessions que esos miembros tengan en curso (es decir, detiene los agents en ejecución).",
+    "warnTasks": "Elimina todas las tareas de este team junto con su git worktree; los cambios sin confirmar en esos worktrees se pierden con ellos.",
+    "warnMessages": "Borra todo el historial de chat de este team.",
+    "summary": "Team eliminado: {{tasks}} tarea(s), {{members}} miembro(s), {{sessions}} session(es) detenida(s).",
+    "summaryWithUncommitted": "Team eliminado: {{tasks}} tarea(s), {{members}} miembro(s), {{sessions}} session(es) detenida(s). ⚠ Estas tareas tenían cambios sin confirmar en su worktree y se eliminaron con ellas: {{titles}}"
+  },
   "errors": {
     "teamNameRequired": "Introduce un nombre de team",
     "selectTeamFirst": "Selecciona primero un team",

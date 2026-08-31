@@ -24,6 +24,11 @@ Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊�
 - **角色制團隊**:每個 team member 綁一個 Agent Profile(角色、後端、model、
   effort、系統提示詞、環境變數),`lifecycle` 分 `persistent`(長命,例如熟悉
   codebase 的 Reviewer)與 `ephemeral`(隨任務生滅的執行 worker)。
+- **刪除團隊**:「團隊管理」可刪除整個 team——會**連帶**中止所有成員正在跑的
+  session、刪除全部任務(含各自的 git worktree)與群聊紀錄。確認對話框逐條列出
+  代價、預設焦點在取消鈕;worktree 內有未提交變更不會中止刪除,而是刪完後明確
+  列出是哪些任務,讓人知道失去了什麼(e2e 步驟 35 守住「不留孤兒 session /
+  殘留 worktree」)。
 - **agent 互傳訊息**:內建 `team-bus` MCP server,agent 能呼叫
   `send_message`、`broadcast`、`report_status`、`request_review`、
   `list_teammates`。人類在「團隊群聊」視圖看即時對話,隨時能插話。

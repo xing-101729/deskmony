@@ -38,6 +38,18 @@
     "adding": "加入中…",
     "submit": "+ 加入成員"
   },
+  "deleteTeam": {
+    "button": "刪除團隊",
+    "confirmTitle": "刪除團隊「{{name}}」?",
+    "confirmButton": "確定刪除",
+    "deleting": "刪除中…",
+    "warnMembers": "移除這個團隊的全部 {{count}} 位成員。",
+    "warnSessions": "中止這些成員目前正在跑的 session(等於停掉執行中的 agent)。",
+    "warnTasks": "刪除這個團隊的所有任務,連同各自的 git worktree —— worktree 內尚未提交的變更會一併消失。",
+    "warnMessages": "清除這個團隊的所有群聊訊息紀錄。",
+    "summary": "已刪除團隊:任務 {{tasks}} 個、成員 {{members}} 位、中止 session {{sessions}} 個。",
+    "summaryWithUncommitted": "已刪除團隊:任務 {{tasks}} 個、成員 {{members}} 位、中止 session {{sessions}} 個。⚠ 下列任務的 worktree 內有未提交的變更,已隨之移除:{{titles}}"
+  },
   "errors": {
     "teamNameRequired": "請輸入團隊名稱",
     "selectTeamFirst": "請先選擇一個團隊",
