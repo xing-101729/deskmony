@@ -176,6 +176,23 @@ export const teamMessages = sqliteTable("team_messages", {
   deliveredAt: integer("delivered_at"),
   /** S2:所屬任務 context id;"legacy" = 遷移前的舊資料,不參與預算計算。 */
   contextId: text("context_id").notNull().default("legacy"),
+  /**
+   * 2026-08-31:這則訊息是不是「一次發給全隊」的廣播展開出來的其中一筆。
+   *
+   * **為什麼需要一個獨立欄位而不是看 `toTarget`**:`deliverBroadcast()` 真正
+   * 投遞時會把一則廣播展開成 N 筆、每筆 `to_target` 各自填收件者的名字(S2
+   * L4 §5.1,這樣每個收件者的送達狀態才能各自獨立)——展開之後
+   * `to_target === "broadcast"` 就再也不成立了,廣播這個事實在投遞路徑上被抹掉。
+   * 結果是 agent 收到訊息時分不出「這是專門找我的」還是「全隊都收到了同一則」,
+   * 而那正是它判斷該不該回覆最主要的依據(一則廣播若 N 個成員都回,就是 N 則
+   * 訊息,正是 S2 訊息預算存在要防的放大)。
+   *
+   * 忙碌成員的訊息會先留在 Mailbox、之後才從 DB 撈出來批次注入,所以這個旗標
+   * 必須**持久化**,不能只在記憶體裡傳遞。舊資料一律視為 false(非廣播)——
+   * `ALTER TABLE ADD COLUMN ... DEFAULT 0` 對既有列天生就填 0,語意正確,
+   * 不需要額外回填。
+   */
+  isBroadcast: integer("is_broadcast", { mode: "boolean" }).notNull().default(false),
 });
 export type TeamMessageRow = typeof teamMessages.$inferSelect;
 export type NewTeamMessageRow = typeof teamMessages.$inferInsert;

@@ -457,6 +457,8 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
           source: "human",
           note,
           contextId: "legacy",
+          // 同 deliverBroadcast():展開後 `to` 是個別收件者,廣播事實靠旗標留住。
+          isBroadcast: true,
         });
         lastMessage = message;
         const result = await this.deliverToMember(member, message);
@@ -678,6 +680,9 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
         source: "agent",
         note,
         contextId,
+        // 展開後 `to` 變成個別收件者,廣播這個事實只能靠這個旗標留住(見
+        // schema.ts 的 `is_broadcast`)——收件者要據此判斷「全隊都收到了」。
+        isBroadcast: true,
       });
       lastMessage = message;
       const result = await this.deliverToMember(member, message);
@@ -717,9 +722,17 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
   }
 
   private async persistAndPush(
-    fields: Omit<TeamMessage, "id" | "timestamp"> & { contextId: string },
+    // `isBroadcast` 選填、預設 false —— 只有真正的廣播展開路徑
+    // (`deliverBroadcast()` 與 `sendHumanMessage()` 的 broadcast 分支)需要顯式
+    // 帶 true,其餘一對一路徑維持既有寫法不必逐一改。
+    fields: Omit<TeamMessage, "id" | "timestamp" | "isBroadcast"> & { contextId: string; isBroadcast?: boolean },
   ): Promise<TeamMessage> {
-    const message: TeamMessage = { ...fields, id: randomUUID(), timestamp: Date.now() };
+    const message: TeamMessage = {
+      ...fields,
+      isBroadcast: fields.isBroadcast ?? false,
+      id: randomUUID(),
+      timestamp: Date.now(),
+    };
     await this.db.insert(teamMessagesTable).values(messageToRow(message)).run();
     this.emit("team-message", message);
     return message;
@@ -926,14 +939,28 @@ function replyHint(m: TeamMessage, canReplyToTeamChat: boolean): string {
   if (!canReplyToTeamChat) {
     return "(注意:你目前使用的 agent 軟體沒有團隊訊息工具,你的回覆只會留在自己的 session,發送者看不到——不必嘗試呼叫工具回覆)";
   }
-  return m.source === "human"
-    ? "(回覆請呼叫 broadcast 工具——單純用文字回答只會留在你自己的 session,人類看不到)"
-    : `(回覆請呼叫 send_message 工具、對象填 "${m.from}"——單純用文字回答只會留在你自己的 session,對方看不到)`;
+  // 措辭刻意中性(2026-08-31):把「該不該回」放在「怎麼回」前面,並明講不回也是
+  // 正常選項。修正前是無條件的「回覆請呼叫 X 工具」,附在每一則訊息後面,讀起來
+  // 像每則都在等回應——那會推高 S2 訊息預算要防的那種你來我往
+  // (見 docs/LAYER-3-hld/message-budget_hld.md §0「A↔B 可無限互相回覆」)。
+  const how =
+    m.source === "human"
+      ? "呼叫 broadcast 工具"
+      : `呼叫 send_message 工具、對象填 "${m.from}"`;
+  // 廣播的收件者是全隊:每個人都回就等於 N 則訊息,所以這裡額外提醒「通常不需要
+  // 每個人都回」。`isBroadcast` 是唯一可靠的判斷依據——投遞時 `to` 已經被改寫成
+  // 個別收件者(見 schema.ts 的 `is_broadcast` 說明)。
+  const scope = m.isBroadcast
+    ? "這是發給全隊的廣播(所有成員都收到了同一則,通常不需要每個人都回應)"
+    : "這則訊息是專門發給你的";
+  return `(${scope}。需要回應時請${how};判斷不需要回應就不必送出任何訊息——沉默是正常的,不必為了回覆而回覆。單純用文字回答只會留在你自己的 session,對方看不到。)`;
 }
 
 function formatSingle(m: TeamMessage, canReplyToTeamChat: boolean): string {
   const roleLabel = m.fromRole ? `(${m.fromRole})` : "";
-  const broadcastLabel = m.to === "broadcast" ? "[廣播] " : "";
+  // `m.to === "broadcast"` 在投遞路徑上永遠不成立(展開後 `to` 是收件者名字),
+  // 所以改看 `isBroadcast` —— 修正前這個標籤形同失效,agent 完全分不出廣播。
+  const broadcastLabel = m.isBroadcast ? "[廣播] " : "";
   const downgradeLabel = m.note ? `[${m.note}] ` : "";
   return `${downgradeLabel}${broadcastLabel}來自 @${m.from}${roleLabel} 的訊息:${m.content}\n${replyHint(m, canReplyToTeamChat)}`;
 }
@@ -952,6 +979,7 @@ function rowToMessage(row: typeof teamMessagesTable.$inferSelect): TeamMessage {
     note: row.note ?? undefined,
     contextId: row.contextId,
     deliveredAt: row.deliveredAt ?? undefined,
+    isBroadcast: row.isBroadcast,
   };
 }
 
@@ -969,5 +997,6 @@ function messageToRow(message: TeamMessage): typeof teamMessagesTable.$inferInse
     note: message.note ?? null,
     contextId: message.contextId,
     deliveredAt: message.deliveredAt ?? null,
+    isBroadcast: message.isBroadcast,
   };
 }

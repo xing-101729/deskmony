@@ -885,14 +885,28 @@ async function messageBusSmokeTest(client, workspaceDir) {
     // TeamMember 可以被 send_message 指名),所以應該指引它用 broadcast——
     // 且**不可**出現「沒有團隊訊息工具」那句(那是給 opencode/pty 的,見 12f)。
     const replyHintOk = echoed.includes("broadcast") && !echoed.includes("沒有團隊訊息工具");
+    // 2026-08-31:這是一對一訊息(to:"Coder"),注入文字必須明講「專門發給你的」、
+    // 不可標成廣播;而且措辭要中性——保留「不必為了回覆而回覆」這句,不能退回成
+    // 無條件催促回覆的版本(見 message-bus.ts replyHint() 註解)。
+    const directScopeOk = echoed.includes("專門發給你的") && !echoed.includes("[廣播]");
+    const neutralToneOk = echoed.includes("不必為了回覆而回覆");
 
     const historyResult = await client.rpc("team.messages", { teamId });
     const persisted = historyResult.messages.find((m) => m.content === content);
+    const notFlaggedBroadcast = persisted?.isBroadcast === false;
 
     record(
-      "步驟12b MessageBus:idle 成員立即以 prompt 注入(fake ACP agent 回顯驗證確實收到),且附上正確的回覆指引(acp 有 team-bus 工具 → 指引用 broadcast)",
-      sendResult.delivered === "immediate" && wrapperOk && replyHintOk && Boolean(persisted) && persisted?.to === "Coder",
-      `delivered=${sendResult.delivered}, replyHintOk=${replyHintOk}, echoed=${JSON.stringify(echoed)}, persisted=${JSON.stringify(persisted)}`,
+      "步驟12b MessageBus:idle 成員立即以 prompt 注入(fake ACP agent 回顯驗證確實收到),附上正確的回覆指引(acp → broadcast 工具),標示為「專門發給你的」而非廣播,且措辭中性(明講不必為回覆而回覆)",
+      sendResult.delivered === "immediate" &&
+        wrapperOk &&
+        replyHintOk &&
+        directScopeOk &&
+        neutralToneOk &&
+        notFlaggedBroadcast &&
+        Boolean(persisted) &&
+        persisted?.to === "Coder",
+      `delivered=${sendResult.delivered}, replyHintOk=${replyHintOk}, directScopeOk=${directScopeOk}, ` +
+        `neutralToneOk=${neutralToneOk}, isBroadcast=${persisted?.isBroadcast}, echoed=${JSON.stringify(echoed)}`,
     );
   } catch (err) {
     record("步驟12b MessageBus:idle 成員立即以 prompt 注入", false, String(err));
@@ -1000,6 +1014,46 @@ async function messageBusSmokeTest(client, workspaceDir) {
     );
   } catch (err) {
     record("步驟12e MessageBus:目標成員沒有活躍 session 時留在 Mailbox,session 建立後自動補投", false, String(err));
+  }
+
+  // ---- 12b2: 廣播訊息必須看得出是廣播(2026-08-31)----
+  // 這正是先前漏掉的那個缺口:`deliverBroadcast()` 投遞時把廣播展開成 N 筆、
+  // 每筆 `to` 改寫成個別收件者,於是 `to === "broadcast"` 永遠不成立,
+  // `[廣播]` 標籤形同失效 —— agent 收到廣播時看起來就像有人專程找它,分不出
+  // 「全隊都收到了」。改用持久化的 `isBroadcast` 旗標後,這裡把兩件事都釘住:
+  // ①DB 裡確實標成廣播;②注入文字要讓 agent 看得出來、並提醒不必每個人都回。
+  try {
+    const bcContent = `broadcast-scope-${randomUUID().slice(0, 8)} ${delayEchoMarker(0)}`;
+    await client.rpc("message.send", { teamId, to: "broadcast", content: bcContent, fromName: "Tester" });
+
+    const bcEv = await waitForMessageContaining(client, coderSessionId, bcContent, 15_000);
+    const bcEchoed = bcEv.event.delta;
+    const labelledBroadcast = bcEchoed.includes("[廣播]");
+    const saysWholeTeam = bcEchoed.includes("發給全隊的廣播");
+    const saysNotEveryoneNeedsToReply = bcEchoed.includes("通常不需要每個人都回應");
+    // **不可**同時說成「專門發給你的」——那是一對一才對的措辭。
+    const notMislabelledDirect = !bcEchoed.includes("專門發給你的");
+
+    const bcHistory = await client.rpc("team.messages", { teamId });
+    const bcRows = bcHistory.messages.filter((m) => m.content === bcContent);
+    // 展開成 N 筆(收件者各一筆),每筆的 to 是個別成員名字、且都標記為廣播。
+    const expandedPerRecipient = bcRows.length >= 2 && bcRows.every((m) => m.to !== "broadcast");
+    const allFlaggedBroadcast = bcRows.length > 0 && bcRows.every((m) => m.isBroadcast === true);
+
+    record(
+      "步驟12b2 MessageBus:廣播展開成 N 筆後仍標記為廣播(isBroadcast 持久化),注入文字讓 agent 看得出「發給全隊」並提醒不必每個人都回——修正前 to 被改寫成收件者名字,廣播這個事實在投遞路徑上整個消失",
+      labelledBroadcast &&
+        saysWholeTeam &&
+        saysNotEveryoneNeedsToReply &&
+        notMislabelledDirect &&
+        expandedPerRecipient &&
+        allFlaggedBroadcast,
+      `labelled=${labelledBroadcast}, saysWholeTeam=${saysWholeTeam}, notEveryone=${saysNotEveryoneNeedsToReply}, ` +
+        `notMislabelledDirect=${notMislabelledDirect}, rows=${bcRows.length}, allFlagged=${allFlaggedBroadcast}, ` +
+        `echoed=${JSON.stringify(bcEchoed.slice(0, 400))}`,
+    );
+  } catch (err) {
+    record("步驟12b2 MessageBus:廣播訊息可被辨識為廣播", false, String(err));
   }
 
   // ---- 12f: 回覆指引依收訊者的 software 而變(2026-08-28,使用者實測回報)----

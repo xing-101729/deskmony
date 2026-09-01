@@ -179,6 +179,7 @@ export function createDb(dbFilePath: string): NexusDb {
   ensureTasksAcceptanceColumn(sqlite);
   ensureTasksAwaitingHumanReviewColumn(sqlite);
   ensureTeamMessagesBudgetColumns(sqlite);
+  ensureTeamMessagesIsBroadcastColumn(sqlite);
   ensureTeamMembersLifecycleColumn(sqlite);
   migrateAutoAcceptAllPermissionLevel(sqlite);
 
@@ -266,6 +267,24 @@ function ensureSessionsRecoveryColumns(sqlite: Database.Database): void {
  * IF NOT EXISTS` 對已存在的表不會補欄位,需要另外用 `PRAGMA table_info`
  * 檢查後視情況 `ALTER TABLE`)。同一輪新增的單一欄位,不需要特殊回填邏輯。
  */
+/**
+ * 2026-08-31:對既有 DB 補上 `team_messages.is_broadcast`(見 schema.ts 對這個
+ * 欄位「為什麼不能看 to_target」的完整說明)。
+ *
+ * 帶 SQL `DEFAULT 0` 且 NOT NULL——`ALTER TABLE ADD COLUMN` 會把既有列一律填
+ * 0(= 非廣播),這正是舊資料的正確既有語意,不需要像
+ * `ensureTeamMessagesBudgetColumns()` 那樣再做一次性 UPDATE 回填。
+ */
+function ensureTeamMessagesIsBroadcastColumn(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(team_messages)").all() as { name: string }[];
+  if (columns.some((col) => col.name === "is_broadcast")) return;
+  try {
+    sqlite.exec("ALTER TABLE team_messages ADD COLUMN is_broadcast INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    // 欄位已存在(競態)或其他非預期情況——同其他 ensure* 函式,不讓啟動中斷。
+  }
+}
+
 function ensureSessionsParentColumn(sqlite: Database.Database): void {
   const columns = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
   const hasColumn = columns.some((col) => col.name === "parent_session_id");

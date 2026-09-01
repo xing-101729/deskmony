@@ -124,5 +124,15 @@ export const TeamMessageSchema = z.object({
   /** S2:null/undefined = 尚未送達(Mailbox 中的權威狀態,見
    *  message-budget_detail.md §5)。有值 = 已成功注入該 session 的時間戳。 */
   deliveredAt: z.number().optional(),
+  /**
+   * 這則訊息是不是「一次發給全隊」的廣播展開出來的其中一筆(見
+   * packages/db/src/schema.ts 對 `is_broadcast` 欄位的完整說明)。
+   *
+   * 投遞時 `to` 已經被改寫成個別收件者的名字,單看 `to` 分不出廣播與否;
+   * 注入 prompt 時靠這個旗標告訴 agent「全隊都收到了同一則」,那是它判斷
+   * 該不該回覆的主要依據——一則廣播若每個成員都回,就是 N 則訊息。
+   * 舊資料沒有這個欄位,一律視為 false。
+   */
+  isBroadcast: z.boolean().default(false),
 });
 export type TeamMessage = z.infer<typeof TeamMessageSchema>;

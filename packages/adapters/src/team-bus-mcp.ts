@@ -46,7 +46,16 @@ export function createTeamBusMcpServer(context: TeamSpawnContext): McpSdkServerC
       "與同一個 team 的隊友互傳訊息:send_message 傳給特定隊友、broadcast 對全隊廣播、" +
       "list_teammates 查詢隊友名單與目前狀態、report_status 回報自己的任務狀態。" +
       "訊息不會立刻打斷對方 —— 對方忙碌時會排隊,回合結束後批次送達;" +
-      "priority=\"interrupt\" 只有被授權的角色才有效,否則會自動降級為 normal。",
+      "priority=\"interrupt\" 只有被授權的角色才有效,否則會自動降級為 normal。" +
+      // 2026-08-31:節制引導。這組工具原本只說明「怎麼發」,沒有一句「什麼時候
+      // 不該發」,而每則收到的訊息又都附著回覆指引 —— 兩者相加會推高
+      // 「A 回 B、B 再回 A」這種你來我往,正是 S2 訊息預算存在要防的失控形態
+      // (見 docs/LAYER-3-hld/message-budget_hld.md §3)。額度用盡會直接熔斷、
+      // 停掉所有橫向溝通,所以節制本身也符合 agent 自己的利益。
+      "收到隊友訊息時先判斷是否真的需要回應:單純的狀態告知、或已經有其他人接手的廣播," +
+      "通常不需要回覆,不回覆是正常且正確的選擇。每則訊息都會消耗這個任務的訊息額度," +
+      "廣播更是一次消耗 N 則(每個收件者各一則),額度用盡會熔斷整個任務的橫向溝通。" +
+      "回報工作進度請優先用 report_status(不佔訊息額度),不要用 broadcast 廣播進度。",
     tools: [
       tool(
         "send_message",
