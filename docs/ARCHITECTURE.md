@@ -53,7 +53,7 @@ flowchart TB
 
     subgraph CORE["apps/core — headless orchestration server(Node.js)"]
         direction TB
-        GW["gateway/ WsGateway — 67 個 RPC + 11 個 push channel"]
+        GW["gateway/ WsGateway — 68 個 RPC + 11 個 push channel"]
         subgraph DOMAIN["領域模組"]
             direction LR
             Sess["session/"]
@@ -409,9 +409,9 @@ ACP,見 `docs/DECISIONS.md` B2):
 
 ## 7. Gateway 協議
 
-`ws://` 上的 request/response + server push。**67 個 RPC 方法**(連同 `auth` 一起
+`ws://` 上的 request/response + server push。**68 個 RPC 方法**(連同 `auth` 一起
 算;2026-08-25 新增 4 個政策/真.無限制相關方法,見下方「政策」列與 Session
-列),分組:
+列;2026-08-31 新增 `team.delete`),分組:
 
 | 分組 | 方法 |
 |---|---|
@@ -420,7 +420,7 @@ ACP,見 `docs/DECISIONS.md` B2):
 | Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode`(2026-08-25 起遠端可用,已從 🔒 移除)/ `.setTrueUnrestricted`(2026-08-25 新增,遠端可用)/ `.spawnChild` / `.listChildren` / `.sendToChild` / `.spawnChildForSubagent`(S12 子 agent,見 §9.3)/ `.terminalInput` / `.resizeTerminal` |
 | 權限 | `permission.resolve`、`dialog.resolve` |
 | 政策 | `policy.addRule` / `.removeRule` / `.listRules`(2026-08-25 新增,遠端可用) |
-| Team | `team.create` / `.list` / `.addMember` / `.removeMember` / `.messages` / `.teammates` |
+| Team | `team.create` / `.list` / `.addMember` / `.removeMember` / `.delete`(2026-08-31 新增,破壞性:連帶刪任務+worktree、dispose 成員 session,見 §9.4)/ `.messages` / `.teammates` |
 | 訊息 | `message.send` / `.sendMessage` / `.broadcast` / `.reportStatus` / `.requestReview` / `.getContextBudget` |
 | 任務 | `task.create` / `.list` / `.get` / `.assign` / `.updateStatus` / `.delete` / `.merge` / `.setAcceptance` / `.runAcceptance` / `.approveReview`、`workspace.get` |
 | 成本 | `cost.getSummary` |
@@ -471,7 +471,7 @@ erDiagram
 | `messages` | `role`、`content`、`attachments` | `attachments` 是圖片附件的 JSON,獨立欄位而非塞進 `content` |
 | `agent_profiles` | `software`、`providerId`、`model`、`effort`、`env`、`acpConfig`/`ptyConfig`/`opencodeConfig` | 巢狀物件以 JSON 字串存 |
 | `teams` / `team_members` | `lifecycle`(`persistent`/`ephemeral`)、`canInterrupt` | |
-| `team_messages` | `deliveredAt`(null = 仍在 Mailbox)、`contextId` | **DB 是 Mailbox 的權威來源**,不是記憶體 Map |
+| `team_messages` | `deliveredAt`(null = 仍在 Mailbox)、`contextId`、`isBroadcast` | **DB 是 Mailbox 的權威來源**,不是記憶體 Map;`isBroadcast` 見 §9.2「廣播在投遞後仍看得出是廣播」 |
 | `tasks` | `status`、`assigneeMemberId`、`workspaceId`、`blockedFrom`、`acceptance`、`awaitingHumanReview` | |
 | `workspaces` | `baseDir`、`worktreePath`、`branch` | |
 | `settings` | `key` / `value`(JSON) | 通用 k/v,新增偏好不需要 schema 遷移 |
@@ -502,7 +502,7 @@ provider 目錄的「OpenCode(ACP,支援團隊訊息)」改用 `opencode acp` �
 
 因此 `MessageBus` 注入訊息時會**依收訊者的 software 決定回覆指引**:沒有工具
 的成員收到的是「你的回覆只會留在自己的 session」的如實告知,絕不會被叫去呼叫
-不存在的工具(e2e 步驟 12b/12f 分別守住正反兩面)。
+不存在的工具(e2e 步驟 12b/12f 分別守住正反兩面;完整的指引規則見 §9.2)。
 
 | MCP server | 工具 | 進 `allowedTools`(自動放行)? |
 |---|---|---|
@@ -512,6 +512,13 @@ provider 目錄的「OpenCode(ACP,支援團隊訊息)」改用 `opencode acp` �
 
 > 舊文件列過的 `read_inbox` **不存在也不需要**:投遞策略是「idle 立即注入 /
 > busy 排隊後自動批次注入」,Mailbox 對 agent 是被動送達,不是拉取式的。
+
+這組工具的 MCP `instructions` 除了說明「怎麼發」,也明講**什麼時候不該發**
+(2026-08-31):單純的狀態告知、或已有他人接手的廣播通常不需要回覆;每則訊息都
+消耗該任務的訊息額度,廣播更是一次消耗 N 則(每個收件者各一則);回報進度請優先
+用不佔額度的 `report_status`,不要用 `broadcast`。加這段的理由與 §9.2 的中性化
+措辭相同——工具描述原本只教怎麼發、不教何時該閉嘴,與「每則收到的訊息都附回覆
+指引」相加,會把 agent 推向 §5.2 訊息斷路器正要防的你來我往。
 
 ### 9.2 投遞策略(`MessageBus.deliverToMember()`)
 
@@ -558,6 +565,27 @@ Promise 的語意就是「resolve 才代表真的停了」,不 await 會與尚�
 投遞前查不到 session 就依 team(其次 profile)的 `workingDir` 自動建一條,同一
 member 用雙重檢查鎖,避免兩則幾乎同時抵達的訊息各建一個 session。短命
 (ephemeral)成員維持原設計**不**自動建——不在線是刻意允許的狀態(同文件 §3)。
+
+**注入的訊息會附一句回覆指引,而且依收訊者與訊息性質而變**(2026-08-28/31,
+`formatSingle()` / `replyHint()`)。三個維度:
+
+| 維度 | 行為 |
+|---|---|
+| 收訊者的 software | 有掛 team-bus 工具(`claude-agent-sdk`/`acp`,見 `SOFTWARE_WITH_TEAM_BUS`)才給工具指引;`opencode`/`pty` 改為如實告知「你的回覆只會留在自己的 session」——**絕不叫它呼叫不存在的工具** |
+| 發送者是人還是 agent | 人類插話沒有對應的 TeamMember,無法被 `send_message` 指名,因此指引用 `broadcast`;隊友訊息則指名 `send_message(to: <發送者>)` |
+| 一對一還是廣播 | 廣播額外標示「所有成員都收到了同一則,通常不需要每個人都回應」 |
+
+措辭刻意中性:先講「這則是不是專門給你的」,再講「需要回應時怎麼回」,並明講
+**不回覆是正常選項**。修正前是無條件的「回覆請呼叫 X 工具」附在每一則後面,讀起來
+像每則都在等回應,會推高 §5.2 訊息預算正要防的那種你來我往。
+
+**廣播在投遞後仍看得出是廣播**(2026-08-31,`team_messages.isBroadcast`)。
+`deliverBroadcast()` 投遞時把一則廣播**展開成 N 筆、每筆 `to` 改寫成個別收件者**
+(S2 L4 §5.1,這樣每人的送達狀態才能各自獨立)——展開之後 `to === "broadcast"`
+再也不成立,廣播這個事實在投遞路徑上被抹掉,agent 收到廣播時看起來就像有人專程
+找它。而「這是不是專門找我」正是它判斷該不該回覆的主要依據。改用獨立的持久化
+旗標修正:**必須持久化**而非記憶體傳遞,因為忙碌成員的訊息會先留在 Mailbox、
+稍後才從 DB 撈出來批次注入。冪等遷移、舊資料一律 false。
 `workingDir` 取不到或 `createSession()` 失敗時靜默降級回 `"no-session"`,訊息
 安全留在 Mailbox,前端 `TeamChatView` 顯示一則非阻斷提示,不讓自動上線的失敗
 變成整個 `sendMessage` 的硬錯誤。

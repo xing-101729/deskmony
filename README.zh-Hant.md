@@ -31,7 +31,7 @@ Deskmony 讓你跑一整支 AI coding agent **團隊**,而不是側邊欄裡的�
 
 - 🛡️ **三個獨立斷路器** —— 權限、訊息、成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
 - 🤝 **是一支團隊,不是一個聊天機器人** —— 角色(PM / Architect / Coder / Reviewer / QA),每個可綁不同後端與 model。
-- 💬 **agent 之間互相傳訊** —— 內建 `team-bus` MCP server,提供 `send_message`、`broadcast`、`request_review`、`report_status`、`list_teammates`。人類看著即時群聊,隨時可以插話。長命成員收到訊息時若還沒有 session,會自動幫它開一條;每則注入的訊息也會直接點名該用哪個工具回覆,回話才會回到群聊,而不是卡在 agent 自己的對話紀錄裡。這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸上(後者涵蓋 Codex、Gemini,以及走 `opencode acp` 的 OpenCode);`pty` 直通**架構上沒有工具通道**,這類成員仍然收得到訊息,但會被如實告知「回覆傳不回去」,而不是被交付一個根本不存在的工具。
+- 💬 **agent 之間互相傳訊** —— 內建 `team-bus` MCP server,提供 `send_message`、`broadcast`、`request_review`、`report_status`、`list_teammates`。人類看著即時群聊,隨時可以插話。長命成員收到訊息時若還沒有 session,會自動幫它開一條;每則注入的訊息也會直接點名該用哪個工具回覆,回話才會回到群聊,而不是卡在 agent 自己的對話紀錄裡。那句提示同時會告訴 agent「這則是專門找你的,還是發給全隊的廣播」,並明講不回覆也是正常選項——否則一則廣播給五個人就等於邀請五則回覆,那正是訊息斷路器要防的迴圈。這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸上(後者涵蓋 Codex、Gemini,以及走 `opencode acp` 的 OpenCode);`pty` 直通**架構上沒有工具通道**,這類成員仍然收得到訊息,但會被如實告知「回覆傳不回去」,而不是被交付一個根本不存在的工具。
 - 🌱 **agent 可以開子 agent** —— 第二個 `subagent` MCP server 讓 session 把子任務委派出去並收回結果。開子 agent **刻意不自動放行**。
 - 🖥️ **貨真價實的桌面 IDE** —— 串流 markdown、行內 diff、內嵌終端機、todo 追蹤、圖片工具輸出、互動式提問元件。
 - 🗂️ **git worktree 隔離** —— 每個任務一個 worktree;合併回主幹永遠需要人類親手點一下。
@@ -114,7 +114,7 @@ flowchart TB
     end
 
     subgraph CORE["apps/core —— headless orchestration server"]
-        GW["gateway/ —— 67 個 RPC + 11 個 push channel"]
+        GW["gateway/ —— 68 個 RPC + 11 個 push channel"]
         subgraph DOMAIN["領域"]
             direction LR
             Sess["session/"]

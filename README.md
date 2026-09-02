@@ -31,7 +31,7 @@ That isn't a marketing line. The four directories that exist purely to serve the
 
 - 🛡️ **Three independent circuit breakers** — permissions, messages, and cost. Default-deny throughout, with a hard-deny list that no auto-mode can bypass — the one deliberate exception is an explicit, typed-confirmation "true-unrestricted" tier, covered below.
 - 🤝 **Agent teams, not a single chatbot** — roles (PM / Architect / Coder / Reviewer / QA), each bound to a different backend and model.
-- 💬 **Agents message each other** — a built-in `team-bus` MCP server offers `send_message`, `broadcast`, `request_review`, `report_status`, and `list_teammates`. Humans watch the live team chat and can interject at any time. A persistent member with no session yet gets one spawned on delivery, and every injected message names the tool to reply with, so answers land back in the team chat instead of being stranded in the agent's own transcript. The tools are mounted on the `claude-agent-sdk` and `acp` transports (the latter covers Codex, Gemini, and OpenCode via `opencode acp`); a `pty` passthrough has no tool channel at all, so members on it still *receive* messages but are told plainly that their reply cannot get back — never handed a tool that isn't there.
+- 💬 **Agents message each other** — a built-in `team-bus` MCP server offers `send_message`, `broadcast`, `request_review`, `report_status`, and `list_teammates`. Humans watch the live team chat and can interject at any time. A persistent member with no session yet gets one spawned on delivery, and every injected message names the tool to reply with, so answers land back in the team chat instead of being stranded in the agent's own transcript. That hint also tells the agent whether the message was aimed at it or broadcast to the whole team, and says outright that sending nothing is a normal outcome — otherwise a broadcast to five members invites five replies, which is exactly the loop the message breaker exists to stop. The tools are mounted on the `claude-agent-sdk` and `acp` transports (the latter covers Codex, Gemini, and OpenCode via `opencode acp`); a `pty` passthrough has no tool channel at all, so members on it still *receive* messages but are told plainly that their reply cannot get back — never handed a tool that isn't there.
 - 🌱 **Agents can spawn sub-agents** — a second `subagent` MCP server lets a session delegate to children and collect their results. Spawning is deliberately *not* auto-approved.
 - 🖥️ **A real desktop IDE** — streaming markdown, inline diffs, an embedded terminal, todo tracking, image tool output, and interactive question prompts.
 - 🗂️ **Git-worktree isolation** — every task gets its own worktree; merging back to the trunk always takes a human click.
@@ -114,7 +114,7 @@ flowchart TB
     end
 
     subgraph CORE["apps/core — headless orchestration server"]
-        GW["gateway/ — 67 RPC methods + 11 push channels"]
+        GW["gateway/ — 68 RPC methods + 11 push channels"]
         subgraph DOMAIN["domain"]
             direction LR
             Sess["session/"]
