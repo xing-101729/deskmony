@@ -194,9 +194,19 @@ bearer token,用 `timingSafeEqual` 做常數時間字串比對(見上方「認�
 
 - **`DESKMONY_AUTH_TOKEN` 維持環境變數專屬**,這份設定檔完全沒有任何 token
   欄位。
-- 桌面版每次啟動在記憶體產生臨時 token(見上方「桌面殼串接」)這個既有設計
-  是刻意的:不把長期憑證落地成檔案,重開 app 就是換一把新鑰匙,沒有「token
-  檔案被誰讀走」這個額外的攻擊面。
+- 桌面版原本每次啟動在記憶體產生臨時 token(見上方「桌面殼串接」),不落地
+  成檔案。**2026-09 起局部反轉這個決定**:使用者要求一組能複製給別人、重啟
+  後還能沿用的固定 token,`electron/main.ts` 的 `resolveAuthToken()` 改用
+  Electron 的 `safeStorage`(Windows DPAPI/macOS Keychain/Linux Secret
+  Service)把自訂/重新產生的值加密存進 `<userData>/auth-token.enc`——這是對
+  「token 檔案被誰讀走」這個攻擊面的**直接對策**(加密、綁定這台機器這個 OS
+  使用者),不是忽略它;`safeStorage` 不可用時退回舊行為(僅本次執行有效)。
+  這個持久化**只存在 Electron 這一層**,`~/.deskmony/config.json` 依然完全
+  沒有任何 token 欄位,上面兩條規則不變。`SettingsDialog.tsx` 新增「遠端
+  存取」區塊管理這個值(顯示 + 複製 + 自訂 + 重新產生);`DESKMONY_AUTH_TOKEN`
+  環境變數仍然永遠優先(該區塊此時鎖定唯讀);改變只影響**下次啟動**套用的
+  值,不會追溯套用到已在跑的 core 子程序,因此不需要新的 gateway RPC,也不
+  碰 `ws-gateway.ts` 的認證熱路徑。
 - 若設定檔出現疑似 token 的欄位(例如 `daemon.authToken`,或任何名稱含
   `token`/`secret`/`password`/`apikey` 的欄位),`apps/core/src/config/
   load-config.ts` 的 `scanUnknownKeys()` 會把它當「未知欄位」處理、忽略、
@@ -395,6 +405,12 @@ pnpm start:core       # 等同 pnpm --filter @deskmony/core run start → node d
   沒有被 `main.ts` 覆寫),token 純粹是縱深防禦(即使本機被其他使用者/
   process 意外連上 core 的 port,也需要知道這個隨機 token 才能操控),不是
   因為桌面殼場景本身需要對外曝露。
+
+> **2026-09 更新**:上面「每次啟動都重新產生、不落地成檔案」已不是完整
+> 現況——`main.ts` 現在預設把產生的值加密持久化,讓它能跨重啟複製給別人用
+> (`SettingsDialog.tsx` 新的「遠端存取」區塊)。完整理由與邊界見上方「為何
+> 刻意不把 token 放進設定檔」一節的 2026-09 更新段落;這裡的歷史敘述保留
+> 原樣,不代表目前行為。
 
 ## 瀏覽器/行動裝置 client(M5 Round B)
 
