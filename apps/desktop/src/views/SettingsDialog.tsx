@@ -390,6 +390,126 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
 }
 
 /**
+ * 桌面殼「遠端存取 token」區塊——只在 Electron 場景顯示(`window.deskmony`
+ * 存在時,見 SettingsDialog 底部的存在性檢查)。與 GlobalConfigSection 不同:
+ * 這裡管理的不是 core 的 `~/.deskmony/config.json`(那份檔案刻意永遠不含
+ * token,見 packages/shared/src/core-config.ts 頂端「安全決定」),是 Electron
+ * 自己本機加密保存的狀態(electron/main.ts 的 `resolveAuthToken()`)——因此
+ * 刻意不重用 `ConfigSource`/`ConfigFieldRow` 的「default/file/env」語彙,
+ * 避免和 config.json 的「file」來源混淆成同一份東西。
+ *
+ * 改變 token 只影響「下次啟動 Deskmony 時套用的值」,不會追溯套用到目前
+ * 已在跑的 core 子程序——比照 GlobalConfigSection 既有的 `requiresRestart`
+ * 提示慣例,用本地 `changed` state 顯示同樣語意的提示。
+ */
+function RemoteAccessSection(): JSX.Element {
+  const { t } = useTranslation(["settings", "common"]);
+  const [info, setInfo] = useState<{ token: string; locked: boolean; persisted: boolean } | null>(null);
+  const [draft, setDraft] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState<"save" | "regenerate" | null>(null);
+  const [changed, setChanged] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void window.deskmony?.getAuthTokenInfo?.().then((next) => next && setInfo(next));
+  }, []);
+
+  const handleCopy = async (): Promise<void> => {
+    if (!info) return;
+    await navigator.clipboard.writeText(info.token);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handleRegenerate = async (): Promise<void> => {
+    setBusy("regenerate");
+    setError(null);
+    try {
+      const next = await window.deskmony?.regenerateAuthToken?.();
+      if (next) {
+        setInfo(next);
+        setChanged(true);
+      }
+    } catch (err) {
+      setError(translateError(err, t));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleSaveCustom = async (): Promise<void> => {
+    if (draft.trim().length < 8) return;
+    setBusy("save");
+    setError(null);
+    try {
+      const next = await window.deskmony?.setAuthToken?.(draft.trim());
+      if (next) {
+        setInfo(next);
+        setChanged(true);
+        setDraft("");
+      }
+    } catch (err) {
+      setError(translateError(err, t));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!info) return <p className="py-2 text-center text-2xs text-fg-faint">{t("common:loading")}</p>;
+
+  return (
+    <div className="rounded-md bg-surface px-3 py-2.5">
+      <p className="text-2xs leading-relaxed text-fg-faint">{t("settings:remoteAccess.description")}</p>
+
+      <div className="mt-2 flex items-center gap-2">
+        <Input
+          mono
+          readOnly
+          value={info.token}
+          fieldSize="md"
+          className="flex-1"
+          onFocus={(e) => e.currentTarget.select()}
+        />
+        <Button size="sm" variant="outline" icon="copy" onClick={() => void handleCopy()}>
+          {copied ? t("settings:remoteAccess.copied") : t("settings:remoteAccess.copyButton")}
+        </Button>
+      </div>
+
+      {info.locked && (
+        <p className="mt-1.5 flex items-center gap-1 text-2xs text-fg-faint">
+          <Icon name="shield" size={11} />
+          {t("settings:remoteAccess.lockedReason")}
+        </p>
+      )}
+      {!info.locked && !info.persisted && <Badge tone="warn" className="mt-1.5">{t("settings:remoteAccess.notPersistedWarning")}</Badge>}
+
+      {!info.locked && (
+        <div className="mt-2.5 flex items-center gap-2 border-t border-line pt-2.5">
+          <Input
+            mono
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={t("settings:remoteAccess.customValuePlaceholder")}
+            className="flex-1"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <Button size="sm" variant="outline" loading={busy === "save"} disabled={busy !== null || draft.trim().length < 8} onClick={() => void handleSaveCustom()}>
+            {t("settings:remoteAccess.saveButton")}
+          </Button>
+          <Button size="sm" variant="outline" icon="refresh" loading={busy === "regenerate"} disabled={busy !== null} onClick={() => void handleRegenerate()}>
+            {t("settings:remoteAccess.regenerateButton")}
+          </Button>
+        </div>
+      )}
+      {changed && <Badge tone="warn" className="mt-2">{t("settings:remoteAccess.requiresRestart")}</Badge>}
+      {error && <Badge tone="danger" title={error} className="mt-2">{t("settings:remoteAccess.saveFailedWithReason", { error })}</Badge>}
+    </div>
+  );
+}
+
+/**
  * S11(Notification):「通知設定」區塊——**唯讀顯示**。刻意不提供任何輸入框
  * ——`notification` 整區都不在 `config.setFile` 的安全子集內。
  */
@@ -487,6 +607,13 @@ export function SettingsDialog({ onClose }: SettingsDialogProps): JSX.Element {
 
         <SectionLabel className="pt-1">{t("settings:sections.global")}</SectionLabel>
         {effectiveConfig ? <GlobalConfigSection config={effectiveConfig} /> : <p className="py-2 text-center text-2xs text-fg-faint">{t("common:loading")}</p>}
+
+        {typeof window !== "undefined" && window.deskmony && (
+          <>
+            <SectionLabel className="pt-1">{t("settings:sections.remoteAccess")}</SectionLabel>
+            <RemoteAccessSection />
+          </>
+        )}
 
         <SectionLabel className="pt-1">{t("settings:sections.notification")}</SectionLabel>
         {effectiveConfig ? <NotificationConfigSection config={effectiveConfig} /> : <p className="py-2 text-center text-2xs text-fg-faint">{t("common:loading")}</p>}

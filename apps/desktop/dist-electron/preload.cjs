@@ -69,6 +69,22 @@ function onNotificationClick(callback) {
     electron_1.ipcRenderer.on("deskmony:notification-clicked", listener);
     return () => electron_1.ipcRenderer.removeListener("deskmony:notification-clicked", listener);
 }
+/**
+ * 使用者需求(2026-09):Settings UI 需要顯示/複製/自訂/重新產生桌面殼目前
+ * 使用的認證 token(見 electron/main.ts 的 `resolveAuthToken()`/
+ * `deskmony:setAuthToken`/`deskmony:regenerateAuthToken` handler 註解)。
+ * 純瀏覽器 client(`window.deskmony` 整個是 `undefined`)沒有這組方法可用
+ * ——那是另一台機器,本來就管不到「這台」機器的 Electron 本機加密儲存。
+ */
+function getAuthTokenInfo() {
+    return electron_1.ipcRenderer.invoke("deskmony:getAuthTokenInfo");
+}
+function setAuthToken(value) {
+    return electron_1.ipcRenderer.invoke("deskmony:setAuthToken", value);
+}
+function regenerateAuthToken() {
+    return electron_1.ipcRenderer.invoke("deskmony:regenerateAuthToken");
+}
 electron_1.contextBridge.exposeInMainWorld("deskmony", {
     corePort,
     gatewayUrl: `ws://localhost:${corePort}`,
@@ -77,4 +93,7 @@ electron_1.contextBridge.exposeInMainWorld("deskmony", {
     focusWindow,
     notify,
     onNotificationClick,
+    getAuthTokenInfo,
+    setAuthToken,
+    regenerateAuthToken,
 });

@@ -6,6 +6,7 @@
   "sections": {
     "permission": "権限",
     "global": "全体設定",
+    "remoteAccess": "リモートアクセス",
     "notification": "通知設定",
     "provider": "Provider 管理"
   },
@@ -48,6 +49,18 @@
     "written": "書き込み済み:{{fields}}",
     "requiresRestart": "(反映には core の再起動が必要です)",
     "saveFailedWithReason": "保存に失敗しました:{{error}}"
+  },
+  "remoteAccess": {
+    "description": "デスクトップシェルが現在 WebSocket 接続の認証に使用している token です——ブラウザやスマートフォンから接続画面経由でこのパソコンに接続する場合、同じ値の入力が必要です。コピーしてそのまま相手に渡せます。カスタム値や再生成した値は次回 Deskmony 起動時に適用される token にのみ影響し、すでに確立している接続には影響しません。",
+    "copyButton": "コピー",
+    "copied": "コピーしました",
+    "lockedReason": "DESKMONY_AUTH_TOKEN 環境変数によってロックされているため、この画面からは変更できません",
+    "notPersistedWarning": "このシステムでは暗号化ストレージを利用できません。この値は今回の実行中のみ有効です",
+    "customValuePlaceholder": "カスタム token を入力(8文字以上)",
+    "saveButton": "保存",
+    "regenerateButton": "再生成",
+    "requiresRestart": "更新されました。反映には Deskmony の再起動が必要です",
+    "saveFailedWithReason": "失敗しました:{{error}}"
   },
   "notification": {
     "description": "エスカレーション/サーキットブレーカーの帯域外通知(読み取り専用)——webhook url は認証情報と同等に扱われ、ローカル接続であってもリモート/UI からの書き込み経路は提供されません。変更するには <configPath/> の <notificationBlock/> ブロックを直接編集し、core を再起動してください。",

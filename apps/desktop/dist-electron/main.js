@@ -1,9 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, safeStorage } from "electron";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 const RESOURCES_CORE_DIR = "core";
 /**
  * Electron main process(ARCHITECTURE.md 3.1、10 節「Core 與殼分離」):
@@ -17,21 +17,99 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CORE_PORT = Number(process.env.DESKMONY_CORE_PORT ?? 4317);
 const isDev = !app.isPackaged;
 /**
- * M5 Round A(任務2):桌面殼串接認證。main process 產生一個隨機 token,
- * 設進 `process.env.DESKMONY_AUTH_TOKEN`(在 `createWindow()` 之前設定,
- * 讓 preload script 讀到的 `process.env` 也含這個值 —— preload 繼承 main
- * process 當下環境變數的機制與既有 `DESKMONY_CORE_PORT` 相同,見
- * preload.ts 內註解),同一個值再透過 `startCore()` 的 `env` 傳給 core
- * 子程序。這樣 core/renderer 兩端拿到的是同一份 token,且只存在於這個
- * app 生命週期的記憶體/環境變數內,不落地成檔案、不寫進任何 log。
+ * M5 Round A(任務2):桌面殼串接認證,token 優先序 `DESKMONY_AUTH_TOKEN`
+ * 環境變數 → 本機加密保存的值 → 現生成的隨機值(見下方 `resolveAuthToken()`)。
+ * 必須在 `createWindow()`/`startCore()` 之前設進 `process.env.DESKMONY_AUTH_TOKEN`
+ * ——讓 preload script 讀到的 `process.env` 也含這個值(preload 繼承 main
+ * process 當下環境變數的機制與既有 `DESKMONY_CORE_PORT` 相同,見 preload.cts
+ * 內註解),同一個值再透過 `startCore()` 的 `env` 傳給 core 子程序。這樣
+ * core/renderer 兩端拿到的是同一份 token,且從頭到尾不落入
+ * `~/.deskmony/config.json`(見 packages/shared/src/core-config.ts 頂端
+ * 「安全決定」——那份文件的紀律只管「不進 config.json」,不等於「不能在
+ * 別處持久化」)。
  *
- * 每次啟動都重新產生(不持久化)——桌面殼場景下 core 子程序與桌面殼視窗
- * 生命週期一致(main.ts 自己 spawn 的 child process,只有這個 app 實例會
- * 連上),不需要跨重啟保留同一個 token;比起持久化,現生成的隨機值不需要
- * 額外處理「token 檔案要存哪裡、誰能讀」這個新的攻擊面。
+ * 加密保存(反轉舊決定):這裡原本是「每次啟動都重新產生、刻意不落地」,
+ * 理由是不想額外處理「token 檔案要存哪裡、誰能讀」這個新攻擊面。使用者
+ * 需求(想要一組能複製給別人、重啟後還能繼續用的固定 token)反轉了這個
+ * 決定:改用 Electron 的 `safeStorage`(Windows DPAPI/macOS Keychain/Linux
+ * Secret Service)把值加密存在 `<userData>/auth-token.enc`,只有這台機器的
+ * 這個作業系統使用者能解密——這是對「新攻擊面」疑慮的直接對策,不是忽略它。
+ * `DESKMONY_AUTH_TOKEN` 環境變數仍然永遠優先(`authTokenLockedByEnv` 為真時
+ * Settings UI 鎖定編輯,見 `registerIpcHandlers()` 的
+ * `deskmony:setAuthToken`/`deskmony:regenerateAuthToken`)。改變 token 只
+ * 影響「下次啟動」——已經在跑的 core 子程序不會被追溯套用新值,因此不需要
+ * 任何新的 gateway RPC,完全不碰 ws-gateway.ts 的認證熱路徑。
+ *
+ * `safeStorage.isEncryptionAvailable()` 為假時(例如 Linux 沒有系統金鑰庫)
+ * 退回舊行為(僅本次執行有效),不中斷啟動流程,也絕不把 token 明文寫進
+ * 任何 log。
  */
-const CORE_AUTH_TOKEN = process.env.DESKMONY_AUTH_TOKEN || randomUUID();
-process.env.DESKMONY_AUTH_TOKEN = CORE_AUTH_TOKEN;
+let CORE_AUTH_TOKEN;
+/** 為真時 Settings UI 的「遠端存取 token」區塊鎖定,不提供自訂/重新產生
+ *  ——環境變數的優先序高於任何本機儲存的值,介面不該讓人誤以為改了會生效。*/
+let authTokenLockedByEnv = false;
+/** 目前的 `CORE_AUTH_TOKEN` 是否成功寫入本機加密檔案(供 IPC 回傳,UI 據此
+ *  顯示「僅本次執行有效」的警示)。*/
+let authTokenPersisted = false;
+function currentAuthTokenInfo() {
+    return { token: CORE_AUTH_TOKEN, locked: authTokenLockedByEnv, persisted: authTokenPersisted };
+}
+function authTokenFilePath() {
+    return path.join(app.getPath("userData"), "auth-token.enc");
+}
+function readPersistedAuthToken() {
+    if (!safeStorage.isEncryptionAvailable())
+        return undefined;
+    try {
+        const decrypted = safeStorage.decryptString(readFileSync(authTokenFilePath()));
+        return decrypted.trim() || undefined;
+    }
+    catch {
+        // 檔案不存在,或解密失敗(例如換了機器/OS 使用者帳號)—— 視同尚未設定。
+        return undefined;
+    }
+}
+/** 拋出例外 = 加密儲存目前不可用,呼叫端自行決定要不要接受「僅本次有效」
+ *  的降級(見 `resolveAuthToken()`/`deskmony:setAuthToken` 的 try/catch)。*/
+function writePersistedAuthToken(token) {
+    if (!safeStorage.isEncryptionAvailable()) {
+        throw new Error("safeStorage encryption is not available on this system");
+    }
+    writeFileSync(authTokenFilePath(), safeStorage.encryptString(token), { mode: 0o600 });
+}
+/**
+ * 決定本次執行要用的 token 並設進 `process.env`——必須在 `app.whenReady()`
+ * 內、`startCore()`/`createWindow()` 之前呼叫一次(兩者都假設
+ * `process.env.DESKMONY_AUTH_TOKEN` 當下已經是最終值);`safeStorage` 本身
+ * 也要求 app ready 之後才能安全使用。
+ */
+function resolveAuthToken() {
+    const envToken = process.env.DESKMONY_AUTH_TOKEN;
+    authTokenLockedByEnv = Boolean(envToken);
+    if (envToken) {
+        CORE_AUTH_TOKEN = envToken;
+        authTokenPersisted = false;
+    }
+    else {
+        const persisted = readPersistedAuthToken();
+        if (persisted) {
+            CORE_AUTH_TOKEN = persisted;
+            authTokenPersisted = true;
+        }
+        else {
+            CORE_AUTH_TOKEN = randomBytes(32).toString("hex");
+            try {
+                writePersistedAuthToken(CORE_AUTH_TOKEN);
+                authTokenPersisted = true;
+            }
+            catch {
+                authTokenPersisted = false;
+            }
+        }
+    }
+    process.env.DESKMONY_AUTH_TOKEN = CORE_AUTH_TOKEN;
+    console.log(`[electron] auth token source: ${authTokenLockedByEnv ? "DESKMONY_AUTH_TOKEN env var" : authTokenPersisted ? "saved locally (encrypted)" : "generated (session only)"}`);
+}
 let coreProcess;
 let mainWindow;
 // stopCore() 主動 kill() core 子程序時,Windows 上實測會讓 exit 事件回報
@@ -204,6 +282,43 @@ function registerIpcHandlers() {
         });
         notification.show();
     });
+    // Settings UI「遠端存取 token」區塊(見上方 resolveAuthToken() 註解的完整
+    // 背景)。三個 handler 都只碰 `CORE_AUTH_TOKEN`/本機加密檔案,不觸發任何
+    // core 重啟或 gateway RPC——變更只影響「下次啟動 Deskmony 時套用的值」,
+    // UI 端需自行提示使用者重啟(比照 GlobalConfigSection 既有的
+    // `requiresRestart` 提示慣例)。
+    ipcMain.handle("deskmony:getAuthTokenInfo", () => currentAuthTokenInfo());
+    ipcMain.handle("deskmony:setAuthToken", (_event, value) => {
+        if (authTokenLockedByEnv)
+            throw new Error("Locked by the DESKMONY_AUTH_TOKEN environment variable");
+        if (typeof value !== "string")
+            throw new Error("Invalid token value");
+        const trimmed = value.trim();
+        if (trimmed.length < 8)
+            throw new Error("Token must be at least 8 characters");
+        CORE_AUTH_TOKEN = trimmed;
+        try {
+            writePersistedAuthToken(trimmed);
+            authTokenPersisted = true;
+        }
+        catch {
+            authTokenPersisted = false;
+        }
+        return currentAuthTokenInfo();
+    });
+    ipcMain.handle("deskmony:regenerateAuthToken", () => {
+        if (authTokenLockedByEnv)
+            throw new Error("Locked by the DESKMONY_AUTH_TOKEN environment variable");
+        CORE_AUTH_TOKEN = randomBytes(32).toString("hex");
+        try {
+            writePersistedAuthToken(CORE_AUTH_TOKEN);
+            authTokenPersisted = true;
+        }
+        catch {
+            authTokenPersisted = false;
+        }
+        return currentAuthTokenInfo();
+    });
 }
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -229,6 +344,7 @@ function createWindow() {
     });
 }
 app.whenReady().then(() => {
+    resolveAuthToken();
     registerIpcHandlers();
     startCore();
     createWindow();

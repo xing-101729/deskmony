@@ -30,6 +30,20 @@ declare global {
       /** S11:訂閱「使用者點擊了原生通知」事件,回傳取消訂閱函式(見
        *  electron/preload.cts 的 `onNotificationClick()`)。 */
       onNotificationClick?: (callback: (sessionId: string) => void) => () => void;
+      /** Settings UI「遠端存取 token」區塊用(見 electron/main.ts 的
+       *  `resolveAuthToken()`/`currentAuthTokenInfo()` 註解)。`locked` 為真
+       *  時表示由 `DESKMONY_AUTH_TOKEN` 環境變數決定,`setAuthToken`/
+       *  `regenerateAuthToken` 會被 main process 拒絕;`persisted` 為假時表示
+       *  這台機器目前無法使用 `safeStorage` 加密儲存,值僅本次執行有效。只在
+       *  Electron 場景存在。 */
+      getAuthTokenInfo?: () => Promise<{ token: string; locked: boolean; persisted: boolean }>;
+      /** 設定自訂 token(至少 8 個字元)。`locked` 為真時 main process 會
+       *  拒絕(拋出例外)。變更只影響下次啟動 Deskmony 時套用的值,不會追溯
+       *  套用到目前已在跑的 core 子程序。 */
+      setAuthToken?: (value: string) => Promise<{ token: string; locked: boolean; persisted: boolean }>;
+      /** 隨機產生一組新 token(32 bytes hex)並嘗試加密保存。語意同
+       *  `setAuthToken`。 */
+      regenerateAuthToken?: () => Promise<{ token: string; locked: boolean; persisted: boolean }>;
     };
   }
 }

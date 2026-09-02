@@ -6,6 +6,7 @@
   "sections": {
     "permission": "Permissions",
     "global": "Global settings",
+    "remoteAccess": "Remote access",
     "notification": "Notification settings",
     "provider": "Provider management"
   },
@@ -48,6 +49,18 @@
     "written": "Written: {{fields}}",
     "requiresRestart": "(requires restarting core to take effect)",
     "saveFailedWithReason": "Save failed: {{error}}"
+  },
+  "remoteAccess": {
+    "description": "The token the desktop shell currently uses to authenticate WebSocket connections — a browser or phone connecting to this computer via the connect screen needs the same value. Copy it to hand it to someone directly; a custom or regenerated value only affects the token applied the next time Deskmony starts — connections already in progress are unaffected.",
+    "copyButton": "Copy",
+    "copied": "Copied",
+    "lockedReason": "Locked by the DESKMONY_AUTH_TOKEN environment variable — can't be changed from this interface",
+    "notPersistedWarning": "This system can't use encrypted storage — this value is only valid for the current run",
+    "customValuePlaceholder": "Enter a custom token (at least 8 characters)",
+    "saveButton": "Save",
+    "regenerateButton": "Regenerate",
+    "requiresRestart": "Updated — restart Deskmony to apply it",
+    "saveFailedWithReason": "Failed: {{error}}"
   },
   "notification": {
     "description": "Out-of-band notifications for escalations/circuit-breaker trips (read-only) — the webhook URL is treated as a credential, so no remote/UI write path is provided even over a local connection; to change these, edit the <notificationBlock/> block in <configPath/> directly and restart core for it to take effect.",

@@ -6,6 +6,7 @@
   "sections": {
     "permission": "權限",
     "global": "全域設定",
+    "remoteAccess": "遠端存取",
     "notification": "通知設定",
     "provider": "Provider 管理"
   },
@@ -48,6 +49,18 @@
     "written": "已寫入:{{fields}}",
     "requiresRestart": "(需重啟 core 才會生效)",
     "saveFailedWithReason": "儲存失敗:{{error}}"
+  },
+  "remoteAccess": {
+    "description": "桌面殼目前用來認證 WebSocket 連線的 token——瀏覽器或手機透過「連線畫面」連進這台電腦時需要輸入同一組值。複製後可直接貼給對方;自訂或重新產生的值只影響下次啟動 Deskmony 後套用的 token,已經在跑的連線不受影響。",
+    "copyButton": "複製",
+    "copied": "已複製",
+    "lockedReason": "由 DESKMONY_AUTH_TOKEN 環境變數鎖定,無法在此介面變更",
+    "notPersistedWarning": "此系統無法使用加密儲存,這組值僅本次執行有效",
+    "customValuePlaceholder": "輸入自訂 token(至少 8 個字元)",
+    "saveButton": "儲存",
+    "regenerateButton": "重新產生",
+    "requiresRestart": "已更新,需重啟 Deskmony 才會套用",
+    "saveFailedWithReason": "失敗:{{error}}"
   },
   "notification": {
     "description": "升級/熔斷的帶外通知(唯讀)——webhook url 視同憑證,即使本機連線也不提供任何遠端/UI 寫入路徑;要修改請直接編輯 <configPath/> 的 <notificationBlock/> 區塊,並重啟 core 才會生效。",

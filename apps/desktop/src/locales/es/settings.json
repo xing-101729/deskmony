@@ -6,6 +6,7 @@
   "sections": {
     "permission": "Permisos",
     "global": "Configuración global",
+    "remoteAccess": "Acceso remoto",
     "notification": "Configuración de notificaciones",
     "provider": "Gestión de provider"
   },
@@ -48,6 +49,18 @@
     "written": "Escrito: {{fields}}",
     "requiresRestart": "(requiere reiniciar core para aplicarse)",
     "saveFailedWithReason": "Error al guardar: {{error}}"
+  },
+  "remoteAccess": {
+    "description": "El token que la aplicación de escritorio usa actualmente para autenticar las conexiones WebSocket — un navegador o teléfono que se conecte a este equipo mediante la pantalla de conexión necesita el mismo valor. Cópialo para compartirlo directamente; un valor personalizado o regenerado solo afecta al token que se aplicará la próxima vez que se inicie Deskmony — las conexiones ya en curso no se ven afectadas.",
+    "copyButton": "Copiar",
+    "copied": "Copiado",
+    "lockedReason": "Bloqueado por la variable de entorno DESKMONY_AUTH_TOKEN — no se puede cambiar desde esta interfaz",
+    "notPersistedWarning": "Este sistema no puede usar almacenamiento cifrado — este valor solo es válido para la ejecución actual",
+    "customValuePlaceholder": "Introduce un token personalizado (mínimo 8 caracteres)",
+    "saveButton": "Guardar",
+    "regenerateButton": "Regenerar",
+    "requiresRestart": "Actualizado — reinicia Deskmony para aplicarlo",
+    "saveFailedWithReason": "Error: {{error}}"
   },
   "notification": {
     "description": "Notificaciones fuera de banda para escaladas/disyuntor (solo lectura) — la URL del webhook se trata como una credencial, por lo que no se ofrece ninguna vía de escritura remota/UI ni siquiera en una conexión local; para cambiarlas, edita directamente el bloque <notificationBlock/> en <configPath/> y reinicia core para que surta efecto.",
