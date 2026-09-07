@@ -100,6 +100,17 @@ export const useTeamStore = create<TeamStoreState>((set, get) => ({
       }
     });
 
+    // 2026-09-04(稽核修補):斷線重連後補資料 —— 斷線期間的 team-message
+    // 與成員狀態變更推播都已遺失,重新拉快照收斂。見 gateway-client 的
+    // `onReconnected()` 註解。
+    client.onReconnected(() => {
+      void get().refreshTeams();
+      const teamId = get().currentTeamId;
+      // `selectTeam()` 同時重載群聊訊息與成員狀態,正是重連後需要的整包補齊
+      // (它就是「切到這個 team」時做的事,對重連而言語意相同)。
+      if (teamId) void get().selectTeam(teamId);
+    });
+
     void get().refreshTeams();
   },
 

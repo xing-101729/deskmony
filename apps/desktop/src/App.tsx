@@ -19,6 +19,7 @@ import { Icon } from "./ui/icons.js";
 import { MOD_LABEL, useHotkeys } from "./ui/hotkeys.js";
 import { sessionStatusMeta } from "./ui/status.js";
 import { useTheme } from "./ui/theme.js";
+import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 import { shortenPath } from "./lib/workspaces.js";
 
 export type ViewMode = "session" | "team-chat" | "task-board";
@@ -392,14 +393,44 @@ export default function App(): JSX.Element {
           onToggleTheme={toggleTheme}
           onLogout={hasElectronBridge ? undefined : handleLogout}
         />
-        {viewMode === "session" && <SessionView onOpenSidebar={() => setSidebarOpen(true)} />}
-        {viewMode === "team-chat" && <TeamChatView onOpenSidebar={() => setSidebarOpen(true)} />}
-        {viewMode === "task-board" && <TaskBoardView onOpenSidebar={() => setSidebarOpen(true)} />}
+        {/*
+          2026-09-04(稽核修補):每個主要視圖各自包一層 ErrorBoundary。
+          這一層才是有價值的隔離 —— 一個 session 的聊天內容(渲染的是 agent
+          產生的不可信 markdown/工具輸出)炸掉時,側邊欄、指令面板、其他視圖
+          仍然可用。`resetKey` 綁 currentSessionId:切到別的 session 會自動清掉
+          錯誤狀態,不會一路卡著同一張錯誤畫面。
+        */}
+        {viewMode === "session" && (
+          <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
+            <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
+          </ErrorBoundary>
+        )}
+        {viewMode === "team-chat" && (
+          <ErrorBoundary label="團隊群聊">
+            <TeamChatView onOpenSidebar={() => setSidebarOpen(true)} />
+          </ErrorBoundary>
+        )}
+        {viewMode === "task-board" && (
+          <ErrorBoundary label="任務看板">
+            <TaskBoardView onOpenSidebar={() => setSidebarOpen(true)} />
+          </ErrorBoundary>
+        )}
       </div>
 
-      <PermissionModal />
-      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
-      {recoveryOpen && <RecoveryView onClose={() => setRecoveryOpen(false)} />}
+      {/* 對話框各自也包一層:一個對話框壞掉不該把底下的主畫面一起帶走。 */}
+      <ErrorBoundary label="權限請求">
+        <PermissionModal />
+      </ErrorBoundary>
+      {settingsOpen && (
+        <ErrorBoundary label="設定">
+          <SettingsDialog onClose={() => setSettingsOpen(false)} />
+        </ErrorBoundary>
+      )}
+      {recoveryOpen && (
+        <ErrorBoundary label="崩潰復原">
+          <RecoveryView onClose={() => setRecoveryOpen(false)} />
+        </ErrorBoundary>
+      )}
       {paletteOpen && <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />}
     </div>
   );

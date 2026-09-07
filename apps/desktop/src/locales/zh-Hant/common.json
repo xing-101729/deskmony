@@ -10,5 +10,6 @@
   "delete": "刪除",
   "edit": "編輯",
   "loading": "載入中…",
-  "unknown": "未知"
+  "unknown": "未知",
+  "dismissAlert": "關閉提示"
 }

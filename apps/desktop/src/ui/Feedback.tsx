@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { IconButton } from "./Button.js";
 import { Icon, type IconName } from "./icons.js";
 import type { Tone } from "./Badge.js";
@@ -37,6 +38,8 @@ export function Alert({
   action?: ReactNode;
   className?: string;
 }): JSX.Element {
+  // 2026-09-04(稽核修補):理由同 Dialog.tsx 的關閉鈕。
+  const { t } = useTranslation(["common"]);
   const meta = ALERT_TONE[tone];
   return (
     <div
@@ -49,7 +52,7 @@ export function Alert({
         {children}
       </div>
       {action}
-      {onDismiss && <IconButton icon="x" aria-label="關閉提示" size="xs" onClick={onDismiss} className="-mr-1 -mt-0.5" />}
+      {onDismiss && <IconButton icon="x" aria-label={t("common:dismissAlert")} size="xs" onClick={onDismiss} className="-mr-1 -mt-0.5" />}
     </div>
   );
 }

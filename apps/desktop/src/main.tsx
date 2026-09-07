@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App.js";
+import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 import { initI18n } from "./i18n.js";
 import { initLocale } from "./ui/locale.js";
 import { initTheme } from "./ui/theme.js";
@@ -15,7 +16,12 @@ initLocale();
 initTheme();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+  // 2026-09-04(稽核修補):最外層的最後防線。各主要視圖另外有自己的
+  // ErrorBoundary(見 App.tsx)—— 只包最外層等於只是把白畫面換成錯誤畫面,
+  // 真正有價值的隔離在內層。
   <React.StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

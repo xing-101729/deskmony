@@ -71,5 +71,8 @@
   "slashCommands": {
     "menuAriaLabel": "Slash command menu",
     "noMatches": "No matching slash commands"
+  },
+  "attachment": {
+    "tooLarge": "These attachments exceed {{limit}} MB and were skipped: {{files}}"
   }
 }
