@@ -41,6 +41,11 @@ export const ErrorCodes = {
   AUTH_INVALID_TOKEN: "auth.invalidToken",
   AUTH_RATE_LIMITED: "auth.rateLimited",
   GATEWAY_LOCAL_ONLY_METHOD: "gateway.localOnlyMethod", // params: {method}
+  // 2026-09-04(稽核修補):方法本身遠端可呼叫,但這次帶了一個只有本機能提供的
+  // 欄位——目前唯一的例子是 `task.create` 的 `acceptance`(見 ws-gateway.ts 的
+  // `findRemoteForbiddenField()`)。把整個 `task.create` 設成 local-only 會連
+  // 「遠端建立一般任務」都一起擋掉,超出實際風險範圍,所以改成擋欄位。
+  GATEWAY_LOCAL_ONLY_FIELD: "gateway.localOnlyField", // params: {method, field}
   GATEWAY_INVALID_REQUEST: "gateway.invalidRequest", // params: {detail}
   // Phase 2(ACP scoped MCP bridge token):scoped token 呼叫了不在白名單內的
   // 方法,或試圖操作不屬於自己綁定範圍(session/team)的資源,或 token 已過期。

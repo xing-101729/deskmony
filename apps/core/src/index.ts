@@ -2,6 +2,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AcpAdapter, AdapterRegistry, ClaudeAgentSdkAdapter, GenericPtyAdapter, OpenCodeAdapter } from "@deskmony/adapters";
+import { initChildRegistry, reapOrphans } from "@deskmony/adapters";
 import type { SubagentPort } from "@deskmony/shared";
 import { initDb } from "./db.js";
 import { ProfileStore, createDefaultProfile } from "./profiles.js";
@@ -135,6 +136,14 @@ async function main(): Promise<void> {
   // 不再只看環境變數——防止使用者改設定檔就意外把無認證的 core 曝露到區網
   // (見 README「綁定安全檢查用合併後的值」章節)。
   validateBindSafety(bindHost, authToken);
+
+  /**
+   * 2026-09-04(稽核修補):孤兒子程序登記簿 —— 必須在任何 adapter spawn 之前
+   * 初始化。見 packages/adapters/src/child-registry.ts 的完整說明:core 若被
+   * SIGKILL/強制終止/斷電,優雅關機路徑完全沒機會跑,spawn 出去的 agent 與它們
+   * 的 MCP 孫程序會變成永久孤兒。這個機制把「永遠洩漏」變成「下次啟動時回收」。
+   */
+  initChildRegistry(config.data.dataDir);
 
   const db = initDb(config.data.dataDir);
   const profiles = new ProfileStore(db);
@@ -431,6 +440,23 @@ async function main(): Promise<void> {
   // DB 損毀時 `reconcileOnStartup()` 內的 `db.select()`/`db.update()` 會直接
   // 拋出例外,原樣往上傳給 `main().catch()`(見該函式最外層,同 config 損毀
   // 的既有作風:啟動失敗並明確報錯,不帶著壞資料啟動)。
+  /**
+   * 2026-09-04(稽核修補):回收上一輪殘留的 agent 子程序。
+   *
+   * 刻意排在 `reconcileOnStartup()`(把死掉的 session 標成 interrupted)**之前**:
+   * 先確保上一輪的行程真的死透,再去對帳它們的 session 狀態,順序才不會反過來
+   * ——否則有可能把一條「其實還在跑」的孤兒 session 標成 interrupted,使用者按了
+   * 「接手」之後就有兩個 agent 在同一個 worktree 上工作。
+   */
+  const reaped = reapOrphans();
+  if (reaped.killed > 0 || reaped.skipped > 0) {
+    console.warn(
+      `[core] 啟動回收:殺掉 ${reaped.killed} 個上一輪殘留的 agent 子程序` +
+        (reaped.skipped > 0 ? `,略過 ${reaped.skipped} 個(pid 重用或回收失敗,見上方訊息)` : "") +
+        " —— 代表 core 上次不是乾淨關閉的。",
+    );
+  }
+
   const reconcileResult = await sessionManager.reconcileOnStartup();
   if (reconcileResult.count > 0) {
     console.warn(
@@ -498,6 +524,40 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
+
+  /**
+   * 2026-09-04(稽核修補):全域 last-resort 兜底。
+   *
+   * Node 15 起,未被捕捉的 promise rejection **預設直接終止 process**
+   * (`--unhandled-rejections=throw`),而這個專案要求 Node ≥ 20。在補這道兜底
+   * 之前,任何一條沒接 `.catch()` 的 fire-and-forget 路徑一旦拋錯,炸掉的不是
+   * 那一個 session,是整個 core ——連帶所有 team 的所有 session、所有正在跑的
+   * 任務,而且因為子程序沒有 OS 層級的連坐回收(見 `packages/adapters/src/
+   * child-process.ts` 的註解),它們會全部變成孤兒繼續佔資源。
+   *
+   * 這道兜底**刻意只記錄、不退出**:對一個要無人值守跑數小時的 orchestrator
+   * 來說,「少數幾條事件處理失敗」遠比「整個控制平面消失」好——後者連帶讓
+   * 使用者失去 interrupt/dispose 所有 agent 的唯一介面。真正的修法是在各個
+   * 事件迴圈內部就地處理(這一輪已經對最大的來源 `SessionManager.
+   * consumeEvents()` 做了,見該函式),這裡是攔住「還沒被想到的那些」。
+   *
+   * `uncaughtException` 同樣只記錄不退出,理由相同;但它比 rejection 更可能
+   * 代表行程狀態已經不可信,所以額外標明 FATAL,方便從 log 分辨兩者。
+   */
+  process.on("unhandledRejection", (reason) => {
+    console.error(
+      "[core][unhandled-rejection] 有一條 promise 沒有被 catch —— 這是 bug,請回報。" +
+        "core 刻意不因此退出(見 index.ts 的說明):",
+      reason instanceof Error ? reason.stack : reason,
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    console.error(
+      "[core][uncaught-exception][FATAL] 未捕捉的同步例外 —— 行程狀態可能已不可信," +
+        "但仍刻意不退出,以免連帶失去對所有 agent 子程序的控制:",
+      err.stack ?? err,
+    );
+  });
 }
 
 main().catch((err) => {

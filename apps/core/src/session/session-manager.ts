@@ -43,37 +43,20 @@ import type { Notifier } from "../enforcement/notifier.js";
 import { appendPolicyRule, removePolicyRule as removePolicyRuleFile } from "../config/config-file-writer.js";
 import type { TurnLimiter } from "../cost/turn-limiter.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
+import {
+  DEFAULT_YOLO_DURATION_MS as YOLO_DEFAULT,
+  SessionPermissionCoordinator,
+  type SessionPermissionState,
+} from "./session-permission-coordinator.js";
 
 /**
- * S7(auto-mode-and-yolo)L4 §2:YOLO(`"auto-accept-all"`)的存活時間——過了
- * 這段時間,下一次權限決策前的惰性檢查會自動回落 `"always-ask"`(見
- * `checkAndExpireYolo()`)。**用惰性檢查、不用計時器**(L4 §2「過期檢查時機:
- * 每次 decide() 前惰性檢查」)。
- *
- * 可由 `DESKMONY_YOLO_DURATION_MS` 環境變數覆寫,**純粹是為了 e2e 測試能在
- * 合理時間內驗證「30 分鐘後過期」這條規則**,不是使用者可調整的偏好——這個
- * 值本身不落地任何設定檔(不像 `daemon.permissionTimeoutMs` 那樣走
- * config.json 分層合併),與 `DESKMONY_AUTH_TOKEN` 一樣是刻意留在
- * `apps/core/src/index.ts` 之外的環境變數讀取(見該檔案「唯一例外」的說明,
- * 這裡是第二個例外,理由相同:不該被任何 client 或設定檔遠端/本機改動,
- * 只給啟動這個 process 的人用)。
+ * 2026-09-04(稽核修補,拆 God object 第一塊):`DEFAULT_YOLO_DURATION_MS` 與
+ * `SessionPermissionState` 已搬到 `./session-permission-coordinator.ts` ——
+ * 它們屬於權限狀態機,不屬於 session 生命週期。這裡原樣 re-export,讓既有的
+ * `from "./session-manager.js"` 匯入點不需要跟著改。
  */
-export const DEFAULT_YOLO_DURATION_MS = 30 * 60_000;
-
-/** S7:一個 session 目前的暫態權限模式(auto/YOLO)——只存在記憶體,不落地
- *  DB(見 packages/shared/src/agent-profile.ts 的 `SessionPermissionModeSchema`
- *  註解)。`yoloExpiresAt` 只有 `mode === "auto-accept-all"` 時有值。
- *  `trueUnrestricted`(2026-08-25 新增,見 docs/DECISIONS.md §G)只有
- *  `mode === "auto-accept-all"` 時可能為 `true`——`setSessionPermissionMode()`
- *  與 `checkAndExpireYolo()` 都建構全新的 state 物件(不 spread 舊值),
- *  任何脫離 `"auto-accept-all"` 的 mode 變化都會自動、免額外程式碼地把這個
- *  欄位一併清掉;只有 `setTrueUnrestricted()` 刻意 spread 舊 state 只 patch
- *  這一個欄位,見該方法。 */
-export interface SessionPermissionState {
-  mode: SessionPermissionMode;
-  yoloExpiresAt?: number;
-  trueUnrestricted?: boolean;
-}
+export { DEFAULT_YOLO_DURATION_MS } from "./session-permission-coordinator.js";
+export type { SessionPermissionState } from "./session-permission-coordinator.js";
 
 /**
  * S7 L4 §2.1:`ExecContext` 的 `attended`/`local` 兩個欄位是**環境事實**,
@@ -225,6 +208,52 @@ interface RuntimeState {
 }
 
 /**
+ * ============================================================================
+ * 拆解進度與剩餘計畫(2026-09-04 稽核修補)
+ * ============================================================================
+ *
+ * 2026-09-03 的反方稽核把這個類別判定為典型 God object(當時 2,153 行、至少
+ * 11 種職責),並指出**當時找到的最嚴重幾個 bug 全部出在這裡,不是巧合**:
+ * 當一個類別同時是「事件迴圈」「狀態機」「政策引擎協調者」「多個斷路器的
+ * 掛勾點」,任何一處遺漏都會淹沒在其他職責的程式碼裡。
+ *
+ * ---- 已完成 ----------------------------------------------------------------
+ *
+ * ✅ **權限/政策狀態機** → `./session-permission-coordinator.ts`
+ *    `permissionState` Map + 模式切換 + 政策規則 CRUD + ExecContext 組裝 +
+ *    YOLO 惰性過期。對外只需要四個回呼(是非題與通知),介面夠窄。
+ *    抽出後 e2e 斷言全數通過,行為零漂移。
+ *
+ * ---- 評估後「刻意不拆」------------------------------------------------------
+ *
+ * ❌ **context checkpoint 重啟**(`performContextCheckpointRestart()` 一帶)
+ *    看起來像獨立職責,實際上它需要 runtime / teamManager / profiles /
+ *    adapters / prepareSpawnProfile / setStatus / persistMessage / sendPrompt /
+ *    getHistory / turnLimiter / consumeEvents / teamBus 十幾個東西 —— 因為它
+ *    **本來就是**一個 session 生命週期操作(dispose 舊 handle + respawn + 重接
+ *    事件迴圈)。抽出來只會產生一個要傳十幾個回呼的殼,是為拆而拆。
+ *    真正該做的是先釐清「決定要不要 checkpoint」(策略)與「執行 respawn」
+ *    (機制)的界線,那是設計問題,不是搬程式碼問題。
+ *
+ * ---- 剩餘的縫,依「介面寬度 ÷ 價值」排序 --------------------------------------
+ *
+ * 1. **SubagentOrchestrator**:`spawnChild` / `spawnChildFromTool` /
+ *    `sendToChildFromTool` / `listChildrenFromTool` / `pendingIdleInjection`
+ *    佇列與 flush。介面中等寬(需要 createSession/sendPrompt/runtime 查詢),
+ *    但職責邊界清楚,是下一個最值得動的。
+ *
+ * 2. **PTY 活動量測**:`scheduleIdleIfTerminal` / `clearPtyIdleTimer`。
+ *    很小、很獨立,但價值也小 —— 適合順手做,不值得單獨排一輪。
+ *
+ * 3. **SessionEventRouter**(`consumeEventsInner()` 的 240 行 switch)。
+ *    這是最大的一塊,也是最誘人的一塊,但它是所有副作用的分派中樞 ——
+ *    在 1 與「checkpoint 策略/機制分離」都做完之前動它,只會把耦合搬進
+ *    一個新檔案。**建議最後做,不是最先做。**
+ *
+ * 每一步都應該比照這次:只搬不改、抽完立刻跑 `pnpm test:e2e` 確認全部斷言
+ * 全綠。重構與修 bug 混在同一輪,會讓「測試掛了是搬壞的還是改壞的」無法區分。
+ * ============================================================================
+ *
  * SessionManager(ARCHITECTURE.md 3.3 節):
  *   「對每個 agent 成員建立/恢復/中斷 session;維護 session 狀態機
  *    (idle / busy / waiting-permission / error)」
@@ -239,11 +268,15 @@ export class SessionManager extends EventEmitter {
   /** M3 Round A:TeamMember.id -> 目前綁定的 sessionId(反向 map 見 sessionMembers)。 */
   private memberSessions = new Map<string, string>();
   private sessionMembers = new Map<string, string>();
-  /** S7(auto-mode-and-yolo):每個 session 的暫態權限模式(auto/YOLO)——見
-   *  `SessionPermissionState` 型別註解,**刻意不落地 DB**(HLD §2:崩潰/重啟
-   *  不復活,回落 `profile.permissionLevel`)。session 刪除時一併清除(見
-   *  `deleteSession()`),避免無限增長。 */
-  private permissionState = new Map<string, SessionPermissionState>();
+  /**
+   * 2026-09-04(稽核修補,拆 God object 第一塊):權限/政策狀態機。
+   *
+   * 原本是這個類別直接持有的 `permissionState` Map 加上六個方法;現在整塊
+   * 搬到 `./session-permission-coordinator.ts`,這裡只保留一個實例。
+   * 在建構子裡建立(不是建構子參數)——它需要的回呼(`isSessionRunning` 等)
+   * 都指回這個類別自己,由外部注入反而會製造循環。
+   */
+  private readonly permissions: SessionPermissionCoordinator;
   /** 透過 setTeamBus() 事後注入(見 apps/core/src/index.ts 的建構順序說明:
    * MessageBus 的建構子需要 SessionManager,SessionManager 也需要把
    * TeamBusPort 傳給 adapter.spawn(),兩者互相依賴,用 setter 打破循環)。 */
@@ -340,9 +373,28 @@ export class SessionManager extends EventEmitter {
      */
     private readonly costGovernor: CostGovernor,
     /** S7:YOLO 存活時間,見上方 `DEFAULT_YOLO_DURATION_MS` 註解。 */
-    private readonly yoloDurationMs: number = DEFAULT_YOLO_DURATION_MS,
+    private readonly yoloDurationMs: number = YOLO_DEFAULT,
   ) {
     super();
+    this.permissions = new SessionPermissionCoordinator({
+      policyEngine,
+      auditLog,
+      notifier,
+      configPath,
+      yoloDurationMs,
+      // 這四個回呼就是 coordinator 對 SessionManager 的全部需求(見該檔案
+      // 頂端「依賴倒轉的方式」)——刻意收斂成是非題與通知,不遞交整份
+      // runtime/db,否則只是把耦合換個地方藏。
+      isSessionRunning: (sessionId) => this.runtime.has(sessionId),
+      onSessionStateChanged: (sessionId) => {
+        void this.getSession(sessionId).then((session) => {
+          if (session) this.emit("session-updated", session);
+        });
+      },
+      emitPolicyUpdated: (push) => this.emit("policy-updated", push),
+      hasConnectedClient: () => this.clientPresence?.hasConnectedClient() ?? false,
+      hasRemoteClient: () => this.clientPresence?.hasRemoteClient() ?? false,
+    });
   }
 
   /** 見上方 teamBus 欄位註解:apps/core/src/index.ts 建立好 MessageBus 後回頭注入。 */
@@ -368,13 +420,13 @@ export class SessionManager extends EventEmitter {
 
   async listSessions(): Promise<Session[]> {
     const rows = await this.db.select().from(sessionsTable).all();
-    return rows.map((row) => this.attachPermissionState(rowToSession(row)));
+    return rows.map((row) => this.permissions.attachTo(rowToSession(row)));
   }
 
   /** S6(crash-recovery):復原視圖的資料來源之一,見 `RecoveryService.list()`。 */
   async listInterruptedSessions(): Promise<Session[]> {
     const rows = await this.db.select().from(sessionsTable).where(eq(sessionsTable.status, "interrupted")).all();
-    return rows.map((row) => this.attachPermissionState(rowToSession(row)));
+    return rows.map((row) => this.permissions.attachTo(rowToSession(row)));
   }
 
   /**
@@ -513,7 +565,7 @@ export class SessionManager extends EventEmitter {
     }
     // S7:初值 = profile.permissionLevel(必為 "always-ask"/"auto-accept-edits"
     // 之一,見 PermissionLevelSchema 收窄後的定義,不可能是 YOLO)。
-    this.permissionState.set(session.id, { mode: profile.permissionLevel });
+    this.permissions.initialize(session.id, profile.permissionLevel);
 
     void this.consumeEvents(session.id);
 
@@ -521,10 +573,41 @@ export class SessionManager extends EventEmitter {
     if (member) {
       this.emit("member-session-ready", { memberId: member.id, sessionId: session.id });
     }
-    return this.attachPermissionState(session);
+    return this.permissions.attachTo(session);
   }
 
+  /**
+   * 2026-09-04(稽核修補):per-session 序列化。
+   *
+   * `sendPrompt()` 內部是「檢查預算 → await 持久化 → await 設狀態 → 起算回合
+   * → 送給 adapter」,中間有多個 await 缺口,而三條路徑會併發打進來:
+   * 使用者連點兩次送出、兩個 client 同時操作同一個 session、以及
+   * `MessageBus` 的訊息注入撞上手動輸入(`deliverPromptWhenIdle()` 本身就是
+   * 「先讀狀態、再送」的 check-then-act)。兩次呼叫都會通過各自的預算檢查、
+   * 都 persist、都呼叫 `adapter.sendPrompt()`,底層收到兩個幾乎同時的 prompt,
+   * 行為未定義。
+   *
+   * `MessageBus.withMemberLock()` 早就用同一套 promise chain 手法處理過這個
+   * 問題,只是那把鎖只保護 MessageBus 自己的投遞路徑,沒有收斂到
+   * `sendPrompt()` 這個**唯一的共同入口**。這裡補上。
+   */
+  private readonly sendPromptLocks = new Map<string, Promise<unknown>>();
+
   async sendPrompt(sessionId: string, prompt: PromptInput): Promise<void> {
+    const previous = this.sendPromptLocks.get(sessionId) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => this.sendPromptInner(sessionId, prompt));
+    this.sendPromptLocks.set(
+      sessionId,
+      run.catch(() => undefined),
+    );
+    // 刻意不在這裡清 Map(那需要判斷「我是不是最後一環」,而那個判斷本身就是
+    // 另一個 race)。清理跟著 session 生命週期走,見 `deleteSession()` 等處
+    // 一併呼叫的 `clearPerSessionState()` —— 與 `waitingSince`/`permissionState`
+    // 這些 per-session Map 的既有慣例一致。
+    return (await run) as void;
+  }
+
+  private async sendPromptInner(sessionId: string, prompt: PromptInput): Promise<void> {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) {
       throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
@@ -544,7 +627,7 @@ export class SessionManager extends EventEmitter {
       // 分類。理想的後續修正是讓 CostGovernor.checkSendPromptAllowed() 改回傳
       // 結構化的 code/params(它產生的兩種情況剛好對應既有的
       // ErrorCodes.BUDGET_DAILY_LIMIT / BUDGET_TASK_LIMIT),屆時這裡可以直接
-      // 原樣往外傳、不再需要這層包裝(見最終報告的 TODO 說明)。
+      // 原樣往外傳、不再需要這層包裝(這是一項已知待辦,說明見上方)。
       const reason = budgetCheck.reason ?? "此 session 已被成本斷路器擋下,無法送出新的 prompt";
       throw new DeskmonyError("sessionManager.promptBlockedByBudget", { reason }, reason);
     }
@@ -638,10 +721,22 @@ export class SessionManager extends EventEmitter {
    * `appendPolicyRule()`(寫回 config.json,重啟後一致)一起做,兩者不可只做
    * 一邊(見 policy-engine.ts 的 `addRule()` 註解)。
    */
-  resolvePermission(requestId: string, decision: "allow" | "deny", rememberRule?: PolicyRule): void {
-    const resolved = this.permissionGateway.resolve(requestId);
+  resolvePermission(
+    /**
+     * 2026-09-04(稽核修補):新增的第一參數。過去這個值是從
+     * `permissionGateway.resolve(requestId)` 反查回來的,而那份登記用的是會
+     * 跨 session 碰撞的單鍵——決策因此可能被套用到**另一條 session** 的工具
+     * 呼叫上。完整說明見 `packages/shared/src/events.ts` 的
+     * `PermissionDecisionSchema.sessionId`。
+     */
+    sessionId: string,
+    requestId: string,
+    decision: "allow" | "deny",
+    rememberRule?: PolicyRule,
+  ): void {
+    const resolved = this.permissionGateway.resolve(sessionId, requestId);
     if (!resolved) return;
-    const { sessionId, strong } = resolved;
+    const { strong } = resolved;
     const runtime = this.runtime.get(sessionId);
     if (!runtime) return;
 
@@ -704,157 +799,33 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * S7:切換一個 session 的暫態權限模式(auto/YOLO)。
+   * ---- 權限/政策:委派給 SessionPermissionCoordinator ---------------------
    *
-   * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):**本機與遠端皆可呼叫**——
-   * 已從 gateway 層的 `LOCAL_ONLY_METHODS` 移除(原 F3/C6 限制,使用者明確
-   * 翻案)。這裡刻意仍不判斷連線來源(SessionManager 本身不知道是哪個連線
-   * 呼叫的,這不是這個方法的職責)。`mode === "auto-accept-all"` 時設定 30
-   * 分鐘後過期(惰性檢查,不用計時器,見 `checkAndExpireYolo()`)。
-   *
-   * 這裡建構的 `state` 物件永遠是全新的(不 spread 舊 state)——這個寫法本身
-   * 就是「任何 mode 變化都會清掉 `trueUnrestricted`」的機制,見上方
-   * `SessionPermissionState.trueUnrestricted` 註解,不需要額外程式碼特別
-   * 處理「離開 auto-accept-all 時要記得清掉真.無限制層」這件事。
+   * 2026-09-04(稽核修補,拆 God object 第一塊):以下六個方法的實作已搬到
+   * `./session-permission-coordinator.ts`。這裡保留同名的薄委派,理由是
+   * `WsGateway` 的 dispatch 直接呼叫這些方法名,把它們一起改掉會讓這一輪的
+   * diff 同時橫跨「搬程式碼」與「改呼叫端」兩件事 —— 一旦測試掛了就分不清是
+   * 哪一件造成的。等這塊穩定之後,gateway 可以改成直接持有 coordinator,
+   * 這幾個委派再一併移除。
    */
   setSessionPermissionMode(sessionId: string, mode: SessionPermissionMode): SessionPermissionState {
-    if (!this.runtime.has(sessionId)) {
-      throw new DeskmonyError(
-        ErrorCodes.SESSION_NOT_RUNNING,
-        { sessionId },
-        `session 尚未啟動或已結束,無法設定權限模式: ${sessionId}`,
-      );
-    }
-    const state: SessionPermissionState = { mode };
-    if (mode === "auto-accept-all") {
-      state.yoloExpiresAt = Date.now() + this.yoloDurationMs;
-    }
-    this.permissionState.set(sessionId, state);
-    // 讓所有已連線的 client(含觸發這次呼叫的那個)都能立即更新 UI 顯示的
-    // 常駐標記(HLD §2.2 補償防護),不需要等下一次剛好有權限請求才會反映。
-    void this.getSession(sessionId).then((session) => {
-      if (session) this.emit("session-updated", session);
-    });
-    return state;
+    return this.permissions.setMode(sessionId, mode);
   }
 
-  /**
-   * 2026-08-25 新增(見 docs/DECISIONS.md §G):在 YOLO 之上疊加/解除「真.無
-   * 限制」層——`enabled:true` 時連 hard-deny 四類都會被繞過(見
-   * apps/core/src/permissions/policy-engine.ts 的 `decide()` 短路)。**本機與
-   * 遠端皆可呼叫**(比照 `setSessionPermissionMode()`)。
-   *
-   * `enabled:true` 時強制檢查目前 `permissionMode` 必須已經是
-   * `"auto-accept-all"`——不能讓呼叫端跳過 `setSessionPermissionMode()` 直接
-   * 開最高層級(這是「疊在 YOLO 之上」這個設計意圖的伺服器端保證,不只是 UI
-   * 上「YOLO 開了才顯示按鈕」的視覺層級)。`enabled:false` 永遠允許,不檢查
-   * 前置條件——降級方向不該被擋。
-   *
-   * 與 `setSessionPermissionMode()` 不同,這裡**刻意 spread 現有 state**只
-   * patch `trueUnrestricted` 這一個欄位——這是唯一需要保留 `mode`/
-   * `yoloExpiresAt` 的呼叫端,其餘方法(`setSessionPermissionMode()`/
-   * `checkAndExpireYolo()`)建構全新 state 物件都是為了讓這個欄位在 mode
-   * 變化時自動清除。
-   *
-   * `isRemote` 由呼叫端(ws-gateway.ts)依連線本身判定後傳入,只用於稽核/
-   * 通知內容,不影響是否放行這次呼叫本身(F3 修訂後這個能力本機遠端一視同
-   * 仁)。啟用時觸發稽核 + 桌面推播(使用者明確要求的「啟用當下要警告」);
-   * 關閉只寫稽核,不推播(回到安全方向不需要打斷使用者)。
-   */
   setTrueUnrestricted(sessionId: string, enabled: boolean, isRemote: boolean): SessionPermissionState {
-    if (!this.runtime.has(sessionId)) {
-      throw new DeskmonyError(
-        ErrorCodes.SESSION_NOT_RUNNING,
-        { sessionId },
-        `session 尚未啟動或已結束,無法設定 true-unrestricted: ${sessionId}`,
-      );
-    }
-    const current = this.permissionState.get(sessionId) ?? { mode: "always-ask" as const };
-    if (enabled && current.mode !== "auto-accept-all") {
-      throw new DeskmonyError(
-        ErrorCodes.SESSION_TRUE_UNRESTRICTED_REQUIRES_YOLO,
-        { sessionId },
-        `session 必須先開啟 YOLO(auto-accept-all)才能啟用 true-unrestricted: ${sessionId}`,
-      );
-    }
-    const state: SessionPermissionState = { ...current, trueUnrestricted: enabled };
-    this.permissionState.set(sessionId, state);
-
-    const ts = Date.now();
-    this.auditLog.appendTrueUnrestrictedToggle({ sessionId, enabled, isRemote, ts });
-    if (enabled) {
-      void this.notifier.deliverTrueUnrestrictedEnabled({ sessionId, isRemote, ts }).catch((err) => {
-        console.error(`[enforcement] deliverTrueUnrestrictedEnabled 失敗(不影響已生效的模式切換): ${String(err)}`);
-      });
-    }
-
-    void this.getSession(sessionId).then((session) => {
-      if (session) this.emit("session-updated", session);
-    });
-    return state;
+    return this.permissions.setTrueUnrestricted(sessionId, enabled, isRemote);
   }
 
-  /**
-   * 2026-08-25 新增(見 docs/DECISIONS.md §G):新增一條政策允許清單規則
-   * (「權限」設定頁的「單項選擇」功能)。**本機與遠端皆可呼叫**——政策編輯從
-   * 這輪起不再是 local-only。`id`/`addedBy`/`addedAt` 一律由這裡生成/填入
-   * (見 `PolicyAddRuleInput` 型別——呼叫端不能提供這三個欄位),`addedBy`
-   * 固定 `"user"`,與 `resolvePermission()` 的 rememberRule 路徑固定寫
-   * `"ui-remember"` 區分兩種來源。
-   *
-   * 寫檔失敗就回滾 in-memory 那份——與 `resolvePermission()` 的 rememberRule
-   * 刻意不同(那裡吞掉寫檔失敗只印警告):這支方法**唯一的目的**就是把規則
-   * 持久化,吞掉失敗會讓呼叫端以為規則真的存在,重啟後卻悄悄消失。
-   */
   addPolicyRule(input: PolicyAddRuleInput, isRemote: boolean): PolicyRule {
-    const ruleId = randomUUID();
-    const rule: PolicyRule = { ...input, id: ruleId, addedBy: "user", addedAt: Date.now() };
-    this.policyEngine.addRule(rule);
-    try {
-      appendPolicyRule(this.configPath, rule);
-    } catch (err) {
-      this.policyEngine.removeRule(ruleId);
-      throw new DeskmonyError(
-        "policy.addRuleWriteFailed",
-        { detail: err instanceof Error ? err.message : String(err) },
-        `新增政策規則失敗(寫入 config.json 失敗,已回滾): ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    this.auditLog.appendPolicyRuleChange({ action: "add", ruleId, rule, isRemote, ts: Date.now() });
-    const push: PolicyUpdatedPush = { action: "add", rule };
-    this.emit("policy-updated", push);
-    return rule;
+    return this.permissions.addRule(input, isRemote);
   }
 
-  /**
-   * 2026-08-25 新增:刪除一條政策允許清單規則(依 id)。本機與遠端皆可呼叫,
-   * 理由同 `addPolicyRule()`。id 不存在時回傳 `undefined`,不拋例外——呼叫端
-   * 可能與另一個 client 對同一份清單並行操作,「已經被別人刪過了」不是錯誤。
-   * 同樣是「寫檔失敗就回滾 in-memory」,理由同 `addPolicyRule()`。
-   */
   removePolicyRule(id: string, isRemote: boolean): PolicyRule | undefined {
-    const removed = this.policyEngine.removeRule(id);
-    if (!removed) return undefined;
-    try {
-      removePolicyRuleFile(this.configPath, id);
-    } catch (err) {
-      this.policyEngine.addRule(removed);
-      throw new DeskmonyError(
-        "policy.removeRuleWriteFailed",
-        { detail: err instanceof Error ? err.message : String(err) },
-        `刪除政策規則失敗(寫入 config.json 失敗,已回滾): ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    this.auditLog.appendPolicyRuleChange({ action: "remove", ruleId: id, rule: removed, isRemote, ts: Date.now() });
-    const push: PolicyUpdatedPush = { action: "remove", rule: removed };
-    this.emit("policy-updated", push);
-    return removed;
+    return this.permissions.removeRule(id, isRemote);
   }
 
-  /** 2026-08-25 新增:`policy.listRules` RPC 用,見該方法在 gateway.ts 的註解
-   *  (為什麼不能改讀 `config.getEffective` 的快照)。 */
   listPolicyRules(): PolicyRule[] {
-    return this.policyEngine.getRules();
+    return this.permissions.listRules();
   }
 
   /**
@@ -1079,7 +1050,7 @@ export class SessionManager extends EventEmitter {
     }
     await this.db.delete(messagesTable).where(eq(messagesTable.sessionId, sessionId)).run();
     await this.db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId)).run();
-    this.permissionState.delete(sessionId); // S7:避免 Map 隨 session 生命週期無限增長。
+    this.permissions.clear(sessionId); // S7:避免 Map 隨 session 生命週期無限增長。
     this.waitingSince.delete(sessionId); // S3b:同上,避免無限增長。
     this.clearContextCheckpointState(sessionId); // S8:同上,避免無限增長。
     this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
@@ -1138,7 +1109,7 @@ export class SessionManager extends EventEmitter {
    * `SessionStatus` 列舉值(`SessionStatusSchema` 目前只有 idle/busy/
    * waiting/error 四種,見 packages/shared/src/session.ts)。這裡把 DB 狀態
    * 設成既有的 `"error"`,`lastError` 說明原因,是目前 schema 下最貼近語意的
-   * 選擇(自行判斷,見最終報告)。
+   * 選擇(實作當下的自行判斷,repo 外無紀錄)。
    */
   async reclaimSession(sessionId: string): Promise<void> {
     const runtime = this.runtime.get(sessionId);
@@ -1301,7 +1272,7 @@ export class SessionManager extends EventEmitter {
       backendSessionId: session.backendSessionId,
       slashCommandsObserved: false,
     });
-    this.permissionState.set(sessionId, { mode: profile.permissionLevel });
+    this.permissions.initialize(sessionId, profile.permissionLevel);
 
     await this.db
       .update(sessionsTable)
@@ -1407,7 +1378,54 @@ export class SessionManager extends EventEmitter {
     return { ...withEnv, systemPrompt: withNotesPointer(withEnv.systemPrompt, displayName) };
   }
 
+  /**
+   * 2026-09-04(稽核修補):`consumeEventsInner()` 的錯誤圍籬。
+   *
+   * 三個呼叫點都是 `void this.consumeEvents(...)`(fire-and-forget,因為這是一條
+   * 要跑到 session 結束的長命迴圈,呼叫端不能 await 它)。在補這道圍籬之前,
+   * 迴圈內任何一次 `await this.persistMessage(...)`/DB 寫入/`profiles.get()`
+   * 拋錯,都會變成 unhandled rejection —— 在 Node ≥ 20 底下**直接終止整個 core**,
+   * 連帶炸掉所有其他 team 的所有 session。`apps/core/src/index.ts` 那道全域兜底
+   * 是最後防線;這裡才是就地、能講清楚是哪一條 session 出事的正確位置。
+   *
+   * 刻意**不**在迴圈內逐事件 try/catch 之後繼續跑:一次未預期的例外之後,這條
+   * session 的內部狀態(runtime、turn、權限等待中的請求)已經無法保證一致,
+   * 假裝沒事繼續消費下一個事件等於把不一致藏起來。改成沿用這個檔案既有的
+   * adapter 錯誤慣例——寫一則 `session.adapterError` 系統訊息 + 把 session 標成
+   * `"error"` ——讓使用者在 UI 上**看得到**這條 session 死了、為什麼死,
+   * 而不是看著一條再也不會更新、狀態卻停在 busy 的對話。
+   */
   private async consumeEvents(sessionId: string): Promise<void> {
+    try {
+      await this.consumeEventsInner(sessionId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[session-manager] session ${sessionId} 的事件迴圈因未預期例外中止(core 不會因此退出):`,
+        err instanceof Error ? err.stack : err,
+      );
+      // 收尾本身也可能失敗(例如例外的成因就是 DB 掛了)——絕不能讓錯誤處理
+      // 又拋一次,那會把這道圍籬原本要防的 unhandled rejection 再造出來。
+      try {
+        await this.persistMessage(
+          sessionId,
+          "system",
+          JSON.stringify({
+            event: "session.adapterError",
+            params: { message, detail: "event-loop-aborted" },
+          }),
+        );
+        await this.setStatus(sessionId, "error", message);
+      } catch (cleanupErr) {
+        console.error(
+          `[session-manager] session ${sessionId} 標記 error 狀態時再次失敗(已放棄):`,
+          cleanupErr instanceof Error ? cleanupErr.stack : cleanupErr,
+        );
+      }
+    }
+  }
+
+  private async consumeEventsInner(sessionId: string): Promise<void> {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) return;
 
@@ -1492,7 +1510,7 @@ export class SessionManager extends EventEmitter {
           // decide() 前檢查**,不用計時器。過期時回落 always-ask,在聊天串
           // 留一則系統訊息(近似 HLD 說的「發通知」)+ 廣播 session-updated
           // 讓所有 client 的常駐標記立刻消失,不用等使用者手動重新整理。
-          const { state: permState, justExpired } = this.checkAndExpireYolo(sessionId);
+          const { state: permState, justExpired } = this.permissions.checkAndExpireYolo(sessionId);
           if (justExpired) {
             console.warn(`[auto-mode] session ${sessionId} 的 YOLO(auto-accept-all)已到期(30 分鐘),自動回落 always-ask`);
             // i18n 專案:改存 JSON 結構化事件,理由同 setSessionModel() 內的說明。
@@ -1502,7 +1520,7 @@ export class SessionManager extends EventEmitter {
           }
 
           const profile = await this.profiles.get(runtime.agentProfileId);
-          const ctx = this.buildExecContext(permState);
+          const ctx = this.permissions.buildExecContext(permState);
           const permissionReq: PermissionRequest = {
             sessionId,
             requestId: event.requestId,
@@ -1745,7 +1763,7 @@ export class SessionManager extends EventEmitter {
    * lifecycle === "persistent" 的 team member session 生效**——ephemeral
    * worker 靠任務終態 dispose(§2.2),不需要這條 mid-task 的 checkpoint 機制
    * (這是 L4 沒有逐字寫死、但依 HLD §2.2 標題「長命 agent 的 context 閾值
-   * 重啟」推斷的判斷,見最終報告「自行判斷」清單)。
+   * 重啟」推斷的判斷,實作當下的自行判斷,repo 外無紀錄)。
    */
   private async handleContextUsage(sessionId: string, runtime: RuntimeState, used: number, size: number): Promise<void> {
     if (!(size > 0)) return; // 防禦:避免除以 0 或負值資料。
@@ -1842,7 +1860,7 @@ export class SessionManager extends EventEmitter {
     });
     // memberSessions/sessionMembers 的 key/value 不變(同一 member ↔ 同一
     // sessionId),不需要更新。
-    this.permissionState.set(sessionId, { mode: profile.permissionLevel });
+    this.permissions.initialize(sessionId, profile.permissionLevel);
 
     // i18n 專案:改存 JSON 結構化事件,理由同 setSessionModel() 內的說明。
     await this.persistMessage(
@@ -1890,6 +1908,10 @@ export class SessionManager extends EventEmitter {
     this.contextCheckpointTriggered.delete(sessionId);
     this.contextCheckpointPendingNote.delete(sessionId);
     this.contextCheckpointAwaitingRestart.delete(sessionId);
+    // 2026-09-04(稽核修補):`sendPrompt()` 的 per-session 鎖鏈也在這裡清 ——
+    // 它與上面三個一樣是「跟著 session 生命週期存在」的 per-session 狀態,
+    // 由所有 dispose/delete/重啟路徑共用同一個清理點,不必各自記得。
+    this.sendPromptLocks.delete(sessionId);
   }
 
   /**
@@ -1964,101 +1986,7 @@ export class SessionManager extends EventEmitter {
   /** 公開:MessageBus 需要查詢目標成員 session 的目前狀態(idle/busy/...)決定投遞策略。 */
   async getSession(sessionId: string): Promise<Session | undefined> {
     const rows = await this.db.select().from(sessionsTable).where(eq(sessionsTable.id, sessionId)).all();
-    return rows[0] ? this.attachPermissionState(rowToSession(rows[0])) : undefined;
-  }
-
-  /**
-   * S7:把目前的暫態權限模式(auto/YOLO)補到一個 Session 物件上,供所有對外
-   * 回傳 Session 的路徑(`getSession()`/`listSessions()`/`createSession()`)共用
-   * ——單一組裝點,避免各呼叫端各自忘記補這兩個欄位而漂移。**刻意不在這裡做
-   * YOLO 過期的惰性檢查**(那個檢查只在 `checkAndExpireYolo()` 被呼叫的地方
-   * ——也就是每次真正 `decide()` 之前——才會發生並跟著發通知,見 L4 §6「過期
-   * 檢查時機」;這裡單純讀取當下記憶體裡的值,可能在真正過期後的幾分鐘內仍
-   * 顯示舊狀態,直到下一次權限請求觸發檢查為止,這是規格選定的行為,不是
-   * bug)。
-   */
-  private attachPermissionState(session: Session): Session {
-    const state = this.permissionState.get(session.id);
-    if (!state) return session;
-    return {
-      ...session,
-      permissionMode: state.mode,
-      yoloExpiresAt: state.yoloExpiresAt,
-      trueUnrestricted: state.trueUnrestricted,
-    };
-  }
-
-  /**
-   * S7 L4 §2.1:組出餵給 `PolicyEngine.decide()` 的 `ExecContext`。
-   *
-   * **三個欄位來自三個不同的來源,彼此正交**——這是 2026-07-28 修正的設計
-   * 錯誤:初版把 `attended` 寫成 `autoMode` 的補數(`mode === "always-ask"`),
-   * 等於把 2×2 壓成 1×2 ⇒ `attended=false` 必然 `autoMode=true` ⇒ 未分類請求
-   * 一律在 `decide()` 第 4 步被自動放行,永遠走不到第 5 步的 escalate ⇒ S1 L4
-   * §6 與 S11 §4 定案的「無人值守時掛起等人、不逾時 deny」變成死碼。而那條
-   * 規則存在的理由(「沒人回應 ≠ 拒絕」)專為**「無人值守 + 未開 auto」**這個
-   * 象限而設計,恰恰被那個公式消滅。
-   *
-   * | | 未開 auto | 已開 auto |
-   * |---|---|---|
-   * | 有 client 連線 | 逐筆問;逾時 deny | 中間地帶自動放行 |
-   * | 無 client 連線 | **escalate 掛起等你回來(不逾時 deny)** | 中間地帶自動放行 |
-   *
-   * - `attended` = **環境事實**:現在有沒有人看得到彈窗(Gateway 才知道)。
-   * - `autoMode` = **政策設定**:使用者是否預先授權(session 暫態,與 attended
-   *   完全獨立)。
-   * - `local` = **保守的整體判定**:只要有任何遠端 client 連線中就視為非
-   *   local。permission-request 不綁定單一 WS 連線,無法問「這一筆是誰送的」;
-   *   遠端可能就是那個會去點「仍要允許」的人,fail-safe 方向要求寧可嚴、不可
-   *   寬(這同時補上「auto 已開著時,遠端看到的 escalate-strong 仍被當本機
-   *   處理」這個落差)。
-   *
-   * **未注入 `ClientPresencePort` 時**(理論上只有「沒有 Gateway 的 headless
-   * 組裝」才會發生,index.ts 一定會注入):`attended=false` + `local=true`
-   * ——也就是「一個 client 都沒有」的退化讀法,而這個組合**不可能**產生
-   * escalate-strong(第 1 步只有 `local && attended && !autoMode` 才降級),
-   * 忘記接線的失敗方向因此是安全的(hard-deny 一律直接 deny)。
-   *
-   * **這是決策當下的瞬時快照**:`attended` 只影響這一筆請求註冊時要不要設逾時
-   * 計時器,之後 client 斷線/連上都不會回頭改寫已經註冊的那一筆(見
-   * `consumeEvents()` 的 `permissionGateway.register()` 呼叫處)。
-   */
-  private buildExecContext(state: SessionPermissionState): ExecContext {
-    return {
-      attended: this.clientPresence?.hasConnectedClient() ?? false,
-      local: !(this.clientPresence?.hasRemoteClient() ?? false),
-      autoMode: state.mode !== "always-ask",
-      // YOLO 與一般 auto 唯一的差別:是否連 config 的 deny-list 也繞過
-      // (見 policy-engine.ts 的 decide() 註解)。
-      yolo: state.mode === "auto-accept-all",
-      // 2026-08-25 新增(見 docs/DECISIONS.md §G):唯一能讓 decide() 跳過
-      // hard-deny 的欄位——`state.trueUnrestricted` 只有在 mode 已經是
-      // "auto-accept-all" 時才可能為 true(見 setTrueUnrestricted() 的前置
-      // 條件檢查),這裡原樣傳遞,不重複驗證。
-      trueUnrestricted: state.trueUnrestricted === true,
-    };
-  }
-
-  /**
-   * S7 L4 §6:YOLO 30 分鐘惰性過期檢查——純粹的「檢查 + 必要時就地降級」,
-   * 不做任何 I/O/emit(那些副作用由呼叫端在 `justExpired` 為 true 時自行處理,
-   * 見 `consumeEvents()` 的 `permission-request` case)。找不到任何暫態記錄
-   * (理論上不會發生,`createSession()` 一定會設)時保守視為 `"always-ask"`。
-   *
-   * `downgraded` 是全新建構的物件(不 spread 舊 state)——這個既有寫法在
-   * 2026-08-25 之後多了一個附帶效果:YOLO 一到期,`trueUnrestricted`(若曾經
-   * 開啟)也跟著自動清除,不需要額外程式碼特別處理「真.無限制層不能在沒有
-   * YOLO 的情況下殘留」這件事,見 `SessionPermissionState.trueUnrestricted`
-   * 註解。
-   */
-  private checkAndExpireYolo(sessionId: string): { state: SessionPermissionState; justExpired: boolean } {
-    const state = this.permissionState.get(sessionId) ?? { mode: "always-ask" as const };
-    if (state.mode === "auto-accept-all" && state.yoloExpiresAt !== undefined && Date.now() >= state.yoloExpiresAt) {
-      const downgraded: SessionPermissionState = { mode: "always-ask" };
-      this.permissionState.set(sessionId, downgraded);
-      return { state: downgraded, justExpired: true };
-    }
-    return { state, justExpired: false };
+    return rows[0] ? this.permissions.attachTo(rowToSession(rows[0])) : undefined;
   }
 
   private async setStatus(sessionId: string, status: SessionStatus, lastError?: string): Promise<void> {

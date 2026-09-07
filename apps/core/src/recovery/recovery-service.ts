@@ -31,7 +31,7 @@ import type { WorkspaceManager } from "../workspace/workspace-manager.js";
  * ——這個類別本身完全沒有任何背景計時器/自動觸發邏輯,**人不點,什麼都不會
  * 發生**。
  *
- * ---- 「session ↔ team member ↔ task」的反查(已知限制,見最終報告)----
+ * ---- 「session ↔ team member ↔ task」的反查(已知限制)----
  *
  * `SessionManager` 的 `memberSessions`/`sessionMembers`(session 建立時是哪個
  * team member)**只存在記憶體**,core 重啟後(啟動對帳跑完時)這個對應已經
@@ -90,7 +90,10 @@ export class RecoveryService {
 
   /** §4:「繼續(保有記憶)」——直接委派給 `SessionManager.continueSession()`,那裡有完整的前置檢查。 */
   async continueSession(sessionId: string): Promise<Session> {
-    return this.sessionManager.continueSession(sessionId);
+    // 2026-09-04(稽核修補):見 withRecoveryClaim()。
+    return this.withRecoveryClaim(sessionId, async () => {
+      return this.sessionManager.continueSession(sessionId);
+    });
   }
 
   /**
@@ -100,20 +103,23 @@ export class RecoveryService {
    * 處理過了)。
    */
   async takeover(sessionId: string): Promise<Session> {
-    const session = await this.mustGetInterrupted(sessionId);
-    const { task, workspace } = await this.resolveContext(session);
-    const member = await this.teamManager.findMemberByAgentProfileId(session.agentProfileId);
-    const summary = await this.buildTakeoverSummary(session, task, workspace);
+    // 2026-09-04(稽核修補):見 withRecoveryClaim()。
+    return this.withRecoveryClaim(sessionId, async () => {
+      const session = await this.mustGetInterrupted(sessionId);
+      const { task, workspace } = await this.resolveContext(session);
+      const member = await this.teamManager.findMemberByAgentProfileId(session.agentProfileId);
+      const summary = await this.buildTakeoverSummary(session, task, workspace);
 
-    const input: CreateSessionInput = {
-      title: `${session.title}(接手)`,
-      agentProfileId: session.agentProfileId,
-      workingDir: session.workingDir,
-      teamMemberId: member?.id,
-    };
-    const newSession = await this.sessionManager.takeoverWithSummary(input, summary);
-    await this.sessionManager.abandonInterruptedSession(sessionId);
-    return newSession;
+      const input: CreateSessionInput = {
+        title: `${session.title}(接手)`,
+        agentProfileId: session.agentProfileId,
+        workingDir: session.workingDir,
+        teamMemberId: member?.id,
+      };
+      const newSession = await this.sessionManager.takeoverWithSummary(input, summary);
+      await this.sessionManager.abandonInterruptedSession(sessionId);
+      return newSession;
+    });
   }
 
   /**
@@ -124,41 +130,47 @@ export class RecoveryService {
    * 中斷 session 收尾成 `closed`。
    */
   async rerun(sessionId: string): Promise<Session> {
-    const session = await this.mustGetInterrupted(sessionId);
-    const { workspace } = await this.resolveContext(session);
+    // 2026-09-04(稽核修補):見 withRecoveryClaim()。
+    return this.withRecoveryClaim(sessionId, async () => {
+      const session = await this.mustGetInterrupted(sessionId);
+      const { workspace } = await this.resolveContext(session);
 
-    if (workspace) {
-      if (!this.workspaceManager.worktreeExists(workspace)) {
-        throw new DeskmonyError(
-          ErrorCodes.RECOVERY_WORKTREE_LOST,
-          { worktreePath: workspace.worktreePath },
-          `worktree 已遺失(${workspace.worktreePath}),無法重跑,請改用「放棄」`,
-        );
+      if (workspace) {
+        if (!this.workspaceManager.worktreeExists(workspace)) {
+          throw new DeskmonyError(
+            ErrorCodes.RECOVERY_WORKTREE_LOST,
+            { worktreePath: workspace.worktreePath },
+            `worktree 已遺失(${workspace.worktreePath}),無法重跑,請改用「放棄」`,
+          );
+        }
+        const dirty = await this.workspaceManager.isDirty(workspace);
+        if (dirty) {
+          throw new DeskmonyError(
+            "recovery.worktreeDirty",
+            { worktreePath: workspace.worktreePath },
+            `worktree(${workspace.worktreePath})有未提交的變更,請先呼叫「檢查變更」查看 diff,並選擇「保留」(建 wip 分支)或「丟棄」處理乾淨後再重跑——絕不默默在髒 worktree 上重跑`,
+          );
+        }
       }
-      const dirty = await this.workspaceManager.isDirty(workspace);
-      if (dirty) {
-        throw new DeskmonyError(
-          "recovery.worktreeDirty",
-          { worktreePath: workspace.worktreePath },
-          `worktree(${workspace.worktreePath})有未提交的變更,請先呼叫「檢查變更」查看 diff,並選擇「保留」(建 wip 分支)或「丟棄」處理乾淨後再重跑——絕不默默在髒 worktree 上重跑`,
-        );
-      }
-    }
 
-    const member = await this.teamManager.findMemberByAgentProfileId(session.agentProfileId);
-    const newSession = await this.sessionManager.createSession({
-      title: `${session.title}(重跑)`,
-      agentProfileId: session.agentProfileId,
-      workingDir: session.workingDir,
-      teamMemberId: member?.id,
+      const member = await this.teamManager.findMemberByAgentProfileId(session.agentProfileId);
+      const newSession = await this.sessionManager.createSession({
+        title: `${session.title}(重跑)`,
+        agentProfileId: session.agentProfileId,
+        workingDir: session.workingDir,
+        teamMemberId: member?.id,
+      });
+      await this.sessionManager.abandonInterruptedSession(sessionId);
+      return newSession;
     });
-    await this.sessionManager.abandonInterruptedSession(sessionId);
-    return newSession;
   }
 
   /** §5.2:「放棄」——session 標 `closed`;worktree/任務一律保留(同 S3b T2「回收 ≠ 丟棄」)。 */
   async abandon(sessionId: string): Promise<void> {
-    await this.sessionManager.abandonInterruptedSession(sessionId);
+    // 2026-09-04(稽核修補):見 withRecoveryClaim()。
+    return this.withRecoveryClaim(sessionId, async () => {
+      await this.sessionManager.abandonInterruptedSession(sessionId);
+    });
   }
 
   /**
@@ -234,6 +246,41 @@ export class RecoveryService {
     if (!task?.workspaceId) return { task };
     const workspace = await this.workspaceManager.getWorkspace(task.workspaceId);
     return { task, workspace };
+  }
+
+  /**
+   * 2026-09-04(稽核修補):同一個 interrupted session 上的復原操作互斥。
+   *
+   * `takeover()`/`rerun()`/`continueSession()` 都是「先 `mustGetInterrupted()`
+   * 檢查狀態 → 一連串 await(組摘要、開新 session、送 prompt)→ **最後一步**
+   * 才把舊 session 標成 closed」。狀態真正改變是在整條流程的尾巴,中間完全
+   * 沒有鎖。
+   *
+   * 後果不只是「多一個錯誤訊息」:使用者對同一筆連按兩次「接手」,兩次呼叫都
+   * 會通過檢查、各自 `createSession()` 開一個**全新的 agent**,對著**同一個
+   * worktree** 開始工作。先完成的那次成功標記 closed,後完成的那次在最後一步
+   * 拋錯 —— 而它建立的第二個 agent 已經真的在跑、已經真的收到 prompt 了。
+   * 使用者看到的錯誤訊息完全沒有反映「其實多開了一個 agent 在同一批檔案上」。
+   *
+   * 用「宣告佔用」而不是提前改 DB 狀態:提前標 closed 的話,流程中途失敗會讓
+   * 這筆從復原視圖消失、使用者再也無法重試,那是更糟的失敗模式。
+   */
+  private readonly inFlight = new Set<string>();
+
+  private async withRecoveryClaim<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    if (this.inFlight.has(sessionId)) {
+      throw new DeskmonyError(
+        "recovery.alreadyInProgress",
+        { sessionId },
+        `這個 session 的復原操作正在進行中,請等它完成: ${sessionId}`,
+      );
+    }
+    this.inFlight.add(sessionId);
+    try {
+      return await fn();
+    } finally {
+      this.inFlight.delete(sessionId);
+    }
   }
 
   private async mustGetInterrupted(sessionId: string): Promise<Session> {
