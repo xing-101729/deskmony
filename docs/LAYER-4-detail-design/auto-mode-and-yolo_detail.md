@@ -53,6 +53,8 @@ S1 的 session-manager hook 在 escalate-strong 時帶 `strong: true`。
 ```ts
 // packages/shared/src/events.ts
 export const PermissionDecisionSchema = z.object({
+  /** ⚠️ 2026-09-04 新增(稽核修補),**必填**——見下方說明。 */
+  sessionId: z.string(),
   requestId: z.string(),
   decision: z.enum(["allow", "deny"]),
   /** 選定要寫入 allowlist 的窄規則;undefined = 只此一次。
@@ -60,6 +62,23 @@ export const PermissionDecisionSchema = z.object({
   rememberRule: PolicyRuleSchema.optional(),
 });
 ```
+
+> ⚠️ **2026-09-04(稽核修補):`sessionId` 從「Core 反查」改成「client 明講」。**
+>
+> 這個欄位原本不存在,Core 端靠 `PermissionGateway` 用 `requestId` **單鍵**反查
+> sessionId。但 `requestId` 是各 adapter 連線自己維護的編號,**只保證在同一個
+> session 內唯一**——`apps/core/src/enforcement/notifier.ts` 的註解就記著實測
+> 結果:「兩個不同 session 的第一筆權限請求都拿到同一個 requestId」,所以
+> notifier 一直是用 `${sessionId}::${requestId}` 組合鍵去重的。同一份 codebase
+> 裡一邊有實測證據、一邊有個假設它不成立的元件。
+>
+> 單鍵反查在多 agent 併發(本產品的核心情境)下會壞在兩個方向:後註冊的請求
+> 覆寫前一筆(前一筆的逾時計時器也一併被清掉 → 那個 agent 永遠等不到回覆、
+> 也永遠不會逾時),以及使用者對 A 的彈窗按下的決定被套用到 B 的工具呼叫。
+>
+> 現在 `PermissionGateway` 內部也改用 `${sessionId}::${requestId}` 組合鍵
+> (`resolve()` 因此多一個 `sessionId` 參數)。與早就這樣做的 `dialog.resolve`
+> 一致。UI 端的 `PendingPermission` 一直都帶著 `sessionId`,不需要新增任何狀態。
 > **取代**既有的 `remember: z.boolean()`——布林值表達不了「記多窄」,而 HLD §4 定案是**使用者選定範圍**。
 
 ---

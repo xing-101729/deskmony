@@ -139,7 +139,21 @@ decide(req: PermissionRequest, ctx: ExecContext): PolicyDecision
 |---|---|
 | **worktree 外寫入/刪除** | 檔案類工具的目標路徑 realpath 後不在 `workspace.worktreePath` 之下 |
 | **讀秘密路徑** | 路徑命中 `~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、`**/credentials` |
-| **force-push / 危險 git** | 指令 regex 命中 `git push .*(--force|-f)\b`、`git push .*--delete`、`git branch -D` 於非 worktree 分支 |
+| **force-push / 危險 git** | 指令 regex 命中 `git push .*(--force\|-f)\b`、`git push .*--delete`、`git branch -D`(⚠️ **大小寫敏感**,見下方) |
+
+> ⚠️ **2026-09-04(稽核修補):`branch -D` 的旗標比對必須大小寫敏感。**
+>
+> 三條 pattern 原本共用一個帶 `/i` 的 regex,而 `/i` 讓 `-D` 連 **`-d`** 一起命中。
+> 這兩個旗標語意天差地遠:`-D` 是**強制**刪除,連未合併的分支也照刪(真的會弄丟
+> 工作,屬於 §C5「不可逆」那一類);`-d` 只刪已完全合併的分支,未合併時 git 自己
+> 就會拒絕——那是例行清理。
+>
+> 誤判的代價不只是「多問一次」:hard-deny 是**永遠升級、不可學習**的類別
+> (C4 紀律③,不給「永遠允許」),所以每一次例行的分支清理都會被硬擋且無法透過
+> allowlist 消除。一個經常誤喊的地板,會讓人開始習慣性略過真正該看的那幾次警告。
+>
+> 現在的寫法是「指令字本身不分大小寫(與另外兩條一致),但旗標比對大小寫敏感」。
+> 這個 bug 是新增的 `scripts/e2e-hard-deny.mjs` 第一次執行就抓到的。
 | **非白名單外連** | 網路類工具的 host 不在 `policy.allowedHosts`(預設空 = 全擋) |
 
 **判定失敗時的方向**:任何「無法確定是否命中」的情況(路徑解析失敗、指令無法解析)⇒ **不視為 hard-deny,但也不 allow ⇒ 落到 §2 第 5 步 `escalate`**。fail-safe 方向正確(問人),不 fail-open。

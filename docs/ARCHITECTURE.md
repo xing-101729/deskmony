@@ -20,11 +20,16 @@ Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 
 這句話決定了整個架構的重心。「多 agent 能互聊」只是功能,不是護城河;真正的主軸是
 **由三個獨立斷路器組成的安全罩**(見 §5)。專門服務安全罩的四個目錄
-(`permissions/`、`cost/`、`enforcement/`、`recovery/`)合計 **2,267 行(不含
-空行;含空行 2,445 行),佔 `apps/core` 的 22%**;若再算上散在
-`session-manager.ts` 的決策編排
-(`buildExecContext()`、`checkAndExpireYolo()`、`resolvePermission()`)與
-`MessageBus` 的訊息預算閘,實際比重更高。
+(`permissions/`、`cost/`、`enforcement/`、`recovery/`)合計 **1,545 行實際
+程式碼(不含空行與註解),佔 `apps/core` 的 22%**;若再算上
+`session-permission-coordinator.ts`(`buildExecContext()`、`checkAndExpireYolo()`)、
+`session-manager.ts` 的 `resolvePermission()` 與 `MessageBus` 的訊息預算閘,
+實際比重更高。
+
+> ⚠️ 這個數字刻意扣掉註解。這份 codebase 有 31% 是註解,算進去會得到比較好看的
+> 2,372 行 —— 但註解擋不下任何一次工具呼叫。**行數本身證明不了安全性**,
+> 真正的證據是 §5 的決策流程與 `scripts/e2e-hard-deny.mjs` 對四類 hard-deny 的
+> 逐條斷言(那支測試是 2026-09-04 新增的,在此之前四類裡有三類零覆蓋)。
 
 任何新功能的設計,都必須回答一個問題:**「這條路徑上,三個斷路器分別擋在哪裡?」**
 
@@ -44,7 +49,7 @@ Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 
 ```mermaid
 flowchart TB
-    subgraph SHELL["apps/desktop — 桌面殼(Electron 33 + React 18)"]
+    subgraph SHELL["apps/desktop — 桌面殼(Electron 44 + React 18)"]
         direction LR
         Views["views/ 對話・團隊群聊・任務看板・復原視圖"]
         Stores["stores/ zustand × 4"]
@@ -125,7 +130,12 @@ flowchart TB
 ABI 重編),**終端使用者機器不需要安裝 Node.js**;dev 模式反過來優先用系統 Node
 (dev 的 `node_modules` 是系統 Node 的 ABI)。
 
-桌面殼每次啟動會產生一個隨機 `DESKMONY_AUTH_TOKEN`(記憶體 + 環境變數,不落地),
+桌面殼啟動時依序解析 `DESKMONY_AUTH_TOKEN`:環境變數 → 本機以 Electron
+`safeStorage` 加密保存的值 → 現生成的隨機值(三選一,**必有其一**,見
+`electron/main.ts` 的 `resolveAuthToken()`)。加密保存那條是 2026-09-02 新增的
+(Settings「遠端存取」面板可複製 / 自訂 / 重新產生),讓遠端 client 有一組穩定的
+token 可用;它落在獨立的加密檔案,**不會**進 `~/.deskmony/config.json`。
+決定出來的 token
 同時傳給 core 子程序與 preload,兩端自動對上。
 
 ---
@@ -138,7 +148,8 @@ ABI 重編),**終端使用者機器不需要安裝 Node.js**;dev 模式反過來
 
 | 模組 | 檔案 | 職責 |
 |---|---|---|
-| **SessionManager** | `session/session-manager.ts`(~1.9k 行,最大的單一模組) | session 生命週期與狀態機、adapter 事件消費、權限決策編排、子 agent、context checkpoint、啟動對帳、優雅關閉 |
+| **SessionManager** | `session/session-manager.ts`(~2.1k 行,仍是最大的單一模組) | session 生命週期與狀態機、adapter 事件消費、子 agent、context checkpoint、啟動對帳、優雅關閉 |
+| **SessionPermissionCoordinator** | `session/session-permission-coordinator.ts` | 每個 session 的暫態權限模式(auto / YOLO / 真.無限制)、政策規則 CRUD、`ExecContext` 組裝、YOLO 惰性過期。2026-09-04 從 SessionManager 抽出的第一塊(見該檔案頂端說明);SessionManager 保留同名的薄委派,gateway 呼叫端不受影響 |
 | **TeamManager** | `team/team-manager.ts` | team / team member CRUD;member 帶 `lifecycle`(persistent / ephemeral) |
 | **MessageBus** | `bus/message-bus.ts` | 訊息路由、Mailbox(DB 驅動)、投遞策略、**contextId 綁定與訊息預算斷路器** |
 | **TaskService** | `tasks/task-service.ts` | 任務狀態機、指派、機器驗收閘、人類 review 閘、合併並完成 |
@@ -171,6 +182,7 @@ ABI 重編),**終端使用者機器不需要安裝 Node.js**;dev 模式反過來
 | **loadConfig** | `config/load-config.ts` | 分層合併設定(defaults → config.json → env) |
 | **config-file-writer** | `config/config-file-writer.ts` | 安全子集寫回 config.json;`appendPolicyRule()` |
 | **AgentDetector** | `detect/agent-detector.ts` | 偵測本機已裝的 agent CLI(固定 allowlist + `execFile` + 逾時) |
+| **child-registry** | `packages/adapters/src/child-registry.ts` | 跨 core 重啟的孤兒**行程**回收(pid + 建立時間記錄,下次啟動比對後才殺)|
 | **SettingsStore** | `settings/settings-store.ts` | per-provider 偏好(啟用 / 排序 / env / model),env 對外一律遮罩 |
 
 ---
@@ -286,10 +298,30 @@ DELETE,記錄權限決策、三斷路器 trip、啟動對帳。**這不是 event
 連線建立 → remoteAddress 正規化 → isLocal = 是否 loopback(終生不變)
               ↓
 handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS 檢查
+                                              ④欄位層級的 local-only 檢查
                                                     ↓
-                              config.setFile / profile.create / profile.delete
-                              → 遠端一律拒絕(2026-08-25 起清單只剩這三項)
+    ③ config.setFile / profile.create / profile.delete
+      task.setAcceptance / task.runAcceptance / settings.setProviderPrefs
+    ④ task.create 的 acceptance 欄位
+                              → 遠端一律拒絕
 ```
+
+- ⚠️ **2026-09-04 新增(稽核修補)**:清單從三項變成六項,另加一道**欄位層級**
+  的檢查。新增的三個方法與原本那三個同類(都是「改變 core 自己或子程序怎麼被
+  啟動」的設定面操作),但更要緊的是它們**完全不經過工具呼叫,因此也完全不經過
+  政策引擎**——這與 §G 翻案開放給遠端的那些(切 auto/YOLO、編 allowlist)有本質
+  差別:那些操作再寬,每一次執行仍要過 `PolicyEngine.decide()`,仍留在稽核紀錄裡。
+  - `task.setAcceptance`/`task.runAcceptance`:驗收指令最終走
+    `acceptance-runner.ts` 的 `spawn(command, { shell: true })`,而
+    `TaskAcceptanceSchema.commands` 是不受限的 `z.array(z.string())`。
+  - `settings.setProviderPrefs`:`ProviderPrefs.env` 無 key 白名單,會被併進
+    **每一個** agent 子程序的環境變數(設一個 `NODE_OPTIONS` 就能在任何工具
+    呼叫發生**之前**取得執行權)。
+  - `task.create` 刻意**不**整個設成 local-only(那會連「遠端建一則普通任務」
+    都擋掉),改用 `findRemoteForbiddenField()` 只擋它的 `acceptance` 欄位——
+    否則只擋 `setAcceptance` 等於沒擋。
+  回歸測試見 `scripts/e2e-auto-mode-yolo.mjs` 的 E-3b-1/2/3(每條都同時驗證
+  「遠端被拒」與「本機仍可用」)。
 
 - **`isLocal` 只由 Core 依連線本身判定,絕不採信 client 自稱。**
 - **隧道連線(Tailscale/WireGuard)不是 loopback,一律視為遠端**——刻意的:
@@ -687,6 +719,19 @@ core 啟動
 
 優雅關閉 5 秒逾時保護:寧可留下孤兒讓下次啟動對帳抓到,也不卡住不關。
 
+**孤兒有兩種,處理方式不同**(2026-09-04 釐清):
+
+| | 是什麼 | 誰處理 |
+|---|---|---|
+| 孤兒**紀錄** | DB `sessions` 表裡狀態停在 `busy`/`waiting` 的列 | `reconcileOnStartup()` 標成 `interrupted`,交人分流 |
+| 孤兒**行程** | 真的還活著的 agent CLI 與它們再開的 MCP 孫程序 | `packages/adapters/src/child-registry.ts` 在下次啟動時回收 |
+
+第二種過去完全沒人管:子程序沒有被綁進任何 OS 層級的連坐回收單位(沒有 Windows
+Job Object,`spawn()` 也沒帶 `detached`),所以 core 被 SIGKILL / 工作管理員結束 /
+斷電時,它們會**繼續活著**佔用資源。現在 spawn 時會把 pid 連同該行程的**建立時間**
+記進 `<dataDir>/child-pids.json`,下次啟動比對建立時間後才殺 —— 對不上就**不殺**,
+pid 重用絕不能誤傷無關行程。正常 `dispose()` 之後會把該筆紀錄移除。
+
 ---
 
 ## 12. 設定系統
@@ -811,7 +856,7 @@ RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
 | 「Event Sourcing:一切皆事件,可回放、可重建 UI 狀態」 | ❌ 當前狀態 CRUD。唯一的 append-only 是 `enforcement_audit`,只記權限決策/trip/對帳,**不記 agent 輸出、不能重建狀態**(DECISIONS D1/D5) |
 | `Scheduler`(排程/自動循環)列在核心模組表與架構圖 | ❌ **從未實作**,沒有任何對應檔案 |
 | `CodexAdapter`(`codex proto` / exec JSON) | ❌ 不存在。Codex 走 `acp`(經 `@agentclientprotocol/codex-acp` 橋接套件,非本機 codex CLI 原生支援) |
-| 「殼:建議 Tauri 2…或 Electron」 | ✅ 已定案 **Electron 33**,沒有 Tauri 程式碼 |
+| 「殼:建議 Tauri 2…或 Electron」 | ✅ 已定案 **Electron 44**(2026-09-04 從 33 升級,見 SECURITY 相關說明),沒有 Tauri 程式碼 |
 | 「Monaco Editor — diff 檢視與檔案預覽」 | ❌ 無 Monaco。自製 `DiffHunkView` + `react-syntax-highlighter` |
 | 「虛擬列表(聊天串流訊息量大)」 | ❌ 未實作 |
 | `read_inbox` MCP 工具 | ❌ 不存在也不需要(投遞是推播式,不是拉取式) |
