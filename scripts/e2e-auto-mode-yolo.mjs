@@ -55,6 +55,12 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
+import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+
+// 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
+// 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
+// —— 見 scripts/lib/require-fresh-build.mjs 的完整說明。
+requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -455,7 +461,7 @@ async function testAutoAndYolo() {
       // 嘗試帶 rememberRule 一起 allow——Core 端必須忽略 rememberRule(C4 紀律③),
       // 但這次的 decision(allow)仍要照常套用,agent 不因此卡住。
       const attemptedRule = { tool: "Write file", when: { pathUnder: outsideDir }, effect: "allow" };
-      await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "allow", rememberRule: attemptedRule });
+      await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "allow", rememberRule: attemptedRule });
       await waitCompleted(sessionId);
       await sleep(300);
 
@@ -478,7 +484,7 @@ async function testAutoAndYolo() {
       const listAfter = await client.rpc("session.list", {});
       const wentWaiting = listAfter.sessions.find((s) => s.id === sessionId)?.status === "waiting";
 
-      await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "deny" });
+      await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "deny" });
       await waitCompleted(sessionId).catch(() => {});
 
       // 也直接讀 config.json,確認 F1 的 rememberRule 真的沒被寫進去。
@@ -505,7 +511,7 @@ async function testAutoAndYolo() {
       const notStrong = permEvent.strong !== true;
 
       const rule = { tool: "Write file", when: { pathUnder: targetDir }, effect: "allow" };
-      await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "allow", rememberRule: rule });
+      await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "allow", rememberRule: rule });
       await waitCompleted(sessionId);
       await sleep(300);
       const firstFileWritten = existsSync(firstFile);
@@ -566,7 +572,7 @@ async function testAutoAndYolo() {
       const isStrong = permEvent.strong === true;
       const trueUnrestrictedNeverArmed = sessionDuring?.trueUnrestricted !== true;
 
-      await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "deny" });
+      await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "deny" });
       await waitCompleted(sessionId).catch(() => {});
       const fileNotWritten = !existsSync(targetFile);
 
@@ -673,7 +679,7 @@ async function testYoloExpiry() {
     const modeReportedAsAlwaysAsk = sessionAfter?.permissionMode === "always-ask" || sessionAfter?.permissionMode === undefined;
 
     // 清理:手動 resolve。
-    await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "deny" });
+    await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "deny" });
     await client
       .waitForEvent((e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error"), 15_000)
       .catch(() => {});
@@ -738,7 +744,7 @@ async function testYoloExpiry() {
       const trueUnrestrictedClearedInState = sessionDuring2?.trueUnrestricted !== true;
 
       // 清理:手動 deny 這筆掛著的 escalate-strong 請求。
-      await client.rpc("permission.resolve", { requestId: permEvent2.requestId, decision: "deny" });
+      await client.rpc("permission.resolve", { sessionId: sessionId2, requestId: permEvent2.requestId, decision: "deny" });
       await client
         .waitForEvent((e) => e.sessionId === sessionId2 && (e.event.type === "completed" || e.event.type === "error"), 15_000)
         .catch(() => {});
@@ -902,6 +908,109 @@ async function testRemoteRejection() {
       `configSetFileRejected=${configSetFileRejected}`,
     );
 
+    /**
+     * ---- E-3b(2026-09-04 稽核修補的回歸測試)----------------------------
+     *
+     * 這三條擋的是**繞過整個安全罩的任意程式碼執行路徑**,與 §G 刻意開放給遠端
+     * 的那些(切 auto/YOLO、編 allowlist)本質不同:那些放寬的是「工具呼叫要不要
+     * 放行」,每次執行仍走 `PolicyEngine.decide()`;下面這些完全不經過工具呼叫,
+     * 因此政策引擎、hard-deny、三個斷路器全都看不到。
+     *
+     *   - `task.setAcceptance`/`task.runAcceptance` → `acceptance-runner.ts` 的
+     *     `spawn(command, { shell: true })`,指令字串不受任何限制。
+     *   - `settings.setProviderPrefs` → `ProviderPrefs.env` 無 key 白名單,會被
+     *     併進**每一個** agent 子程序的環境變數(例如 `NODE_OPTIONS`)。
+     *   - `task.create` 的 `acceptance` 欄位:方法本身遠端可用(建立普通任務無害),
+     *     但挾帶驗收指令等於繞過上面第一條,所以改用欄位層級的閘門擋
+     *     (`findRemoteForbiddenField()`)。
+     *
+     * 只斷言「遠端被拒」還不夠——那樣把方法名打錯也會通過(不存在的方法一樣會
+     * 拋錯)。所以每一條都同時驗證**本機仍然可用**,證明擋掉的是來源而不是功能。
+     */
+    const gateTeam = await localClient.rpc("team.create", { name: "E-3b gate team", workingDir: workspaceDir });
+    const gateTeamId = gateTeam.team.id;
+    // `err.code` 是 MiniGatewayClient 掛上去的 errorCode(見這個檔案上方
+    // handleMessage 的 response 分支),不是 `err.errorCode`。
+    const callBothWays = async (method, params) => {
+      let remoteRejected = false;
+      let remoteErrCode = "";
+      try {
+        await remoteClient.rpc(method, params);
+      } catch (err) {
+        remoteRejected = true;
+        remoteErrCode = err?.code ?? String(err?.message ?? err);
+      }
+      let localOk = false;
+      let localErr = "";
+      try {
+        await localClient.rpc(method, params);
+        localOk = true;
+      } catch (err) {
+        localErr = err?.code ?? String(err?.message ?? err);
+      }
+      return { remoteRejected, remoteErrCode, localOk, localErr };
+    };
+
+    // E-3b-1:task.create 挾帶 acceptance —— 欄位層級閘門。
+    const createWithAcceptance = await callBothWays("task.create", {
+      teamId: gateTeamId,
+      title: "E-3b acceptance gate",
+      acceptance: { commands: ["echo pwned"] },
+    });
+    // 對照組:同一個方法、拿掉 acceptance,遠端必須仍然可用(證明擋的是欄位不是方法)。
+    let remotePlainTaskOk = false;
+    try {
+      await remoteClient.rpc("task.create", { teamId: gateTeamId, title: "E-3b plain task" });
+      remotePlainTaskOk = true;
+    } catch {
+      remotePlainTaskOk = false;
+    }
+    record(
+      "【稽核修補】E-3b-1: task.create 挾帶 acceptance(= shell 指令)遠端被拒(gateway.localOnlyField),本機仍可建立;拿掉 acceptance 後遠端建立普通任務仍然成功——擋的是欄位不是整個方法",
+      createWithAcceptance.remoteRejected &&
+        createWithAcceptance.remoteErrCode === "gateway.localOnlyField" &&
+        createWithAcceptance.localOk &&
+        remotePlainTaskOk,
+      `remoteRejected=${createWithAcceptance.remoteRejected}(code=${createWithAcceptance.remoteErrCode}), localOk=${createWithAcceptance.localOk}(err=${createWithAcceptance.localErr}), remotePlainTaskOk=${remotePlainTaskOk}`,
+    );
+
+    // E-3b-2:task.setAcceptance / task.runAcceptance —— 方法層級閘門。
+    const gateTask = await localClient.rpc("task.create", { teamId: gateTeamId, title: "E-3b setAcceptance gate" });
+    const setAcceptance = await callBothWays("task.setAcceptance", {
+      taskId: gateTask.task.id,
+      acceptance: { commands: ["echo ok"] },
+    });
+    let runAcceptanceRemoteRejected = false;
+    let runAcceptanceRemoteErrCode = "";
+    try {
+      await remoteClient.rpc("task.runAcceptance", { taskId: gateTask.task.id });
+    } catch (err) {
+      runAcceptanceRemoteRejected = true;
+      runAcceptanceRemoteErrCode = err?.code ?? String(err?.message ?? err);
+    }
+    record(
+      "【稽核修補】E-3b-2: task.setAcceptance / task.runAcceptance 遠端皆被拒(gateway.localOnlyMethod),setAcceptance 本機仍可用——驗收指令是 shell:true 執行,不可由遠端定義或觸發",
+      setAcceptance.remoteRejected &&
+        setAcceptance.remoteErrCode === "gateway.localOnlyMethod" &&
+        setAcceptance.localOk &&
+        runAcceptanceRemoteRejected &&
+        runAcceptanceRemoteErrCode === "gateway.localOnlyMethod",
+      `setAcceptance: remoteRejected=${setAcceptance.remoteRejected}(code=${setAcceptance.remoteErrCode}), localOk=${setAcceptance.localOk}(err=${setAcceptance.localErr}); runAcceptance: remoteRejected=${runAcceptanceRemoteRejected}(code=${runAcceptanceRemoteErrCode})`,
+    );
+
+    // E-3b-3:settings.setProviderPrefs —— 方法層級閘門(env 注入)。
+    const setProviderPrefs = await callBothWays("settings.setProviderPrefs", {
+      providerId: "anthropic",
+      patch: { env: { NODE_OPTIONS: "--require=/tmp/pwned.js" } },
+    });
+    record(
+      "【稽核修補】E-3b-3: settings.setProviderPrefs 遠端被拒(gateway.localOnlyMethod),本機仍可用——這份 env 會被併進每一個 agent 子程序,設 NODE_OPTIONS 等於在任何工具呼叫發生前就取得執行權",
+      setProviderPrefs.remoteRejected &&
+        setProviderPrefs.remoteErrCode === "gateway.localOnlyMethod" &&
+        setProviderPrefs.localOk,
+      `remoteRejected=${setProviderPrefs.remoteRejected}(code=${setProviderPrefs.remoteErrCode}), localOk=${setProviderPrefs.localOk}(err=${setProviderPrefs.localErr})`,
+    );
+
     // ---- 共用小工具:用本機連線送出寫檔 prompt 並等到 permission-request ----
     const triggerWrite = async (sessionId, targetPath) => {
       const startIdx = localClient.events.length;
@@ -1061,7 +1170,7 @@ async function testRemoteRejection() {
       const wentWaiting = listAfter.sessions.find((s) => s.id === sessionId)?.status === "waiting";
       const isStrong = permEvent.strong === true;
 
-      await localClient.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "deny" }).catch(() => {});
+      await localClient.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "deny" }).catch(() => {});
       await localClient
         .waitForEvent((e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error"), 15_000)
         .catch(() => {});
