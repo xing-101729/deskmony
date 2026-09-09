@@ -9,6 +9,7 @@
     "test": "pnpm typecheck && pnpm build && node scripts/run-e2e.mjs",
     "test:e2e": "node scripts/run-e2e.mjs",
     "test:e2e:live": "node scripts/e2e-gateway.mjs",
+    "cli": "node apps/cli/dist/bin.js",
     "dev:core": "pnpm --filter @deskmony/core run dev",
     "dev:desktop": "pnpm --filter @deskmony/desktop run dev",
     "dev:electron": "pnpm --filter @deskmony/desktop run electron",
