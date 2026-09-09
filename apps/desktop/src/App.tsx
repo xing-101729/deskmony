@@ -19,6 +19,7 @@ import { Icon } from "./ui/icons.js";
 import { MOD_LABEL, useHotkeys } from "./ui/hotkeys.js";
 import { sessionStatusMeta } from "./ui/status.js";
 import { useTheme } from "./ui/theme.js";
+import { useFontScale } from "./ui/font-scale.js";
 import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 import { shortenPath } from "./lib/workspaces.js";
 
@@ -68,6 +69,9 @@ export default function App(): JSX.Element {
   const themePreference = useTheme((s) => s.preference);
   const resolvedTheme = useTheme((s) => s.resolved);
   const toggleTheme = useTheme((s) => s.toggle);
+  const increaseFontScale = useFontScale((s) => s.increase);
+  const decreaseFontScale = useFontScale((s) => s.decrease);
+  const resetFontScale = useFontScale((s) => s.reset);
 
   const [viewMode, setViewMode] = useState<ViewMode>("session");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -177,8 +181,15 @@ export default function App(): JSX.Element {
         { combo: "mod+,", handler: () => setSettingsOpen(true) },
         { combo: "alt+arrowdown", handler: () => cycleSession(1), allowInTerminal: true },
         { combo: "alt+arrowup", handler: () => cycleSession(-1), allowInTerminal: true },
+        // 字級調整:這三組組合鍵在終端裡沒有 readline/既定終端語意(不像
+        // ui/hotkeys.ts 檔頭註解警告的 Ctrl+K/B/N 那樣被終端本身佔用),而
+        // 「正在看終端輸出時調整字級」恰好是最常見的使用情境之一,所以明確
+        // 允許終端聚焦時也生效。
+        { combo: "mod+=", handler: () => increaseFontScale(), allowInTerminal: true },
+        { combo: "mod+-", handler: () => decreaseFontScale(), allowInTerminal: true },
+        { combo: "mod+0", handler: () => resetFontScale(), allowInTerminal: true },
       ],
-      [cycleSession, handleCreateSession],
+      [cycleSession, decreaseFontScale, handleCreateSession, increaseFontScale, resetFontScale],
     ),
   );
 
@@ -262,6 +273,33 @@ export default function App(): JSX.Element {
         keywords: t("app:commands.toggleTheme.keywords"),
         run: () => toggleTheme(),
       },
+      {
+        id: "action:font-size-increase",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.fontSize.increase.title"),
+        icon: "type",
+        hint: `${MOD_LABEL}+`,
+        keywords: t("app:commands.fontSize.increase.keywords"),
+        run: () => increaseFontScale(),
+      },
+      {
+        id: "action:font-size-decrease",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.fontSize.decrease.title"),
+        icon: "type",
+        hint: `${MOD_LABEL}-`,
+        keywords: t("app:commands.fontSize.decrease.keywords"),
+        run: () => decreaseFontScale(),
+      },
+      {
+        id: "action:font-size-reset",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.fontSize.reset.title"),
+        icon: "type",
+        hint: `${MOD_LABEL}0`,
+        keywords: t("app:commands.fontSize.reset.keywords"),
+        run: () => resetFontScale(),
+      },
     ];
 
     if (interruptedSessions.length > 0) {
@@ -305,8 +343,11 @@ export default function App(): JSX.Element {
 
     return list;
   }, [
+    decreaseFontScale,
     handleCreateSession,
+    increaseFontScale,
     interruptedSessions.length,
+    resetFontScale,
     resolvedTheme,
     selectSession,
     selectedProfile,

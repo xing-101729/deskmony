@@ -44,6 +44,7 @@ export type IconName =
   | "sun"
   | "terminal"
   | "trash"
+  | "type"
   | "user"
   | "users"
   | "x"
@@ -222,6 +223,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M6.5 7l.8 11a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9L17.5 7" />
     </>
   ),
+  type: (
+    <>
+      <path d="M4 7V4h16v3" />
+      <path d="M9 20h6" />
+      <path d="M12 4v16" />
+    </>
+  ),
   user: (
     <>
       <circle cx="12" cy="8.5" r="3.5" />
@@ -247,7 +255,9 @@ const PATHS: Record<IconName, JSX.Element> = {
 
 export interface IconProps {
   name: IconName;
-  /** 邊長(px)。預設 14——與 11/12px 的文字並排時視覺重量最接近。 */
+  /** 邊長,單位是「16px root 時的 px」。預設 14——與 11/12px 的文字並排時
+   *  視覺重量最接近。呼叫端永遠只填這組熟悉的 px 數字,實際渲染時換算成
+   *  rem(見下方 `width`/`height`),不必自己處理字級縮放。 */
   size?: number;
   className?: string;
   /** 少數需要更細/更粗描邊的場合(例如 10px 的極小徽章圖示)。 */
@@ -258,8 +268,12 @@ export function Icon({ name, size = 14, className, strokeWidth = 1.75 }: IconPro
   return (
     <svg
       viewBox="0 0 24 24"
-      width={size}
-      height={size}
+      // size 除以 16 轉成 rem,而不是直接當 px 寫死——固定 px 的圖示不會跟著
+      // ui/font-scale.ts 調整的 root font-size 縮放,字級調大時圖示會停在
+      // 原本的實際像素、跟文字比例跑掉(=「不是整體等比縮放」)。呼叫端仍然
+      // 只填 px 數字(見上方 IconProps.size 註解),換算只在這裡做一次。
+      width={`${size / 16}rem`}
+      height={`${size / 16}rem`}
       fill="none"
       stroke="currentColor"
       strokeWidth={strokeWidth}

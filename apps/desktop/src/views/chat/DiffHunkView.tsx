@@ -127,7 +127,7 @@ export function DiffHunkView({
       {diff.hunks.length === 0 ? (
         <div className="border-t border-line-subtle px-2.5 py-2 text-2xs text-fg-faint">{t("chat:diff.noChangesLabel")}</div>
       ) : (
-        <div className="max-h-[420px] overflow-auto border-t border-line-subtle">
+        <div className="max-h-[26.25rem] overflow-auto border-t border-line-subtle">
           {diff.hunks.map((hunk, i) => (
             <div key={i}>
               <div className="bg-canvas px-2.5 py-1 font-mono text-2xs text-fg-faint">

@@ -81,7 +81,7 @@ function FencedCodeBlock({ language, code }: { language: string; code: string })
         <SyntaxHighlighter
           language={language}
           style={resolvedTheme === "dark" ? oneDark : oneLight}
-          customStyle={{ margin: 0, padding: "0.625rem", background: "transparent", fontSize: "12px" }}
+          customStyle={{ margin: 0, padding: "0.625rem", background: "transparent", fontSize: "0.75rem" }}
           codeTagProps={{ className: "font-mono" }}
         >
           {code}
