@@ -47,15 +47,29 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..");
  * `dist/index.js`(純 re-export,內容不變)的 mtime 完全不動,拿它當代表會把
  * 剛建好的 package 誤判成過期。
  *
- * 只列 e2e 真正會載入的那幾個(core 與它的三個 workspace 依賴)——`apps/desktop`
- * 不在其中:e2e 從來不啟動 Electron/Vite 產物(唯一的例外 `package-smoke.mjs`
- * 有它自己的完整打包流程),把它加進來只會逼所有人多跑一次不相干的 vite build。
+ * 只列 e2e 真正會載入的那幾個——`apps/desktop` 不在其中:e2e 從來不啟動
+ * Electron/Vite 產物(唯一的例外 `package-smoke.mjs` 有它自己的完整打包
+ * 流程),把它加進來只會逼所有人多跑一次不相干的 vite build。
+ *
+ * `@deskmony/client`(2026-09-09 新增,見 docs/LAYER-3-hld/cli_hld.md §4.1)
+ * 是例外中的例外:現在還沒有任何 e2e 直接跑到它的產物(它先被 apps/desktop
+ * 的 vite build 打包用,vite build 不歸這裡管,理由同上);但下一輪 apps/cli
+ * 落地後會直接 `node apps/cli/dist/bin.js`,CLI 連 gateway 就是靠這個套件
+ * ——先加進來,免得屆時忘記補,重演這個檔案開頭說的「改了程式碼卻用舊產物
+ * 測」那種假通過。
+ *
+ * `@deskmony/cli`(同日,「下一輪」現在已經落地,見 scripts/e2e-cli.mjs)—
+ * e2e-cli.mjs 用 `spawnSync` 直接執行 `apps/cli/dist/bin.js` 當子程序,跟上面
+ * 其他套件被 `import()` 進來測不一樣,但道理相同:那也是編譯產物,一樣會
+ * 中招同一種「改了 src 卻測到舊 dist」的假通過,所以一併加進來監看。
  */
 const WATCHED = [
   { name: "@deskmony/shared", root: "packages/shared", entry: "packages/shared/dist/index.js" },
+  { name: "@deskmony/client", root: "packages/client", entry: "packages/client/dist/index.js" },
   { name: "@deskmony/db", root: "packages/db", entry: "packages/db/dist/index.js" },
   { name: "@deskmony/adapters", root: "packages/adapters", entry: "packages/adapters/dist/index.js" },
   { name: "@deskmony/core", root: "apps/core", entry: "apps/core/dist/index.js" },
+  { name: "@deskmony/cli", root: "apps/cli", entry: "apps/cli/dist/bin.js" },
 ];
 
 /** 遞迴找出目錄底下最新的檔案 mtime(毫秒);目錄不存在回傳 0。 */

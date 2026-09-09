@@ -42,6 +42,34 @@ importers:
         specifier: ^3.25.2
         version: 3.25.2(zod@4.4.3)
 
+  apps/cli:
+    dependencies:
+      '@deskmony/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@deskmony/core':
+        specifier: workspace:*
+        version: link:../core
+      '@deskmony/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.1
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
+      rimraf:
+        specifier: ^6.0.1
+        version: 6.1.3
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
   apps/core:
     dependencies:
       '@anthropic-ai/sdk':
@@ -90,6 +118,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@deskmony/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@deskmony/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -200,6 +231,19 @@ importers:
       '@types/node':
         specifier: ^22.10.2
         version: 22.20.1
+      rimraf:
+        specifier: ^6.0.1
+        version: 6.1.3
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/client:
+    dependencies:
+      '@deskmony/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
       rimraf:
         specifier: ^6.0.1
         version: 6.1.3
