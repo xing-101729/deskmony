@@ -21,8 +21,9 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這九支是**決定性**
- * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端),
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十一支是**決定性**
+ * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
+ * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
  *
  * 用法:
@@ -56,6 +57,13 @@ const SUITES = [
   "e2e-agent-lifecycle",
   "e2e-crash-recovery",
   "e2e-auto-mode-yolo",
+  // 2026-09-09(cli_hld.md §9):驅動編譯後的 `apps/cli/dist/bin.js` 子程序,
+  // 疊在其餘每一支都假設能正常運作的 gateway/adapters/policy-engine 之上
+  // ——放最後:如果下面那些底層測試會失敗,應該先看到那些訊號,而不是被
+  // 這支「整合了一切」的測試的失敗訊息蓋過去。啟動兩個獨立的 headless core
+  // (一個一般、一個啟用認證),不是這裡最快的一支,但也遠比
+  // e2e-crash-recovery(十個 core)快。
+  "e2e-cli",
 ];
 
 const args = process.argv.slice(2);

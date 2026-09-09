@@ -8,7 +8,7 @@
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
 ![Electron](https://img.shields.io/badge/Electron-44-47848F?style=flat-square&logo=electron&logoColor=white)
 ![pnpm](https://img.shields.io/badge/pnpm-workspaces-F69220?style=flat-square&logo=pnpm&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20(CLI)-0078D6?style=flat-square&logo=windows&logoColor=white)
 ![i18n](https://img.shields.io/badge/i18n-4%20languages-6f42c1?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
@@ -208,7 +208,7 @@ Dirty worktrees get a forced decision first: keep the work on a WIP branch, or d
 ### Prerequisites
 
 - **Node.js ≥ 20** and **pnpm 10** (the repo pins `pnpm@10.13.1` — `corepack enable` picks it up)
-- Windows for the packaged installer today. Core and adapters are plain Node/TypeScript, so other platforms are mostly a packaging exercise.
+- Windows for the packaged desktop installer. **The core and the CLI also run on Linux** — a `ubuntu-latest` CI job builds them and runs the CLI end-to-end suite on every PR. Be precise about what that proves: the core + CLI path works there, against a fake backend that needs no credentials. It does *not* prove that every adapter drives every real backend on Linux — nobody has tested that yet.
 - At least one agent backend: log into the Claude Code CLI, set an `OPENAI_API_KEY`/`CODEX_API_KEY` (or use ChatGPT login) for Codex — it runs through a bundled `@agentclientprotocol/codex-acp` bridge, no separate codex CLI install needed — install OpenCode, or point a profile at any interactive CLI through the PTY adapter. **Deskmony orchestrates agents; it does not ship model access.**
 
 ### Install
@@ -238,6 +238,34 @@ pnpm start:core
 ```
 
 Then open `http://127.0.0.1:4317/`. The core serves the same UI as a static page over the same port it uses for the WebSocket gateway, so a browser or phone needs nothing installed. The static page needs no auth to download; the WebSocket behind it still does.
+
+### The `deskmony` CLI
+
+The desktop shell was always meant to be *one* client of the core, not the only one. The CLI is the third — same WebSocket gateway, same safety shield. It runs on Linux and in Windows `cmd.exe`.
+
+```bash
+deskmony serve                 # run the headless core in the foreground
+deskmony                       # interactive REPL (same as `deskmony chat`)
+deskmony run "find the TODOs"  # one-shot: stream the answer, then exit
+deskmony run - < prompt.txt    # read the prompt from stdin
+deskmony session list --json   # NDJSON, for scripts
+deskmony doctor                # detect agent backends, check the connection
+```
+
+`serve` and the clients are separate on purpose: the core owns a SQLite database, and two cores on one data directory is a real hazard. Start `serve` in one terminal (or leave the desktop app running) and point the others at it with `--url` / `DESKMONY_URL`.
+
+Exit codes are stable enough to branch on: `0` success, `1` runtime error, `2` bad usage, `3` cannot connect or auth failed, `4` a permission request was denied. **`4` matters more than it looks** — a denied turn ends with exactly the same events as a successful one, so a CLI that only watched the event stream would report success for a turn that did nothing. `run` tracks its own denials instead.
+
+Outside a TTY, `run` never invents permission for itself: it denies, names the tool on stderr, and exits `4`. To automate, say so explicitly with `--permission-mode auto-accept-edits`, which maps onto the core's existing `session.setPermissionMode`. There is no silent-approval path.
+
+**Getting `deskmony` onto your PATH.** pnpm does not put a workspace package's `bin` in the root `node_modules/.bin`, so installing dependencies is not enough:
+
+```bash
+node apps/cli/dist/bin.js --help   # always works, no install
+cd apps/cli && npm link            # puts `deskmony` on PATH
+```
+
+`npm link` is the recommended route: npm's global prefix (`%APPDATA%\npm` on Windows, `~/.npm-global` or similar elsewhere) is already on PATH in a standard Node install, so no environment changes are needed. Verified by running `deskmony --help` in a real Windows console — Chinese output and column alignment render correctly. `pnpm link --global` also exists, but it needs `pnpm setup` first on machines where `PNPM_HOME` is unset, and that rewrites your PATH.
 
 ### Build a Windows installer
 

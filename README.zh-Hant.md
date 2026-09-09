@@ -8,7 +8,7 @@
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
 ![Electron](https://img.shields.io/badge/Electron-44-47848F?style=flat-square&logo=electron&logoColor=white)
 ![pnpm](https://img.shields.io/badge/pnpm-workspaces-F69220?style=flat-square&logo=pnpm&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20(CLI)-0078D6?style=flat-square&logo=windows&logoColor=white)
 ![i18n](https://img.shields.io/badge/i18n-4%20languages-6f42c1?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
@@ -208,7 +208,7 @@ stateDiagram-v2
 ### 事前準備
 
 - **Node.js ≥ 20** 與 **pnpm 10**(repo 釘死 `pnpm@10.13.1`,跑 `corepack enable` 就會抓到)
-- 目前封裝安裝檔是 Windows 專屬。core 與 adapter 都是純 Node/TypeScript,其他平台主要是打包工程問題。
+- 桌面版封裝安裝檔目前是 Windows 專屬。**core 與 CLI 也能在 Linux 上跑**——每次 PR 都有一個 `ubuntu-latest` CI job 建置它們並跑完整套 CLI e2e。這句話證明的範圍要說清楚:core + CLI 這條路徑在 Linux 上通,用的是不需要任何憑證的假後端;它**不**證明各 adapter 對真實後端在 Linux 上的行為,那還沒有人測過。
 - 至少一個 agent 後端:登入 Claude Code CLI;Codex 只需設定 `OPENAI_API_KEY`/`CODEX_API_KEY`(或改用 ChatGPT 登入)——它透過內附的 `@agentclientprotocol/codex-acp` 橋接套件運作,不需要另外安裝 codex CLI;安裝 OpenCode;或把某個 profile 透過 PTY adapter 指向任何互動式 CLI。**Deskmony 負責調度 agent,不提供 model 存取本身。**
 
 ### 安裝
@@ -238,6 +238,34 @@ pnpm start:core
 ```
 
 接著打開 `http://127.0.0.1:4317/`。core 把同一套 UI 當靜態頁面,透過與 WebSocket gateway 相同的 port 服務出來,瀏覽器或手機不需要裝任何東西。靜態頁面本身不需認證即可下載;它背後的 WebSocket 仍然需要。
+
+### `deskmony` 指令列介面
+
+桌面殼從一開始就只是 core 的**其中一種** client,不是唯一一種。CLI 是第三種——同一個 WebSocket gateway、同一層安全罩。Linux 與 Windows `cmd.exe` 都能用。
+
+```bash
+deskmony serve                 # 在前景跑 headless core
+deskmony                       # 互動 REPL(等同 deskmony chat)
+deskmony run "找出所有 TODO"    # 一次性:串流輸出後退出
+deskmony run - < prompt.txt    # prompt 從 stdin 讀
+deskmony session list --json   # NDJSON,供腳本消費
+deskmony doctor                # 偵測 agent 後端、檢查連線
+```
+
+`serve` 與 client 刻意分開:core 持有一份 SQLite,同一個資料目錄上跑兩份 core 是真實的資料危害。在一個終端機跑 `serve`(或讓桌面 app 開著),其餘用 `--url` / `DESKMONY_URL` 指過去。
+
+退出碼穩定到可以拿來做分支判斷:`0` 成功、`1` 執行期錯誤、`2` 用法錯誤、`3` 連不上或認證失敗、`4` 權限請求被拒。**`4` 比看起來重要**——被拒絕的那一輪,事件層面跟成功的一輪長得一模一樣,只看事件串流的 CLI 會把「什麼都沒做成」回報成成功。`run` 因此自己記錄拒絕紀錄,不從事件反推。
+
+非 TTY 環境下,`run` 不會自己給自己權限:直接拒絕、把工具名印在 stderr、以 `4` 結束。要自動化就明講 `--permission-mode auto-accept-edits`(對應 core 既有的 `session.setPermissionMode`)。沒有沉默放行的路。
+
+**怎麼讓 `deskmony` 進 PATH。** pnpm 不會把 workspace 套件的 `bin` 放進根目錄的 `node_modules/.bin`,所以光裝相依是不夠的:
+
+```bash
+node apps/cli/dist/bin.js --help   # 一定能動,零安裝
+cd apps/cli && npm link            # 把 deskmony 掛上 PATH
+```
+
+推薦走 `npm link`:npm 的全域 prefix(Windows 是 `%APPDATA%\npm`)在標準 Node 安裝下本來就在 PATH 上,不需要改任何環境變數。已在真實 Windows 主控台實測 `deskmony --help`,中文與欄位對齊都正常。`pnpm link --global` 也可以,但在 `PNPM_HOME` 未設定的機器上得先跑 `pnpm setup`,而那會改寫你的 PATH。
 
 ### 打包 Windows 安裝檔
 
