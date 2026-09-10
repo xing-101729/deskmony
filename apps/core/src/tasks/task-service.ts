@@ -338,105 +338,136 @@ export class TaskService extends EventEmitter {
    * `workingDir` 且該目錄是 git repo(否則 WorkspaceManager 會丟出明確錯誤,
    * 見 workspace-manager.ts 的 assertIsGitRepo)。
    */
+  /**
+   * 2026-09-04(稽核修補):同一個 member 的指派互斥。
+   *
+   * 內部的「這個成員是不是已經有 session」檢查(`getSessionIdForMember()`)
+   * 是同步 Map 讀取,但它前面已經有過 await(建 worktree),後面到真正
+   * `createSession()` 之間又是一個 await(`adapter.spawn()` 可能耗時數百毫秒)
+   * —— 而 `memberSessions` 是在 spawn **完成之後**才寫入的。
+   *
+   * 兩個 `task.assign` 幾乎同時把同一個 ephemeral member 指派到不同任務時,
+   * 兩者都會在對方寫入前讀到 undefined、都通過檢查、都各自 spawn 一個 session。
+   * 最終 `memberSessions` 只留下最後一次 set 的贏家,另一個 session 的子程序
+   * 仍在跑卻**再也無法透過 getSessionIdForMember()/disposeSessionForMember()
+   * 觸及** —— 任務完成的清理流程永遠清不到它,只能人工發現、人工砍。
+   */
+  private readonly assigningMembers = new Set<string>();
+
   async assignTask(input: AssignTaskInput): Promise<{ task: Task; workspace: Workspace }> {
-    const task = await this.mustGetTask(input.taskId);
-    if (!isValidTransition(task.status, "assigned", task.blockedFrom)) {
+    // 2026-09-04(稽核修補):見 `assigningMembers` 註解。以 memberId 為粒度
+    // (不是 taskId)—— 要防的是「同一個成員被同時指派兩次」。
+    if (this.assigningMembers.has(input.memberId)) {
       throw new DeskmonyError(
-        ErrorCodes.TASK_INVALID_TRANSITION,
-        { from: task.status, to: "assigned", taskId: task.id },
-        `不合法的任務狀態轉換: ${task.status} → assigned(taskId=${task.id})`,
+        "task.memberAssignmentInProgress",
+        { memberId: input.memberId },
+        `這個成員的指派正在進行中,請等它完成: ${input.memberId}`,
       );
     }
+    this.assigningMembers.add(input.memberId);
+    try {
 
-    const member = await this.teamManager.getMember(input.memberId);
-    if (!member || member.teamId !== task.teamId) {
-      throw new DeskmonyError(
-        "task.memberNotInTeam",
-        { memberId: input.memberId, taskId: task.id },
-        `成員 ${input.memberId} 不屬於任務 ${task.id} 所在的 team`,
-      );
-    }
-
-    const team = await this.teamManager.getTeam(task.teamId);
-    if (!team) {
-      throw new DeskmonyError(
-        ErrorCodes.ENTITY_NOT_FOUND,
-        { entityType: "team", id: task.teamId },
-        `找不到 team: ${task.teamId}`,
-      );
-    }
-    if (!team.workingDir) {
-      throw new DeskmonyError(
-        "task.teamMissingWorkingDir",
-        { teamId: team.id, teamName: team.name },
-        `team "${team.name}" 未設定 workingDir,無法建立任務 worktree 隔離`,
-      );
-    }
-
-    const workspace = await this.workspaceManager.createWorkspaceForTask({
-      taskId: task.id,
-      baseDir: team.workingDir,
-    });
-
-    // S8(agent-lifecycle)L4 §2.1:ephemeral member 指派時自動 spawn session;
-    // persistent member 什麼都不做(長命 session 由人或團隊啟動時建立,見
-    // agent-lifecycle_detail.md §2.1)。**這裡的檢查/spawn 都在「任務狀態實際
-    // 寫進 DB」之前**——失敗時只需要回滾剛建立的 workspace,任務本身從未離開
-    // 原本的狀態,天然滿足「整個指派回滾、任務退回 backlog」的要求(§2.1「失敗
-    // 處理」),不需要額外的復原邏輯。
-    if (member.lifecycle === "ephemeral") {
-      if (!this.sessionControl) {
-        // 理論上不會發生——index.ts 一定會呼叫 setSessionControl()。防禦性地
-        // 視為錯誤並回滾,而不是靜默略過自動 spawn(那會留下「已指派但沒有
-        // agent」的半狀態,正是 §2.1 要避免的)。
-        await this.rollbackWorkspace(workspace);
+      const task = await this.mustGetTask(input.taskId);
+      if (!isValidTransition(task.status, "assigned", task.blockedFrom)) {
         throw new DeskmonyError(
-          "task.sessionControlNotReady",
-          undefined,
-          "內部錯誤:SessionManager 尚未就緒,無法為 ephemeral 成員自動建立 session(指派已回滾)",
+          ErrorCodes.TASK_INVALID_TRANSITION,
+          { from: task.status, to: "assigned", taskId: task.id },
+          `不合法的任務狀態轉換: ${task.status} → assigned(taskId=${task.id})`,
         );
       }
 
-      const existingSessionId = this.sessionControl.getSessionIdForMember(member.id);
-      if (existingSessionId) {
-        await this.rollbackWorkspace(workspace);
-        const existingTask = await this.getActiveTaskForMember(member.id);
+      const member = await this.teamManager.getMember(input.memberId);
+      if (!member || member.teamId !== task.teamId) {
         throw new DeskmonyError(
-          "task.memberAlreadyAssigned",
-          { memberName: member.name, existingTaskTitle: existingTask?.title, sessionId: existingSessionId },
-          `成員 "${member.name}" 目前已在任務${existingTask ? ` "${existingTask.title}"` : ""}上,一個成員同時只能承接一個任務` +
-            `(session ${existingSessionId} 仍在使用中)`,
+          "task.memberNotInTeam",
+          { memberId: input.memberId, taskId: task.id },
+          `成員 ${input.memberId} 不屬於任務 ${task.id} 所在的 team`,
         );
       }
 
-      try {
-        await this.sessionControl.createSession({
-          title: `${member.name}: ${task.title}`,
-          agentProfileId: member.agentProfileId,
-          workingDir: workspace.worktreePath,
-          teamMemberId: member.id,
-        });
-      } catch (err) {
-        await this.rollbackWorkspace(workspace);
-        const detail = err instanceof Error ? err.message : String(err);
+      const team = await this.teamManager.getTeam(task.teamId);
+      if (!team) {
         throw new DeskmonyError(
-          "task.sessionAutoCreateFailed",
-          { memberName: member.name, detail },
-          `成員 "${member.name}" 的 session 自動建立失敗,指派已整個回滾(任務退回 backlog、workspace 已清除): ${detail}`,
+          ErrorCodes.ENTITY_NOT_FOUND,
+          { entityType: "team", id: task.teamId },
+          `找不到 team: ${task.teamId}`,
         );
       }
+      if (!team.workingDir) {
+        throw new DeskmonyError(
+          "task.teamMissingWorkingDir",
+          { teamId: team.id, teamName: team.name },
+          `team "${team.name}" 未設定 workingDir,無法建立任務 worktree 隔離`,
+        );
+      }
+
+      const workspace = await this.workspaceManager.createWorkspaceForTask({
+        taskId: task.id,
+        baseDir: team.workingDir,
+      });
+
+      // S8(agent-lifecycle)L4 §2.1:ephemeral member 指派時自動 spawn session;
+      // persistent member 什麼都不做(長命 session 由人或團隊啟動時建立,見
+      // agent-lifecycle_detail.md §2.1)。**這裡的檢查/spawn 都在「任務狀態實際
+      // 寫進 DB」之前**——失敗時只需要回滾剛建立的 workspace,任務本身從未離開
+      // 原本的狀態,天然滿足「整個指派回滾、任務退回 backlog」的要求(§2.1「失敗
+      // 處理」),不需要額外的復原邏輯。
+      if (member.lifecycle === "ephemeral") {
+        if (!this.sessionControl) {
+          // 理論上不會發生——index.ts 一定會呼叫 setSessionControl()。防禦性地
+          // 視為錯誤並回滾,而不是靜默略過自動 spawn(那會留下「已指派但沒有
+          // agent」的半狀態,正是 §2.1 要避免的)。
+          await this.rollbackWorkspace(workspace);
+          throw new DeskmonyError(
+            "task.sessionControlNotReady",
+            undefined,
+            "內部錯誤:SessionManager 尚未就緒,無法為 ephemeral 成員自動建立 session(指派已回滾)",
+          );
+        }
+
+        const existingSessionId = this.sessionControl.getSessionIdForMember(member.id);
+        if (existingSessionId) {
+          await this.rollbackWorkspace(workspace);
+          const existingTask = await this.getActiveTaskForMember(member.id);
+          throw new DeskmonyError(
+            "task.memberAlreadyAssigned",
+            { memberName: member.name, existingTaskTitle: existingTask?.title, sessionId: existingSessionId },
+            `成員 "${member.name}" 目前已在任務${existingTask ? ` "${existingTask.title}"` : ""}上,一個成員同時只能承接一個任務` +
+              `(session ${existingSessionId} 仍在使用中)`,
+          );
+        }
+
+        try {
+          await this.sessionControl.createSession({
+            title: `${member.name}: ${task.title}`,
+            agentProfileId: member.agentProfileId,
+            workingDir: workspace.worktreePath,
+            teamMemberId: member.id,
+          });
+        } catch (err) {
+          await this.rollbackWorkspace(workspace);
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new DeskmonyError(
+            "task.sessionAutoCreateFailed",
+            { memberName: member.name, detail },
+            `成員 "${member.name}" 的 session 自動建立失敗,指派已整個回滾(任務退回 backlog、workspace 已清除): ${detail}`,
+          );
+        }
+      }
+
+      const updated: Task = {
+        ...task,
+        status: "assigned",
+        assigneeMemberId: member.id,
+        workspaceId: workspace.id,
+        updatedAt: Date.now(),
+      };
+      await this.db.update(tasksTable).set(taskToRow(updated)).where(eq(tasksTable.id, task.id)).run();
+      this.emit("task-updated", updated);
+      return { task: updated, workspace };
+    } finally {
+      this.assigningMembers.delete(input.memberId);
     }
-
-    const updated: Task = {
-      ...task,
-      status: "assigned",
-      assigneeMemberId: member.id,
-      workspaceId: workspace.id,
-      updatedAt: Date.now(),
-    };
-    await this.db.update(tasksTable).set(taskToRow(updated)).where(eq(tasksTable.id, task.id)).run();
-    this.emit("task-updated", updated);
-    return { task: updated, workspace };
   }
 
   /** §2.1 失敗回滾用:清掉剛建立、還沒有任何任務狀態依賴它的 workspace。

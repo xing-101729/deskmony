@@ -104,6 +104,19 @@
   --shadow-pop: 0 12px 32px -10px rgb(16 16 20 / 0.14), 0 0 0 1px rgb(16 16 20 / 0.06);
 }
 
+/* rem 刻度的錨點:整份設計系統的字級/間距(tailwind.config.js 的
+ * fontSize/spacing)都是 rem,而 rem 是相對「根元素 font-size」換算的單位
+ * ——這裡先明訂一個基準值,不依賴瀏覽器/作業系統的預設(不同環境的預設不
+ * 保證是 16px)。ui/font-scale.ts 的 applyToDocument() 會在 React 掛載前用
+ * inline style(`document.documentElement.style.fontSize`)蓋掉這裡的值,
+ * inline style 的優先權天生高於這條 stylesheet 規則,兩者不會打架、也不會
+ * 因為套用順序而閃一下不同的字級。這裡寫死 16px 是因為它是 `md` 檔、也是
+ * 「加入字級功能之前的 UI 像素級」,JS 尚未執行的極短暫瞬間仍停在原本的
+ * 畫面,不會有奇怪的過渡態。 */
+html {
+  font-size: 16px;
+}
+
 html,
 body,
 #root {

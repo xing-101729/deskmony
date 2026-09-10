@@ -16,6 +16,7 @@ import { MOD_LABEL } from "../ui/hotkeys.js";
 import type { ThemePreference, ResolvedTheme } from "../ui/theme.js";
 import { useLocale } from "../ui/locale.js";
 import { LOCALES, type Locale } from "../lib/locale-storage.js";
+import { FONT_SCALES, useFontScale } from "../ui/font-scale.js";
 import { groupSessionsByWorkspace } from "../lib/workspaces.js";
 import { buildAgentOverride } from "../lib/agent-override.js";
 import { translateError } from "../lib/error-i18n.js";
@@ -525,6 +526,7 @@ export function SessionList({
           onClick={onToggleTheme}
         />
         <LanguageSwitcher />
+        <FontScaleSwitcher />
         <IconButton
           icon="settings"
           aria-label={t("sessionList:settingsAriaLabel")}
@@ -616,6 +618,66 @@ function LanguageSwitcher(): JSX.Element {
               >
                 {LANGUAGE_NAMES[l]}
                 {l === locale && <Icon name="check" size={11} className="text-accent" />}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 字級切換器——側欄底部工具列緊接在 LanguageSwitcher 旁邊的另一顆
+ * IconButton,樣式與互動完全比照上面的 LanguageSwitcher(錨定在按鈕旁的小
+ * 選單,不是 CommandPalette/Dialog 那種全螢幕或置中的重量級彈窗):同樣只是
+ * 4 個選項的極簡選單,沒有理由自己另外發明一套樣式。
+ *
+ * 與 LanguageSwitcher 的差異只有一點:選項標籤(小/預設/大/特大)要透過
+ * i18next 查表(`sessionList:fontScale.options.*`)。LANGUAGE_NAMES 是語言
+ * 自己的專有名詞、刻意不翻譯,但字級檔位的說明文字是一般 UI 文案,理當跟著
+ * 使用者選的介面語言走。
+ */
+function FontScaleSwitcher(): JSX.Element {
+  const { t } = useTranslation(["sessionList"]);
+  const scale = useFontScale((s) => s.scale);
+  const setScale = useFontScale((s) => s.setScale);
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="relative">
+      <IconButton
+        icon="type"
+        aria-label={t("sessionList:fontScale.toggleLabel")}
+        title={t("sessionList:fontScale.toggleLabel")}
+        active={open}
+        onClick={() => setOpen((v) => !v)}
+      />
+      {open && (
+        <>
+          {/* 點外面關閉——理由同 LanguageSwitcher 的同名遮罩。 */}
+          <div className="fixed inset-0 z-40" onMouseDown={() => setOpen(false)} />
+          <div
+            role="menu"
+            aria-label={t("sessionList:fontScale.menuLabel")}
+            className="absolute bottom-full left-0 z-50 mb-1 w-28 overflow-hidden rounded-md border border-line-subtle bg-panel py-1 shadow-overlay"
+          >
+            {FONT_SCALES.map((s) => (
+              <button
+                key={s}
+                type="button"
+                role="menuitemradio"
+                aria-checked={s === scale}
+                onClick={() => {
+                  setScale(s);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs transition hover:bg-surface ${
+                  s === scale ? "font-medium text-fg" : "text-fg-soft"
+                }`}
+              >
+                {t(`sessionList:fontScale.options.${s}`)}
+                {s === scale && <Icon name="check" size={11} className="text-accent" />}
               </button>
             ))}
           </div>

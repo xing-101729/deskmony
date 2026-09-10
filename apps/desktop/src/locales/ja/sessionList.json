@@ -41,6 +41,16 @@
     "toggleLabel": "言語を切り替え",
     "menuLabel": "言語を選択"
   },
+  "fontScale": {
+    "toggleLabel": "文字サイズを変更",
+    "menuLabel": "文字サイズを選択",
+    "options": {
+      "sm": "小",
+      "md": "標準",
+      "lg": "大",
+      "xl": "特大"
+    }
+  },
   "settingsAriaLabel": "設定",
   "logoutAriaLabel": "ログアウト",
   "unnamedWorkspace": "(ディレクトリ未指定)",

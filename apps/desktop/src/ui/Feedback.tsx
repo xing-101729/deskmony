@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { IconButton } from "./Button.js";
 import { Icon, type IconName } from "./icons.js";
 import type { Tone } from "./Badge.js";
@@ -37,6 +38,8 @@ export function Alert({
   action?: ReactNode;
   className?: string;
 }): JSX.Element {
+  // 2026-09-04(稽核修補):理由同 Dialog.tsx 的關閉鈕。
+  const { t } = useTranslation(["common"]);
   const meta = ALERT_TONE[tone];
   return (
     <div
@@ -49,7 +52,7 @@ export function Alert({
         {children}
       </div>
       {action}
-      {onDismiss && <IconButton icon="x" aria-label="關閉提示" size="xs" onClick={onDismiss} className="-mr-1 -mt-0.5" />}
+      {onDismiss && <IconButton icon="x" aria-label={t("common:dismissAlert")} size="xs" onClick={onDismiss} className="-mr-1 -mt-0.5" />}
     </div>
   );
 }
@@ -73,7 +76,7 @@ export function EmptyState({
       <div className="flex flex-col items-center gap-1.5 px-3 py-6 text-center">
         <Icon name={icon} size={16} className="text-fg-faint opacity-60" />
         <p className="text-xs text-fg-subtle">{title}</p>
-        {description && <p className="max-w-[220px] text-2xs leading-relaxed text-fg-faint">{description}</p>}
+        {description && <p className="max-w-[13.75rem] text-2xs leading-relaxed text-fg-faint">{description}</p>}
         {action}
       </div>
     );
@@ -85,7 +88,7 @@ export function EmptyState({
       </span>
       <div className="space-y-1">
         <p className="text-md font-semibold text-fg">{title}</p>
-        {description && <p className="mx-auto max-w-[340px] text-xs leading-relaxed text-fg-subtle">{description}</p>}
+        {description && <p className="mx-auto max-w-[21.25rem] text-xs leading-relaxed text-fg-subtle">{description}</p>}
       </div>
       {action && <div className="flex items-center gap-2 pt-1">{action}</div>}
     </div>

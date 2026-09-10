@@ -247,6 +247,26 @@ export type SessionEventEnvelope = z.infer<typeof SessionEventEnvelopeSchema>;
  * apps/core/src/session/session-manager.ts 的 `resolvePermission()`。
  */
 export const PermissionDecisionSchema = z.object({
+  /**
+   * 2026-09-04(稽核修補)新增,**必填**。
+   *
+   * 這個欄位過去不存在——Core 端靠 `PermissionGateway` 用 `requestId` 單鍵反查
+   * sessionId。但 `requestId` 是**各 adapter 連線自己維護的編號,只保證在同一
+   * 個 session 內唯一**:`apps/core/src/enforcement/notifier.ts` 的註解就記著
+   * 實測結果——「兩個不同 session 的第一筆權限請求都拿到同一個 requestId」,
+   * 所以 notifier 一直是用 `${sessionId}::${requestId}` 組合鍵去重的。
+   *
+   * 單鍵反查在多 agent 併發(本產品的核心情境)下會壞在兩個方向:後註冊的
+   * 請求覆寫前一筆(前一筆的計時器也一併被清掉 → 那個 agent 永遠等不到回覆、
+   * 也永遠不會逾時),以及使用者對 A 的彈窗按下的決定被套用到 B 的工具呼叫。
+   *
+   * 改成由 client 明講 sessionId,與早就這樣做的 `dialog.resolve` 一致
+   * (見 gateway.ts 對應 schema 的註解——那裡當初的理由是「dialog 不經過
+   * PermissionGateway,沒有登記可反查」;現在的結論是那份登記本來就不該用
+   * 單鍵)。UI 端的 `PendingPermission` 一直都帶著 `sessionId`,不需要新增
+   * 任何狀態就能填上。
+   */
+  sessionId: z.string(),
   requestId: z.string(),
   decision: z.enum(["allow", "deny"]),
   rememberRule: PolicyRuleSchema.optional(),

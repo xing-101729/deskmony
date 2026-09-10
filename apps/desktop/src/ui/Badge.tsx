@@ -41,7 +41,7 @@ export function Badge({ children, tone = "neutral", icon, mono, title, className
     <span
       title={title}
       className={[
-        "inline-flex h-[18px] max-w-full items-center gap-1 rounded px-1.5 text-2xs font-medium",
+        "inline-flex h-[1.125rem] max-w-full items-center gap-1 rounded px-1.5 text-2xs font-medium",
         mono ? "tabular font-mono" : "",
         TONE[tone],
         className ?? "",

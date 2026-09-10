@@ -6,10 +6,11 @@
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
-![Electron](https://img.shields.io/badge/Electron-33-47848F?style=flat-square&logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-44-47848F?style=flat-square&logo=electron&logoColor=white)
 ![pnpm](https://img.shields.io/badge/pnpm-workspaces-F69220?style=flat-square&logo=pnpm&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
 ![i18n](https://img.shields.io/badge/i18n-4%20languages-6f42c1?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 **[English](README.md)** · **[繁體中文](README.zh-Hant.md)**
 
@@ -23,9 +24,11 @@ Deskmony lets you run a **team** of AI coding agents — not one chatbot in a si
 
 Most multi-agent coding tools give you two options: approve every permission prompt yourself, or switch on full auto-approve and hope. Deskmony takes a third path.
 
-The thesis is simple: **letting agents run unattended isn't about trusting them more — it's about circuit breakers that don't care how much you trust them.** Three independent breakers sit underneath every agent, every message, and every dollar spent. Any one of them can halt a runaway on its own, and none of them can be switched off from a remote client.
+The thesis is simple: **letting agents run unattended isn't about trusting them more — it's about circuit breakers that don't care how much you trust them.** Three independent breakers sit underneath every agent, every message, and every dollar spent. Any one of them can halt a runaway on its own. The message and cost breakers cannot be switched off remotely; the permission breaker reached remote/local parity on 2026-08-25 — a deliberate, documented reversal (see [`DECISIONS.md` §G](docs/DECISIONS.md)), spelled out under "What remote can and cannot do" below.
 
-That isn't a marketing line. The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **2,267 non-blank lines, 22% of the orchestration core**, before counting the decision plumbing inside the session manager and message bus.
+The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **1,545 lines of actual code (blanks and comments excluded), 22% of the orchestration core**, before counting the decision plumbing inside the session manager and message bus.
+
+(That figure deliberately excludes comments. This codebase is 31% comments; counting them gives a nicer-looking 2,372 — but a comment has never blocked a tool call, so citing it as evidence of safety investment would be dishonest. **Line counts can't prove safety anyway**: what actually should convince you is the decision flow below, and the per-category assertions in `scripts/e2e-hard-deny.mjs`.)
 
 ## ✨ Highlights
 
@@ -101,13 +104,15 @@ Remote clients **can** watch, send prompts, approve or deny escalations, switch 
 
 Binding to a non-loopback address without `DESKMONY_AUTH_TOKEN` **refuses to start**. The token is deliberately not a config-file field, so editing config can't widen exposure — it comes only from the env var, or (desktop shell only) a value the Settings "remote access" panel keeps encrypted at rest via Electron's `safeStorage`, letting you copy a stable token to hand to a browser or phone.
 
+The WebSocket upgrade also carries a **same-origin check independent of the token** (added 2026-09-04). Browsers are not bound by same-origin policy when opening a `ws://` connection — any web page can reach your local gateway, and its source address genuinely *is* 127.0.0.1, so it is correctly judged "local". With no token set, that makes "visit one malicious page" enough to take over. The rule now: requests with no `Origin` (non-browser clients — phone apps, scripts) pass, browser UIs same-origin with `Host` pass, `file://` and loopback origins pass **only when a token is enabled** (the desktop shell always sets one; a sandboxed iframe can't obtain it), everything else is rejected at the upgrade.
+
 ## 🏗️ Architecture
 
 Three tiers. The desktop shell is deliberately just one client of the core — the same WebSocket gateway serves a browser or a phone.
 
 ```mermaid
 flowchart TB
-    subgraph SHELL["apps/desktop — Electron 33 + React 18"]
+    subgraph SHELL["apps/desktop — Electron 44 + React 18"]
         direction LR
         Views["views/ chat · team chat · task board · recovery"]
         Stores["stores/ zustand × 4"]
@@ -160,7 +165,7 @@ Four adapters are registered. Every one implements the same interface, so permis
 | `OpenCodeAdapter` | OpenCode's HTTP + SSE server | OpenCode | Native server, works remotely |
 | `GenericPtyAdapter` | Raw `node-pty` passthrough | Claude Code CLI, Aider, any interactive CLI | **Fallback — no permission events** |
 
-The user-facing layer is a **provider catalog** of seven entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `codex` → ACP (via the `@agentclientprotocol/codex-acp` bridge, not a locally installed codex CLI), `aider` → PTY, `custom-pty`.
+The user-facing layer is a **provider catalog** of eight entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `opencode-acp` → ACP (OpenCode driven through `opencode acp`, which is what gives it the team-bus tools), `codex` → ACP (via the `@agentclientprotocol/codex-acp` bridge, not a locally installed codex CLI), `aider` → PTY, `custom-pty`.
 
 **The PTY tier's missing permission events are a security boundary, not a to-do item.** It's raw stdin passthrough — structurally unmanageable by the policy engine. Until a real execution sandbox exists, PTY agents stay read-only with no unattended autonomy. Deskmony deliberately does **not** try to intercept shell commands: `bash -c`, `$()`, and base64 defeat that in seconds, and shipping it would be security theater.
 
@@ -248,7 +253,7 @@ The packaged core runs on Electron's bundled Node with `better-sqlite3` rebuilt 
 | Layer | Choice |
 |---|---|
 | Language | TypeScript (strict), every package |
-| Desktop shell | Electron 33 |
+| Desktop shell | Electron 44 |
 | UI | React 18 + Zustand + Tailwind + Vite |
 | Terminal | xterm.js + node-pty |
 | Chat rendering | react-markdown + remark-gfm + react-syntax-highlighter + a custom diff-hunk viewer |
@@ -267,7 +272,7 @@ Deskmony/
 │  ├─ desktop/          # Electron + React shell
 │  │  ├─ views/         # chat, team chat, task board, recovery, dialogs
 │  │  ├─ stores/        # zustand × 4
-│  │  ├─ ui/            # design system
+│  │  ├─ ui/            # design system (incl. ErrorBoundary)
 │  │  └─ locales/       # en, zh-Hant, ja, es
 │  └─ core/             # headless orchestration server
 │     ├─ session/ bus/ tasks/ team/ workspace/     # domain
@@ -277,16 +282,29 @@ Deskmony/
 │  ├─ adapters/         # 4 adapters + team-bus & subagent MCP servers
 │  ├─ db/               # Drizzle schema, idempotent migrations
 │  └─ shared/           # types, gateway protocol, zod schemas
-├─ scripts/             # 11 e2e suites, fake backends, packaging
+├─ scripts/             # 11 e2e suites, the runner, the build-freshness guard, fake backends, packaging
+├─ .github/workflows/   # CI (typecheck → build → the 10 deterministic suites)
 └─ docs/                # architecture, decisions, layered design, dev log
 ```
 
 ## 🧪 Testing
 
-**11 end-to-end suites, 456 assertions**, all driving a real headless core over the WebSocket gateway — **never through Electron**. The main suite splits into a *deterministic* group, which is the acceptance gate and must pass 100%, and a *model-behavior* group whose assertions depend on what a real model chose to say that run.
+```bash
+pnpm test          # typecheck + build + the 10 deterministic suites (~8 min)
+pnpm test:e2e      # just the suites (requires a current pnpm build)
+pnpm test:e2e:live # e2e-gateway.mjs — needs real Claude Code credentials, spends real tokens
+```
 
-Three fake backends — `fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo` — let the deterministic group run without real models or external CLIs. `package-smoke.mjs` is a packaging regression test that verifies the built executable resolves all its dependencies.
+**Eleven end-to-end suites.** Ten of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those ten are what `pnpm test` and CI run: **138 assertions, all of which must pass.**
 
+`e2e-gateway.mjs` is excluded from the default run on purpose. It needs real Claude Code credentials, costs real money, and carries a *model-behavior* group whose assertions depend on what a model chose to say that run — the file marks those as known-flaky. A CI that goes red because a model rephrased itself is a CI people learn to ignore.
+
+Two guards keep the suite honest:
+
+- **Build freshness.** The suites exercise `dist/`, not `src/`. Before this was checked, forgetting `pnpm build` meant the tests would quietly validate *stale* code and pass — worse than failing. `scripts/lib/require-fresh-build.mjs` now blocks that.
+- **`e2e-hard-deny.mjs`** covers all four hard-deny categories. Three of them (secret paths, dangerous git, network allowlist) had zero coverage until 2026-09-04 — and they are precisely the ones built from string and regex matching, i.e. the ones that can actually be wrong. It also pins the *known* bypasses (base64, variable splicing) as deliberate assertions, so if that behaviour ever changes the docs get updated with it.
+
+`package-smoke.mjs` is a packaging regression test: it launches the built executable with system Node.js stripped from `PATH` and verifies the core subprocess still starts and authenticates.
 ## 📚 Documentation
 
 | Doc | What's in it |
@@ -295,18 +313,23 @@ Three fake backends — `fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | **Why** — the authoritative design-decision record behind the safety shield |
 | [`docs/LAYER-3-hld/`](docs/LAYER-3-hld/) → [`docs/LAYER-4-detail-design/`](docs/LAYER-4-detail-design/) | High-level → detail design per subsystem |
 | [`docs/DEVLOG.md`](docs/DEVLOG.md) | The round-by-round build log — what shipped, what broke, what got corrected |
+| [`SECURITY.md`](SECURITY.md) | **Threat model and reporting** — what counts as a vulnerability, what is knowingly accepted (no PTY sandbox, hard-deny is pattern matching, the true-unrestricted tier…), and how to harden your own install |
+| [`LICENSE`](LICENSE) | MIT |
 
 ## 🗺️ Status
 
-Built and end-to-end tested: team and profile management, cross-agent messaging, the desktop IDE, git-worktree isolation, browser/remote access with token auth, the full three-breaker safety shield, crash recovery, desktop and webhook notifications, the machine acceptance gate, session sub-agents, a self-service policy allowlist UI, and the true-unrestricted bypass tier.
+Built, and guarded by end-to-end tests that CI runs on every push and PR (see Testing above): team and profile management, cross-agent messaging, the desktop IDE, git-worktree isolation, browser/remote access with token auth, the full three-breaker safety shield, crash recovery, desktop and webhook notifications, the machine acceptance gate, session sub-agents, a self-service policy allowlist UI, and the true-unrestricted bypass tier.
 
 Open by design, and worth knowing before you rely on it:
 
 - **No execution sandbox for the PTY tier.** Until there is one, PTY agents stay read-only — that's the honest consequence, not an oversight.
 - **No LLM lead.** Task decomposition is manual; `TaskService` is fully deterministic.
 - **No mid-turn cost cutoff.** The only adapter that emits usage does so as a turn ends, so there is no observable "usage arrived mid-turn" case to build against. Branching on it would be inventing behaviour.
-- **Only Claude SDK and ACP sessions can *initiate* messages.** ACP agents (Codex, Gemini CLI) reach the same two MCP servers through a bridge subprocess holding a scoped, per-session token; OpenCode and PTY don't mount them yet — though *receiving* injected messages works across every backend.
+- **Only Claude SDK and ACP sessions can *initiate* messages.** ACP agents (Codex, Gemini CLI) reach the same two MCP servers through a bridge subprocess holding a scoped, per-session token; the `opencode` provider (bespoke HTTP/SSE) and PTY don't mount them — but the `opencode-acp` provider does, since it runs OpenCode through ACP. *Receiving* injected messages works across every backend.
 - **Provider secrets are masked over the wire but stored in plaintext locally**, the same trade-off Paseo makes with its config file.
+- **Orphaned agent processes are only reclaimed on the next start.** If core is SIGKILLed, force-quit, or loses power, the graceful shutdown path never runs and spawned agents — plus the MCP grandchildren they started — keep running. Their pids are now recorded in `<dataDir>/child-pids.json` and reaped at the next start after matching the process creation time (**no match, no kill** — pid reuse must never cost you an unrelated process). Reclaiming them at the moment of death needs a Windows Job Object, which means a native dependency; this project deliberately does not require an MSVC toolchain on the packaging machine.
+- **SQLite migrations can only add columns.** `packages/db/src/client.ts` is a dozen hand-rolled "check `PRAGMA table_info` → `ALTER TABLE ADD COLUMN`" functions with no version table. Type changes, renames, drops and new constraints are all out of reach; a destructive migration would need a real migration mechanism first.
+- **The chat view keeps at most 2,000 items in memory.** Older ones are dropped (the full history stays in SQLite and reloads when you switch away and back). This bounds what a runaway loop can do to renderer memory; ordinary conversations never come close.
 - **Windows packaging only** so far.
 
 ---

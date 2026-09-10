@@ -25,5 +25,6 @@
   "unrestrictedRiskCategory4": "conexiones de red a hosts no permitidos",
   "unrestrictedRisk2": "Comparte el temporizador de 30 minutos de YOLO — se desactiva junto con YOLO al expirar, no es un temporizador independiente.",
   "unrestrictedRiskRemote": "Estás activando esto desde una conexión remota — una vez activado, se aplica a las solicitudes de cualquier conexión, no solo esta.",
-  "unrestrictedTypeToConfirm": "Escribe «{{phrase}}» para confirmar"
+  "unrestrictedTypeToConfirm": "Escribe «{{phrase}}» para confirmar",
+  "switchFailed": "Error al cambiar"
 }

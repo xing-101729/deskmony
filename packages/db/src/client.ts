@@ -19,6 +19,23 @@ export function createDb(dbFilePath: string): NexusDb {
 
   const sqlite = new Database(dbFilePath);
   sqlite.pragma("journal_mode = WAL");
+  /**
+   * 2026-09-04(稽核修補):`busy_timeout`。
+   *
+   * better-sqlite3 的預設是**遇到鎖定衝突立即拋出 `SQLITE_BUSY`**,不等待、
+   * 不重試。正常情況下只有 core 自己一個 process 開這個檔案,不太會自己跟自己
+   * 搶鎖;但只要有第二個東西同時碰到它 —— 使用者用 DB Browser 手動檢視、一個
+   * 沒有正確隔離 `DESKMONY_DATA_DIR` 的第二個 core 實例(這在本專案的開發史上
+   * 真的發生過)、任何備份腳本 —— 就會拋例外。
+   *
+   * 而那個例外會一路餵給 `SessionManager.consumeEvents()`。在補上事件迴圈圍籬
+   * 之前,那等於整個 core 崩潰;現在雖然只會殺掉一條 session,仍然是「一次巧合
+   * 的並行存取就讓一條 agent 對話死掉」——用一行 pragma 換掉這個風險很划算。
+   *
+   * 5 秒是保守值:WAL 模式下寫鎖通常只持續毫秒等級,會真的等滿 5 秒代表另一端
+   * 卡住了,那時候拋錯反而是對的(不該無限等下去把事件迴圈也拖住)。
+   */
+  sqlite.pragma("busy_timeout = 5000");
 
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS sessions (

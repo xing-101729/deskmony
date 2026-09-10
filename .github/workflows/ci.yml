@@ -1,0 +1,78 @@
+# 2026-09-04(稽核修補):這個 repo 在此之前完全沒有 CI。README 宣稱
+# 「已完成並有端到端測試把關」,但沒有任何自動化在執行那 16,800 行測試 ——
+# 「把關」實際上是「作者記得手動跑」。這個 workflow 讓那句話成立。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # 同一個分支連續 push 時取消前一輪 —— e2e 跑得久,沒必要為過期的 commit 排隊。
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Windows runner:這是 Windows 專屬產品(見 README「已知限制」),而且好幾個
+    # 已知的坑本身就是 Windows 專屬的 —— `child.kill("SIGTERM")` 等同
+    # TerminateProcess(見 e2e-crash-recovery-graceful-bootstrap.mjs)、
+    # `taskkill /T /F` 的程序樹回收、`node_modules` junction。在 Linux 上跑
+    # 這些測試會通過,卻完全沒有驗證到實際出貨的平台。
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # 版本不寫死在這裡 —— 根 package.json 的 `packageManager` 欄位
+        # (pnpm@10.13.1)才是唯一來源,action 會自己讀。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Build 必須排在 Typecheck 前面。workspace 套件之間是用 package `exports`
+      # 互相解析的(`@deskmony/shared` → `./dist/index.d.ts`,見各套件的
+      # package.json),`dist/` 又在 .gitignore 裡,而且沒有任何套件有 `prepare`
+      # 腳本會在 install 時順手建置 —— 所以全新 checkout 上 `packages/*/dist`
+      # 根本不存在。`typecheck`(`tsc --noEmit`)不產出檔案,先跑它等於要 tsc
+      # 去解析一批還沒被編譯出來的 .d.ts,必定失敗;`build`(`tsc -p`)會真的
+      # 產出 dist,跑完之後 typecheck 才有東西可以解析。本機不會踩到是因為
+      # dist 早就留在工作目錄裡了。
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: e2e(決定性測試)
+        # 不含 e2e-gateway.mjs —— 它需要真實 Claude Code 憑證、會花真的錢,而且
+        # 有一組刻意標記為「已知 flake」的 model-behavior 斷言。詳見
+        # scripts/run-e2e.mjs 頂端說明。要跑的話:pnpm test:e2e:live
+        run: pnpm test:e2e
+
+  audit:
+    # 與 check 分開、且刻意**不**擋合併(continue-on-error)—— 相依套件的新
+    # advisory 隨時可能冒出來,那不該讓一個不相干的 PR 變紅。但它必須是**可見**
+    # 的:2026-09-03 的稽核發現 68 個 advisory(26 high)長期無人察覺,正是因為
+    # 從來沒有人跑過 `pnpm audit`。
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: pnpm audit
+        run: pnpm audit --audit-level high

@@ -10,5 +10,6 @@
   "delete": "Eliminar",
   "edit": "Editar",
   "loading": "Cargando…",
-  "unknown": "Desconocido"
+  "unknown": "Desconocido",
+  "dismissAlert": "Descartar"
 }

@@ -20,6 +20,7 @@
   },
   "gateway": {
     "localOnlyMethod": "此操作僅限本機連線呼叫:{{method}}",
+    "localOnlyField": "此操作的「{{field}}」欄位僅限本機連線提供:{{method}}",
     "invalidRequest": "無效的請求:{{detail}}"
   },
   "budget": {

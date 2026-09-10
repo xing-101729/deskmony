@@ -54,6 +54,10 @@ export const useRecoveryStore = create<RecoveryStoreState>((set, get) => ({
         void get().refresh();
       }
     });
+    // 2026-09-04(稽核修補):斷線重連後補資料,理由同 session-store。
+    client.onReconnected(() => {
+      void get().refresh();
+    });
     void get().refresh();
   },
 

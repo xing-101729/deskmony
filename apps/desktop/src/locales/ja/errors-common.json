@@ -20,6 +20,7 @@
   },
   "gateway": {
     "localOnlyMethod": "この操作はローカル接続でのみ実行できます: {{method}}",
+    "localOnlyField": "この操作の「{{field}}」フィールドはローカル接続からのみ指定できます:{{method}}",
     "invalidRequest": "無効なリクエストです: {{detail}}"
   },
   "budget": {

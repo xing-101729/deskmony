@@ -195,11 +195,11 @@ export function PermissionModal(): JSX.Element | null {
 
   const handleDeny = (): void => {
     resetLocalState();
-    resolvePermission(current.requestId, "deny");
+    resolvePermission(current.sessionId, current.requestId, "deny");
   };
   const handleAllow = (rememberRule?: PolicyRule): void => {
     resetLocalState();
-    resolvePermission(current.requestId, "allow", rememberRule);
+    resolvePermission(current.sessionId, current.requestId, "allow", rememberRule);
   };
 
   return (

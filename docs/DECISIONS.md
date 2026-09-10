@@ -47,7 +47,7 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 | A2 | **LLM 提議、人/規則裁決** | 發散工作(拆解、找路、寫扣)給 LLM;**收斂決策**(定案拆解、判定完成、批准合併)由人或硬規則把關。同一個 LLM 不得既拆解又自評完成。 |
 | A3 | **done = 機器可驗證驗收閘** | `report_status(done)` 必須先過該任務定義的測試 / build / typecheck / 自訂指令,否則系統直接打回,進不了 Review。純探索型任務可標「無機器驗收、強制人判」為例外。 |
 | A4 | **角色決定生命週期** | lead + 少數需跨任務記憶的角色(如熟悉 codebase 的 Reviewer)長命;純執行 worker 隨任務生滅。投遞層必須把「對方不在線」當一等公民。 |
-| A5 | **peer 訊息綁 context** | 無 task/review 脈絡的訊息一律拒收。**每個 context 自帶訊息數 / hop 深度預算**,燒完熔斷並回報 lead 或人類。脈絡閘擋無脈絡閒聊,脈絡預算擋脈絡內死循環。 |
+| A5 | **peer 訊息綁 context** | 無 task/review 脈絡的訊息一律拒收。**每個 context 自帶訊息數預算**,燒完熔斷並回報 lead 或人類。脈絡閘擋無脈絡閒聊,脈絡預算擋脈絡內死循環。<br>⚠️ **2026-09-04 更正**:原文寫「訊息數 / **hop 深度**預算」,但 hop 深度從未實作 —— 實際落地的只有訊息數這一條(`core-config.ts` 明載它是 Phase 2「唯一主防線」,hop 深度 / A↔B 頻率 / broadcast 冷卻**全部延後**;`message-budget_hld.md` §與 `_detail.md` 也都標「⏸ 延後」)。`FEATURES.md` 一直是對的,是這份文件沒跟上。 |
 
 ## B. 多後端 Adapter
 
@@ -86,7 +86,7 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 
 | # | 決策 | 說明 |
 |---|---|---|
-| E1 | **做 usage 量測** | 補一個一等公民 `usage` AgentEvent,來源:ACP `usage_update`、Claude SDK `result.usage`、OpenCode usage。PTY 報不了 → 又一個「PTY 唯讀/需人陪」的理由。 |
+| E1 | **做 usage 量測** | 補一個一等公民 `usage` AgentEvent。PTY 報不了 → 又一個「PTY 唯讀/需人陪」的理由。<br>⚠️ **2026-09-04 更正**:原文列的三個來源(ACP `usage_update`、Claude SDK `result.usage`、OpenCode usage)**實測只有一個可用**。經 bridge 的 Claude Code 從頭到尾送 0 個 `usage_update`(`acp-adapter.ts` 實測紀錄,且是結構性的 → `usageReporting: "unknown"`);OpenCode adapter 如實回報 `"unsupported"`。**唯一真正會發 `usage` 事件的是 `ClaudeAgentSdkAdapter`**。對其他後端,所有 usage-based 預算是空轉,只剩不依賴 usage 的 `TurnLimiter` —— 這是成本斷路器實際涵蓋範圍的重大限制,README 已誠實揭露,這份文件補上。 |
 | E2 | **任務預算硬上限** | 燒破 → halt + 升級(同 A5 circuit-breaker 模式)。 |
 | E3 | **每日 / 全域 kill-switch** | 團隊總花費到頂 → 全部暫停。 |
 | E4 | **保守預設、有意識才開大** | 同 default-deny 哲學。上限是**反應式**的:框住損害,非精準防超支。 |
@@ -102,17 +102,21 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 
 ---
 
-## 這份共識逼出的「淨新增工作」(目前 codebase 沒有)
+## 這份共識逼出的「淨新增工作」
 
-依風險 / 依賴排序,**與現況落差最大者在前**:
+> ⚠️ **2026-09-04 更正**:本節原標題是「(目前 codebase 沒有)」,寫於 2026-07-24。
+> **七項裡有六項早已完成**,只讀這一節會嚴重誤判專案進度。逐項現況標註如下,
+> 標題也已拿掉那個已經不成立的括號。
 
-1. **政策引擎(C2–C6)** — gateway 目前只 forward+timeout(57 行空殼),無 allowlist/deny-list/default-deny/auto 語意。**安全罩的地基,最優先。**
-2. **context 訊息預算 + 熔斷(A5)** — MessageBus 目前**零**失控防護。
-3. **usage 量測 + 預算斷路器(E1–E3)** — AgentEvent 目前無 usage 欄位。
-4. **機器驗收閘(A3)** — TaskService 目前無驗收條件概念。
-5. **LLM lead/orchestrator(A2)** — 目前 TaskService 純確定性,沒有會提議拆解的 LLM。
-6. **崩潰對帳 + 復原視圖 + Mailbox 持久化(D2–D4)**。
-7. **每 session auto 按鈕(語意 ii)+ 獨立 YOLO + 遠端能力矩陣(C6, F3–F4)**。
+依風險 / 依賴排序(原始順序保留,不重排):
+
+1. ✅ **已完成** — **政策引擎(C2–C6)**。落地於 `apps/core/src/permissions/policy-engine.ts` 與 `hard-deny.ts`。
+2. ✅ **已完成(部分)** — **context 訊息預算 + 熔斷(A5)**,落地於 `apps/core/src/bus/message-bus.ts`。**僅訊息數維度**,hop 深度仍未做(見上面 A5 的更正)。
+3. ✅ **已完成(涵蓋範圍受限)** — **usage 量測 + 預算斷路器(E1–E3)**,落地於 `apps/core/src/cost/cost-governor.ts`。但只有 `claude-agent-sdk` 後端真的會發 usage(見上面 E1 的更正)。
+4. ✅ **已完成** — **機器驗收閘(A3)**,落地於 `apps/core/src/tasks/acceptance-runner.ts`。
+5. ⬜ **仍未做** — **LLM lead/orchestrator(A2)**:`TaskService` 目前仍是純確定性的,沒有會提議拆解的 LLM。**這是七項裡唯一還沒做的。**
+6. ✅ **已完成** — **崩潰對帳 + 復原視圖 + Mailbox 持久化(D2–D4)**,落地於 `apps/core/src/recovery/recovery-service.ts` 與 `team_messages` 表。
+7. ✅ **已完成** — **每 session auto 按鈕 + 獨立 YOLO + 遠端能力矩陣(C6, F3–F4)**,落地於 `session-manager.ts` 與 `ws-gateway.ts` 的 `buildCapabilities()`。遠端能力矩陣已於 2026-08-25 翻案(見 §G)。
 
 ---
 

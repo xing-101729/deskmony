@@ -6,10 +6,11 @@
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
-![Electron](https://img.shields.io/badge/Electron-33-47848F?style=flat-square&logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-44-47848F?style=flat-square&logo=electron&logoColor=white)
 ![pnpm](https://img.shields.io/badge/pnpm-workspaces-F69220?style=flat-square&logo=pnpm&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
 ![i18n](https://img.shields.io/badge/i18n-4%20languages-6f42c1?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 **[English](README.md)** ・ **[繁體中文](README.zh-Hant.md)**
 
@@ -23,9 +24,11 @@ Deskmony 讓你跑一整支 AI coding agent **團隊**,而不是側邊欄裡的�
 
 多數多 agent coding 工具只給你兩個選項:每個權限彈窗都自己盯著核准,或者整組開自動核可、然後賭。Deskmony 走第三條路。
 
-論點很簡單:**讓 agent 無人值守運作,靠的不是「更信任它」,而是不管你信不信任它、斷路器都一樣會跳。** 三個各自獨立的斷路器罩住每個 agent、每則訊息、每一分花費。任一條都能單獨叫停失控,而且**沒有一條可以從遠端關掉**。
+論點很簡單:**讓 agent 無人值守運作,靠的不是「更信任它」,而是不管你信不信任它、斷路器都一樣會跳。** 三個各自獨立的斷路器罩住每個 agent、每則訊息、每一分花費。任一條都能單獨叫停失控。訊息與成本兩條**遠端無法停用**;權限那條自 2026-08-25 起遠端與本機同權(有意識、有記錄的翻案,見 [`DECISIONS.md` §G](docs/DECISIONS.md)),詳見下方「遠端能做什麼、不能做什麼」。
 
-這不是行銷話術。純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **2,267 行(不含空行),佔 orchestration core 的 22%**,這還沒算上散在 session manager 與 message bus 裡的決策編排。
+純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **1,545 行實際程式碼(不含空行與註解),佔 orchestration core 的 22%**,這還沒算上散在 session manager 與 message bus 裡的決策編排。
+
+(這個數字刻意扣掉註解。這份 codebase 有 31% 是註解,把它們算進去會得到比較好看的 2,372 行 —— 但註解不會擋下任何一次工具呼叫,拿來當「安全投入」的證據是假的。**行數本來就證明不了安全性**,真正該看的是下面那張決策流程圖,以及 `scripts/e2e-hard-deny.mjs` 對四類 hard-deny 的逐條斷言。)
 
 ## ✨ 亮點
 
@@ -101,13 +104,15 @@ flowchart TB
 
 綁非 loopback 位址又沒設 `DESKMONY_AUTH_TOKEN` 會**直接拒絕啟動**。token 刻意不是設定檔欄位,所以改設定檔擴大不了曝露面 —— 只能來自環境變數,或(僅桌面殼)Settings「遠端存取」面板用 Electron `safeStorage` 加密保存在本機的值,讓你能複製一組穩定的 token 交給瀏覽器或手機使用。
 
+WebSocket 升級另外有一道**與 token 獨立的同源檢查**(2026-09-04 新增):瀏覽器不受同源政策限制地對 `ws://` 發起連線 —— 任何網頁都能連上你本機的 gateway,而它的來源位址**本來就是真的 127.0.0.1**,會被正確判定為「本機」。在沒有設 token 的單機模式下,那等於「開啟一個惡意網頁」就足以接管。現在的規則是:沒有 `Origin` 的非瀏覽器 client(手機 app、腳本)放行、與 `Host` 同源的瀏覽器 UI 放行、`file://` 與 loopback 來源**在有 token 時**放行(桌面殼一定有 token,sandboxed iframe 拿不到),其餘一律在升級階段就拒絕。
+
 ## 🏗️ 架構
 
 三層。桌面殼刻意被設計成 core 的其中一種 client —— 同一組 WebSocket gateway 也服務瀏覽器和手機。
 
 ```mermaid
 flowchart TB
-    subgraph SHELL["apps/desktop —— Electron 33 + React 18"]
+    subgraph SHELL["apps/desktop —— Electron 44 + React 18"]
         direction LR
         Views["views/ 對話・團隊群聊・任務看板・復原"]
         Stores["stores/ zustand × 4"]
@@ -160,7 +165,7 @@ flowchart TB
 | `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用 |
 | `GenericPtyAdapter` | 原始 `node-pty` 直通 | Claude Code CLI、Aider、任意互動式 CLI | **保底 —— 沒有權限事件** |
 
-使用者看到的那一層是七項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY、`custom-pty`。
+使用者看到的那一層是八項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,團隊訊息工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY、`custom-pty`。
 
 **PTY 這層缺的權限事件是安全邊界,不是待辦事項。** 它是 raw stdin 直通,**結構上**沒辦法被政策引擎管。在真正的執行沙箱做出來之前,PTY agent 一律唯讀、不給無人值守的自主權。Deskmony 刻意**不做** shell 指令攔截:`bash -c`、`$()`、base64 幾秒就能繞過,做了只是 security theater。
 
@@ -248,7 +253,7 @@ pnpm package:dir    # 未封裝版本,方便本機快速測試
 | 層 | 選擇 |
 |---|---|
 | 語言 | TypeScript(strict),每個 package 都是 |
-| 桌面殼 | Electron 33 |
+| 桌面殼 | Electron 44 |
 | UI | React 18 + Zustand + Tailwind + Vite |
 | 終端機 | xterm.js + node-pty |
 | 對話渲染 | react-markdown + remark-gfm + react-syntax-highlighter + 自製 diff-hunk viewer |
@@ -267,7 +272,7 @@ Deskmony/
 │  ├─ desktop/          # Electron + React 殼
 │  │  ├─ views/         # 對話、團隊群聊、任務看板、復原、各式對話框
 │  │  ├─ stores/        # zustand × 4
-│  │  ├─ ui/            # 設計系統
+│  │  ├─ ui/            # 設計系統(含 ErrorBoundary)
 │  │  └─ locales/       # en、zh-Hant、ja、es
 │  └─ core/             # headless orchestration server
 │     ├─ session/ bus/ tasks/ team/ workspace/     # 領域
@@ -277,16 +282,29 @@ Deskmony/
 │  ├─ adapters/         # 4 個 adapter + team-bus 與 subagent MCP server
 │  ├─ db/               # Drizzle schema、冪等遷移
 │  └─ shared/           # 型別、gateway 協議、zod schema
-├─ scripts/             # 11 支 e2e、fake 後端、打包腳本
+├─ scripts/             # 11 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
+├─ .github/workflows/   # CI(typecheck → build → 10 支決定性測試)
 └─ docs/                # 架構、設計定案、分層設計、開發日誌
 ```
 
 ## 🧪 測試
 
-**11 支端到端測試、456 個斷言**,全部直接對真實的 headless core 打 WebSocket gateway —— **從不經過 Electron**。主套件切成 *deterministic* 組(驗收閘門,必須 100% PASS)與 *model-behavior* 組(斷言依賴真實模型當輪自由選擇怎麼講)。
+```bash
+pnpm test          # typecheck + build + 10 支決定性測試(約 8 分鐘)
+pnpm test:e2e      # 只跑測試(需要 pnpm build 已是最新)
+pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會實際消耗額度
+```
 
-三個 fake 後端 —— `fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo` —— 讓 deterministic 組不需要真實模型也不需要外部 CLI 就能跑。`package-smoke.mjs` 是打包迴歸測試,驗證建出來的執行檔能解析所有依賴。
+**十一支端到端測試。** 其中十支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十支:**138 個斷言,全部必須通過。**
 
+`e2e-gateway.mjs` 刻意不在預設範圍內。它需要真實 Claude Code 憑證、會花真的錢,而且有一組 *model-behavior* 斷言依賴模型當輪自由選擇怎麼講 —— 檔案自己標註為已知 flake。一個會因為模型換句話說就變紅的 CI,很快就會被所有人忽略。
+
+兩道守門員讓這套測試維持誠實:
+
+- **建置新鮮度。** 測試跑的是 `dist/` 而不是 `src/`。在補上檢查之前,忘記 `pnpm build` 會讓測試安靜地驗證**過期**的程式碼並全綠 —— 那比直接失敗更糟。現在由 `scripts/lib/require-fresh-build.mjs` 擋下。
+- **`e2e-hard-deny.mjs`** 涵蓋 hard-deny 全部四類。其中三類(秘密路徑、危險 git、網路白名單)在 2026-09-04 之前是零覆蓋 —— 而它們恰好就是靠字串與 regex 比對、真的可能寫錯的那三類。它也把**已知的**繞過方式(base64、變數拼接)釘成刻意的斷言,將來行為若改變,文件會一起被提醒更新。
+
+`package-smoke.mjs` 是打包迴歸測試:把系統 Node.js 從 `PATH` 移除後啟動建出來的執行檔,驗證 core 子程序仍能啟動並完成認證。
 ## 📚 文件
 
 | 文件 | 內容 |
@@ -295,18 +313,23 @@ Deskmony/
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | **為什麼** —— 安全罩背後的權威設計定案紀錄 |
 | [`docs/LAYER-3-hld/`](docs/LAYER-3-hld/) → [`docs/LAYER-4-detail-design/`](docs/LAYER-4-detail-design/) | 各子系統的高階設計 → 詳細設計 |
 | [`docs/DEVLOG.md`](docs/DEVLOG.md) | 逐輪開發日誌 —— 做了什麼、壞了什麼、後來怎麼修 |
+| [`SECURITY.md`](SECURITY.md) | **威脅模型與通報管道** —— 什麼算漏洞、什麼是已知且刻意接受的取捨(PTY 無沙箱、hard-deny 是 pattern 比對、真.無限制層…),以及自架時的加固建議 |
+| [`LICENSE`](LICENSE) | MIT |
 
 ## 🗺️ 現況
 
-已完成並有端到端測試把關:團隊與 profile 管理、跨 agent 傳訊、桌面 IDE、git worktree 隔離、帶 token 認證的瀏覽器/遠端存取、完整的三斷路器安全罩、崩潰復原、桌面與 webhook 通知、機器驗收閘、session 子 agent、自助式政策允許清單管理介面、真.無限制繞過層。
+已完成,並由 CI 上每次 push/PR 都會跑的端到端測試把關(見上方「測試」):團隊與 profile 管理、跨 agent 傳訊、桌面 IDE、git worktree 隔離、帶 token 認證的瀏覽器/遠端存取、完整的三斷路器安全罩、崩潰復原、桌面與 webhook 通知、機器驗收閘、session 子 agent、自助式政策允許清單管理介面、真.無限制繞過層。
 
 **刻意留白的部分,在你依賴它之前值得先知道:**
 
 - **PTY 層沒有執行沙箱。** 在做出來之前,PTY agent 就是唯讀 —— 這是誠實的後果,不是疏忽。
 - **沒有 LLM lead。** 任務拆解目前純人工,`TaskService` 是完全確定性的。
 - **沒有回合中途的成本熔斷。** 唯一會發 usage 的 adapter 是在回合結束時才發,根本沒有可觀測的「回合進行中收到 usage」情境可以對著做。硬分岔只是憑空編造行為。
-- **只有 Claude SDK 與 ACP 的 session 能「主動」傳訊。** ACP agent(Codex、Gemini CLI)透過一個持有 scoped、逐 session token 的橋接子行程接到同樣那兩個 MCP server;OpenCode、PTY 尚未掛載 —— 不過「接收」注入的訊息在所有後端都能運作。
+- **只有 Claude SDK 與 ACP 的 session 能「主動」傳訊。** ACP agent(Codex、Gemini CLI)透過一個持有 scoped、逐 session token 的橋接子行程接到同樣那兩個 MCP server;`opencode` 這個 provider(bespoke HTTP/SSE)與 PTY 沒有掛載 —— 但 `opencode-acp` 有,因為它是把 OpenCode 走 ACP 跑。「接收」注入的訊息則在所有後端都能運作。
 - **provider 的密鑰對外遮罩,本機是明文儲存**,與 Paseo 對它的設定檔採取同一種取捨。
+- **孤兒 agent 行程只能在下次啟動時回收。** core 若被 SIGKILL / 強制終止 / 斷電,優雅關機路徑完全沒機會跑,已 spawn 的 agent 與它們的 MCP 孫程序會繼續活著。現在會把 pid 記到 `<dataDir>/child-pids.json`,下次啟動時比對行程建立時間後回收(對不上就**不殺**,防 pid 重用誤傷)。真正的當下回收需要 Windows Job Object,那要多一個原生相依 —— 這個專案刻意不要求打包機器具備 MSVC 工具鏈。
+- **SQLite 遷移只能加欄位。** `packages/db/src/client.ts` 是十餘個「查 `PRAGMA table_info` → 沒有就 `ALTER TABLE ADD COLUMN`」的手刻函式,沒有版本表。改型別 / rename / drop / 加約束都做不到,將來要做破壞性遷移得先換成正式的 migration 機制。
+- **聊天記錄在畫面上最多保留 2,000 則。** 超出會砍最舊的(完整歷史仍在 SQLite,切走再切回會重新載入)。這是為了擋住失控迴圈把 renderer 記憶體吃爆,一般對話遠遠碰不到。
 - **目前只支援 Windows 打包。**
 
 ---
