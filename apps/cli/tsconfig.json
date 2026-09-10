@@ -5,7 +5,8 @@
     "rootDir": "src",
     "composite": true,
     "module": "NodeNext",
-    "moduleResolution": "NodeNext"
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx"
   },
   "include": ["src"],
   "references": [

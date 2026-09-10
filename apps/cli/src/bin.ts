@@ -8,6 +8,7 @@ import { profileListCommand } from "./commands/profile.js";
 import { runCommand } from "./commands/run.js";
 import { serveCommand } from "./commands/serve.js";
 import { sessionListCommand, sessionRmCommand } from "./commands/session.js";
+import { tuiCommand } from "./commands/tui.js";
 
 /**
  * `bin.ts` 只做兩件事(HLD §4.2 對這個檔案的定位):argv 分派、決定退出碼。
@@ -58,6 +59,8 @@ async function dispatch(parsed: ParsedCommand): Promise<void> {
       return runCommand(parsed.options, parsed.promptArg);
     case "serve":
       return serveCommand(parsed.options);
+    case "tui":
+      return tuiCommand(parsed.options);
     case "session-list":
       return sessionListCommand(parsed.options);
     case "session-rm":

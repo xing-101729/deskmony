@@ -72,6 +72,7 @@ export type ParsedCommand =
   | { kind: "chat"; options: GlobalOptions }
   | { kind: "run"; options: GlobalOptions; promptArg: string }
   | { kind: "serve"; options: GlobalOptions }
+  | { kind: "tui"; options: GlobalOptions }
   | { kind: "session-list"; options: GlobalOptions }
   | { kind: "session-rm"; options: GlobalOptions; sessionId: string }
   | { kind: "profile-list"; options: GlobalOptions }
@@ -264,6 +265,10 @@ export function parseArgv(argv: string[]): ParsedCommand {
       if (rest.length > 0) throw new CliUsageError(`serve 不接受額外參數:${rest.join(" ")}`);
       return { kind: "serve", options };
     }
+    case "tui": {
+      if (rest.length > 0) throw new CliUsageError(`tui 不接受額外參數:${rest.join(" ")}`);
+      return { kind: "tui", options };
+    }
     case "session": {
       const [sub, ...subRest] = rest;
       if (sub === "list") {
@@ -337,6 +342,7 @@ export function printHelp(): void {
     "  run <prompt>               一次性:送出、串流輸出、完成後退出",
     "  run -                      prompt 從 stdin 讀(支援 pipe)",
     "  serve                      在前景跑 headless core",
+    "  tui                        全螢幕 TUI(需要 Node 22+ 與真正的終端機)",
     "  session list               列出 session(可加 --json)",
     "  session rm <id>            刪除 session",
     "  profile list               列出 agent profile(可加 --json)",
