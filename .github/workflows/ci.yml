@@ -38,11 +38,19 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
+      # Build 必須排在 Typecheck 前面。workspace 套件之間是用 package `exports`
+      # 互相解析的(`@deskmony/shared` → `./dist/index.d.ts`,見各套件的
+      # package.json),`dist/` 又在 .gitignore 裡,而且沒有任何套件有 `prepare`
+      # 腳本會在 install 時順手建置 —— 所以全新 checkout 上 `packages/*/dist`
+      # 根本不存在。`typecheck`(`tsc --noEmit`)不產出檔案,先跑它等於要 tsc
+      # 去解析一批還沒被編譯出來的 .d.ts,必定失敗;`build`(`tsc -p`)會真的
+      # 產出 dist,跑完之後 typecheck 才有東西可以解析。本機不會踩到是因為
+      # dist 早就留在工作目錄裡了。
       - name: Build
         run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: e2e(決定性測試)
         # 不含 e2e-gateway.mjs —— 它需要真實 Claude Code 憑證、會花真的錢,而且
