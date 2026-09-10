@@ -32,6 +32,16 @@
       "electron",
       "esbuild",
       "node-pty"
-    ]
+    ],
+    "packageExtensions": {
+      "react-i18next": {
+        "peerDependencies": {
+          "@types/react": "*"
+        },
+        "peerDependenciesMeta": {
+          "@types/react": { "optional": true }
+        }
+      }
+    }
   }
 }
