@@ -80,9 +80,16 @@ deskmony --version | --help
   `deskmony serve`),而不是偷偷 spawn 一個。理由:core 持有 SQLite,同一個
   `DATA_DIR` 上跑兩份 core 是真實的資料危害,要做就得先有 lockfile 與交握,
   那是 Phase 2 的獨立題目,不該夾帶在第一版裡。
-- **不做全螢幕 TUI。** 用 `node:readline` 的行導向 REPL。全螢幕 TUI 在
-  `cmd.exe` 上的相容性問題(codepage、alternate screen buffer、滑鼠序列)是
-  另一個工程,不是這一版的價值所在。
+- **不做全螢幕 TUI。** 用 `node:readline` 的行導向 REPL。
+  > **2026-09-10 更正**:這一條原本寫的理由是「全螢幕 TUI 在 `cmd.exe` 上的
+  > 相容性問題(codepage、alternate screen buffer、滑鼠序列)是另一個工程」。
+  > **那個理由查證後不成立**——實際量測(見 [`cli-tui_hld.md`](cli-tui_hld.md)
+  > §1,在傳統 conhost、非 Windows Terminal 環境下)顯示 alternate screen、
+  > CJK 全形寬度、框線字元、resize 事件、方向鍵全部正常。當初是憑印象寫的,
+  > 不是憑量測。**排除 TUI 這個決定本身仍然正確**(Phase 1 要控制範圍,而且
+  > 行導向 REPL 在 pipe / dumb terminal / 無 TERM 的 ssh 下更可靠,不會被
+  > 取代),但理由要換成範圍控制,不是相容性。唯一真正的相容性陷阱是
+  > **emoji 寬度不一致**,見該文 §1.3。
 - **不碰 desktop 的 UI。** 只把 gateway client 抽成共用套件(見 §4)。
 - **不做 `team` / `task` 子指令。** 先把單 session 的路徑做對做完整。
 
@@ -220,7 +227,7 @@ CI:`.github/workflows/ci.yml` 新增一個 **`ubuntu-latest`** job,跑
 
 - 連不上時自動啟動本機 core(需要 `DATA_DIR` lockfile 與交握)
 - `team` / `task` / `recovery` 子指令
-- 全螢幕 TUI
+- 全螢幕 TUI —— **已設計定案**,見 [`cli-tui_hld.md`](cli-tui_hld.md)(2026-09-10)
 - true-unrestricted 的終端確認儀式
 - 把 `@deskmony/cli` 發成公開 npm 套件(目前 `private: true`)
 
