@@ -23,6 +23,21 @@ import type { BoxProps } from "ink";
  */
 export const BORDER_STYLE: NonNullable<BoxProps["borderStyle"]> = "single";
 
+/**
+ * T2(design §4.3):escalate-strong 權限請求的彈窗要「明顯不同,且不只靠
+ * 顏色」——圓角框線(`╭╮╰╯`)加上紅色框線與 `⚠` 圖示三者一起用,單色終端
+ * 也能靠框線形狀分辨出這是不同等級的請求。
+ *
+ * 這裡要更正一件事:cli-tui_hld.md §4.2 與 §4.3 的 ASCII 示意圖其實**都**
+ * 畫成圓角,但 §4.3 的文字說明明講兩者要不同(「圓角 vs 一般的 ┌┐└┘」)——
+ * 那句文字才是規格(也是任務說明重複強調的「different border style」),
+ * §4.2 的示意圖圓角推斷是沿用文件模板時忘記換字元,不是要求一般請求也走
+ * 圓角。因此一般請求沿用整個 TUI 共用的 `BORDER_STYLE`(方角),只有這裡
+ * 額外定義的圓角樣式給 strong 用——兩者只在 `panes/PermissionModal.tsx`
+ * 這一個檔案裡會同時出現,不影響其餘窗格。
+ */
+export const STRONG_BORDER_STYLE: NonNullable<BoxProps["borderStyle"]> = "round";
+
 // ---- session 狀態圖示與顏色 --------------------------------------------------
 
 /**

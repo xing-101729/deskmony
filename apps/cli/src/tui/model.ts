@@ -1,5 +1,5 @@
-import type { AgentEvent, MessageRecord, Session, SessionEventEnvelope } from "@deskmony/shared";
-import { summarizeToolCallOneLine } from "../render.js";
+import type { AgentEvent, MessageRecord, PolicyRule, Session, SessionEventEnvelope } from "@deskmony/shared";
+import { buildNarrowestRememberRule, summarizeToolCallOneLine } from "../render.js";
 
 /**
  * `deskmony tui` 的資料模型——design 文件 docs/LAYER-3-hld/cli-tui_hld.md §9
@@ -47,6 +47,19 @@ export interface PendingPermission {
   strong: boolean;
 }
 
+/** T2:送給 `permission.resolve` RPC 的參數(見 packages/shared/src/events.ts
+ *  的 `PermissionDecisionSchema`)。`sessionId` 必填——design 文件 §4.2 的
+ *  紀律:「TUI 天然是多 session,這裡尤其不能靠 requestId 反查」,`model.ts`
+ *  底下 build/submit/escape 開頭的系列函式一律從 `PendingPermission`(本來
+ *  就帶 `sessionId`)組出這個物件,呼叫端(app.tsx)不需要、也不應該自己
+ *  另外湊參數。 */
+export interface PermissionResolution {
+  sessionId: string;
+  requestId: string;
+  decision: "allow" | "deny";
+  rememberRule?: PolicyRule;
+}
+
 /** 見 apps/core/src/cost/cost-governor.ts 的 `getSummary()`——這裡只留
  *  TUI 用得到的欄位,不是整個 RPC 回應的鏡射。`sessionId` 記的是這份
  *  snapshot 對應哪個 session 查來的(`sessionCostUsd` 只對那個 session 有
@@ -89,6 +102,27 @@ export interface TuiModel {
    *  collapsed 模式會讀這個欄位,compact/full 模式忽略它。 */
   collapsedSessionsExpanded: boolean;
   pendingPermissions: PendingPermission[];
+  /** T2(design §4.2):權限彈窗是否開啟。`a` 開(僅在佇列非空時),`Esc`
+   *  或佇列清空時關閉。開著的時候 app.tsx 的按鍵處理常式會把**全部**按鍵
+   *  導向彈窗自己的邏輯,底下的窗格(Sessions/Transcript)不收到任何按鍵
+   *  ——design §6.1:「權限彈窗出現時搶走全部按鍵,避免以為在選 session,
+   *  其實按到了允許」。 */
+  permissionModalOpen: boolean;
+  /** 彈窗目前顯示 `pendingPermissions` 裡的哪一筆——用 (sessionId,
+   *  requestId) 這組身分認定,**不是**陣列索引。原因:陣列會因為佇列裡
+   *  任何一筆被解決(這個 client 自己送出決定、別的 client 處理掉,或政策
+   *  引擎判定,見 `applyPermissionResolved()`)而變動,若靠索引記錄,中間
+   *  被抽掉一筆時索引在數字上仍然合法,卻會不知不覺指向另一筆完全不同的
+   *  請求——這正是多 session 环境下「按下的決定套用到錯的請求」這類 bug
+   *  的成因(呼應 packages/shared/src/events.ts 對 `PermissionDecisionSchema.
+   *  sessionId` 欄位「不能靠 requestId 單鍵反查」的說明,這裡是同一個顧慮
+   *  在 client 端資料模型裡的版本)。`undefined` 代表彈窗未開啟或佇列已空。 */
+  permissionModalCurrent: { sessionId: string; requestId: string } | undefined;
+  /** design §4.3:strong(escalate-strong)請求要求「完整輸入 yes」才允許,
+   *  不接受單鍵確認——這裡存目前打到一半的字元。只有目前顯示的請求是
+   *  strong 時才有意義;切換到別的請求(`n`,或佇列變動觸發的自動前進)
+   *  一律清空,避免看到殘留的舊字元。 */
+  permissionYesInput: string;
   /** §6.3 雙擊 Ctrl+C:這個時間戳之前收到的下一次 Ctrl+C 視為「確認離開」。
    *  0 = 尚未按過(或視窗已過期,語意上等同未按過)。 */
   ctrlCArmedUntil: number;
@@ -132,6 +166,9 @@ export function createModel(wsUrl: string, columns: number, rows: number): TuiMo
     selectedSessionId: undefined,
     collapsedSessionsExpanded: false,
     pendingPermissions: [],
+    permissionModalOpen: false,
+    permissionModalCurrent: undefined,
+    permissionYesInput: "",
     ctrlCArmedUntil: 0,
     cost: { sessionId: undefined, sessionCostUsd: undefined, todayCostUsd: undefined, dailyCapUsd: undefined, dailyTripped: false },
     quitRequested: false,
@@ -348,6 +385,12 @@ export function applyPermissionResolved(model: TuiModel, sessionId: string, requ
   const before = model.pendingPermissions.length;
   model.pendingPermissions = model.pendingPermissions.filter((p) => !(p.sessionId === sessionId && p.requestId === requestId));
   if (model.pendingPermissions.length !== before) markDirty(model);
+  // T2:不論這筆是被誰解決的(這個 client 自己送出的決定、別的 client 處理
+  // 掉的,還是政策引擎判定的),若彈窗正開著且原本就在看這一筆,都要讓彈窗
+  // 自動前進——這是「不能對已解決的請求再送決定」這條紀律的唯一實作點
+  // (見檔案下方 `syncPermissionModalWithQueue()` 的完整說明),不需要在
+  // a/d/A/yes/Esc 各自的處理函式裡重複判斷一次。
+  syncPermissionModalWithQueue(model);
 }
 
 /**
@@ -465,5 +508,210 @@ export function pressCtrlC(model: TuiModel, now: number): "interrupt" | "quit" {
  *  問題,誤觸機率也低得多)。 */
 export function requestQuit(model: TuiModel): void {
   model.quitRequested = true;
+  markDirty(model);
+}
+
+// ---- T2:權限彈窗(design §4)-------------------------------------------------
+
+/** 上限純粹是防呆(貼上一大段文字、或按著某個鍵不放)——比對條件只認完整
+ *  的 `"yes"`,緩衝區沒有理由需要比這個長,免得畫面被撐壞。 */
+const MAX_YES_INPUT_LEN = 40;
+
+/** `a`(design §3「[a] 逐一處理」/§4.1)——只有佇列非空時才開,理由見
+ *  app.tsx 對這個鍵的呼叫端註解:AlertBar 從 T1 開始就只在佇列非空時才會
+ *  被畫出來,`a` 在佇列空的當下本來就沒有東西可以處理。一律從佇列第一筆
+ *  開始看,不記住「上次關閉時看到第幾筆」——每次重新打開都回到最前面,
+ *  才不會讓使用者猜不透這次會先看到哪一筆。 */
+export function openPermissionModal(model: TuiModel): void {
+  const first = model.pendingPermissions[0];
+  if (!first) return;
+  model.permissionModalOpen = true;
+  model.permissionModalCurrent = { sessionId: first.sessionId, requestId: first.requestId };
+  model.permissionYesInput = "";
+  markDirty(model);
+}
+
+/** 純粹關閉彈窗,**不送出任何決定**——一般請求的 `Esc`(design §4.2
+ *  「稍後再說」)專用路徑,以及佇列被清空時的收尾(見
+ *  `syncPermissionModalWithQueue()`)。這一筆(若還在佇列裡)原封不動留著,
+ *  之後可以再按 `a` 重新看到它。 */
+export function closePermissionModal(model: TuiModel): void {
+  model.permissionModalOpen = false;
+  model.permissionModalCurrent = undefined;
+  model.permissionYesInput = "";
+  markDirty(model);
+}
+
+/** 彈窗目前應該顯示的那一筆——找不到(彈窗未開,或目前指的那筆已經不在
+ *  佇列裡)一律回傳 `undefined`,呼叫端(app.tsx 的按鍵處理常式)一律先呼叫
+ *  這個函式拿到最新狀態才決定要不要送 RPC,不會有機會對著一筆已經被解決
+ *  的請求動作(design §4.1 的紀律⑥;完整推導見下面
+ *  `syncPermissionModalWithQueue()` 的說明)。 */
+export function getCurrentPermission(model: TuiModel): PendingPermission | undefined {
+  if (!model.permissionModalOpen || !model.permissionModalCurrent) return undefined;
+  const { sessionId, requestId } = model.permissionModalCurrent;
+  return model.pendingPermissions.find((p) => p.sessionId === sessionId && p.requestId === requestId);
+}
+
+/** 目前顯示的是佇列裡第幾筆(1-based)/佇列總長度——`PermissionModal.tsx`
+ *  畫「權限請求 1/2」要用到。刻意留在這個檔案而不是讓渲染層自己
+ *  `findIndex`:「目前顯示哪一筆」的認定方式(身分比對,見
+ *  `permissionModalCurrent` 欄位的說明)只有這裡知道,重複一份判斷邏輯到
+ *  渲染層,兩邊之後改壞其中一份就會不一致。 */
+export function getPermissionModalPosition(model: TuiModel): { index: number; total: number } | undefined {
+  const current = getCurrentPermission(model);
+  if (!current) return undefined;
+  const idx = model.pendingPermissions.findIndex((p) => p.sessionId === current.sessionId && p.requestId === current.requestId);
+  if (idx === -1) return undefined;
+  return { index: idx + 1, total: model.pendingPermissions.length };
+}
+
+/** `n`(design §4.2「下一筆」)——**只有一般請求能用**。strong 請求的畫面
+ *  刻意不提供這個選項(design §4.3 的彈窗示意圖沒有畫出 `[n]`):hard-deny
+ *  命中降級來的請求風險最高,設計上要逼使用者先明確處理掉(輸入 `yes` 或
+ *  `Esc`)才能繼續看別的,不能被輕易「先跳過」而在使用者沒意識到的情況下
+ *  一直卡在佇列裡。佇列只剩自己一筆時也是 no-op——沒有「下一筆」可換。 */
+export function advancePermissionModal(model: TuiModel): void {
+  const current = getCurrentPermission(model);
+  if (!current || current.strong) return;
+  if (model.pendingPermissions.length <= 1) return;
+  const idx = model.pendingPermissions.findIndex((p) => p.sessionId === current.sessionId && p.requestId === current.requestId);
+  if (idx === -1) return;
+  const next = model.pendingPermissions[(idx + 1) % model.pendingPermissions.length];
+  if (!next) return;
+  model.permissionModalCurrent = { sessionId: next.sessionId, requestId: next.requestId };
+  model.permissionYesInput = "";
+  markDirty(model);
+}
+
+/**
+ * `a`/`d`/`A`(design §4.2)——**只適用一般請求**,組出要送給
+ * `permission.resolve` 的參數;真正送出 RPC 是呼叫端(app.tsx)的責任,這裡
+ * 只讀 model、不知道 WebSocket client 的存在(與 `pressCtrlC()` 同一種取捨,
+ * 見該函式註解)。回傳 `undefined` 代表沒有東西可以處理——彈窗其實沒開、
+ * 目前這筆已經不在佇列裡(見 `getCurrentPermission()`),或目前這筆其實是
+ * strong(那要走 `submitPermissionYesInput()`,這裡故意不接受,避免呼叫端
+ * 不小心用錯函式繞過「strong 不能單鍵確認」的規則)。
+ *
+ * `remember`(對應 `[A]`)只送**最窄的規則**——直接重用
+ * `apps/cli/src/render.ts` 的 `buildNarrowestRememberRule()`,與桌面
+ * `PermissionModal.tsx` 的預設候選、CLI 的 `prompt.ts` 完全同一份邏輯(design
+ * §4.2:「[A] 只寫最窄的規則」,本檔案開頭「Reuse, do not reimplement」的
+ * 紀律)。
+ */
+export function buildPermissionResolution(model: TuiModel, decision: "allow" | "deny", remember: boolean): PermissionResolution | undefined {
+  const current = getCurrentPermission(model);
+  if (!current || current.strong) return undefined;
+  return {
+    sessionId: current.sessionId,
+    requestId: current.requestId,
+    decision,
+    rememberRule: remember ? buildNarrowestRememberRule(current.toolName, current.input) : undefined,
+  };
+}
+
+/** strong 畫面打字輸入 `yes` 的其中一個字元(design §4.3)。**只適用 strong
+ *  請求**——一般請求的畫面沒有文字輸入框,呼叫端不應該在一般請求上呼叫
+ *  這個函式,這裡防禦性地擋一次。長度上限見 `MAX_YES_INPUT_LEN`。 */
+export function appendPermissionYesInput(model: TuiModel, char: string): void {
+  const current = getCurrentPermission(model);
+  if (!current || !current.strong) return;
+  if (model.permissionYesInput.length >= MAX_YES_INPUT_LEN) return;
+  model.permissionYesInput += char;
+  markDirty(model);
+}
+
+/** strong 畫面的 Backspace。用 `Array.from()` 而非直接 `slice(0, -1)`——理由
+ *  與 `apps/cli/src/tui/keys.ts` 對 UTF-16 代理對(surrogate pair)的既有
+ *  處理一致:萬一使用者手滑用輸入法打進一個佔兩個 UTF-16 code unit 的字元
+ *  (中文/emoji 等),`slice(0, -1)` 只會削掉半個字元,留下一個無法顯示的
+ *  孤兒 surrogate。 */
+export function backspacePermissionYesInput(model: TuiModel): void {
+  const current = getCurrentPermission(model);
+  if (!current || !current.strong) return;
+  if (model.permissionYesInput.length === 0) return;
+  const chars = Array.from(model.permissionYesInput);
+  chars.pop();
+  model.permissionYesInput = chars.join("");
+  markDirty(model);
+}
+
+/**
+ * Enter(僅 strong 畫面,design §4.3)——比對輸入緩衝是否**完整等於**
+ * `"yes"`(去除頭尾空白;大小寫不寬容)。符合 → allow;其餘任何輸入(含
+ * 空字串,也就是直接按 Enter)→ deny。這個「非 yes 一律 deny、不重試」的
+ * 規則與 `apps/cli/src/prompt.ts` 的 `askPermission()` 對 strong 請求的既有
+ * 規則刻意完全一致(該函式原文:「其餘任何輸入,含直接 Enter,一律視為
+ * 拒絕……打錯字太容易被誤判成使用者其實想打 yes,對這種高風險請求,預設值
+ * 必須是拒絕而不是再給一次機會」)——兩個 client 對「什麼算同意」不能有
+ * 不同答案。不論結果是 allow 還是 deny 都清空緩衝,同一個理由:不重試。
+ *
+ * 允許時**不带** `rememberRule`——design §4.3:「不提供永遠允許」;C4 紀律③
+ * 本來就會在 core 端強制剝掉 strong 請求的 `rememberRule`,這裡從一開始就
+ * 不生成,不是靠 core 兜底。
+ */
+export function submitPermissionYesInput(model: TuiModel): PermissionResolution | undefined {
+  const current = getCurrentPermission(model);
+  if (!current || !current.strong) return undefined;
+  const typed = model.permissionYesInput.trim();
+  model.permissionYesInput = "";
+  markDirty(model);
+  return { sessionId: current.sessionId, requestId: current.requestId, decision: typed === "yes" ? "allow" : "deny" };
+}
+
+/**
+ * `Esc`(僅 strong 畫面,design §4.3「取消(維持拒絕)」)——與一般請求的
+ * `Esc`(`closePermissionModal()`,純粹關閉、不送出決定)刻意不同:strong
+ * 請求的存在本身就是 hard-deny 命中後的降級(見
+ * apps/core/src/permissions/policy-engine.ts 的 `decide()`)——一般情況下
+ * 這個工具呼叫本來就會被直接拒絕,只是因為「本機 + 有人在場 + 未開
+ * autoMode」才給一次人工推翻的機會。使用者按 Esc 表示不推翻,維持的正是
+ * 「原本就該發生的拒絕」,所以這裡明確送出 `deny`,不是像一般請求那樣只
+ * 關窗口、把決定留給以後。
+ *
+ * 送出之後**不在這裡關閉彈窗**——core 處理完會廣播 `permission-resolved`
+ * (`apps/core/src/gateway/ws-gateway.ts` 的 `broadcast()` 送給所有已認證
+ * client,含發起請求的這個 client 自己),`applyPermissionResolved()` 收到
+ * 之後呼叫的 `syncPermissionModalWithQueue()` 會讓彈窗自動前進或關閉——
+ * 與「不能對已解決的請求再送決定」用同一條機制處理,不需要在這裡另外手動
+ * 關窗口製造第二條路徑(那條路徑會在 RPC 還沒送達 core 之前就讓使用者以為
+ * 已經處理完,而彈窗其實已經換到別的請求上)。
+ */
+export function escapeStrongPermission(model: TuiModel): PermissionResolution | undefined {
+  const current = getCurrentPermission(model);
+  if (!current || !current.strong) return undefined;
+  model.permissionYesInput = "";
+  markDirty(model);
+  return { sessionId: current.sessionId, requestId: current.requestId, decision: "deny" };
+}
+
+/**
+ * `applyPermissionResolved()` 尾端呼叫——佇列因為任何原因(這個 client 自己
+ * 送出的決定、別的 client 處理掉的,或政策引擎判定的,呼叫端不需要分辨是
+ * 哪一種)變動之後,檢查彈窗目前顯示的那一筆是否還在佇列裡:
+ *
+ *   - 還在 → 什麼都不做(可能是佇列裡別筆被解決,與目前畫面無關)。
+ *   - 不在了、佇列裡還有別的 → 自動前進到佇列第一筆(design 沒有明講這種
+ *     情況該顯示哪一筆,選第一筆是最不需要另外解釋的選擇——與
+ *     `openPermissionModal()` 一律從第一筆開始看的邏輯一致)。
+ *   - 不在了、佇列已經空了 → 直接關閉彈窗,沒有東西可以再看。
+ *
+ * 這是 design §4.1 紀律⑥(「不能對已解決的請求再送決定」)唯一的實作點:
+ * 只要彈窗顯示的內容永遠跟著佇列真正的狀態走,`a`/`d`/`A`/yes/Esc 各自的
+ * 處理函式在動作前呼叫 `getCurrentPermission()` 拿到的就必然是**尚未被
+ * 解決**的請求(WS 推播與按鍵處理都在同一個 Node event loop 上跑,兩者
+ * 之間不存在「資料其實已經更新但還沒被看到」的競態),不需要每個處理函式
+ * 各自重新判斷一次「這筆是不是已經失效了」。
+ */
+function syncPermissionModalWithQueue(model: TuiModel): void {
+  if (!model.permissionModalOpen) return;
+  if (getCurrentPermission(model) !== undefined) return;
+  const next = model.pendingPermissions[0];
+  if (!next) {
+    closePermissionModal(model);
+    return;
+  }
+  model.permissionModalCurrent = { sessionId: next.sessionId, requestId: next.requestId };
+  model.permissionYesInput = "";
   markDirty(model);
 }

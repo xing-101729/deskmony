@@ -5,15 +5,24 @@ import type { EffectiveCoreConfig, MessageRecord, Session, SessionEventEnvelope 
 import type { GlobalOptions } from "../args.js";
 import { CliExitError, closeGateway, connectGateway } from "../connect.js";
 import {
+  advancePermissionModal,
+  appendPermissionYesInput,
   applyPermissionResolved,
   applySessionEvent,
+  backspacePermissionYesInput,
+  buildPermissionResolution,
+  closePermissionModal,
   computeLayoutMode,
   createModel,
   CTRL_C_WINDOW_MS,
   cycleFocus,
+  escapeStrongPermission,
+  getCurrentPermission,
   getFocusedSessionView,
   getOrderedSessionViews,
+  getPermissionModalPosition,
   moveSessionSelection,
+  openPermissionModal,
   pressCtrlC,
   replaceSessions,
   requestQuit,
@@ -22,8 +31,10 @@ import {
   setConnectionStatus,
   setCostSnapshot,
   setTerminalSize,
+  submitPermissionYesInput,
   toggleCollapsedSessionsExpanded,
   upsertSession,
+  type PermissionResolution,
   type TuiModel,
 } from "./model.js";
 import { createKeyDecoder, type KeyDecoder, type ParsedKey } from "./keys.js";
@@ -32,6 +43,7 @@ import { SessionsPane, SessionsSummaryLine } from "./panes/SessionsPane.js";
 import { TranscriptPane } from "./panes/TranscriptPane.js";
 import { AlertBar } from "./panes/AlertBar.js";
 import { StatusBar } from "./panes/StatusBar.js";
+import { PermissionModal } from "./panes/PermissionModal.js";
 import { BORDER_STYLE, connectionLabel } from "./theme.js";
 
 /**
@@ -39,14 +51,23 @@ import { BORDER_STYLE, connectionLabel } from "./theme.js";
  * 定位)。這個檔案**才是**允許 import ink/react 的地方——`model.ts`/
  * `keys.ts` 刻意不行,見那兩個檔案檔頭的說明。
  *
- * T1 的範圍(HLD §11):骨架、四個區域版面、尺寸退化、終端還原。**不含權限
- * 彈窗**(T2)——design §2 的核心論點是「同時盯著多個 agent、看見待決權限」,
- * T1 只做到「看見」(alert bar 顯示計數,見 panes/AlertBar.tsx),「處理」
- * (逐一核准/拒絕的彈窗)留給 T2 整段做,避免被骨架的雜事稀釋。連帶地,
- * T1 也不提供從 TUI 本身送出 prompt 的輸入框——這個 TUI 存在的理由是
+ * T1 的範圍(HLD §11):骨架、四個區域版面、尺寸退化、終端還原,alert bar
+ * 只顯示待決權限計數(見 panes/AlertBar.tsx),不提供處理它們的辦法。
+ *
+ * T2(design §4,本檔案這一輪的範圍):`a` 開啟逐一處理的權限彈窗——
+ * `handlePermissionModalKey()`/`sendPermissionResolution()` 這兩個函式,
+ * 與 `TuiRoot` 對 `model.permissionModalOpen` 的渲染分支。**決策邏輯本身
+ * 不在這裡**——「目前該看哪一筆」「按下某個鍵該送出什麼決定」全部是
+ * `tui/model.ts` 的純函式(design §9:「model.ts 不 import ink/react,才能
+ * 在 e2e 裡直接單元測試,不需要跑起一個終端機」),這個檔案只負責接住
+ * ParsedKey、呼叫對應的 model.ts 函式,以及真的把算好的結果送出
+ * `permission.resolve` RPC。
+ *
+ * T1/T2 都不提供從 TUI 本身送出 prompt 的輸入框——這個 TUI 存在的理由是
  * 「唯讀監看多個 agent」(cli-tui_hld.md §2:「如果 TUI 只是把 REPL 畫進
  * 框線裡,它不值得做」),`deskmony chat`/`deskmony run`/其他 client 才是
- * 送出訊息的地方。
+ * 送出訊息的地方;權限彈窗是這個唯讀監看原則唯一的例外——不是「送話」,
+ * 是「對別人已經在做的事表態」,兩者性質不同。
  */
 
 const RENDER_INTERVAL_MS = 33; // §7:「setInterval 33ms(約 30fps),有髒資料才畫」。
@@ -104,7 +125,22 @@ function TuiRoot({ model }: TuiRootProps): React.JSX.Element {
   const focusedView = getFocusedSessionView(model);
   const sessionTitle = (id: string): string => model.sessions.get(id)?.session.title ?? id;
 
-  const alertBarHeight = model.pendingPermissions.length > 0 ? CHROME_ROW_HEIGHT : 0;
+  /**
+   * T2:權限彈窗開著時,整個「中段 + alert bar」的版位讓給彈窗——不是疊在
+   * 上面(Ink 沒有真正的 z-index/overlay,見 panes/PermissionModal.tsx 檔頭
+   * 說明),而是直接取代。AlertBar 因此在彈窗開著時不畫(彈窗自己的標題列
+   * 已經有「1/2」這種佇列位置資訊,兩者同時出現只是重複),但版面高度算法
+   * 刻意不因為「少畫一個 alert bar」而改變——`middleHeight` 永遠假設 alert
+   * bar 的空間已經被算進去,彈窗直接繼承整段高度,才不會在開/關彈窗之間
+   * 造成其餘區域高度跳動。
+   */
+  const currentPermission = getCurrentPermission(model);
+  const permissionPosition = getPermissionModalPosition(model);
+  // 彈窗開著時不畫 AlertBar(見上方註解),所以這裡不必為它預留高度——
+  // `middleHeight` 因此會自然地把那一段高度整個讓給彈窗或 `middle`,兩種
+  // 情況共用同一個變數,不必另外算一個「彈窗高度」。
+  const showAlertBar = !model.permissionModalOpen && model.pendingPermissions.length > 0;
+  const alertBarHeight = showAlertBar ? CHROME_ROW_HEIGHT : 0;
   const middleHeight = Math.max(0, model.rows - CHROME_ROW_HEIGHT * 2 - alertBarHeight);
 
   let middle: React.JSX.Element;
@@ -171,10 +207,19 @@ function TuiRoot({ model }: TuiRootProps): React.JSX.Element {
           — {model.wsUrl} · {connectionLabel(model.connection)}
         </Text>
       </Box>
-      {middle}
-      {model.pendingPermissions.length > 0 && (
-        <AlertBar pendingPermissions={model.pendingPermissions} sessionTitle={sessionTitle} width={model.columns} />
+      {model.permissionModalOpen && currentPermission && permissionPosition ? (
+        <PermissionModal
+          current={currentPermission}
+          position={permissionPosition}
+          sessionTitle={sessionTitle}
+          yesInput={model.permissionYesInput}
+          width={model.columns}
+          height={middleHeight}
+        />
+      ) : (
+        middle
       )}
+      {showAlertBar && <AlertBar pendingPermissions={model.pendingPermissions} sessionTitle={sessionTitle} width={model.columns} />}
       <StatusBar cost={model.cost} width={model.columns} ctrlCArmedUntil={model.ctrlCArmedUntil} />
     </Box>
   );
@@ -265,8 +310,111 @@ export async function runTui(options: GlobalOptions): Promise<void> {
     process.exit(code);
   }
 
+  /**
+   * T2:送出一筆 `permission.resolve` 決定。刻意集中成這一個函式,而不是在
+   * `handlePermissionModalKey()` 的每個分支各自呼叫`client.call()`——所有
+   * 呼叫共用同一套「沒有連線就放棄」「失敗就靜默留著讓使用者再按一次」的
+   * 取捨(理由見下方 catch 區塊的說明),散在多處容易漏改。**不在這裡更新
+   * `pendingPermissions` 或關閉/前進彈窗**——那是 `model.ts` 的
+   * `applyPermissionResolved()`/`syncPermissionModalWithQueue()` 收到 core
+   * 廣播回來的 `permission-resolved` 推播之後才做的事(見 model.ts 對應
+   * 函式的完整說明),這裡搶先做的話,萬一 RPC 其實失敗了,畫面會顯示一個
+   * 其實沒有真的被處理掉的狀態。
+   */
+  function sendPermissionResolution(resolution: PermissionResolution): void {
+    if (!client) return;
+    void client.call("permission.resolve", resolution).catch(() => {
+      // 送出失敗(例如連線剛好斷開)——不假裝已經處理掉,讓這一筆繼續留在
+      // 佇列裡,使用者可以之後再按一次。錯誤目前沒有地方顯示,比照 app.tsx
+      // 其餘 RPC 呼叫的既有取捨(cost 輪詢/history 補值失敗都是靜默重試或
+      // 忽略,見對應註解)。
+    });
+  }
+
+  /**
+   * T2(design §6.1):「權限彈窗出現時搶走全部按鍵,底層窗格不接收」——這裡
+   * 是那條紀律唯一的實作點,`handleKey()` 在彈窗開著時整個轉交給這個函式,
+   * **包含 Ctrl+C**:一般情況下 Ctrl+C 會中斷「目前焦點 session」,但彈窗
+   * 開著時畫面上完全沒有顯示是哪個 session 有焦點(整個中段被彈窗取代,見
+   * `TuiRoot` 的渲染邏輯),誤觸的代價與「以為在選 session,其實按到了
+   * 允許」是同一種問題,所以連 Ctrl+C 也一併吞掉。要離開彈窗一律先按
+   * `Esc`(一般請求直接關閉;strong 請求送出明確拒絕,見
+   * `escapeStrongPermission()`),退出彈窗之後 Ctrl+C/`q` 才恢復原本語意。
+   */
+  function handlePermissionModalKey(key: ParsedKey): void {
+    const current = getCurrentPermission(model);
+    if (!current) {
+      // 理論上不該發生:`syncPermissionModalWithQueue()` 已經會在佇列清空
+      // 的當下自動關閉彈窗。防禦性地在這裡兜底,避免真的發生時卡在一個
+      // 沒有任何鍵有反應的空白彈窗。
+      closePermissionModal(model);
+      return;
+    }
+
+    if (current.strong) {
+      // design §4.3:strong 畫面沒有單鍵捷徑,`a`/`d`/`n` 這些字元在這裡
+      // 一律當成「正在打字」處理(見下面 `case "char"`),不會被解讀成
+      // 一般畫面的允許/拒絕/下一筆。
+      switch (key.name) {
+        case "escape": {
+          const resolution = escapeStrongPermission(model);
+          if (resolution) sendPermissionResolution(resolution);
+          return;
+        }
+        case "return": {
+          const resolution = submitPermissionYesInput(model);
+          if (resolution) sendPermissionResolution(resolution);
+          return;
+        }
+        case "backspace":
+          backspacePermissionYesInput(model);
+          return;
+        case "char":
+          appendPermissionYesInput(model, key.char ?? "");
+          return;
+        default:
+          return; // 方向鍵/Tab 等在 strong 畫面沒有意義,吞掉。
+      }
+    }
+
+    // 一般(非 strong)請求(design §4.2)。
+    switch (key.name) {
+      case "escape":
+        closePermissionModal(model); // 「稍後再說」——不送出任何決定。
+        return;
+      case "char":
+        if (key.char === "a") {
+          const resolution = buildPermissionResolution(model, "allow", false);
+          if (resolution) sendPermissionResolution(resolution);
+          return;
+        }
+        if (key.char === "d") {
+          const resolution = buildPermissionResolution(model, "deny", false);
+          if (resolution) sendPermissionResolution(resolution);
+          return;
+        }
+        if (key.char === "A") {
+          const resolution = buildPermissionResolution(model, "allow", true);
+          if (resolution) sendPermissionResolution(resolution);
+          return;
+        }
+        if (key.char === "n") {
+          advancePermissionModal(model);
+          return;
+        }
+        return; // 其餘字元:吞掉,不做任何事(§6.1「搶走全部按鍵」)。
+      default:
+        return;
+    }
+  }
+
   function handleKey(key: ParsedKey): void {
     if (model.quitRequested) return; // 已經在收尾,不要再處理新按鍵。
+
+    if (model.permissionModalOpen) {
+      handlePermissionModalKey(key);
+      return;
+    }
 
     switch (key.name) {
       case "ctrl-c": {
@@ -335,21 +483,14 @@ export async function runTui(options: GlobalOptions): Promise<void> {
           return;
         }
         if (key.char === "a") {
-          /**
-           * ============ T2 施工縫(design §4:權限佇列 + 彈窗)============
-           * 這裡之後要做的事:當 `model.pendingPermissions.length > 0` 時,
-           * 開啟逐一處理的彈窗(PermissionModal,§4.2),渲染 `input`(不是
-           * `description`——§13.3 的陷阱)、依 `strong` 決定要不要走
-           * §4.3 的高風險樣式與完整輸入 `yes` 的流程,並在使用者做出決定
-           * 後呼叫 `permission.resolve`(`sessionId` 必填)。
-           * T1 只確保這個鍵被接住、不會落到下面的 `default` 分支被吞掉,
-           * 也不會被誤判成其他按鍵——因為 T1 沒有任何文字輸入框會需要接收
-           * 一般字元(這個 TUI 是唯讀監看,見檔頭說明),no-op 在這裡是
-           * 正確的階段性答案,不是遺漏。
-           */
+          // T2(design §3「[a] 逐一處理」/§4.1):開啟權限佇列彈窗。佇列是
+          // 空的時候維持 T1 的 no-op——`openPermissionModal()` 自己也會做
+          // 同樣的防呆(見 model.ts),這裡先擋一次純粹是避免多餘的
+          // `markDirty()`(雖然無害,但沒有理由不擋)。
+          if (model.pendingPermissions.length > 0) openPermissionModal(model);
           return;
         }
-        return; // 其餘一般字元:T1 沒有輸入框可以接收,忽略。
+        return; // 其餘一般字元:這個 TUI 是唯讀監看,沒有輸入框可以接收,忽略。
       default:
         return; // escape/return/backspace/ctrl-a/ctrl-d:T1 無對應用途。
     }
