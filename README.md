@@ -258,6 +258,18 @@ Exit codes are stable enough to branch on: `0` success, `1` runtime error, `2` b
 
 Outside a TTY, `run` never invents permission for itself: it denies, names the tool on stderr, and exits `4`. To automate, say so explicitly with `--permission-mode auto-accept-edits`, which maps onto the core's existing `session.setPermissionMode`. There is no silent-approval path.
 
+#### The full-screen view
+
+```bash
+deskmony tui
+```
+
+`chat` and `run` show you one session. `tui` shows the whole team, and that difference is the reason it exists: **a permission request raised by a session you are not currently watching is invisible in a line-oriented REPL, and unattended requests never time out.** A second agent can sit blocked for hours while you read the first one's output. The TUI puts a cross-session pending count on screen no matter which session has focus, and `a` walks the queue one request at a time — showing the tool's actual arguments, not just its name, because the name alone ("Write file") tells you nothing you could judge.
+
+Escalations that hit the hard-deny list look different and behave differently: no "always allow", and a typed `yes` rather than a keystroke.
+
+It needs **Node 22** (an Ink requirement, checked at startup with a clear message on older versions) and a real terminal. `deskmony chat` remains the right tool when piping, scripting, or working on a terminal that cannot do full-screen — the TUI is additive, not a replacement.
+
 **Getting `deskmony` onto your PATH.** pnpm does not put a workspace package's `bin` in the root `node_modules/.bin`, so installing dependencies is not enough:
 
 ```bash

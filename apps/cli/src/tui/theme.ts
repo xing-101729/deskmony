@@ -59,6 +59,34 @@ export const SESSION_STATUS_ICON: Record<SessionStatus, string> = {
 };
 
 /**
+ * T3(§7.3):busy session 的活動指示幀。Braille 字元在 cli-tui_hld.md §1.2
+ * 的實測表格裡量過帳面寬度是 1 欄(`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`),與 `SESSION_STATUS_ICON`
+ * 其餘符號同寬,所以 busy 那一列換成 spinner 不會讓 Sessions 窗格的欄位跑掉。
+ *
+ * **幀次由時間推算,不記任何狀態**(見 `spinnerFrame()`)——這是刻意的:
+ * 若改成「每次重繪就把 frameIndex++」,幀的推進速度會跟著重繪頻率走,焦點
+ * session 在狂送 delta 時 spinner 會轉得比背景快,反而變成一個會誤導人的
+ * 訊號(看起來像「這個 agent 比較忙」)。用時間推算則不論誰在重繪、重繪
+ * 幾次,同一時刻所有 spinner 都在同一幀。
+ */
+export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+/** 每幀停留的毫秒數——與 app.tsx 的 `SPINNER_INTERVAL_MS` 同值時,每次
+ *  spinner 重繪剛好推進一幀。分成兩個常數是因為職責不同:這裡定義「動畫看
+ *  起來多快」,那裡定義「多久醒來重繪一次」,兩者概念上可以不同(例如之後
+ *  想讓動畫更慢但重繪節奏不變),不該綁死成同一個數字。 */
+export const SPINNER_FRAME_MS = 125;
+
+/**
+ * 依「現在時刻」算出 spinner 應該顯示哪一幀。純函式、不吃任何模組層級狀態,
+ * 所以同一個渲染輪次裡呼叫幾次都得到同一幀,也不需要在 model 裡存 frameIndex。
+ */
+export function spinnerFrame(nowMs: number): string {
+  const index = Math.floor(nowMs / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+  return SPINNER_FRAMES[index] ?? SPINNER_FRAMES[0];
+}
+
+/**
  * §3:「不用顏色當唯一訊號——單色終端與色盲都要能分辨,所以圖示本身就要有
  * 區別」——這裡的顏色因此是**加分**,不是唯一線索;`undefined` 代表用終端
  * 機預設前景色,不特別上色(`idle`/`closed` 是「安靜」的狀態,不需要搶

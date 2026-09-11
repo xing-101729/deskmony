@@ -64,6 +64,11 @@ const SUITES = [
   // (一個一般、一個啟用認證),不是這裡最快的一支,但也遠比
   // e2e-crash-recovery(十個 core)快。
   "e2e-cli",
+  // 2026-09-11(cli-tui_hld.md §10.1):全螢幕 TUI。**放在 e2e-cli 之後**,
+  // 理由同上再加一層——它疊在 CLI 之上,而且是整套測試裡唯一需要真的偽終端
+  // (node-pty / ConPTY)的一支,環境敏感度最高。先看到底層與 CLI 的訊號,
+  // 再看它。
+  "e2e-cli-tui",
 ];
 
 const args = process.argv.slice(2);

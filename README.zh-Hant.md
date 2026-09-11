@@ -258,6 +258,18 @@ deskmony doctor                # 偵測 agent 後端、檢查連線
 
 非 TTY 環境下,`run` 不會自己給自己權限:直接拒絕、把工具名印在 stderr、以 `4` 結束。要自動化就明講 `--permission-mode auto-accept-edits`(對應 core 既有的 `session.setPermissionMode`)。沒有沉默放行的路。
 
+#### 全螢幕介面
+
+```bash
+deskmony tui
+```
+
+`chat` 和 `run` 一次只看得到一個 session。`tui` 看得到整隊,而這個差別正是它存在的理由:**在行導向的 REPL 裡,由你當下沒在看的那個 session 跳出來的權限請求是完全看不見的,而無人值守的請求不會逾時。** 你讀著第一個 agent 的輸出時,第二個可能已經卡住好幾小時。TUI 不論焦點在哪個 session,都會把跨 session 的待決數量放在畫面上,按 `a` 逐一處理——而且顯示的是工具的實際參數,不是只有工具名稱,因為光看名稱(「Write file」)根本無從判斷。
+
+命中硬性拒絕清單的請求會長得不一樣,行為也不一樣:不提供「永遠允許」,而且要完整打字輸入 `yes`,不接受單鍵。
+
+它需要 **Node 22**(Ink 的要求,啟動時會檢查並在舊版給出明確訊息)與真正的終端機。要 pipe、寫腳本、或在不支援全螢幕的終端上工作時,`deskmony chat` 仍然是對的工具——TUI 是加上去的一層,不是取代。
+
 **怎麼讓 `deskmony` 進 PATH。** pnpm 不會把 workspace 套件的 `bin` 放進根目錄的 `node_modules/.bin`,所以光裝相依是不夠的:
 
 ```bash

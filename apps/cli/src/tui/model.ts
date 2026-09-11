@@ -314,6 +314,20 @@ function pushLine(view: SessionView, line: TranscriptLine): void {
  * 不做的」明講 PTY session 的原始 ANSI 不在 TUI 的窗格裡渲染,
  * TranscriptPane 對 `adapterType === "pty"` 的 session 整個顯示替代訊息,
  * 這裡收到 terminal-data 也不必處理(反正不會被顯示)。
+ *
+ * ⚠️ 2026-09-10(T3,補齊 §7.3——T1 只做完 §7.1/§7.2/§7.4,這一條是唯一
+ * 沒做的節流紀律):`message-delta` 是這裡**唯一**依「是不是目前焦點」決定
+ * 要不要 `markDirty()` 的事件型別,理由與其餘事件型別(`tool-call`/
+ * `permission-request`/`error`…)不同,不能一概而論——那些事件本來頻率就
+ * 低(一次工具呼叫、一次權限請求),而且部分事件本身就有跨 session 的可見
+ * 效果(`permission-request` 要更新 alert bar,不論焦點在哪),所以仍然
+ * 一律 `markDirty()`,見函式尾端。`message-delta` 則是 HLD §7 點名的那個
+ * 「一個 busy session 可以每秒數十次」的高頻事件,非焦點 session 的內容
+ * 本來就不在 TranscriptPane 畫出來的樹裡(SessionsPane 只畫圖示/標題),
+ * 過去卻仍然無條件 `markDirty()`,造成 N 個背景 session 同時狂送 delta 時,
+ * app.tsx 的 33ms 節奏被迫每一輪都重繪——這正是「render 很便宜,因為背景
+ * 內容沒有輸出到畫面上」這個舊論證的漏洞:它只算對了**輸出位元組**,沒算到
+ * **reconcile 成本**(React 仍然要整棵樹跑一次 diff,即使 diff 出來是空的)。
  */
 export function applySessionEvent(model: TuiModel, envelope: SessionEventEnvelope): void {
   const view = getOrCreateSessionView(model, envelope.sessionId);
@@ -334,7 +348,22 @@ export function applySessionEvent(model: TuiModel, envelope: SessionEventEnvelop
       } else {
         view.pendingAssistant = { messageId: event.messageId, text };
       }
-      break;
+      // §7.3:上面的緩衝更新一律做(不論焦點)——之後使用者切過去看那個
+      // session 時,完整內容要在。但**只有目前焦點的 session** 才為了這個
+      // delta 觸發重繪:非焦點 session 的這段內容根本不在目前畫出來的樹裡,
+      // 33ms 節奏沒有理由為了它而醒過來。
+      //
+      // 非焦點 busy session 仍然要讓 Sessions 窗格看起來「還活著」——但那
+      // 是「一個 spinner 幀」的節奏,不是「跟著每個 delta 重繪」,兩者刻意
+      // 分開實作:見本檔案的 `hasAnyBusySession()`、tui/app.tsx 的
+      // `SPINNER_INTERVAL_MS`(只在有 busy session 時才醒來,頻率遠低於
+      // 33ms 的主節奏)與 tui/theme.ts 的 `spinnerFrame()`(幀次由目前時間
+      // 推算,不需要這裡記錄任何「上次動過的時間」)。這裡因此不需要為非
+      // 焦點分支寫任何程式碼——單純不呼叫 `markDirty()` 就是完整的實作。
+      if (envelope.sessionId === model.selectedSessionId) {
+        markDirty(model);
+      }
+      return; // 跳過函式尾端「其餘事件型別一律 markDirty」的共用路徑。
     }
     case "tool-call":
       pushLine(view, { kind: "tool", text: summarizeToolCallOneLine(event.toolName, event.input) });
@@ -442,6 +471,25 @@ export function getOrderedSessionViews(model: TuiModel): SessionView[] {
 export function getFocusedSessionView(model: TuiModel): SessionView | undefined {
   if (!model.selectedSessionId) return undefined;
   return model.sessions.get(model.selectedSessionId);
+}
+
+/**
+ * T3(§7.3):目前有沒有任何 session 在 busy——`app.tsx` 的 spinner interval
+ * 用它決定「這一拍要不要醒來重繪」。
+ *
+ * 這是整個節流設計裡唯一還會「沒有資料變動也重繪」的路徑,代價要講清楚:
+ * 只要有**任何一個** agent 在跑,畫面就會以 `SPINNER_INTERVAL_MS` 的頻率
+ * 重繪,即使那個 agent 是背景的、它的輸出根本沒顯示在畫面上。這個成本是
+ * 刻意付的——這個產品的預設情境是「一隊 agent 無人值守跑數小時」,而一個
+ * 完全靜止的畫面在那種情境下無法分辨「還在跑」與「已經卡死」,那比多花
+ * 一點 CPU 糟得多。付的價錢有明確上限(與 delta 頻率無關,只與「有沒有人
+ * 在忙」有關),這正是 §7.3 要達成的事:**重繪頻率不再被事件頻率牽著走。**
+ */
+export function hasAnyBusySession(model: TuiModel): boolean {
+  for (const view of model.sessions.values()) {
+    if (view.session.status === "busy") return true;
+  }
+  return false;
 }
 
 /** `↑↓` 在 Sessions 窗格切換選取(§6.1)。`delta` 為 +1/-1。 */

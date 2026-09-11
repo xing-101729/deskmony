@@ -113,6 +113,13 @@ jobs:
       # 這個 job 證明的範圍要說清楚:core + CLI 這條路徑在 Linux 上跑得起來
       # (用假後端 fake-acp-agent,不需要任何憑證)。它**不**證明各 adapter
       # 對真實後端(Claude Code / Codex / OpenCode)在 Linux 上的行為。
+      #
+      # **`e2e-cli-tui.mjs` 也刻意不在這裡跑,是延後不是漏掉。** 它是整套
+      # 測試裡唯一需要真的偽終端的一支(Windows 走 ConPTY、Linux 走 Unix
+      # pty,兩者行為不完全一致),環境敏感度最高。這個 job 的存在目的是
+      # 「證明 CLI 這條路徑在 Linux 上通」,把最容易 flaky 的東西塞進來只會
+      # 讓它變成沒人相信的紅燈——理由與上面 check job 排除 e2e-gateway.mjs
+      # 完全相同。TUI 在 Linux 上的驗證留給之後專門處理。
       - name: e2e(只跑 CLI 這一套)
         run: node scripts/e2e-cli.mjs
 

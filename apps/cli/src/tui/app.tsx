@@ -21,6 +21,7 @@ import {
   getFocusedSessionView,
   getOrderedSessionViews,
   getPermissionModalPosition,
+  hasAnyBusySession,
   moveSessionSelection,
   openPermissionModal,
   pressCtrlC,
@@ -71,6 +72,17 @@ import { BORDER_STYLE, connectionLabel } from "./theme.js";
  */
 
 const RENDER_INTERVAL_MS = 33; // §7:「setInterval 33ms(約 30fps),有髒資料才畫」。
+/**
+ * T3(§7.3):spinner 的重繪節奏,**刻意遠低於**上面的主節奏,而且只在真的
+ * 有 session 在 busy 時才醒來(見 `hasAnyBusySession()`)。
+ *
+ * 為什麼需要第二個 interval,而不是讓 spinner 跟著主節奏走:§7.3 的目的是
+ * 「非焦點 session 的 delta 只累積、不參與重繪」,而背景 agent 仍然必須看
+ * 起來還活著。若共用 33ms 那一拍,等於 spinner 把剛剛省下來的重繪又全部
+ * 加回去;分開之後,沒有任何 session 在忙時是 **0 次**重繪,有人在忙時是
+ * 固定 8 次/秒,兩者都與 delta 到達的頻率完全脫鉤。
+ */
+const SPINNER_INTERVAL_MS = 125;
 const COST_POLL_INTERVAL_MS = 3_000;
 const SESSIONS_PANE_WIDTH_FULL = 22; // §3:「Sessions(左,固定 22 欄)」。
 const SESSIONS_PANE_WIDTH_COMPACT = 16; // §3.1:「80–99 欄:Sessions 窗格縮到 16 欄」。
@@ -88,10 +100,19 @@ interface TuiRootProps {
  * 唯一會呼叫 `forceRerender()` 的地方——§7 紀律「事件進來只更新資料模型,
  * 絕不直接觸發重繪」的具體實作:WS 推播與按鍵處理常式(見下面 `runTui()`)
  * 只改 `model` 並把 `model.dirty` 設 true,由這個元件的 interval 決定什麼
- * 時候真的重繪。非焦點 session 的 delta 因此「只累積、不參與重繪」——它們
- * 的內容本來就不在目前畫出來的樹裡(見 panes/SessionsPane.tsx 只顯示圖示
- * /標題,不顯示 transcript 內容),33ms 節奏本身就已經確保不會因為它們而
- * 多重繪。
+ * 時候真的重繪。
+ *
+ * T3 更正了 T1 留在這裡的一段錯誤論證。原本寫的是「非焦點 session 的 delta
+ * 因此只累積、不參與重繪——它們的內容本來就不在畫出來的樹裡,33ms 節奏本身
+ * 就已經確保不會因為它們而多重繪」。**那段話只算對了輸出位元組,沒算到
+ * reconcile 成本**:背景 session 的 delta 當時仍然會 `markDirty()`,於是
+ * 五個背景 agent 在串流時,即使焦點 session 完全靜止,React 還是每秒被叫去
+ * 整棵樹 diff 30 次——diff 出來是空的,不送任何位元組,但 CPU 照樣付了。
+ * 對一個設計來無人值守跑數小時的產品,那不是可以四捨五入掉的成本。
+ *
+ * 現在真正的實作是 model.ts 的 `applySessionEvent()`:`message-delta` 只在
+ * 「事件屬於目前焦點 session」時才 `markDirty()`。背景 session 的活動改由
+ * 下面那個獨立的 spinner interval 呈現,頻率固定且與 delta 到達率脫鉤。
  */
 function TuiRoot({ model }: TuiRootProps): React.JSX.Element {
   const [, forceRerender] = useReducer((n: number) => n + 1, 0);
@@ -103,6 +124,17 @@ function TuiRoot({ model }: TuiRootProps): React.JSX.Element {
         forceRerender();
       }
     }, RENDER_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [model]);
+
+  // T3(§7.3):spinner 專用的慢節奏。**不碰 `model.dirty`**——它不是「資料
+  // 變了」,而是「時間過了,動畫該換一幀」,兩者混在同一個旗標裡會讓上面
+  // 那個 interval 也跟著醒來,等於白費功夫。沒有任何 session 在忙時這裡
+  // 一次都不會重繪。
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (hasAnyBusySession(model)) forceRerender();
+    }, SPINNER_INTERVAL_MS);
     return () => clearInterval(id);
   }, [model]);
 

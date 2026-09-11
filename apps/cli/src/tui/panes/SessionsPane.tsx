@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { SessionView } from "../model.js";
-import { BORDER_STYLE, SESSION_STATUS_COLOR, SESSION_STATUS_ICON } from "../theme.js";
+import { BORDER_STYLE, SESSION_STATUS_COLOR, SESSION_STATUS_ICON, spinnerFrame } from "../theme.js";
 
 export interface SessionsPaneProps {
   sessions: SessionView[];
@@ -35,7 +35,14 @@ export function SessionsPane({ sessions, selectedSessionId, focused, compact, wi
         {sessions.length === 0 && <Text dimColor>(尚無 session)</Text>}
         {sessions.map((view) => {
           const isSelected = view.session.id === selectedSessionId;
-          const icon = SESSION_STATUS_ICON[view.session.status];
+          // T3(§7.3):busy 的那一列用 spinner 幀取代靜態的 `●`,讓背景
+          // session 看起來「還在動」。這是 §7.3 能夠成立的前提——非焦點
+          // session 的 delta 不再觸發重繪之後,若這裡也是靜態圖示,一個跑
+          // 了三小時的背景 agent 與一個當掉的背景 agent 在畫面上完全一樣。
+          // spinner 幀由 `spinnerFrame()` 依時間推算(見 theme.ts),所以
+          // 這裡不需要任何 per-session 的動畫狀態。
+          const icon =
+            view.session.status === "busy" ? spinnerFrame(Date.now()) : SESSION_STATUS_ICON[view.session.status];
           const iconColor = SESSION_STATUS_COLOR[view.session.status];
           return (
             <Box key={view.session.id} flexDirection="row">
