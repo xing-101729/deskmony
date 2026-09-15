@@ -54,6 +54,16 @@
       "@hono/node-server": "^1.19.15",
       "qs": "^6.16.0",
       "@xmldom/xmldom": "^0.8.15"
+    },
+    "packageExtensions": {
+      "react-i18next": {
+        "peerDependencies": {
+          "@types/react": "*"
+        },
+        "peerDependenciesMeta": {
+          "@types/react": { "optional": true }
+        }
+      }
     }
   },
   "license": "MIT"

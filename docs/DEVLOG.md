@@ -3383,3 +3383,48 @@ HTTP 回應掃描,不驗證實際 UI 渲染或完整業務功能(這是 `e2e-gat
   macOS/Linux 是否需要對應的 symlink 修法,這輪沒有驗證,留給之後若要支援
   跨平台打包時再處理)。`apps/core/package.json` 的 `better-sqlite3` 在其他
   平台上是否也需要 electron-rebuild 這輪同樣沒有驗證。
+
+---
+
+## monorepo 型別解析:給 react-i18next 補一個 `@types/react` peer
+
+`apps/desktop` 的 typecheck 曾整批冒出四個 TS2786(`App.tsx`、
+`ProfileCreateDialog.tsx`、`SettingsDialog.tsx` 兩處,全是 `<Trans>` 的使用點):
+
+```
+error TS2786: 'Trans' cannot be used as a JSX component.
+  Its type 'TransLegacy' is not a valid JSX element type.
+    ...
+      Type 'ReactElement<unknown, string | JSXElementConstructor<any>>' is not
+      assignable to type 'ReactNode'.
+```
+
+`ReactElement<unknown, …>` 是 **`@types/react@19` 的**預設型別參數
+(18.3.x 的預設是 `P = any`),所以這行錯誤本身就說明了:`react-i18next` 的
+`.d.ts` 解析到的 React 型別跟 app 自己用的不是同一份。
+
+成因是 `react-i18next` **沒有宣告 `@types/react` peer dependency**,pnpm 因此
+不會在它專屬的虛擬 store 目錄裡放一份 `@types/react`。TypeScript 解析
+`import * as React from 'react'` 時走的是 symlink 的**真實路徑**
+(`node_modules/.pnpm/react-i18next@…/node_modules/react-i18next/`),一路往上
+找不到,最後落到 pnpm 的 hoist fallback 目錄
+`node_modules/.pnpm/node_modules/@types/react`。那一格**只放得下一個版本**:
+workspace 裡只要同時存在第二個 `@types/react`(某個 app 裝了需要 React 19 的
+套件,或是舊的 `node_modules` 沒清乾淨、還留著 lockfile 早就不再引用的孤兒
+版本),就可能由它贏走這一格,`<Trans>` 便整個掛掉——而 `apps/desktop/`
+`node_modules/@types/react` 這時看起來完全正常(仍是 18.3.31),很容易誤判。
+
+修法在 root `package.json` 的 `pnpm.packageExtensions`:幫 `react-i18next` 補上
+一個 optional 的 `@types/react` peer。pnpm 從此會照 `apps/desktop` 自己的版本
+解析,並把它連進 `react-i18next` 專屬的 `.pnpm/react-i18next@…(@types+react@…)/`
+`node_modules/` 底下,TypeScript 在走到 hoist fallback **之前**就先命中正確版本,
+那個目錄裡躺著哪個版本都不再有影響。lockfile 的差異只有 `react-i18next` 多一段
+peer 後綴。
+
+驗證方式:在一棵把 `.pnpm/node_modules/@types/react` 指向 19.3.0 的工作樹上,
+先重現了一模一樣的四個 TS2786;套上 `packageExtensions` 後,**同一棵樹、hoist
+目錄仍指向 19.3.0**,`pnpm --filter @deskmony/desktop run typecheck` 轉綠。
+
+> 這類錯誤常常「換一個 worktree 重裝就好了」,因為 hoist 目錄選哪個版本並不
+> 保證穩定。日後再看到型別版本錯亂,先查 `node_modules/.pnpm/` 底下是不是有
+> 兩個 `@types/react`,以及 hoist 目錄那一格指向誰。
