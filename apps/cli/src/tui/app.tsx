@@ -538,12 +538,25 @@ export async function runTui(options: GlobalOptions): Promise<void> {
    * `alternateScreen: true`——讓 ink 自己管進入/離開 alternate screen 與
    * 對應的游標顯示/隱藏(見 tui/restore.ts 檔頭:這是讀過 ink 原始碼確認
    * 過的內建行為,不是猜的)。
+   *
+   * `interactive: true`——**不能**交給 ink 自動偵測。ink 的預設是
+   * `!isInCi && stdout.isTTY`,而且 CI 偵測優先:環境裡只要有 `CI=true`
+   * (或 `CONTINUOUS_INTEGRATION`),就算 stdout 是真的 TTY 也會被當成非
+   * 互動——執行期間一格都不畫、只在 unmount 時寫出最後一格,上面的
+   * `alternateScreen` 與 resize 處理也跟著失效(ink 裡兩者都以 interactive
+   * 為前提)。按鍵卻不經過 ink 的畫面(見 tui/keys.ts),照樣被處理,於是
+   * 使用者面對一片空白,按下去的鍵卻在看不見的地方生效。`CI` 說不出使用者
+   * 面前是不是互動終端機,`isTTY` 才說得出來,而 commands/tui.ts 在走到這裡
+   * 之前已經確認過 stdin/stdout 都是 TTY。2026-09-15 PR #3 的 CI 就是這樣
+   * 掛的(GitHub Actions 設了 `CI=true`),見 scripts/e2e-cli-tui.mjs 檔頭
+   * 與案例 11。
    */
   const instance = render(<TuiRoot model={model} />, {
     stdin: process.stdin,
     stdout: process.stdout,
     exitOnCtrlC: false,
     alternateScreen: true,
+    interactive: true,
   });
 
   try {

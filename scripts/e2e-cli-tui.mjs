@@ -47,6 +47,21 @@
  *     沒有任何影響,濾掉是安全的,而且是必要的。
  * 所以下面的 `stripStyleOnly()`(見 helper 區)**只**濾 SGR,其餘一律保留。
  *
+ * ---- ⚠ 環境變數 `CI` 會讓 ink 一格都不畫 ------------------------------
+ *
+ * 2026-09-15,這支測試第一次在 GitHub Actions 上跑(PR #3),案例 1-8 裡所有
+ * 需要畫面的斷言全數失敗,本機卻測不出來。原因是 GitHub Actions 設了
+ * `CI=true`,ConPTY 裡的 TUI 繼承之後,ink 的 CI 偵測(`is-in-ci`)優先於
+ * `stdout.isTTY`,把它降級成非互動模式:執行期間不輸出任何一格、不進
+ * alternate screen,只在 unmount 時寫出最後一格。按鍵照樣被處理(案例 7
+ * 在這種狀態下照樣通過),所以症狀是「程式活著、畫面全空」。當時在本機設
+ * `CI=true` 跑這支,重現了一模一樣的 11/25(那時還沒有案例 11)。
+ *
+ * 修正在 apps/cli/src/tui/app.tsx 的 `interactive: true`。這支測試因此
+ * **刻意不拔掉 `CI`**(見 `cleanCliEnv()`):拔掉會讓 CI 上轉綠,但環境裡
+ * 真的帶著 `CI=true` 的使用者看到的仍是一片空白。案例 11 另外明確帶
+ * `CI=true` 再開一次 TUI,讓沒有這個變數的本機跑也守得住這條。
+ *
  * ---- port 配置 --------------------------------------------------------
  *
  * 既有套件用掉的 port(`grep -hoE "[0-9]{4}" scripts/*.mjs` 過一輪):
@@ -363,7 +378,8 @@ class TuiDriver {
 }
 
 /** TUI 子程序的環境:比照 e2e-cli 的 `cleanCliEnv()`,把開發者終端機裡可能
- *  殘留的 `DESKMONY_*` 拔掉,讓結果不受執行機器的環境影響。 */
+ *  殘留的 `DESKMONY_*` 拔掉,讓結果不受執行機器的環境影響。
+ *  **刻意不拔 `CI`**——理由見檔頭「環境變數 `CI` 會讓 ink 一格都不畫」。 */
 const STRIPPED_ENV_KEYS = [
   "DESKMONY_URL",
   "DESKMONY_AUTH_TOKEN",
@@ -584,7 +600,7 @@ function require_fs() {
 }
 
 // =======================================================================
-// 案例 1-8:需要真的 core + 真的 ConPTY。
+// 案例 1-8、11:需要真的 core + 真的 ConPTY。
 // =======================================================================
 async function testTuiAgainstCore() {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-tui-data-"));
@@ -599,6 +615,7 @@ async function testTuiAgainstCore() {
   let core;
   let client;
   let tui;
+  let ciTui;
   try {
     core = startCore({ port: PORT_TUI, dataDir, homeDir, workspaceDir });
     await waitForPort(URL_TUI, 20_000);
@@ -744,8 +761,28 @@ async function testTuiAgainstCore() {
       tui.all.includes("\x1b[?1049l") && tui.all.includes("\x1b[?25h"),
       `ESC[?1049l=${tui.all.includes("\x1b[?1049l")} ESC[?25h=${tui.all.includes("\x1b[?25h")}`,
     );
+
+    // ---- 案例 11:環境裡有 CI=true 時照樣要畫得出來 --------------------
+    // 見檔頭「環境變數 `CI` 會讓 ink 一格都不畫」。在 GitHub Actions 上,上面
+    // 那個 TUI 本來就帶著 CI=true;這一段是為了讓**本機**跑也守得住
+    // tui/app.tsx 的 `interactive: true`——拿掉那一行,這裡在任何機器上都會
+    // 變紅。另外斷言有進 alt screen:非互動模式下 ink 連 alternate screen 都
+    // 不開,那是這個 bug 最不依賴時序的訊號。
+    ciTui = new TuiDriver(pty, { url: URL_TUI, cwd: workspaceDir, env: { ...cleanCliEnv(), CI: "true" } });
+    const ciDrawn = await ciTui.waitForOutput("SESSIONS", 20_000);
+    const ciAltScreen = ciTui.all.includes("\x1b[?1049h");
+    record(
+      "案例 11:環境變數 CI=true 時照樣畫出版面並進入 alt screen(不能被 ink 降級成非互動)",
+      ciDrawn && ciAltScreen,
+      `SESSIONS=${ciDrawn} ESC[?1049h=${ciAltScreen}`,
+    );
+    ciTui.write("\x03");
+    await sleep(800);
+    ciTui.write("\x03");
+    await ciTui.waitForExit(10_000);
   } finally {
     await tui?.dispose();
+    await ciTui?.dispose();
     client?.close();
     await killProcessTreeHard(core);
     await sleep(500);
