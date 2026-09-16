@@ -25,5 +25,6 @@
   "unrestrictedRiskCategory4": "許可リストにないホストへのネットワーク接続",
   "unrestrictedRisk2": "YOLO と同じ 30 分タイマーを共有します——YOLO が期限切れになると一緒にオフになります。独立したタイマーではありません。",
   "unrestrictedRiskRemote": "リモート接続からこれを有効にしようとしています——有効にすると、この接続に限らずどの接続からのリクエストにも適用されます。",
-  "unrestrictedTypeToConfirm": "「{{phrase}}」と入力して確認してください"
+  "unrestrictedTypeToConfirm": "「{{phrase}}」と入力して確認してください",
+  "switchFailed": "切り替えに失敗しました"
 }

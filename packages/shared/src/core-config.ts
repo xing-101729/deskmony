@@ -349,7 +349,7 @@ export type BudgetConfig = z.infer<typeof BudgetConfigSchema>;
  * 警告通知實作(`EnforcementEvent` 的 `reminder` kind 目前 `source` 只收斂
  * `"cost"`,見 packages/shared/src/enforcement.ts——擴充它需要新的、這輪 L4
  * 文字完全沒描述行為的設計決定,保守起見這輪只落地欄位本身,不擅自發明行為,
- * 見最終報告「自行判斷」章節)。
+ * 這是實作當下的自行判斷,repo 外沒有留下任何紀錄——理由就寫在這裡,不必去找別的文件)。
  */
 export const MessageBudgetConfigSchema = z
   .object({

@@ -49,6 +49,20 @@
       "toDark": "Cambiar a tema oscuro",
       "keywords": "theme dark light tema oscuro claro"
     },
+    "fontSize": {
+      "increase": {
+        "title": "Aumentar tamaño de fuente",
+        "keywords": "font size zoom in aumentar tamaño fuente"
+      },
+      "decrease": {
+        "title": "Reducir tamaño de fuente",
+        "keywords": "font size zoom out reducir tamaño fuente"
+      },
+      "reset": {
+        "title": "Restablecer tamaño de fuente",
+        "keywords": "font size reset restablecer tamaño fuente predeterminado"
+      }
+    },
     "recovery": {
       "title": "Recuperar sessions interrumpidas ({{count}})",
       "keywords": "recovery crash interrumpida recuperar reanudar"

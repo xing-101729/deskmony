@@ -25,5 +25,6 @@
   "unrestrictedRiskCategory4": "network connections to non-allowlisted hosts",
   "unrestrictedRisk2": "Shares YOLO's 30-minute timer — turns off together when YOLO expires, not a separate timer.",
   "unrestrictedRiskRemote": "You're enabling this from a remote connection — once on, it applies to requests from any connection, not just this one.",
-  "unrestrictedTypeToConfirm": "Type \"{{phrase}}\" to confirm"
+  "unrestrictedTypeToConfirm": "Type \"{{phrase}}\" to confirm",
+  "switchFailed": "Switch failed"
 }

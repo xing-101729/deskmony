@@ -103,6 +103,14 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
         }));
       }
     });
+
+    // 2026-09-04(稽核修補):斷線重連後補資料 —— 斷線期間的 task-updated /
+    // task-deleted 推播都已遺失,對目前檢視中的 team 重新拉一次任務清單。
+    client.onReconnected(() => {
+      for (const teamId of Object.keys(get().tasksByTeam)) {
+        void get().loadTasks(teamId);
+      }
+    });
   },
 
   loadTasks: async (teamId) => {

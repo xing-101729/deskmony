@@ -29,6 +29,12 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
+import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+
+// 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
+// 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
+// —— 見 scripts/lib/require-fresh-build.mjs 的完整說明。
+requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -735,7 +741,7 @@ async function liveE2e() {
         1000,
       ).catch(() => null);
       if (permEvent) {
-        await client.rpc("permission.resolve", { requestId: permEvent.event.requestId, decision: "deny" }).catch(() => {});
+        await client.rpc("permission.resolve", { sessionId: permEvent.sessionId, requestId: permEvent.event.requestId, decision: "deny" }).catch(() => {});
       }
     }
 
@@ -771,7 +777,7 @@ async function liveE2e() {
       for (const sid of [sessionB, sessionC]) {
         const permEvent = await client.waitForEvent((e) => e.sessionId === sid && e.event.type === "permission-request", 1000).catch(() => null);
         if (permEvent) {
-          await client.rpc("permission.resolve", { requestId: permEvent.event.requestId, decision: "deny" }).catch(() => {});
+          await client.rpc("permission.resolve", { sessionId: permEvent.sessionId, requestId: permEvent.event.requestId, decision: "deny" }).catch(() => {});
         }
       }
     }
@@ -814,7 +820,7 @@ async function liveE2e() {
     const targetFileD = path.join(workspaceDir, "d.txt");
     const permEvent = await triggerWritePermission(sessionD, targetFileD, "content-d");
 
-    await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "allow" });
+    await client.rpc("permission.resolve", { sessionId: sessionD, requestId: permEvent.requestId, decision: "allow" });
     await client.waitForEvent((e) => e.sessionId === sessionD && (e.event.type === "completed" || e.event.type === "error"), 15_000);
     const fileWritten = existsSync(targetFileD);
 

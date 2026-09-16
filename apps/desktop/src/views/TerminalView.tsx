@@ -7,6 +7,7 @@ import { getTerminalBuffer, onTerminalData, useSessionStore } from "../stores/se
 import { IconButton } from "../ui/Button.js";
 import { Badge } from "../ui/Badge.js";
 import { useTheme } from "../ui/theme.js";
+import { useFontScale } from "../ui/font-scale.js";
 
 /** 把 index.css 定義的 CSS 變數(RGB 通道值)解析成 xterm.js 能吃的 `rgb()`
  *  字串——xterm 用 canvas/webgl 繪製,`fillStyle` 不會像一般 DOM 那樣解析
@@ -23,6 +24,14 @@ function resolveTerminalTheme(): NonNullable<ConstructorParameters<typeof Termin
     selectionBackground: channel("--c-line-strong"),
   };
 }
+
+/** xterm 用 canvas 繪製終端內容,字級是建構 `Terminal` 時給的 px 數字,不吃
+ *  CSS rem——調整 ui/font-scale.ts 的 root font-size 不會讓它自動變大/變小
+ *  (同一類問題見上方 resolveTerminalTheme() 的說明,那是顏色版本,這裡是
+ *  字級版本)。這裡手動依目前的 root font-size 等比換算,維持「終端字級
+ *  跟著 UI 其餘部分一起縮放」的目標。13 是原本寫死的字級,也就是 16px root
+ *  (= font-scale 的 `md` 檔)時的基準值。 */
+const TERMINAL_BASE_FONT_PX = 13;
 
 /**
  * TerminalView — GenericPtyAdapter(`capabilities().terminal === true`)的
@@ -83,6 +92,13 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   // 用 clear() + 重寫 buffer,不整個銷毀重建,避免 DOM 抖動)。
   useEffect(() => {
     if (!containerRef.current) return;
+    // 字級用 getState() 讀「掛載當下」的值,不透過 useFontScale() hook 訂閱
+    // ——這個 effect 的 deps 刻意是 [](整個 TerminalView 存活期間只建立一次
+    // xterm 實例,理由見上方效果註解),若改用 hook 訂閱 rootFontPx,依
+    // exhaustive-deps 規則就得把它加進 deps,結果會變成字級一變 xterm 就被
+    // 整個銷毀重建、緩衝內容閃一下清空。「字級改變後即時套用」交給下面另一個
+    // 訂閱 rootFontPx 的 effect 負責(比照下面主題切換 effect 的既有寫法)。
+    const initialFontSize = Math.round(TERMINAL_BASE_FONT_PX * (useFontScale.getState().rootFontPx / 16));
     const term = new Terminal({
       // Issue 1 修正之二:移除 convertEol(預設值就是 false,見 xterm.js
       // ITerminalOptions 型別定義)。真正的 pty 已經會送出正確的 "\r\n" 換行
@@ -91,7 +107,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
       // TUI 程式(游標定位類 escape sequence 因此跑位,對應「格式跑掉」的
       // 使用者回報)。
       fontFamily: "Cascadia Code, JetBrains Mono, Consolas, monospace",
-      fontSize: 13,
+      fontSize: initialFontSize,
       cursorBlink: true,
       theme: resolveTerminalTheme(),
     });
@@ -162,6 +178,21 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   useEffect(() => {
     if (termRef.current) termRef.current.options.theme = resolveTerminalTheme();
   }, [resolvedTheme]);
+
+  // 字級(ui/font-scale.ts)變動時比照上面主題切換即時套用給 xterm——canvas
+  // 繪製同樣不會自動跟著 root font-size 改變。字級一變,每個字元的實際像素
+  // 寬度也變了,所以除了更新 fontSize,還要重新 fit()(讓 xterm 依容器目前
+  // 寬度重算 cols/rows)並 reportResize()(把新的 cols/rows 告訴後端 pty,
+  // 否則後端仍以為終端是舊的欄數,TUI 版面會錯位——同 currentSessionId 切換
+  // effect 的既有理由)。
+  const rootFontPx = useFontScale((s) => s.rootFontPx);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontSize = Math.round(TERMINAL_BASE_FONT_PX * (rootFontPx / 16));
+    fitRef.current?.fit();
+    reportResize();
+  }, [rootFontPx]);
 
   const handleSend = (): void => {
     if (!currentSessionId) return;

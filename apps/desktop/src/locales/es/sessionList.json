@@ -41,6 +41,16 @@
     "toggleLabel": "Cambiar idioma",
     "menuLabel": "Seleccionar idioma"
   },
+  "fontScale": {
+    "toggleLabel": "Cambiar tamaño de fuente",
+    "menuLabel": "Seleccionar tamaño de fuente",
+    "options": {
+      "sm": "Pequeño",
+      "md": "Predeterminado",
+      "lg": "Grande",
+      "xl": "Extra grande"
+    }
+  },
   "settingsAriaLabel": "Configuración",
   "logoutAriaLabel": "Cerrar sesión",
   "unnamedWorkspace": "(Sin directorio especificado)",

@@ -87,10 +87,29 @@ function isSecretPath(rawPath: string, baseDir: string): boolean {
  * 匹配反而會讓攻擊者用一個無關前綴就繞過。這是刻意的不對稱設計——allowlist
  * 錨定是為了不誤放行,hard-deny 不錨定是為了不漏擋。
  */
-const DANGEROUS_GIT_PATTERNS: { category: string; pattern: RegExp }[] = [
-  { category: "force-push", pattern: /\bgit\s+push\b[^\n]*(--force\b|\s-f\b)/i },
-  { category: "delete-remote-branch", pattern: /\bgit\s+push\b[^\n]*--delete\b/i },
-  { category: "force-delete-branch", pattern: /\bgit\s+branch\b[^\n]*\s-D\b/i },
+const DANGEROUS_GIT_PATTERNS: { category: string; test: (command: string) => boolean }[] = [
+  { category: "force-push", test: (c) => /\bgit\s+push\b[^\n]*(--force\b|\s-f\b)/i.test(c) },
+  { category: "delete-remote-branch", test: (c) => /\bgit\s+push\b[^\n]*--delete\b/i.test(c) },
+  {
+    category: "force-delete-branch",
+    /**
+     * 2026-09-04(稽核修補):這條原本是單一個帶 `/i` 的 regex
+     * `/\bgit\s+branch\b[^\n]*\s-D\b/i` —— 而 `/i` 讓 `-D` 連 `-d` 一起命中。
+     *
+     * 這兩個旗標的語意天差地遠:`-D` 是**強制**刪除,連未合併的分支也照刪
+     * (真的會弄丟工作,屬於 §C5「不可逆」那一類);`-d` 只刪已完全合併的
+     * 分支,未合併時 git 自己就會拒絕 —— 那是例行清理,不是危險操作。
+     *
+     * 把 `-d` 誤判成 hard-deny 的代價不只是「多問一次」:hard-deny 是**永遠
+     * 升級、不可學習**的類別(§C4 紀律③,不給「永遠允許」),所以每一次例行的
+     * 分支清理都會硬生生擋住且無法透過 allowlist 消除。一個經常誤喊的地板,
+     * 會讓人開始習慣性略過真正該看的那幾次警告。
+     *
+     * 修法:指令字本身維持大小寫不敏感(與另外兩條一致),但**旗標比對必須
+     * 大小寫敏感** —— 這正是 `-D` 與 `-d` 唯一的區別所在。
+     */
+    test: (c) => /\bgit\s+branch\b/i.test(c) && /\s-D\b/.test(c),
+  },
 ];
 
 export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
@@ -129,8 +148,8 @@ export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
   //    擋明顯的意外,擋不住 `bash -c`/`$()`/base64 刻意繞過)。
   const command = extractCommandFromInput(req.input);
   if (command !== undefined) {
-    for (const { category, pattern } of DANGEROUS_GIT_PATTERNS) {
-      if (pattern.test(command)) {
+    for (const { category, test } of DANGEROUS_GIT_PATTERNS) {
+      if (test(command)) {
         return {
           matched: true,
           category: "dangerous-git",

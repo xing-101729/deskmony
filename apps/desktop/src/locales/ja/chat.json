@@ -71,5 +71,8 @@
   "slashCommands": {
     "menuAriaLabel": "スラッシュコマンドメニュー",
     "noMatches": "一致するスラッシュコマンドが見つかりません"
+  },
+  "attachment": {
+    "tooLarge": "次の添付ファイルは {{limit}} MB を超えているため、スキップしました:{{files}}"
   }
 }

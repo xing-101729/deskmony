@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { ModalPortal } from "../views/ModalPortal.js";
 import { IconButton } from "./Button.js";
 import { Icon, type IconName } from "./icons.js";
@@ -58,6 +59,11 @@ export function Dialog({
   bare,
   children,
 }: DialogProps): JSX.Element {
+  // 2026-09-04(稽核修補):關閉鈕的 aria-label 原本硬編中文,是全樹唯二漏掉
+  // i18n 的字串之一。這是幾乎所有可關閉對話框共用的底層元件,非中文介面下
+  // 螢幕報讀器會唸出中文。
+  const { t } = useTranslation(["common"]);
+
   useEffect(() => {
     if (!dismissible || !onClose) return;
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -109,7 +115,7 @@ export function Dialog({
             </div>
             <div className="flex flex-shrink-0 items-center gap-1">
               {headerAction}
-              {dismissible && onClose && <IconButton icon="x" aria-label="關閉" onClick={onClose} />}
+              {dismissible && onClose && <IconButton icon="x" aria-label={t("common:close")} onClick={onClose} />}
             </div>
           </header>
 

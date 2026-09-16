@@ -51,7 +51,7 @@ rmSync(tmpDir, { recursive: true });
  * `prebuilds/<platform>-<arch>/*.node`)可以同時被系統 Node 與 Electron
  * 內建 Node 載入而不會 ABI 不符 —— 本機已直接用
  * `ELECTRON_RUN_AS_NODE=1` 借用 Electron 內建 Node 對這份未重編的
- * `node-pty` 執行 `pty.spawn()` 並收發資料驗證成功(見改動當輪的驗證記錄)。
+ * `node-pty` 執行 `pty.spawn()` 並收發資料驗證成功(本機實測驗證,repo 外無紀錄)。
  * `better-sqlite3` 則不是 N-API 建置(未使用 `node-addon-api`),沒有這個
  * ABI 穩定保證,因此才需要這道重編步驟。刻意不對 `node-pty` 執行
  * `electron-rebuild`(即使它也在 `onlyModules` 候選範圍內也不會被要求

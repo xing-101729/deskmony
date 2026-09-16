@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentProfile, EffortLevel, Session, SlashCommandInfo } from "@deskmony/shared";
 import { PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
@@ -18,11 +18,24 @@ import { Icon } from "../ui/icons.js";
 import { Meter } from "../ui/Feedback.js";
 import { shortenPath } from "../lib/workspaces.js";
 import { resolveSystemEventText } from "../lib/system-events.js";
+// 2026-09-04(稽核修補):ModelControl/EffortControl 的錯誤訊息原本繞過了
+// translateError(),在非中文介面會顯示未翻譯的原文——與 app 其餘幾乎所有
+// 錯誤處理不一致(那些在 error-i18n 重構時都改過了,這兩處被漏掉)。
+import { translateError } from "../lib/error-i18n.js";
 import { MarkdownMessage } from "./chat/MarkdownMessage.js";
 import { TodoListView, parseTodoWriteInput } from "./chat/TodoListView.js";
 import { DiffHunkView, parseDiffResult } from "./chat/DiffHunkView.js";
 import { ToolImage, parseImageBlock } from "./chat/ToolImage.js";
 import { AskUserQuestionWidget, parseAskUserQuestionInput } from "./chat/AskUserQuestionWidget.js";
+
+/**
+ * 2026-09-04(稽核修補):「沒有選中 session」時 `items` selector 的固定回傳值。
+ *
+ * **必須是模組層級的常數**,不能在 selector 裡寫 `?? []`——zustand 是靠回傳值的
+ * strict equality 決定要不要重新 render,每次都回傳一個新的空陣列會讓
+ * `useSyncExternalStore` 認為狀態一直在變,導致無限重繪。
+ */
+const EMPTY_ITEMS: readonly ChatItem[] = [];
 
 /**
  * 顯示目前 session 的 model,並(`software="claude-agent-sdk"` 或
@@ -61,7 +74,7 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
     try {
       await setSessionModel(session.id, model);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setSwitching(false);
     }
@@ -131,7 +144,7 @@ function EffortControl({ session, profile }: { session: Session; profile: AgentP
     try {
       await setSessionEffort(session.id, effort);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(translateError(err, t));
     } finally {
       setSwitching(false);
     }
@@ -359,8 +372,22 @@ function AttachmentFileChip({ name, className }: { name: string; className?: str
   );
 }
 
-function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
-  const { t } = useTranslation(["chat"]);
+/**
+ * 2026-09-04(稽核修補):包了 `memo`。
+ *
+ * `items.map()` 每次 render 都會重建整份元素陣列,而 `ChatItem` 物件本身在
+ * store 裡是 immutable 的(每次更新都建新物件、不就地改),所以預設的淺比較
+ * 就完全夠用:只有真正變動的那一則(串流中的最後一則)會重新 render,
+ * 其餘幾百幾千則不會再重跑 react-markdown 解析與 Prism 語法高亮。
+ *
+ * 這與上面 `items` selector 的收窄是一組的:selector 讓「別條 session 的事件」
+ * 不再喚醒這個元件,memo 讓「本條 session 的一則新訊息」不再重繪整串歷史。
+ */
+const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
+  // "systemEvents" 是 item.kind === "system" 分支用的(見下方 resolveSystemEventText()
+  // 呼叫)——雖然 i18n.ts 用 import.meta.glob 把所有 namespace 都 eager 載入了,
+  // 這裡仍明確列出來,讓「這個元件用到哪些 namespace」在宣告處就看得見。
+  const { t } = useTranslation(["chat", "systemEvents"]);
 
   if (item.kind === "tool") {
     if (item.toolName === "TodoWrite") {
@@ -392,9 +419,14 @@ function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
   }
 
   if (item.kind === "system") {
+    // 2026-09-04(稽核修補):這裡原本直接渲染 `item.content`,而 session-store
+    // 存進去的是 `JSON.stringify({event, params})`——使用者切換 model/effort、
+    // 權限請求逾時、adapter 出錯時,對話串裡會直接冒出一行原始 JSON。四個語系的
+    // systemEvents.json 翻譯早就寫好了,`resolveSystemEventText` 也一直被 import
+    // 著,只是從來沒有被呼叫過(dead import)。
     return (
       <div className="my-1.5 rounded-md bg-danger/10 px-2.5 py-1.5 text-xs leading-relaxed text-danger">
-        {item.content}
+        {resolveSystemEventText(item.content, t)}
       </div>
     );
   }
@@ -438,7 +470,7 @@ function ChatBubble({ item }: { item: ChatItem }): JSX.Element | null {
       </div>
     </div>
   );
-}
+});
 
 /**
  * async-scribbling-llama.md Phase 6:composer 待送附件的本地狀態形狀——比
@@ -508,7 +540,33 @@ function looksBinary(bytes: Uint8Array): boolean {
  *      文字內容一律轉 base64 存放,與 prompt.ts 的
  *      `PromptDocumentAttachmentSchema` 約定一致。
  */
+/**
+ * 2026-09-04(稽核修補):composer 附件的大小上限。
+ *
+ * 在此之前這條路徑對 `file.size` 完全不檢查。對照組:同一個檔案樹裡的
+ * `chat/ToolImage.tsx` 對 **agent 產生**的圖片一直都有 `MAX_INLINE_BYTES`
+ * (15 MB)與「太大就不內嵌」的 UX —— 使用者主動附加的這一側被漏掉了。
+ *
+ * 沒有上限的後果不只是「檔案很大」:`bytesToBase64()` 是逐 byte 字串串接的
+ * 同步迴圈,跑在主執行緒上,沒有分批、沒有進度、不能取消。誤選一個幾十 MB
+ * 的 log 檔就會讓整個 renderer 卡住,而且使用者連「檔案太大」的提示都收不到。
+ *
+ * 10 MB 是保守值:附件最終要 base64 編碼(體積 +33%)後塞進 prompt 送給模型,
+ * 比這更大的東西本來就不適合走這條路。
+ */
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+/** 附件過大 —— 由呼叫端轉成使用者看得到的提示(見 `attachFiles()`)。 */
+export class AttachmentTooLargeError extends Error {
+  constructor(readonly fileName: string) {
+    super(`附件過大:${fileName}`);
+  }
+}
+
 async function readComposerAttachment(file: File): Promise<ComposerAttachment | null> {
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    throw new AttachmentTooLargeError(file.name);
+  }
   if (isSupportedImageMediaType(file.type)) {
     const mediaType = file.type;
     const data = await readFileAsDataUrlBase64(file);
@@ -599,7 +657,19 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const profiles = useSessionStore((s) => s.profiles);
-  const itemsBySession = useSessionStore((s) => s.itemsBySession);
+  /**
+   * 2026-09-04(稽核修補):這裡原本是 `useSessionStore((s) => s.itemsBySession)`
+   * ——訂閱**整個** map。而 store 對「任何一條 session 的任何一個事件」都會產生
+   * 新的頂層物件參考(見 session-store.ts 的 `handleSessionEvent()`),zustand
+   * 對它做的是 strict equality 比較,所以背景 session 每收到一個 token,
+   * 正在看的這條 session 也會整個重新 render 一次(連帶重跑 react-markdown
+   * 解析與 Prism 語法高亮)。
+   *
+   * 改成只訂閱目前這條 session 的陣列:其他 session 的事件不再產生新參考,
+   * 這個元件就不會被喚醒。多 agent 平行跑正是本產品的核心情境,這條路徑的
+   * 成本會隨「背景 session 數 × 每秒事件數 × 已累積訊息數」三者相乘放大。
+   */
+  const items = useSessionStore((s) => (s.currentSessionId ? (s.itemsBySession[s.currentSessionId] ?? EMPTY_ITEMS) : EMPTY_ITEMS));
   const sendPrompt = useSessionStore((s) => s.sendPrompt);
   const interrupt = useSessionStore((s) => s.interrupt);
   const slashCommandsBySession = useSessionStore((s) => s.slashCommandsBySession);
@@ -607,6 +677,8 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
 
   const [draft, setDraft] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<ComposerAttachment[]>([]);
+  /** 2026-09-04(稽核修補):附件過大等問題的可見提示,見 addComposerAttachments()。 */
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -615,10 +687,6 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
 
   const session = sessions.find((s) => s.id === currentSessionId);
-  const items = useMemo(
-    () => (currentSessionId ? (itemsBySession[currentSessionId] ?? []) : []),
-    [currentSessionId, itemsBySession],
-  );
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -713,8 +781,38 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
 
   const addComposerAttachments = (files: File[]): void => {
     if (files.length === 0) return;
-    void Promise.all(files.map(readComposerAttachment)).then((results) => {
-      const valid = results.filter((r): r is ComposerAttachment => r !== null);
+    /**
+     * 2026-09-04(稽核修補):用 `allSettled` 而不是 `all`。
+     *
+     * `readComposerAttachment()` 現在會對過大的檔案丟 `AttachmentTooLargeError`
+     * (見該函式註解)。用 `Promise.all` 的話,一個過大的檔案會讓**整批**附件
+     * 一起失敗、而且是 unhandled rejection —— 使用者選了五個檔案、其中一個太大,
+     * 結果五個都沒進去也沒有任何提示。`allSettled` 讓合格的照常加入,過大的
+     * 各自轉成一則可見的提示。
+     */
+    void Promise.allSettled(files.map(readComposerAttachment)).then((results) => {
+      const valid: ComposerAttachment[] = [];
+      const tooLarge: string[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          if (result.value !== null) valid.push(result.value);
+        } else if (result.reason instanceof AttachmentTooLargeError) {
+          tooLarge.push(result.reason.fileName);
+        } else {
+          console.error("[composer] 讀取附件失敗:", result.reason);
+        }
+      }
+      if (tooLarge.length > 0) {
+        setAttachmentError(
+          t("chat:attachment.tooLarge", {
+            files: tooLarge.join("、"),
+            limit: MAX_ATTACHMENT_BYTES / (1024 * 1024),
+            defaultValue: `以下附件超過 {{limit}} MB,已略過:{{files}}`,
+          }),
+        );
+      } else {
+        setAttachmentError(null);
+      }
       if (valid.length === 0) return;
       setPendingAttachments((prev) => [...prev, ...valid]);
     });
@@ -817,6 +915,20 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
       </div>
 
       <div className="flex-shrink-0 border-t border-line-subtle p-3 sm:p-4">
+        {/* 2026-09-04(稽核修補):附件過大等問題的可見提示,見 addComposerAttachments()。 */}
+        {attachmentError && (
+          <div className="mb-1.5 flex items-start gap-1.5 rounded border border-danger/30 bg-danger/5 px-2 py-1.5 text-2xs text-danger">
+            <span className="flex-1">{attachmentError}</span>
+            <button
+              type="button"
+              onClick={() => setAttachmentError(null)}
+              aria-label={t("common:dismissAlert")}
+              className="flex-shrink-0 opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {pendingAttachments.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5">
             {pendingAttachments.map((att) => (

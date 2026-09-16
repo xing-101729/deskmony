@@ -6,6 +6,8 @@ import type { AgentEvent, AgentProfile, PromptInput, SlashCommandInfo } from "@d
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
+import { registerChild, unregisterChild } from "./child-registry.js";
+import { waitForChildExit } from "./child-process.js";
 
 /**
  * OpenCodeAdapter — 對接 opencode 的 headless server API(ARCHITECTURE.md
@@ -183,6 +185,8 @@ export class OpenCodeAdapter implements AgentAdapter {
       stdio: ["ignore", "pipe", "pipe"],
       shell: useShell,
     });
+    // 2026-09-04(稽核修補):見 child-registry.ts。
+    registerChild(child.pid, `opencode:${command}`);
 
     const spawnFailure = new Promise<never>((_, reject) => {
       child.once("error", (err) => {
@@ -267,7 +271,16 @@ export class OpenCodeAdapter implements AgentAdapter {
       );
     }
 
-    const outputQueue = new AsyncQueue<AgentEvent>();
+    const outputQueue = new AsyncQueue<AgentEvent>({
+      // 2026-09-04(稽核修補):緩衝溢位不靜默丟資料,至少讓它在 log 裡看得見。
+      // 見 packages/adapters/src/async-queue.ts 的 DEFAULT_MAX_BUFFERED 註解。
+      onOverflow: (dropped) =>
+        console.error(
+          `[opencode] 事件緩衝溢位,已丟棄最舊的 ${dropped} 筆事件 —— 代表這條 session 的產出速度` +
+            "遠超過下游消費速度(失控迴圈?超大 tool_result?)。丟舊留新是刻意的:" +
+            "否則 completed 事件永遠進不來,session 會卡在 busy。",
+        ),
+    });
     const handle: AgentHandle = { id: randomUUID(), profile, workspace };
     const sseController = new AbortController();
 
@@ -416,6 +429,26 @@ export class OpenCodeAdapter implements AgentAdapter {
     internal.sseController.abort();
     internal.outputQueue.close();
     this.killChild(internal.child);
+    /**
+     * 2026-09-04(稽核修補):等子程序真正 exit 才回報 dispose 完成。
+     *
+     * `claude-sdk-adapter` 與 `acp-adapter` 早就有這一步(各自 `dispose()` 內
+     * 的 `waitForChildExit(child, 3_000)`),而這個 adapter 與 `pty-adapter`
+     * 沒有 —— 同一個介面的四個實作行為不一致,是最容易長出 bug 的地方。
+     *
+     * 為什麼要等:「送出終止指令」不等於「子程序已經死掉」。在 Windows 上
+     * 行程要再過一小段時間才釋放它對 cwd(= 任務 worktree)的佔用,而呼叫端
+     * (`TaskService.deleteTask` → `WorkspaceManager.removeWorkspace`)緊接著就會
+     * `git worktree remove`,撞上 `EBUSY`/`Permission denied`。`WorkspaceManager`
+     * 有約 1.8 秒的重試窗口可以補救,但那比這裡主動等的 3 秒短 —— 在子程序退出
+     * 較慢的機器上,opencode/pty 因此比另外兩個 adapter 更容易真的觸發
+     * `workspace.cleanupFailed`。
+     *
+     * 逾時不丟錯(見 `waitForChildExit()` 註解),fail-safe 方向。
+     */
+    await waitForChildExit(internal.child, 3_000);
+    // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
+    unregisterChild(internal.child.pid);
     this.sessions.delete(handle.id);
   }
 

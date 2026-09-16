@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification, safeStorage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, safeStorage } from "electron";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -382,6 +382,67 @@ function registerIpcHandlers(): void {
   });
 }
 
+/**
+ * 明確安裝 application menu:Electron 在沒有呼叫 `Menu.setApplicationMenu()`
+ * 時會退回內建的預設選單,而這個預設選單本身就內建三個 Chromium 頁面縮放
+ * 角色——`View > Actual Size`(role `resetzoom`,accelerator
+ * `CommandOrControl+0`)、`View > Zoom In`(role `zoomin`,accelerator
+ * `CommandOrControl+Plus`)、`View > Zoom Out`(role `zoomout`,accelerator
+ * `CommandOrControl+-`)——三組快捷鍵剛好就是 `src/ui/font-scale.ts` 字級
+ * 縮放功能用的組合鍵(`App.tsx` 的 `useHotkeys()` 區塊註冊為
+ * `mod+=`/`mod+-`/`mod+0`,對應 `useFontScale().increase/decrease/reset`)。
+ *
+ * 下方 `createWindow()` 設的 `autoHideMenuBar: true` 只隱藏選單「列」,不
+ * 隱藏選單本身:accelerator 是掛在選單項目上、由 Electron/OS 的原生選單
+ * 系統攔截並在 main process 派送的全域鍵盤快捷鍵,跟選單列要不要顯示是兩
+ * 條互不相干的路徑,`autoHideMenuBar` 從未打算處理這個問題。也正因為
+ * accelerator 是在 main process 這一層被攔下來,`src/ui/hotkeys.ts` 裡
+ * renderer 端呼叫的 `event.preventDefault()` 根本碰不到它——那只能擋下
+ * 「已經送到 renderer 的 keydown 事件」,選單 accelerator 從一開始就不走
+ * 這條路,是在更上層被原生選單系統直接吃掉、轉成選單指令派送的,event 從
+ * 未進入 renderer 的事件迴圈。
+ *
+ * 實際後果:在 Electron 視窗裡按 Ctrl/Cmd+=、+-、+0 會同時觸發兩件事——
+ * `font-scale.ts` 的 rem 字級縮放,以及 Chromium `webContents` 的原生頁面
+ * 縮放——兩者疊加,每按一次放大的幅度比預期大很多。字級縮放有
+ * `sm`/`md`/`lg`/`xl` 四檔上限,頁面縮放沒有上限,結果字級卡在 `xl` 之後
+ * 頁面縮放仍會繼續放大,變成側欄字級切換器顯示 `xl`、畫面卻已經放大到不成
+ * 比例的不一致狀態,使用者看切換器完全猜不出畫面實際多大。
+ *
+ * 不能改用攔截 `before-input-event` 後 `preventDefault()` 來解——Electron
+ * 文件明載這個事件呼叫 `preventDefault()` 會連 keydown 一起攔下來、不讓它
+ * 送進 renderer,等於連 app 自己的字級快捷鍵也一併打死,是治標不治本的
+ * 方向。真正對的作法是從選單模板裡直接拿掉那三個 role,讓對應的
+ * accelerator 從根源不存在,而不是等它觸發後再去攔。
+ *
+ * 因此這裡不用 `Menu.setApplicationMenu(null)`——那樣連 reload、強制
+ * reload、開發者工具、視窗選單這些日常開發依賴的 accelerator 也會一起
+ * 消失。改成手動把 View 選單攤開來寫:保留 `reload`/`forceReload`/
+ * `toggleDevTools`/`togglefullscreen` 這些有用的預設角色,只拿掉
+ * `resetzoom`/`zoomin`/`zoomout` 三個。`fileMenu`/`editMenu`/`windowMenu`
+ * 三個內建 role 本身不含任何縮放相關項目,原樣保留即可,不需要跟著攤開
+ * 重寫。
+ */
+function installApplicationMenu(): void {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: "fileMenu" },
+      { role: "editMenu" },
+      {
+        label: "View",
+        submenu: [
+          { role: "reload" },
+          { role: "forceReload" },
+          { role: "toggleDevTools" },
+          { type: "separator" },
+          { role: "togglefullscreen" },
+        ],
+      },
+      { role: "windowMenu" },
+    ]),
+  );
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -411,6 +472,7 @@ app.whenReady().then(() => {
   resolveAuthToken();
   registerIpcHandlers();
   startCore();
+  installApplicationMenu();
   createWindow();
 
   app.on("activate", () => {

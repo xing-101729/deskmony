@@ -25,5 +25,6 @@
   "unrestrictedRiskCategory4": "對非白名單主機的網路連線",
   "unrestrictedRisk2": "與 YOLO 共用同一個 30 分鐘計時器,YOLO 到期時一併關閉,不是獨立的計時器。",
   "unrestrictedRiskRemote": "你正在透過遠端連線啟用這個功能——開啟後,之後任何連線(不只是你這個)送出的請求都會適用。",
-  "unrestrictedTypeToConfirm": "輸入「{{phrase}}」以確認"
+  "unrestrictedTypeToConfirm": "輸入「{{phrase}}」以確認",
+  "switchFailed": "切換失敗"
 }

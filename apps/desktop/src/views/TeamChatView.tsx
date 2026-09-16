@@ -133,14 +133,37 @@ export function TeamChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
     composerRef.current?.focus();
   }, [currentTeamId]);
 
-  // S2(message-budget):訊息列表出現新的 contextId 時,查一次目前的額度用量。
+  /**
+   * S2(message-budget):訊息列表出現**新的** contextId 時,查一次目前的額度用量。
+   *
+   * 2026-09-04(稽核修補):只查沒查過的。
+   *
+   * 原本的寫法是每次 `messages` 變動(= 每一則新訊息推播進來)就對歷史裡
+   * **所有**出現過的 distinct contextId 重打一次 RPC。一個累積了 30 個任務
+   * context 的群聊,任何一則新訊息都會觸發 30 次 `message.getContextBudget`,
+   * 每次完成又各自 `set()` 一次造成額外重繪 —— 團隊存續越久、討論過的任務越多,
+   * 放大倍率越誇張。
+   *
+   * 用 ref 記住查過的集合(不是 state:它不該觸發重繪,只是去重用的備忘錄)。
+   * 額度本身的更新靠 `refreshContextBudget` 在送出訊息後被呼叫,不需要靠這個
+   * effect 輪詢。
+   */
+  const queriedContextIds = useRef(new Set<string>());
   useEffect(() => {
-    const distinctContextIds = new Set(messages.map((m) => m.contextId).filter((id) => id !== "legacy"));
-    for (const contextId of distinctContextIds) {
+    for (const message of messages) {
+      const contextId = message.contextId;
+      if (contextId === "legacy" || queriedContextIds.current.has(contextId)) continue;
+      queriedContextIds.current.add(contextId);
       void refreshContextBudget(contextId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
+
+  // 切換 team 時清掉去重備忘錄 —— 不同 team 的 context 各自獨立,
+  // 而且切回來時本來就該重新查一次當下的額度。
+  useEffect(() => {
+    queriedContextIds.current = new Set();
+  }, [currentTeamId]);
 
   useEffect(() => {
     if (to !== "broadcast" && team && !team.members.some((m) => m.name === to)) {

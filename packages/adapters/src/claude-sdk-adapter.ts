@@ -18,6 +18,7 @@ import type { SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, TeamSpawnContext, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
+import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 import { TEAM_BUS_MCP_SERVER_NAME, TEAM_BUS_TOOL_NAMES, createTeamBusMcpServer } from "./team-bus-mcp.js";
 import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMcpServer } from "./subagent-mcp.js";
@@ -148,7 +149,16 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     const handle: AgentHandle = { id: randomUUID(), profile, workspace };
 
     const inputQueue = new AsyncQueue<SDKUserMessage>();
-    const outputQueue = new AsyncQueue<AgentEvent>();
+    const outputQueue = new AsyncQueue<AgentEvent>({
+      // 2026-09-04(稽核修補):緩衝溢位不靜默丟資料,至少讓它在 log 裡看得見。
+      // 見 packages/adapters/src/async-queue.ts 的 DEFAULT_MAX_BUFFERED 註解。
+      onOverflow: (dropped) =>
+        console.error(
+          `[claude-agent-sdk] 事件緩衝溢位,已丟棄最舊的 ${dropped} 筆事件 —— 代表這條 session 的產出速度` +
+            "遠超過下游消費速度(失控迴圈?超大 tool_result?)。丟舊留新是刻意的:" +
+            "否則 completed 事件永遠進不來,session 會卡在 busy。",
+        ),
+    });
     const pendingPermissions = new Map<
       string,
       (result: PermissionResult) => void
@@ -192,6 +202,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
           signal: spawnOptions.signal,
           windowsHide: true,
         });
+        // 2026-09-04(稽核修補):見 child-registry.ts。
+        registerChild(spawned.pid, `claude-agent-sdk:${spawnOptions.command}`);
         // SDK 內建的 spawn 會自己讀掉 stderr(拿來組錯誤訊息的 tail);換成自訂
         // spawner 之後沒有人讀它,pipe 緩衝區(預設 64KB)填滿就會**卡住**
         // 子程序的寫入 —— 這裡必須自己排掉。內容轉給 console.error,與
@@ -480,6 +492,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     if (child) {
       killProcessTree(child);
       await waitForChildExit(child, 3_000);
+      // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
+      unregisterChild(child.pid);
     }
     this.sessions.delete(handle.id);
   }

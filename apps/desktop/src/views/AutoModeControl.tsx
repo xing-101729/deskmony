@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { translateError } from "../lib/error-i18n.js";
 import type { Session } from "@deskmony/shared";
 import { useSessionStore } from "../stores/session-store.js";
 import { Dialog } from "../ui/Dialog.js";
@@ -42,6 +43,8 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
   const [showYoloConfirm, setShowYoloConfirm] = useState(false);
   const [showUnrestrictedConfirm, setShowUnrestrictedConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** 2026-09-04(稽核修補):切換失敗時顯示給使用者,見 applyMode/applyUnrestricted 的 catch。 */
+  const [error, setError] = useState<string | null>(null);
 
   const mode = session.permissionMode ?? "always-ask";
   const isAuto = mode === "auto-accept-edits";
@@ -50,10 +53,16 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
 
   const applyMode = async (next: Parameters<typeof setSessionPermissionMode>[1]): Promise<void> => {
     setBusy(true);
+    setError(null);
     try {
       await setSessionPermissionMode(session.id, next);
     } catch (err) {
-      console.error("[auto-mode] 切換權限模式失敗:", err instanceof Error ? err.message : err);
+      // 2026-09-04(稽核修補):原本只有 console.error —— 使用者看到的只是按鈕
+      // 從 loading 恢復,沒有任何提示。這是**安全關鍵開關**(YOLO / 真.無限制),
+      // 讓人帶著「我已經關掉危險模式」的錯誤認知離開畫面是不能接受的。
+      // 徽章狀態本身不會說謊(等 RPC 成功才更新),但那需要使用者主動回頭確認。
+      console.error("[auto-mode] 切換權限模式失敗:", err);
+      setError(translateError(err, t));
     } finally {
       setBusy(false);
     }
@@ -61,10 +70,12 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
 
   const applyUnrestricted = async (enabled: boolean): Promise<void> => {
     setBusy(true);
+    setError(null);
     try {
       await setSessionTrueUnrestricted(session.id, enabled);
     } catch (err) {
-      console.error("[auto-mode] 切換 true-unrestricted 失敗:", err instanceof Error ? err.message : err);
+      console.error("[auto-mode] 切換 true-unrestricted 失敗:", err);
+      setError(translateError(err, t));
     } finally {
       setBusy(false);
     }
@@ -178,6 +189,13 @@ export function AutoModeControl({ session }: { session: Session }): JSX.Element 
             void applyUnrestricted(true);
           }}
         />
+      )}
+
+      {/* 2026-09-04(稽核修補):切換失敗時的可見回饋 —— 見 applyMode() 的 catch。 */}
+      {error && (
+        <span className="text-2xs text-danger" title={error}>
+          {t("autoMode:switchFailed", { defaultValue: "切換失敗" })}
+        </span>
       )}
     </div>
   );
