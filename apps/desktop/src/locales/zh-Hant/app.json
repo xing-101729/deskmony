@@ -49,6 +49,20 @@
       "toDark": "切換為深色主題",
       "keywords": "theme dark light 主題 深色 淺色"
     },
+    "fontSize": {
+      "increase": {
+        "title": "放大字級",
+        "keywords": "font size zoom in bigger 放大 字級 字體"
+      },
+      "decrease": {
+        "title": "縮小字級",
+        "keywords": "font size zoom out smaller 縮小 字級 字體"
+      },
+      "reset": {
+        "title": "重設字級",
+        "keywords": "font size reset default 重設 字級 字體"
+      }
+    },
     "recovery": {
       "title": "復原中斷的 session({{count}})",
       "keywords": "recovery crash 中斷 復原"

@@ -49,6 +49,20 @@
       "toDark": "ダークテーマに切り替え",
       "keywords": "theme dark light テーマ ダーク ライト"
     },
+    "fontSize": {
+      "increase": {
+        "title": "文字を大きくする",
+        "keywords": "font size zoom in bigger 文字 拡大 フォント サイズ"
+      },
+      "decrease": {
+        "title": "文字を小さくする",
+        "keywords": "font size zoom out smaller 文字 縮小 フォント サイズ"
+      },
+      "reset": {
+        "title": "文字サイズをリセット",
+        "keywords": "font size reset default 文字 リセット フォント サイズ"
+      }
+    },
     "recovery": {
       "title": "中断された session を復旧({{count}})",
       "keywords": "recovery crash 復旧 中断"

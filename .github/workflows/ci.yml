@@ -46,9 +46,12 @@ jobs:
       # 它第一次跑就會在第一步掛掉。
       #
       # 原因:各 package 的 `typecheck` 是 `tsc -p tsconfig.json --noEmit`,
-      # **不帶 `--build`**,不會去編譯它依賴的 workspace package;跨 package
-      # 的 import 解析到的是 `packages/*/dist/*.d.ts`,而 CI 的 checkout 是
-      # 全新的、沒有任何 `dist/`。實測(把 packages/shared/dist 暫時移走模擬
+      # **不帶 `--build`**,不會去編譯它依賴的 workspace package。workspace
+      # 套件之間是用 package `exports` 互相解析的(`@deskmony/shared` →
+      # `./dist/index.d.ts`,見各套件的 package.json),`dist/` 又在 .gitignore
+      # 裡,而且沒有任何套件有 `prepare` 腳本會在 install 時順手建置 —— 所以
+      # CI 全新 checkout 上的 `packages/*/dist` 根本不存在。本機不會踩到,是因為
+      # dist 早就留在工作目錄裡了。實測(把 packages/shared/dist 暫時移走模擬
       # 全新 checkout):
       #     packages/adapters : error TS2307: Cannot find module '@deskmony/shared'
       #     apps/core         : error TS2339: Property 'name' does not exist ...

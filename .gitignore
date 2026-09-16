@@ -1,6 +1,14 @@
 node_modules/
 *.tsbuildinfo
 dist/
+# apps/desktop 的 Electron 主程序/preload 編譯輸出(electron/main.ts →
+# dist-electron/main.js、electron/preload.cts → dist-electron/preload.cjs,
+# 見 apps/desktop/tsconfig.electron.json 的 outDir)。上面的 `dist/` 是目錄名
+# 完全相符才會命中,擋不到 `dist-electron/`,所以這兩個檔案一直被追蹤著 ——
+# 改 electron/main.ts 就必須連編譯結果一起 commit,否則 repo 裡的產物與原始碼
+# 不一致。它由 `pnpm build`(tsc -p tsconfig.electron.json)完整重建,沒有理由
+# 進版控。
+dist-electron/
 out/
 build/
 release/

@@ -41,6 +41,16 @@
     "toggleLabel": "切換語言",
     "menuLabel": "選擇語言"
   },
+  "fontScale": {
+    "toggleLabel": "切換字級",
+    "menuLabel": "選擇字級",
+    "options": {
+      "sm": "小",
+      "md": "預設",
+      "lg": "大",
+      "xl": "特大"
+    }
+  },
   "settingsAriaLabel": "設定",
   "logoutAriaLabel": "登出",
   "unnamedWorkspace": "(未指定目錄)",
