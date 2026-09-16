@@ -42,6 +42,12 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
+import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+
+// 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
+// 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
+// —— 見 scripts/lib/require-fresh-build.mjs 的完整說明。
+requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -191,7 +197,7 @@ async function unitTests() {
       remoteOrAutoDecision.effect === "deny" &&
       localAutoDecision.effect === "deny" && // 本機+attended 但 autoMode=true → 仍硬 deny,autoMode 優先於 attended
       localAttendedDecision.effect === "escalate-strong" && // 唯一能降級的組合(本機+attended+非 autoMode)
-      localUnattendedDecision.effect === "deny"; // 保守:本機但沒人看 → 硬 deny(見最終報告的自行判斷說明)
+      localUnattendedDecision.effect === "deny"; // 保守:本機但沒人看 → 硬 deny(實作當下的自行判斷,repo 外無紀錄)
 
     record(
       "1f hard-deny(worktree 外寫入)命中時,任何 autoMode/遠端組合都絕不 allow;只有「本機+attended」降級為 escalate-strong",
@@ -685,7 +691,7 @@ async function liveE2e() {
       const session = listAfter.sessions.find((s) => s.id === sessionId);
       const wentWaiting = session?.status === "waiting";
 
-      await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "deny" });
+      await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "deny" });
       await client.waitForEvent(
         (e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error"),
         15_000,
@@ -743,7 +749,7 @@ async function liveE2e() {
       const session = listAfter.sessions.find((s) => s.id === sessionId);
       const wentWaiting = session?.status === "waiting";
 
-      await client.rpc("permission.resolve", { requestId: permEvent.requestId, decision: "deny" });
+      await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "deny" });
       await client.waitForEvent(
         (e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error"),
         15_000,

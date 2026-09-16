@@ -320,7 +320,18 @@ interface SessionStoreState {
    * 自己重複判斷 strong 再決定要不要傳 rememberRule——雙重把關,Core 端才是
    * 權威。
    */
-  resolvePermission: (requestId: string, decision: "allow" | "deny", rememberRule?: PolicyRule) => void;
+  resolvePermission: (
+    /**
+     * 2026-09-04(稽核修補)新增。`requestId` 只在單一 session 內唯一,跨 session
+     * 會碰撞(見 packages/shared/src/events.ts 的 `PermissionDecisionSchema.
+     * sessionId`),所以 RPC 與下面的樂觀移除都必須帶上它。`PendingPermission`
+     * 本來就有這個欄位,呼叫端直接傳即可。
+     */
+    sessionId: string,
+    requestId: string,
+    decision: "allow" | "deny",
+    rememberRule?: PolicyRule,
+  ) => void;
   /**
    * async-scribbling-llama.md Phase 7:回覆一筆 pending 的 AskUserQuestion
    * (見 AskUserQuestionWidget.tsx)。比照上面的 `resolvePermission()`——樂觀地
@@ -476,12 +487,43 @@ export const client = new GatewayClient(window.deskmony?.gatewayUrl ?? "", windo
  * 的決定不衝突 —— 那是指 SQLite,不是 renderer 的暫存記憶體)。
  */
 const TERMINAL_BUFFER_MAX_CHARS = 200_000;
+
+/**
+ * 2026-09-04(稽核修補):單一 session 在 renderer 記憶體裡保留的聊天項目上限。
+ *
+ * 在此之前 `itemsBySession[sessionId]` 完全沒有上限——對照同一個檔案裡的
+ * terminal buffer 一直都有 `TERMINAL_BUFFER_MAX_CHARS`,是這裡漏了。一條跑上
+ * 好幾個小時的 session(本產品明講的使用情境)會持續累積,而每一個事件都要對
+ * 整份陣列做一次 `[...items]` 複製,成本隨長度線性上升。
+ *
+ * **取捨講清楚**:超出上限時砍掉最舊的,所以捲到最上面會看不到最早的訊息。
+ * 這是可接受的,因為完整歷史仍然在 core 的 SQLite 裡——切走再切回這條 session
+ * 會走 `selectSession()` → `session.history` 重新載入。2,000 這個數字刻意訂得
+ * 寬鬆:一般對話遠遠碰不到,只有失控迴圈那種每秒噴幾十個 tool-call 的情況才會
+ * 觸發,而那正是這道上限要防的。
+ */
+const SESSION_ITEMS_MAX = 2_000;
+
+function capItems(items: ChatItem[]): ChatItem[] {
+  return items.length > SESSION_ITEMS_MAX ? items.slice(items.length - SESSION_ITEMS_MAX) : items;
+}
 const terminalBufferBySession = new Map<string, string>();
 type TerminalDataListener = (sessionId: string, data: string) => void;
 const terminalDataListeners = new Set<TerminalDataListener>();
 
 export function getTerminalBuffer(sessionId: string): string {
   return terminalBufferBySession.get(sessionId) ?? "";
+}
+
+/**
+ * 2026-09-04(稽核修補):session 刪除時釋放它的終端緩衝。
+ *
+ * `terminalBufferBySession` 是模組層級的 Map,在此之前**只增不減** ——
+ * 全樹搜尋不到任何 `.delete()`。每條被刪掉的 PTY session 若曾經有過終端輸出,
+ * 它的緩衝(上限 200,000 字元,可到數百 KB)會一直留到整個 app 程序重啟。
+ */
+export function clearTerminalBuffer(sessionId: string): void {
+  terminalBufferBySession.delete(sessionId);
 }
 
 export function onTerminalData(listener: TerminalDataListener): () => void {
@@ -781,6 +823,33 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         }));
       }
     });
+    /**
+     * 2026-09-04(稽核修補):斷線重連後補資料。
+     *
+     * 在此之前,重連成功只是把 `status` 變回 `"open"`,沒有任何程式碼重新拉取
+     * ——斷線期間 core 推播的 session-event / session-updated / policy-updated
+     * 全部確定性遺失,而 UI 上只是提示條消失、看起來一切正常。
+     *
+     * 補的方式是**重新拉快照**而不是「補送遺失事件」:core 端沒有保留未送達
+     * 事件的機制(推播是 fire-and-forget),要做補送得先在 server 端加序號與
+     * 重送緩衝,那是另一個層級的工程。重新拉快照雖然粗,但保證收斂到正確狀態。
+     *
+     * 目前檢視中的 session 另外重載一次歷史 —— 它的訊息是逐事件累積出來的,
+     * 只刷新 session 清單救不回斷線期間的對話內容。
+     */
+    client.onReconnected(() => {
+      console.info("[gateway] 重新連上,重新同步狀態(斷線期間的推播事件已遺失)");
+      void get().refreshProfiles();
+      void get().refreshSessions();
+      void get().loadEnabledModels();
+      void get().loadProviderPrefs();
+      void get().loadEffectiveConfig();
+      void get().loadGatewayCapabilities();
+      void get().loadPolicyRules();
+      const currentId = get().currentSessionId;
+      if (currentId) void get().selectSession(currentId);
+    });
+
     client.connect();
     void get().refreshProfiles();
     void get().refreshSessions();
@@ -948,10 +1017,39 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void client.call("session.interrupt", { sessionId });
   },
 
-  resolvePermission: (requestId, decision, rememberRule) => {
-    void client.call("permission.resolve", { requestId, decision, rememberRule });
+  resolvePermission: (sessionId, requestId, decision, rememberRule) => {
+    /**
+     * 2026-09-04(稽核修補):RPC 失敗時把彈窗放回去。
+     *
+     * 原本是純 fire-and-forget:`void client.call(...)` 之後立刻把這筆從
+     * `pendingPermissions` 移除。連線抖動導致呼叫 reject 時,畫面上彈窗照樣
+     * 消失(看起來像「已處理完成」),但 core 從未收到這個決定 —— agent 會
+     * 一直卡著等,直到伺服器端逾時自動 deny。失敗方向是安全的(不會誤放行),
+     * **但使用者的認知會說謊**,而這是安全關鍵操作,不該讓人以為按過了。
+     *
+     * 樂觀移除保留(絕大多數情況會成功,等 RPC 往返才關彈窗會很鈍),
+     * 失敗時把原本那筆放回佇列並在 console 記錄。
+     */
+    const snapshot = get().pendingPermissions.find((p) => p.sessionId === sessionId && p.requestId === requestId);
+    client.call("permission.resolve", { sessionId, requestId, decision, rememberRule }).catch((err: unknown) => {
+      console.error(
+        `[permission] 送出決定失敗(session=${sessionId}, request=${requestId}),已把請求放回待處理清單:`,
+        err,
+      );
+      if (!snapshot) return;
+      set((state) =>
+        state.pendingPermissions.some((p) => p.sessionId === sessionId && p.requestId === requestId)
+          ? {}
+          : { pendingPermissions: [...state.pendingPermissions, snapshot] },
+      );
+    });
     set((state) => ({
-      pendingPermissions: state.pendingPermissions.filter((p) => p.requestId !== requestId),
+      // 2026-09-04(稽核修補):這裡原本只比對 `requestId` —— 那是同一個跨
+      // session 碰撞問題的第二現場:回覆 session A 的請求會把 session B 那筆
+      // 剛好同號的待決彈窗也一起從 UI 移除(B 的 agent 其實還在等)。
+      pendingPermissions: state.pendingPermissions.filter(
+        (p) => !(p.sessionId === sessionId && p.requestId === requestId),
+      ),
     }));
   },
 
@@ -1017,11 +1115,34 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     const wasCurrent = get().currentSessionId === sessionId;
     set((state) => {
       const sessions = state.sessions.filter((s) => s.id !== sessionId);
+      /**
+       * 2026-09-04(稽核修補):把**所有** per-session 狀態一起清掉。
+       *
+       * 原本只清 `itemsBySession`,其餘四份(模組層級的 terminal buffer、
+       * usage、成本摘要、slash command 快取)全部留著 —— 長時間使用、反覆建立
+       * 與刪除 session 的情況下只增不減,直到整個 app 重啟才釋放。terminal
+       * buffer 尤其明顯:每條刪掉的 PTY session 都可能留下數百 KB(上限
+       * 200,000 字元)在一個永遠不會被清理的模組層級 Map 裡。
+       */
       const itemsBySession = { ...state.itemsBySession };
       delete itemsBySession[sessionId];
+      const sessionUsage = { ...state.sessionUsage };
+      delete sessionUsage[sessionId];
+      const costSummaryBySession = { ...state.costSummaryBySession };
+      delete costSummaryBySession[sessionId];
+      const slashCommandsBySession = { ...state.slashCommandsBySession };
+      delete slashCommandsBySession[sessionId];
+      clearTerminalBuffer(sessionId);
       return {
         sessions,
         itemsBySession,
+        sessionUsage,
+        costSummaryBySession,
+        slashCommandsBySession,
+        // 這筆 session 若還有待決的權限請求/待答問題,一併移除 —— session 都
+        // 沒了,那些彈窗再也不可能被正確回覆。
+        pendingPermissions: state.pendingPermissions.filter((p) => p.sessionId !== sessionId),
+        pendingUserDialogs: state.pendingUserDialogs.filter((d) => d.sessionId !== sessionId),
         currentSessionId: wasCurrent ? null : state.currentSessionId,
       };
     });
@@ -1368,7 +1489,7 @@ function handleSessionEvent(
       case "permission-request": {
         const pending: PendingPermission = { ...event, sessionId };
         return {
-          itemsBySession: { ...state.itemsBySession, [sessionId]: items },
+          itemsBySession: { ...state.itemsBySession, [sessionId]: capItems(items) },
           pendingPermissions: [...state.pendingPermissions, pending],
         };
       }
@@ -1380,7 +1501,7 @@ function handleSessionEvent(
         // toolUseID 找到它就會切換成可互動的表單。
         const pending: PendingUserDialog = { ...event, sessionId };
         return {
-          itemsBySession: { ...state.itemsBySession, [sessionId]: items },
+          itemsBySession: { ...state.itemsBySession, [sessionId]: capItems(items) },
           pendingUserDialogs: [...state.pendingUserDialogs, pending],
         };
       }
@@ -1414,6 +1535,6 @@ function handleSessionEvent(
       }
     }
 
-    return { itemsBySession: { ...state.itemsBySession, [sessionId]: items } };
+    return { itemsBySession: { ...state.itemsBySession, [sessionId]: capItems(items) } };
   });
 }

@@ -20,6 +20,13 @@
  * 字級刻度刻意比 Tailwind 預設**整體縮一階**(sm 14px → 12px、base 16px →
  * 13px):這是專業開發者工具(Linear / Cursor / Raycast / Claude Code)的資訊
  * 密度基準,也是這輪「提高資訊密度」最有效的單一槓桿。
+ *
+ * 2026-09(font-size 使用者偏好):上面這組數值現在一律改以 **rem** 表示
+ * (除以 16 換算,例如 sm = 12px → 0.75rem)——**數值本身與改版當時完全
+ * 相同,只是換了單位**。原因是 src/ui/font-scale.ts 讓使用者調整 `<html>`
+ * 的 root font-size(14 / 16 / 18 / 20px 四檔),rem 是相對 root font-size
+ * 換算的單位,寫死的 px 不會跟著變;下面的 spacing 覆寫同理也一併改 rem。
+ * `borderRadius` 刻意不跟進(見該區塊自己的註解)。
  */
 
 const withAlpha = (variable) => `rgb(var(${variable}) / <alpha-value>)`;
@@ -105,23 +112,25 @@ export default {
         mono: ["Cascadia Code", "JetBrains Mono", "SF Mono", "Consolas", "monospace"],
       },
 
-      /* 開發者工具密度刻度(整體比 Tailwind 預設小一階) */
+      /* 開發者工具密度刻度(整體比 Tailwind 預設小一階)。單位是 rem(見上方
+       * 2026-09 註解),對照的 px 值(16px root 時)寫在行尾註解方便比對。 */
       fontSize: {
-        "2xs": ["10px", { lineHeight: "14px", letterSpacing: "0.01em" }],
-        xs: ["11px", { lineHeight: "16px" }],
-        sm: ["12px", { lineHeight: "18px" }],
-        base: ["13px", { lineHeight: "20px" }],
-        md: ["14px", { lineHeight: "21px" }],
-        lg: ["16px", { lineHeight: "24px" }],
-        xl: ["20px", { lineHeight: "28px" }],
-        "2xl": ["24px", { lineHeight: "32px" }],
+        "2xs": ["0.625rem", { lineHeight: "0.875rem", letterSpacing: "0.01em" }], // 10 / 14px
+        xs: ["0.6875rem", { lineHeight: "1rem" }], // 11 / 16px
+        sm: ["0.75rem", { lineHeight: "1.125rem" }], // 12 / 18px
+        base: ["0.8125rem", { lineHeight: "1.25rem" }], // 13 / 20px
+        md: ["0.875rem", { lineHeight: "1.3125rem" }], // 14 / 21px
+        lg: ["1rem", { lineHeight: "1.5rem" }], // 16 / 24px
+        xl: ["1.25rem", { lineHeight: "1.75rem" }], // 20 / 28px
+        "2xl": ["1.5rem", { lineHeight: "2rem" }], // 24 / 32px
       },
 
-      /* 8px grid:主要使用 1(4)/2(8)/3(12)/4(16)/6(24);7 = 28px 用於固定列高 */
+      /* 8px grid:主要使用 1(4)/2(8)/3(12)/4(16)/6(24);7 = 28px 用於固定列高。
+       * 同上,單位改 rem(16px root 時等於原本的 px 值)。 */
       spacing: {
-        7: "28px",
-        13: "52px",
-        15: "60px",
+        7: "1.75rem", // 28px
+        13: "3.25rem", // 52px
+        15: "3.75rem", // 60px
       },
 
       /*
@@ -129,6 +138,11 @@ export default {
        * 圓角——原本的 3–8px 階梯整體偏「方」,新階梯把 md 直接對齊 12px,大面積
        * 容器(對話框/彈出選單)再放大一階做出層級,細小元件(徽章、kbd、勾選框
        * 用 DEFAULT/sm)維持較小圓角以免在 18–20px 高的元件上顯得過圓。
+       *
+       * 2026-09(font-size 使用者偏好):這裡刻意**不**跟 fontSize/spacing 一起
+       * 換算成 rem,維持寫死的 px——圓角是純裝飾用途(不是文字或版面留白),
+       * 不需要跟著使用者調的字級縮放;固定 px 也讓線條在任何字級檔位下都一樣
+       * 銳利,不會因為 rem 換算出現次像素的模糊圓角。
        */
       borderRadius: {
         sm: "6px",

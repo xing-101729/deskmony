@@ -71,5 +71,8 @@
   "slashCommands": {
     "menuAriaLabel": "slash command 選單",
     "noMatches": "找不到符合的 slash command"
+  },
+  "attachment": {
+    "tooLarge": "以下附件超過 {{limit}} MB,已略過:{{files}}"
   }
 }

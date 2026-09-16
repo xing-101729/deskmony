@@ -20,6 +20,7 @@
   },
   "gateway": {
     "localOnlyMethod": "This operation is only available on a local connection: {{method}}",
+    "localOnlyField": "This operation cannot supply “{{field}}” from a remote connection: {{method}}",
     "invalidRequest": "Invalid request: {{detail}}"
   },
   "budget": {

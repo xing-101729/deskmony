@@ -211,7 +211,36 @@ export class TeamManager {
     return { deletedTasks, deletedMembers: members.length, disposedSessions, tasksWithUncommittedChanges };
   }
 
+  /**
+   * 2026-09-04(稽核修補):移除成員時**先 dispose 它還在跑的 session**。
+   *
+   * 在此之前這個方法只有一行 DB delete。對照同一個檔案的 `deleteTeam()` ——
+   * 它刻意先跑一輪 dispose,註解還寫明「否則同樣變成孤兒」—— 這裡就是漏了。
+   *
+   * 漏掉的後果:對一個正在跑的成員按「移除成員」,`team_members` 的 row 立刻
+   * 消失,但 `SessionManager` 的 `memberSessions`/`sessionMembers` 兩個記憶體
+   * Map 完全不知情。底層子程序繼續跑、繼續吃資源、繼續佔著 worktree,而且從此
+   * **沒有任何正常路徑找得到它**(它不再屬於任何 team member,任務完成的清理
+   * 鉤子也觸及不到),只能重啟 core 或手動用工作管理員砍。
+   *
+   * `cascade` 未注入時**不**退化成「只刪 DB 記錄」—— 比照 `deleteTeam()` 的
+   * 既有決定:留下孤兒 agent 比明確報錯更糟。
+   */
   async removeMember(teamId: string, memberId: string): Promise<void> {
+    const cascade = this.cascade;
+    if (!cascade) {
+      throw new Error(
+        "[team-manager] removeMember 需要 TeamCascadePort 才能安全地 dispose 該成員的 session," +
+          "但它尚未注入。拒絕只刪 DB 記錄——那會留下找不回來的孤兒 agent 行程。",
+      );
+    }
+
+    // 先 dispose 再刪 DB:順序反過來的話,dispose 失敗時 row 已經沒了,
+    // 那條 session 就永遠對不回任何成員。
+    if (cascade.getSessionIdForMember(memberId)) {
+      await cascade.disposeSessionForMember(memberId);
+    }
+
     await this.db
       .delete(teamMembersTable)
       .where(and(eq(teamMembersTable.teamId, teamId), eq(teamMembersTable.id, memberId)))
@@ -249,7 +278,7 @@ export class TeamManager {
    * 的任務,只能靠 `sessions.agentProfileId`(有持久化)反查對應的 team
    * member,再查該 member 目前指派的任務(`TaskService.getActiveTaskForMember()`)。
    *
-   * **已知限制(自行判斷,已列入最終報告)**:schema 沒有強制「一個
+   * **已知限制(實作當下的自行判斷,repo 外無紀錄)**:schema 沒有強制「一個
    * agentProfileId 只能被一個 team member 引用」,這是盡力而為的啟發式推論
    * ——多筆符合時取第一筆。實務上 `TeamManagementDialog` 建立成員時一律綁定
    * 一個未被使用過的 profile,不構成問題,但這不是 schema 層級的保證。

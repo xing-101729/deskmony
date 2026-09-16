@@ -41,6 +41,12 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+
+// 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
+// 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
+// —— 見 scripts/lib/require-fresh-build.mjs 的完整說明。
+requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");

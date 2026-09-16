@@ -218,7 +218,159 @@ const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
   "config.setFile", // 一般設定(daemon/workspace/features/log,不含 policy)
   "profile.create",
   "profile.delete",
+  /**
+   * 2026-09-04(稽核修補)新增的三項——理由與上面那批「使用者沒有要求開放」
+   * 不同,這三項是**結構性繞過安全罩**的路徑,與 §G 翻案開放的那些
+   * (切 auto/YOLO、編 allowlist)有本質差別:
+   *
+   * §G 開放的是「對 agent 的工具呼叫放寬到什麼程度」——那些操作再寬,
+   * 每一次執行仍然要經過 `PolicyEngine.decide()`,仍然留在稽核紀錄裡。
+   * 下面這三項則是**完全不經過工具呼叫、也就完全不經過政策引擎**的執行路徑:
+   *
+   *   - `task.setAcceptance` / `task.runAcceptance`:驗收指令最終走
+   *     `apps/core/src/tasks/acceptance-runner.ts` 的
+   *     `spawn(command, { shell: true, env: {...process.env} })`,而
+   *     `TaskAcceptanceSchema.commands` 是不受限的 `z.array(z.string())`。
+   *     `acceptance-runner.ts` 全檔沒有任何 `checkHardDeny()`/`decide()` 呼叫。
+   *   - `settings.setProviderPrefs`:`ProviderPrefsSchema.env` 是
+   *     `z.record(z.string(), z.string())`(無 key 白名單),而這份 env 經
+   *     `getProviderEnv()` → `SessionManager.prepareSpawnProfile()` 併進
+   *     **每一個 agent 子程序**的環境變數(三個 adapter 都是
+   *     `env: { ...process.env, ...profile.env }`)。設一個 `NODE_OPTIONS`
+   *     就能在任何工具呼叫發生**之前**取得執行權。
+   *
+   * 它同時也與既有的 `config.setFile`/`profile.create` 同類:都是「改變 core
+   * 自己或子程序怎麼被啟動」的設定面操作,本來就該留在本機。
+   *
+   * ⚠️ `task.create` 刻意**不**放進這個清單——見 `findRemoteForbiddenField()`。
+   */
+  "task.setAcceptance",
+  "task.runAcceptance",
+  "settings.setProviderPrefs",
 ]);
+
+/**
+ * 2026-09-04(稽核修補):欄位層級的 local-only 閘門,補 `LOCAL_ONLY_METHODS`
+ * 的粒度不足之處。
+ *
+ * `CreateTaskInputSchema`(packages/shared/src/task.ts)的 `acceptance` 是
+ * optional 欄位,也就是說**`task.create` 本身就能挾帶驗收指令**——只擋
+ * `task.setAcceptance` 等於沒擋。但把整個 `task.create` 設成 local-only 會連
+ * 「遠端建立一則普通任務」這種完全無害、且 README 從未宣稱受限的操作一起擋掉,
+ * 超出實際風險範圍。所以這裡只擋那一個危險欄位:遠端仍可建立/指派/管理任務,
+ * 只是不能自己定義要 spawn 什麼 shell。
+ *
+ * 回傳被擋下的欄位名(用於錯誤訊息),沒有問題時回 `undefined`。
+ */
+function findRemoteForbiddenField(request: ClientRequest): string | undefined {
+  if (request.method === "task.create" && request.params.acceptance !== undefined) {
+    return "acceptance";
+  }
+  return undefined;
+}
+
+/**
+ * 2026-09-04(稽核修補):WebSocket 升級的 Origin 同源檢查 —— 防的是
+ * **CSWSH(Cross-Site WebSocket Hijacking)**。
+ *
+ * ---- 為什麼一定要有這一層 ------------------------------------------------
+ *
+ * WebSocket 升級請求**不受同源政策限制**:瀏覽器會照實附上 `Origin` header,
+ * 但除非伺服器自己驗證,任何網域的網頁都能對 `ws://127.0.0.1:<port>` 開連線。
+ * 而 `isLocal` 的唯一依據是 TCP 來源位址 —— 瀏覽器分頁連本機時,來源位址
+ * **本來就是真的 127.0.0.1**,會被正確地判定為 `isLocal: true`。
+ *
+ * 所以在未設定 `DESKMONY_AUTH_TOKEN` 的情況下(程式碼註解自己稱這是「本專案
+ * 最常見的單機模式」),使用者只要開啟任何一個惡意網頁,那個頁面的 JS 就能
+ * 以「本機、已認證」的身分接管 gateway —— 使用者除了「開啟一個網頁」以外
+ * 什麼都不必做。
+ *
+ * ---- 判斷規則 ------------------------------------------------------------
+ *
+ * 1. **沒有 `Origin` header → 放行。** 非瀏覽器 client(Electron 殼、手機
+ *    app、e2e 腳本、任何 ws 函式庫)預設不送 Origin。這些 client 仍然要過
+ *    token 認證那一關,這裡不是它們的閘門。
+ * 2. **有 `Origin` → 必須與 `Host` 同源。** 瀏覽器 UI 是由這個 server 自己
+ *    以同一個 port 服務出去的(見 `createStaticRequestHandler`),它的 Origin
+ *    必然等於 Host,所以正常使用完全不受影響 —— 不論是 `127.0.0.1:4321`
+ *    還是遠端的 `192.168.1.5:4321`,同源比對都會通過。惡意網站的 Origin 是
+ *    它自己的網域,對不上,直接在升級階段就被拒。
+ *
+ * 這是**與 token 認證獨立的第二層**:token 防的是「你是誰」,這層防的是
+ * 「這個請求是誰替你發的」。兩層都在,才不會因為單機模式沒設 token 就全裸。
+ */
+export function verifySameOrigin(
+  info: { origin?: string; req: IncomingMessage },
+  /**
+   * 是否已啟用 token 認證(`DESKMONY_AUTH_TOKEN` 有設)。只影響「不透明來源」
+   * (`null` / `file://`)這一種情況,見下方。
+   */
+  authEnabled: boolean,
+): boolean {
+  const origin = info.origin ?? info.req.headers.origin;
+  // 非瀏覽器 client:沒有 Origin 就沒有 CSWSH 的攻擊模型(那需要一個被瀏覽器
+  // 載入的頁面)。放行,交給 token 認證那一關。
+  if (!origin) return true;
+
+  const host = info.req.headers.host;
+
+  // 同源:由這個 server 自己服務出去的瀏覽器 UI(不論本機或區網位址)。
+  // 這一條在有沒有 token 的情況下都放行。
+  if (host) {
+    try {
+      if (new URL(origin).host.toLowerCase() === host.toLowerCase()) return true;
+    } catch {
+      // 不是合法 URL —— 可能是 "null" 這種不透明來源,交給下面處理。
+    }
+  }
+
+  /**
+   * ---- 本 app 自己的兩種瀏覽器來源 ---------------------------------------
+   *
+   * 這一段的存在理由很具體:**Deskmony 自己的桌面殼就不是同源的**。
+   *   - 打包後:`main.ts` 用 `loadFile()`,頁面來源是 `file://`,renderer 用
+   *     瀏覽器原生 WebSocket,送出的是 `Origin: file://` 或 `Origin: null`。
+   *   - 開發時:`loadURL(VITE_DEV_SERVER_URL)`,來源是 `http://localhost:5173`,
+   *     而 core 在另一個 port —— 同樣不同源。
+   * 第一版的檢查只比同源,會把**這個 app 自己**擋在門外(打包版與 dev 版都
+   * 連不上 core)。這種「安全措施把正常用法弄壞」的修法比不修更糟。
+   *
+   * 但也不能無條件放行:惡意網站可以用 `<iframe sandbox="allow-scripts">` 造出
+   * origin 為 `null` 的執行環境,那正是 CSWSH 要防的東西。
+   *
+   * 分界點是**有沒有啟用 token 認證**:
+   *   - 有 token:攻擊者的頁面拿不到 token,過不了下一關,放行這兩種來源是
+   *     安全的。打包後的桌面殼**一定**有 token(見 `resolveAuthToken()`,它保證
+   *     啟動 core 前必設三選一),dev 模式同樣走那條路徑。
+   *   - 沒有 token(headless 單機模式,正是最危險的情境):一律拒絕。這個模式
+   *     下本來就不會有桌面殼在連 —— 桌面殼必然帶著 token。
+   */
+  const isOpaque = origin === "null" || origin.startsWith("file://");
+  const isLoopbackOrigin = (() => {
+    try {
+      const h = new URL(origin).hostname.toLowerCase();
+      return h === "localhost" || h === "127.0.0.1" || h === "::1";
+    } catch {
+      return false;
+    }
+  })();
+
+  if (isOpaque || isLoopbackOrigin) {
+    if (authEnabled) return true;
+    console.warn(
+      `[gateway][security] 拒絕 WS 升級(CSWSH 防護):來源 "${origin}" 非同源,且未啟用認證。` +
+        "Deskmony 的桌面殼一定會設定 DESKMONY_AUTH_TOKEN;若你是以 headless 模式手動啟動 core," +
+        "請設定 DESKMONY_AUTH_TOKEN 後再從瀏覽器連線。",
+    );
+    return false;
+  }
+
+  console.warn(
+    `[gateway][security] 拒絕 WS 升級(CSWSH 防護):Origin "${origin}" 與 Host "${host ?? "(無)"}" 不同源,` +
+      "且不是本機來源。若這是預期的用法,請改用不帶 Origin 的非瀏覽器 client,或從本 server 服務的頁面連線。",
+  );
+  return false;
+}
 
 /**
  * 常數時間比較 token(M5 Round B 任務3)。
@@ -469,7 +621,11 @@ export class WsGateway {
         res.end("Not Found");
       }
     });
-    this.wss = new WebSocketServer({ server: this.httpServer });
+    const authEnabled = Boolean(this.authToken);
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      verifyClient: (info: { origin?: string; req: IncomingMessage }) => verifySameOrigin(info, authEnabled),
+    });
     this.wss.on("connection", (socket, request) => this.handleConnection(socket, request));
     this.httpServer.on("error", (err) => {
       console.error("[gateway] HTTP server error:", err);
@@ -943,6 +1099,27 @@ export class WsGateway {
       return;
     }
 
+    // 2026-09-04(稽核修補):同一道閘門的欄位層級版本,見
+    // `findRemoteForbiddenField()`。刻意放在 dispatch 之前、與上面那段同一個
+    // 位置,維持「所有授權判斷都在同一處、不散到各個 case 裡」的既有紀律。
+    if (!connState?.isLocal) {
+      const forbiddenField = findRemoteForbiddenField(parsed);
+      if (forbiddenField) {
+        console.warn(
+          `[gateway][security] 拒絕遠端連線(${connState?.remoteAddress ?? "unknown"})在 "${parsed.method}" 帶入 local-only 欄位 "${forbiddenField}"`,
+        );
+        this.send(socket, {
+          kind: "response",
+          id: parsed.id,
+          ok: false,
+          error: `此操作的「${forbiddenField}」欄位僅限本機連線提供:${parsed.method}`,
+          errorCode: ErrorCodes.GATEWAY_LOCAL_ONLY_FIELD,
+          errorParams: { method: parsed.method, field: forbiddenField },
+        });
+        return;
+      }
+    }
+
     // ---- 2026-08-25 移除(見 docs/DECISIONS.md §G):原本這裡有一道獨立於
     // LOCAL_ONLY_METHODS 的擋——`permission.resolve` 帶 rememberRule 時遠端一律
     // 拒絕,當初是 S7 自行判斷選的保守方向。使用者這輪明確翻案「遠端可編輯
@@ -1025,7 +1202,12 @@ export class WsGateway {
         // rememberRule 若帶 escalate-strong 的 requestId,SessionManager 端會
         // 強制忽略(C4 紀律③);遠端連線帶 rememberRule 已在 handleMessage()
         // 更早一步被擋下(見上方 §5.1 之後的自行判斷區塊)。
-        this.sessionManager.resolvePermission(request.params.requestId, request.params.decision, request.params.rememberRule);
+        this.sessionManager.resolvePermission(
+          request.params.sessionId,
+          request.params.requestId,
+          request.params.decision,
+          request.params.rememberRule,
+        );
         return { ok: true };
       /**
        * async-scribbling-llama.md Phase 7:回覆一筆 AskUserQuestion 的待答問題。

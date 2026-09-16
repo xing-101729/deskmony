@@ -11,6 +11,7 @@ import type { AgentEvent, AgentProfile, McpBridgeTokenGrant, McpBridgeTokenPort,
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, TeamSpawnContext, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
+import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 
 /**
@@ -179,6 +180,9 @@ export class AcpAdapter implements AgentAdapter {
       stdio: ["pipe", "pipe", "pipe"],
       shell: useShell,
     });
+    // 2026-09-04(稽核修補):登記 pid,讓 core 若非正常終止,下次啟動時能回收
+    // 這個孤兒。見 packages/adapters/src/child-registry.ts。
+    registerChild(child.pid, `acp:${command}`);
 
     // child 啟動失敗(command 找不到等)會觸發 "error" 而不是 reject 某個
     // promise;把它轉成一個會 reject 的 promise,跟 initialize/newSession
@@ -202,7 +206,16 @@ export class AcpAdapter implements AgentAdapter {
       console.error(`[acp-adapter] ${profile.name} stderr: ${chunk.toString().trimEnd()}`);
     });
 
-    const outputQueue = new AsyncQueue<AgentEvent>();
+    const outputQueue = new AsyncQueue<AgentEvent>({
+      // 2026-09-04(稽核修補):緩衝溢位不靜默丟資料,至少讓它在 log 裡看得見。
+      // 見 packages/adapters/src/async-queue.ts 的 DEFAULT_MAX_BUFFERED 註解。
+      onOverflow: (dropped) =>
+        console.error(
+          `[acp] 事件緩衝溢位,已丟棄最舊的 ${dropped} 筆事件 —— 代表這條 session 的產出速度` +
+            "遠超過下游消費速度(失控迴圈?超大 tool_result?)。丟舊留新是刻意的:" +
+            "否則 completed 事件永遠進不來,session 會卡在 busy。",
+        ),
+    });
     const pendingPermissions = new Map<string, PendingPermission>();
 
     const stream = acp.ndJsonStream(
@@ -430,6 +443,8 @@ export class AcpAdapter implements AgentAdapter {
     // 這裡等子程序真正 exit(上限 3 秒;逾時就放棄等待,讓呼叫端既有的重試機制
     // 接手,絕不因為等不到而卡住 dispose)。
     await waitForChildExit(internal.child, 3_000);
+    // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
+    unregisterChild(internal.child.pid);
     this.sessions.delete(handle.id);
   }
 

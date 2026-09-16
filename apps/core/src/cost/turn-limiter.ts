@@ -57,8 +57,30 @@ export class TurnLimiter {
     this.sessionControl = port;
   }
 
-  /** 回合開始:`SessionManager.sendPrompt()` 呼叫。 */
+  /**
+   * 回合開始:`SessionManager.sendPrompt()` 呼叫。
+   *
+   * 2026-09-04(稽核修補):**若同一個 session 已經有一回合在跑,不覆寫。**
+   *
+   * 原本是無條件 `this.turns.set(...)`,等於把 `toolCalls` 歸零、`tripped`
+   * 清掉。這在單一 prompt 的正常流程下沒問題(前一回合必然已 `endTurn()`),
+   * 但只要有第二個 prompt 在回合中途插進來 —— 使用者連點兩次送出、訊息注入
+   * 撞上手動輸入、checkpoint 的補寫筆記 prompt 撞上使用者輸入 —— 一個已經
+   * 逼近 200 次工具呼叫、甚至**已經 tripped** 的失控回合,就會重新拿到滿額度
+   * 繼續跑。
+   *
+   * 這件事的嚴重度來自 `TurnLimiter` 的定位:對「Claude Code 經 ACP」這類
+   * 完全不回報 usage 的後端(見檔案頂端註解),CostGovernor 的 token/金額熔斷
+   * 全部空轉,**這是唯一還在運作的成本斷路器**。讓它可以被一次併發 prompt
+   * 重置,等於那條線在最需要的時候消失。
+   *
+   * 保留既有回合(而不是拒絕第二個 prompt)是刻意的:`TurnLimiter` 的職責是
+   * 量測與熔斷,不是決定 prompt 能不能送。第二個 prompt 該不該被擋是
+   * `SessionManager.sendPrompt()` 的事(那裡另外補了 per-session 鎖);
+   * 這裡只確保「計時與計數從第一次開始算,不會被歸零」。
+   */
   startTurn(sessionId: string): void {
+    if (this.turns.has(sessionId)) return;
     this.turns.set(sessionId, { startedAt: Date.now(), toolCalls: 0, tripped: false });
   }
 

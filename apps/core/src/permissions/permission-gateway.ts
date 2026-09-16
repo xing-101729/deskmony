@@ -39,6 +39,23 @@ export interface ResolvedPendingPermission {
   strong: boolean;
 }
 
+/**
+ * 2026-09-04(稽核修補):`pending` 的 key。
+ *
+ * 過去是裸的 `requestId`,而 `requestId` **只保證在同一個 session 內唯一**
+ * ——這件事在 `apps/core/src/enforcement/notifier.ts` 的註解裡有實測紀錄
+ * (「兩個不同 session 的第一筆權限請求都拿到同一個 requestId」),它一直是用
+ * 同樣的組合鍵去重的。這個檔案原本的註解卻寫著「同一個 requestId 重複註冊
+ * (理論上不該發生)」——同一份 codebase 裡一邊有實測證據、一邊假設它不成立。
+ *
+ * 刻意用與 notifier 相同的 `::` 分隔格式,讓兩處一眼看得出是同一個概念。
+ * sessionId/requestId 都不含 `::`(前者是 randomUUID,後者是 adapter 的
+ * 數字或 UUID 編號),不會有分隔歧義。
+ */
+function pendingKey(sessionId: string, requestId: string): string {
+  return `${sessionId}::${requestId}`;
+}
+
 export class PermissionGateway {
   private pending = new Map<string, PendingPermission>();
 
@@ -59,38 +76,41 @@ export class PermissionGateway {
     timeoutMs: number | null,
     onTimeout: (sessionId: string, requestId: string) => void,
   ): void {
-    // 若同一個 requestId 重複註冊(理論上不該發生),先清掉舊的計時器。
-    this.clearTimer(requestId);
+    const key = pendingKey(sessionId, requestId);
+    // 若同一個 (sessionId, requestId) 重複註冊(同一 session 內 requestId 不會
+    // 重複,所以這才真的是「理論上不該發生」),先清掉舊的計時器。
+    this.clearTimer(key);
 
     if (timeoutMs === null) {
-      this.pending.set(requestId, { sessionId, strong });
+      this.pending.set(key, { sessionId, strong });
       return;
     }
 
     const timer = setTimeout(() => {
-      this.pending.delete(requestId);
+      this.pending.delete(key);
       onTimeout(sessionId, requestId);
     }, timeoutMs);
     // Node 環境下避免計時器阻擋進程結束。
     timer.unref?.();
 
-    this.pending.set(requestId, { sessionId, strong, timer });
+    this.pending.set(key, { sessionId, strong, timer });
   }
 
   /**
    * 標記一筆請求已被回覆(不論是 UI 回覆或逾時自動拒絕),回傳其所屬
    * sessionId + 當初是否為 escalate-strong(見 `ResolvedPendingPermission`)。
    */
-  resolve(requestId: string): ResolvedPendingPermission | undefined {
-    const entry = this.pending.get(requestId);
+  resolve(sessionId: string, requestId: string): ResolvedPendingPermission | undefined {
+    const key = pendingKey(sessionId, requestId);
+    const entry = this.pending.get(key);
     if (!entry) return undefined;
-    this.clearTimer(requestId);
-    this.pending.delete(requestId);
+    this.clearTimer(key);
+    this.pending.delete(key);
     return { sessionId: entry.sessionId, strong: entry.strong };
   }
 
-  private clearTimer(requestId: string): void {
-    const entry = this.pending.get(requestId);
+  private clearTimer(key: string): void {
+    const entry = this.pending.get(key);
     if (entry?.timer) clearTimeout(entry.timer);
   }
 }

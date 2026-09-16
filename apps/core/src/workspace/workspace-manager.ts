@@ -142,7 +142,7 @@ export class WorkspaceManager {
   /**
    * S6 新增:「重跑」前顯示 diff 用(crash-recovery_detail.md §5.2「先顯示
    * diff(既有 diff 檢視能力)」——查證後這個能力**其實不存在**,desktop UI
-   * 目前完全沒有任何 diff 檢視元件,這裡是新增的最小實作,見最終報告的
+   * 目前完全沒有任何 diff 檢視元件,這裡是新增的最小實作,見上方說明
    * L4 落差說明)。回傳 `git status --porcelain` 與 `git diff`(只涵蓋已追蹤
    * 檔案的修改;新增的未追蹤檔案只會出現在 status,不會出現在 diff 內容裡
    * ——這是 `git diff` 本身的行為,不特別用 `--no-index`/`add -N` 模擬,保持

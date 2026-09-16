@@ -6,6 +6,7 @@ import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
+import { registerChild, unregisterChild } from "./child-registry.js";
 
 /**
  * GenericPtyAdapter — ARCHITECTURE.md 3.4 節「保底方案,無結構化事件,功能
@@ -100,7 +101,16 @@ export class GenericPtyAdapter implements AgentAdapter {
       );
     }
 
-    const outputQueue = new AsyncQueue<AgentEvent>();
+    const outputQueue = new AsyncQueue<AgentEvent>({
+      // 2026-09-04(稽核修補):緩衝溢位不靜默丟資料,至少讓它在 log 裡看得見。
+      // 見 packages/adapters/src/async-queue.ts 的 DEFAULT_MAX_BUFFERED 註解。
+      onOverflow: (dropped) =>
+        console.error(
+          `[pty] 事件緩衝溢位,已丟棄最舊的 ${dropped} 筆事件 —— 代表這條 session 的產出速度` +
+            "遠超過下游消費速度(失控迴圈?超大 tool_result?)。丟舊留新是刻意的:" +
+            "否則 completed 事件永遠進不來,session 會卡在 busy。",
+        ),
+    });
 
     let ptyProcess: IPty;
     try {
@@ -113,6 +123,8 @@ export class GenericPtyAdapter implements AgentAdapter {
         rows: ptyConfig.rows ?? 24,
         name: "xterm-color",
       });
+      // 2026-09-04(稽核修補):見 child-registry.ts。
+      registerChild(ptyProcess.pid, `pty:${ptyConfig.command}`);
     } catch (err) {
       throw new DeskmonyError(
         "adapterProcess.spawnFailed",
@@ -207,7 +219,38 @@ export class GenericPtyAdapter implements AgentAdapter {
     if (!internal) return;
     internal.outputQueue.close();
     this.killProcessTree(internal);
+    /**
+     * 2026-09-04(稽核修補):等 pty 子程序真正結束才回報 dispose 完成 ——
+     * 理由與 `opencode-adapter.ts` 的同一步完全相同(送出終止指令 ≠ 行程已死,
+     * Windows 上會讓緊接著的 `git worktree remove` 撞 EBUSY)。
+     *
+     * 這裡不能用 `child-process.ts` 的 `waitForChildExit()`:那支吃的是
+     * `ChildProcess`,而 node-pty 給的是 `IPty`(沒有 `exitCode`/`once("exit")`,
+     * 只有 `onExit`)。改成等這個檔案自己維護的 `internal.exited` 旗標 ——
+     * 它已經在 `onExit` 回呼裡被設起來了(見 spawn() 內),不需要新增狀態。
+     */
+    await this.waitForPtyExit(internal, 3_000);
+    // 2026-09-04(稽核修補):同上。
+    unregisterChild(internal.ptyProcess.pid);
     this.sessions.delete(handle.id);
+  }
+
+  /** 見 `dispose()`:`IPty` 版的 `waitForChildExit()`。逾時放棄等待且不丟錯
+   *  (fail-safe 方向,與 `child-process.ts` 的同名函式一致)。 */
+  private waitForPtyExit(internal: InternalSession, timeoutMs: number): Promise<void> {
+    if (internal.exited) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      const tick = (): void => {
+        if (internal.exited || Date.now() >= deadline) {
+          resolve();
+          return;
+        }
+        const timer = setTimeout(tick, 50);
+        timer.unref?.();
+      };
+      tick();
+    });
   }
 
   resolvePermission(): void {

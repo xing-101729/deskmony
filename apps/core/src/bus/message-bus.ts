@@ -73,7 +73,7 @@ import { enforcementTrip } from "../enforcement/trip.js";
  * `reportStatus()`/`sendHumanMessage()` 產生的訊息**不參與**這兩道閘——
  * `contextId` 固定填哨兵值 `"legacy"`(比照遷移前舊資料的語意,見
  * packages/db/src/schema.ts 的 `teamMessages` 註解),理由見 L4 §4「trip 後
- * 只斷訊息,不斷工作」與檔案最終報告的「自行判斷」章節。
+ * 只斷訊息,不斷工作」。其餘實作當下的自行判斷散見於各方法註解,repo 外沒有另一份文件。
  *
  * ---- S2:Mailbox 改由 DB 驅動(L4 §5)----
  * 舊版用 `Map<memberId, TeamMessage[]>` 當 Mailbox 的權威來源,崩潰後這個
@@ -554,7 +554,7 @@ export class MessageBus extends EventEmitter implements TeamBusPort {
    * L4 §2:`request_review(taskId, to)` 天然帶 context(= 該 taskId),但仍須
    * 驗證該 taskId 確實指派給發送者,否則拒收。不帶 `taskId` 時退回與
    * `sendMessage` 相同的一般規則(`deriveContextId()`)——這是 L4 文字沒有
-   * 明講、這輪保守決定的行為(見最終報告「自行判斷」章節):`taskId` 本來就是
+   * 明講、這輪保守決定的行為(這是實作當下的自行判斷,repo 外沒有留下任何紀錄——理由就寫在這裡,不必去找別的文件):`taskId` 本來就是
    * `request_review` 的選填參數,沒有理由讓「沒帶 taskId」的呼叫繞過整套
    * contextId 推導與預算閘。
    */

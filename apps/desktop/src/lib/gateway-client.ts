@@ -54,6 +54,10 @@ export class GatewayClient {
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private pushListeners = new Set<(push: ServerPush) => void>();
   private statusListeners = new Set<(status: ConnectionStatus) => void>();
+  /** 見 `onReconnected()`。 */
+  private reconnectedListeners = new Set<() => void>();
+  /** 曾經成功連上過 —— 用來區分「第一次連上」與「重新連上」。 */
+  private hasConnectedBefore = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByUser = false;
 
@@ -123,6 +127,28 @@ export class GatewayClient {
     return () => this.pushListeners.delete(listener);
   }
 
+  /**
+   * 2026-09-04(稽核修補):**重新連上**時通知(第一次連上不觸發)。
+   *
+   * 在此之前,`scheduleReconnect()` 只是 2 秒後再 `connect()` 一次,而四個
+   * store 都只在啟動時 `init()` 一次、只訂閱一次 push —— 狀態變回 `"open"`
+   * 時沒有任何程式碼重新拉取資料。斷線期間 core 推播的每一個
+   * `session-event`/`session-updated`/`team-message`/`task-updated` 都是
+   * **確定性遺失**,而 UI 上只是頂部提示條消失、看起來一切正常。
+   *
+   * 這在手機/瀏覽器遠端連線(本產品明確支援、也最容易斷線的情境)下特別要命:
+   * Wi-Fi 抖一下、筆電睡眠喚醒,背景 agent 那段時間產生的輸出就再也不會出現,
+   * 除非使用者剛好手動切走再切回那個 session。
+   *
+   * 刻意與 `onStatus` 分開:大多數訂閱者只想知道「現在通不通」(拿來顯示提示
+   * 條),只有需要補資料的才關心「這是一次**重新**連上」。第一次連上不觸發,
+   * 因為那條路徑本來就會走完整的初始載入。
+   */
+  onReconnected(listener: () => void): () => void {
+    this.reconnectedListeners.add(listener);
+    return () => this.reconnectedListeners.delete(listener);
+  }
+
   onStatus(listener: (status: ConnectionStatus) => void): () => void {
     this.statusListeners.add(listener);
     return () => this.statusListeners.delete(listener);
@@ -162,11 +188,28 @@ export class GatewayClient {
 
   private markReady(): void {
     this.ready = true;
+    const isReconnect = this.hasConnectedBefore;
+    this.hasConnectedBefore = true;
     this.emitStatus("open");
     const queue = this.sendQueue;
     this.sendQueue = [];
     for (const { method, params, resolve, reject } of queue) {
       this.sendNow(method, params).then(resolve, reject);
+    }
+    /**
+     * 2026-09-04(稽核修補):見 `onReconnected()`。
+     *
+     * 刻意排在 `sendQueue` 送完之後 —— 斷線期間排隊的呼叫先出去,再補資料,
+     * 順序才與「連線一直沒斷」的情況一致。
+     */
+    if (isReconnect) {
+      for (const listener of this.reconnectedListeners) {
+        try {
+          listener();
+        } catch (err) {
+          console.error("[gateway] onReconnected listener 拋錯(不影響其他 listener):", err);
+        }
+      }
     }
   }
 

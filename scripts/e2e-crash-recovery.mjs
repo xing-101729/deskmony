@@ -38,6 +38,12 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
+import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+
+// 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
+// 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
+// —— 見 scripts/lib/require-fresh-build.mjs 的完整說明。
+requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -45,7 +51,7 @@ const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const GRACEFUL_BOOTSTRAP = path.join(REPO_ROOT, "scripts", "e2e-crash-recovery-graceful-bootstrap.mjs");
 // better-sqlite3 不是這個 script 所在目錄的直接依賴,借用 apps/core 已安裝好的
-// 那一份(見最終報告「自行判斷」清單)——只用來做測試專用的「插入既有 error/
+// 那一份(實作當下的自行判斷,repo 外無紀錄)——只用來做測試專用的「插入既有 error/
 // closed 紀錄」與偶爾的直接查詢,production 程式碼完全不受影響。
 const BETTER_SQLITE3_PATH = path.join(REPO_ROOT, "apps", "core", "node_modules", "better-sqlite3", "lib", "index.js");
 
@@ -754,7 +760,7 @@ async function testDirtyWorktreeRerun() {
     const statusAfterKeep = runGitSync(["status", "--porcelain"], worktreePath);
     const cleanAfterKeep = statusAfterKeep.stdout.trim().length === 0;
     const branchList = runGitSync(["branch", "--list", keepResult.wipBranch], worktreePath);
-    const wipBranchExists = branchList.stdout.includes(keepResult.wipBranch ?? " ");
+    const wipBranchExists = branchList.stdout.includes(keepResult.wipBranch ?? "");
     const currentBranch = runGitSync(["rev-parse", "--abbrev-ref", "HEAD"], worktreePath);
     const switchedBackToTaskBranch = currentBranch.stdout.trim() === taskBranch;
 

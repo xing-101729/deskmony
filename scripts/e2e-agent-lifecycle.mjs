@@ -41,6 +41,12 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { USAGE_UPDATE_PREFIX } from "./fake-acp-agent.mjs";
+import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+
+// 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
+// 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
+// —— 見 scripts/lib/require-fresh-build.mjs 的完整說明。
+requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -759,7 +765,15 @@ async function testContextCheckpointRestart() {
     // 重新 spawn(沿用同一個 sessionId)→ system 訊息 → 送出摘要 → 完成。
     const checkpointHappened = await waitUntil(async () => {
       const { messages } = await client.rpc("session.history", { sessionId: originalSessionId });
-      const systemMsg = messages.find((m) => m.role === "system" && m.content.includes("[S8] context 使用率已達閾值"));
+      // 2026-09-04(稽核修補):原本比對的是舊的純文字訊息「[S8] context 使用率
+      // 已達閾值…」,但 i18n 專案之後 core 改存結構化事件(見 session-manager.ts
+      // 的 performContextCheckpointRestart():JSON.stringify({ event:
+      // "session.contextCheckpointRestarted" })),那串純文字現在只存在於
+      // locales/zh-Hant/systemEvents.json 的**翻譯值**裡,DB 從此不再有它。
+      // 斷言沒跟著改,於是這條測試從那時起就一直逾時失敗(已對照未修改的
+      // baseline 確認是既有失敗,不是這輪改動造成的)。改比對 event 名稱
+      // ——那才是跨語言穩定的契約。
+      const systemMsg = messages.find((m) => m.role === "system" && m.content.includes("session.contextCheckpointRestarted"));
       return systemMsg ? messages : undefined;
     }, { timeoutMs: 25_000 }).catch(() => undefined);
 
@@ -776,7 +790,7 @@ async function testContextCheckpointRestart() {
       const notePromptMsgs = checkpointHappened.filter(
         (m) => m.role === "user" && m.content.startsWith("你的 context 即將用盡"),
       );
-      const systemMsgs = checkpointHappened.filter((m) => m.role === "system" && m.content.includes("[S8] context 使用率已達閾值"));
+      const systemMsgs = checkpointHappened.filter((m) => m.role === "system" && m.content.includes("session.contextCheckpointRestarted"));
       const onlyTriggeredOnce = notePromptMsgs.length === 1 && systemMsgs.length === 1;
 
       // 沿用同一個 DB session id(不是 RecoveryService.takeover() 那種開新 session)。

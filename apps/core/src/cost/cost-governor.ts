@@ -26,7 +26,7 @@ import { enforcementTrip, type SessionControlPort } from "../enforcement/trip.js
  *   - **每日 kill-switch** → **全部 session `interrupt()`**——最高等級訊號,
  *     寧可留半完成也要止血。
  *
- * ---- 已知限制(誠實揭露,見最終報告)----
+ * ---- 已知限制(誠實揭露)----
  * HLD §3.1 定案的「mid-turn 成本熔斷」(回合中途收到 usage 就立即 interrupt,
  * 與「任務預算(回合邊界發現)」用不同的 halt 粒度)這一輪**沒有**做成一條
  * 獨立於「任務預算」的判斷路徑——理由:mid-turn 熔斷的前提是 adapter 會在
