@@ -38,14 +38,32 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # Build 必須排在 Typecheck 前面。workspace 套件之間是用 package `exports`
-      # 互相解析的(`@deskmony/shared` → `./dist/index.d.ts`,見各套件的
-      # package.json),`dist/` 又在 .gitignore 裡,而且沒有任何套件有 `prepare`
-      # 腳本會在 install 時順手建置 —— 所以全新 checkout 上 `packages/*/dist`
-      # 根本不存在。`typecheck`(`tsc --noEmit`)不產出檔案,先跑它等於要 tsc
-      # 去解析一批還沒被編譯出來的 .d.ts,必定失敗;`build`(`tsc -p`)會真的
-      # 產出 dist,跑完之後 typecheck 才有東西可以解析。本機不會踩到是因為
-      # dist 早就留在工作目錄裡了。
+      # ⚠️ Build 必須排在 Typecheck **之前**,不要「順手」調回直覺的順序。
+      #
+      # 2026-09-09 查證:在此之前這兩步是反過來的,而這個 workflow 從加入到
+      # 那天為止**一次都沒執行過**(`gh run list` 回空陣列 —— 觸發條件是
+      # push 到 master 或開 PR,而帶著它的分支兩者都沒發生),所以沒有人發現
+      # 它第一次跑就會在第一步掛掉。
+      #
+      # 原因:各 package 的 `typecheck` 是 `tsc -p tsconfig.json --noEmit`,
+      # **不帶 `--build`**,不會去編譯它依賴的 workspace package。workspace
+      # 套件之間是用 package `exports` 互相解析的(`@deskmony/shared` →
+      # `./dist/index.d.ts`,見各套件的 package.json),`dist/` 又在 .gitignore
+      # 裡,而且沒有任何套件有 `prepare` 腳本會在 install 時順手建置 —— 所以
+      # CI 全新 checkout 上的 `packages/*/dist` 根本不存在。本機不會踩到,是因為
+      # dist 早就留在工作目錄裡了。實測(把 packages/shared/dist 暫時移走模擬
+      # 全新 checkout):
+      #     packages/adapters : error TS2307: Cannot find module '@deskmony/shared'
+      #     apps/core         : error TS2339: Property 'name' does not exist ...
+      #
+      # `pnpm build` 走的是 `pnpm -r run build`,依相依關係拓樸排序,會先把
+      # `packages/*` 編出 `dist/` 再輪到 `apps/*`,所以它自己在全新 checkout
+      # 上是跑得起來的。Build 先跑完之後,Typecheck 才有 `.d.ts` 可解析。
+      #
+      # 那 Build 之後還留著 Typecheck 有什麼用?`pnpm build` 只跑各 package 的
+      # `build` script,而 `apps/desktop` 的 `tsconfig.json` 是 noEmit 專用的
+      # (renderer 那份型別檢查不產生輸出,vite 才負責打包),只有 `typecheck`
+      # 這一步會檢查它 —— 兩步不是重複的。
       - name: Build
         run: pnpm build
 
@@ -57,6 +75,56 @@ jobs:
         # 有一組刻意標記為「已知 flake」的 model-behavior 斷言。詳見
         # scripts/run-e2e.mjs 頂端說明。要跑的話:pnpm test:e2e:live
         run: pnpm test:e2e
+
+  linux-cli:
+    # 2026-09-09(CLI,見 docs/LAYER-3-hld/cli_hld.md §9/§12):Deskmony 至今是
+    # Windows 專屬產品,但 core 與 CLI 都是純 Node/TypeScript。這個 job 的存在
+    # 就是把「Linux 也能用」從一句話變成每次 PR 都會被驗證的事實 —— 沒有它,
+    # README 寫的 Linux 支援跟 2026-09-03 稽核抓到的「宣稱有測試把關但沒有」
+    # 是同一種東西。
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # CLI 完全不碰 Electron(它只是 apps/desktop 的 devDependency),在這個
+      # job 裡下載那 ~100MB 的 binary 純屬浪費。
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # 只建 CLI 與它的相依(`...` 後綴會把相依一起帶上),不建 apps/desktop
+      # —— 那需要 vite/electron 工具鏈,而這個 job 要證明的事情跟桌面殼無關。
+      - name: Build(只建 CLI 與其相依)
+        run: pnpm --filter "@deskmony/cli..." build
+
+      # **刻意只跑 e2e-cli.mjs,不跑 `pnpm test:e2e` 的其餘九支。**
+      # 那九支在 Linux 上會不會過,是一個還沒有人回答過的問題(它們大量依賴
+      # Windows 專屬的程序樹回收行為,見上面 check job 的註解)。把它們一起
+      # 拉上來,只會得到一個因為不相干原因變紅的 job —— 而一個會無故變紅的
+      # CI,很快就會被所有人忽略。這裡的理由與 run-e2e.mjs 排除
+      # e2e-gateway.mjs 完全相同。
+      #
+      # 這個 job 證明的範圍要說清楚:core + CLI 這條路徑在 Linux 上跑得起來
+      # (用假後端 fake-acp-agent,不需要任何憑證)。它**不**證明各 adapter
+      # 對真實後端(Claude Code / Codex / OpenCode)在 Linux 上的行為。
+      #
+      # **`e2e-cli-tui.mjs` 也刻意不在這裡跑,是延後不是漏掉。** 它是整套
+      # 測試裡唯一需要真的偽終端的一支(Windows 走 ConPTY、Linux 走 Unix
+      # pty,兩者行為不完全一致),環境敏感度最高。這個 job 的存在目的是
+      # 「證明 CLI 這條路徑在 Linux 上通」,把最容易 flaky 的東西塞進來只會
+      # 讓它變成沒人相信的紅燈——理由與上面 check job 排除 e2e-gateway.mjs
+      # 完全相同。TUI 在 Linux 上的驗證留給之後專門處理。
+      - name: e2e(只跑 CLI 這一套)
+        run: node scripts/e2e-cli.mjs
 
   audit:
     # 與 check 分開、且刻意**不**擋合併(continue-on-error)—— 相依套件的新
