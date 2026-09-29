@@ -12,6 +12,7 @@ import type { GlobalOptions } from "../args.js";
 import { CliExitError, closeGateway, connectGateway } from "../connect.js";
 import {
   createStdoutTracker,
+  createToolCallLineTracker,
   formatEventNdjson,
   paint,
   renderAgentEventPretty,
@@ -151,6 +152,14 @@ export async function chatCommand(options: GlobalOptions): Promise<void> {
   });
 
   const tracker = createStdoutTracker();
+  /**
+   * 同一個 toolCallId 只印一行(見 render.ts 的 createToolCallLineTracker())。
+   * 一個 tracker 對一個 session:`/new` 換 session 時一併換掉(見
+   * handleSlashCommand() 的 "/new")——不是因為兩個 session 的 toolCallId 會
+   * 撞號(那是後端各自產生的 id,實務上不會),而是因為「一個 session 一份」
+   * 才是這個狀態真正的範圍,靠 id 夠亂來省掉重置是在賭別人的實作細節。
+   */
+  let toolCalls = createToolCallLineTracker();
   const doubleCtrlC = createDoubleCtrlCGuard();
   let exiting = false;
 
@@ -245,7 +254,7 @@ export async function chatCommand(options: GlobalOptions): Promise<void> {
           if (options.json) {
             process.stdout.write(`${formatEventNdjson(envelope)}\n`);
           } else {
-            const text = renderAgentEventPretty(event, { color: options.color, verbose: options.verbose });
+            const text = renderAgentEventPretty(event, { color: options.color, verbose: options.verbose, toolCalls });
             if (text !== undefined) tracker.write(text);
           }
 
@@ -332,6 +341,7 @@ export async function chatCommand(options: GlobalOptions): Promise<void> {
       case "/new": {
         try {
           currentSession = await createNewSession(client, options);
+          toolCalls = createToolCallLineTracker(); // 見上方宣告處:一個 session 一份。
           process.stdout.write(`已建立新 session:${currentSession.id}\n`);
         } catch (err) {
           process.stdout.write(`建立新 session 失敗:${describeError(err)}\n`);
