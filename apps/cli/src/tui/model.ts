@@ -2,6 +2,7 @@ import type { AgentEvent, MessageRecord, PolicyRule, Session, SessionEventEnvelo
 import {
   buildNarrowestRememberRule,
   createToolCallLineTracker,
+  resolveToolResultName,
   summarizeToolCallOneLine,
   type ToolCallLineTracker,
 } from "../render.js";
@@ -389,10 +390,13 @@ export function applySessionEvent(model: TuiModel, envelope: SessionEventEnvelop
     case "tool-result": {
       // 補印那些「宣告過但一直沒拿到 input」的工具(見同一份註解的規則 2)。
       // 排在錯誤行之前,順序才是「先呼叫、後結果」。
-      const missed = view.toolCalls.onResult(event);
-      if (missed) pushLine(view, { kind: "tool", text: summarizeToolCallOneLine(missed.toolName, missed.input) });
+      const { catchUpLine, announcedToolName } = view.toolCalls.onResult(event);
+      if (catchUpLine) pushLine(view, { kind: "tool", text: summarizeToolCallOneLine(catchUpLine.toolName, catchUpLine.input) });
       if (event.isError) {
-        pushLine(view, { kind: "tool-error", text: `${event.toolName} 執行失敗` });
+        // 規則 4(見 render.ts 的 `resolveToolResultName()`):`event.toolName`
+        // 對 Claude session 一律是空字串,直接用會變成開頭少一個主詞的
+        // 「 執行失敗」。
+        pushLine(view, { kind: "tool-error", text: `${resolveToolResultName(event.toolName, announcedToolName)} 執行失敗` });
       }
       break;
     }

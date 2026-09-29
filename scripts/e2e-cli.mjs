@@ -58,6 +58,10 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  EMPTY_RESULT_TOOL_NAME_PREFIX,
+  FAILING_NO_INPUT_TOOL_TITLE,
+  FAILING_TOOL_COMMAND,
+  FAILING_UPSERT_TOOL_TITLE,
   NO_INPUT_TOOL_TITLE,
   UPSERT_TOOL_CALLS_PREFIX,
   UPSERT_TOOL_COMMAND,
@@ -503,11 +507,52 @@ async function testMainCoreCases() {
         `光禿禿的 ${UPSERT_TOOL_TITLE}=${bareUpsertHits}(需為 0), 實際行=${JSON.stringify(upsertLines)}`,
     );
 
+    // ---- 案例 12:工具失敗那一行要有工具名稱 -------------------------------
+    // 2026-09-29 的第二個顯示 bug,與案例 11 同源但是不同的一條規則:
+    // `tool-result` 事件的 `toolName` 對 Claude session **一律是空字串**
+    // (packages/adapters/src/claude-sdk-adapter.ts 組這個事件時寫死
+    // `toolName: ""`,真正的名字只有 `tool-call` 事件帶),CLI 卻直接拿它組
+    // 「<工具名稱> 執行失敗」,於是每個失敗都印成開頭少一個主詞的
+    // 「  !  執行失敗:...」。修正是「空字串就退回 tracker 在 tool-call 記下的
+    // 名字」,見 apps/cli/src/render.ts 的 resolveToolResultName()。
+    //
+    // 兩個工具刻意走 tracker 的**兩條不同分支**:FailingUpsertTool 的呼叫行在
+    // tool-call 就印過了(不需要補印,名字只能由「印過的 id 也回報名字」這個
+    // 這次新增的行為來),FailingNoInputTool 的呼叫行是到 tool-result 才補印的
+    // (補印行與錯誤行都要有名字)。
+    //
+    // 斷言刻意是「錯誤行以 `  ! <工具名稱> 執行失敗` 開頭」的**完整前綴**,不是
+    // 「整段 stdout 有沒有出現工具名稱」——後者在 bug 還在時照樣會通過(`-> `
+    // 那一行本來就有名字),根本沒驗到錯誤行本身。`--no-color` 是為了讓這個
+    // 前綴比對不必處理 SGR 碼(子程序的 stdout 是 pipe、照理不會上色,但那是
+    // args.ts resolveColor() 的實作細節,不該是這個斷言的隱性前提)。
+    const failResult = runCli([...commonArgs, "--no-color", "run", EMPTY_RESULT_TOOL_NAME_PREFIX], { timeoutMs: 30_000 });
+    const failLines = failResult.stdout.replace(/\r/g, "").split("\n");
+    const failErrorLines = failLines.filter((l) => l.startsWith("  ! "));
+    const upsertErrOk = failErrorLines.some((l) => l.startsWith(`  ! ${FAILING_UPSERT_TOOL_TITLE} 執行失敗`));
+    const noInputErrOk = failErrorLines.some((l) => l.startsWith(`  ! ${FAILING_NO_INPUT_TOOL_TITLE} 執行失敗`));
+    // 補印那一行(規則 2 的路徑)也要有名字——它跟錯誤行是兩個不同的呼叫點。
+    const noInputCallOk = failLines.includes(`  -> ${FAILING_NO_INPUT_TOOL_TITLE}`);
+    // 而 FailingUpsertTool 的呼叫行必須是**帶參數的那一行**——那才證明它走的是
+    // tracker 的「已經印過」分支(錯誤行的名字只能由這次新增的「印過的 id 也
+    // 回報名字」來),而不是誤打誤撞也走到補印分支、被上面那條斷言涵蓋掉。
+    const upsertCallOk = failLines.includes(`  -> ${FAILING_UPSERT_TOOL_TITLE} ${FAILING_TOOL_COMMAND}`);
+    record(
+      "案例 12(tool-result 的 toolName 是空字串 → 失敗那一行退回 tool-call 宣告的工具名稱,不印成「  !  執行失敗」)",
+      failResult.status === 0 && failErrorLines.length === 2 && upsertErrOk && noInputErrOk && noInputCallOk && upsertCallOk,
+      `status=${failResult.status}, "  ! " 開頭的行數=${failErrorLines.length}(需為 2), ` +
+        `${FAILING_UPSERT_TOOL_TITLE} 的錯誤行=${upsertErrOk}(需為 true), ` +
+        `${FAILING_NO_INPUT_TOOL_TITLE} 的錯誤行=${noInputErrOk}(需為 true), ` +
+        `${FAILING_NO_INPUT_TOOL_TITLE} 的補印呼叫行=${noInputCallOk}(需為 true), ` +
+        `${FAILING_UPSERT_TOOL_TITLE} 帶參數的呼叫行=${upsertCallOk}(需為 true), ` +
+        `實際的錯誤行=${JSON.stringify(failErrorLines)}`,
+    );
+
     gwClient.close();
     await killProcessTreeHard(core);
     core = null;
   } catch (err) {
-    record("案例 5/6/7/8/9/10/11(共用主 core)執行過程發生未預期錯誤", false, String(err));
+    record("案例 5/6/7/8/9/10/11/12(共用主 core)執行過程發生未預期錯誤", false, String(err));
   } finally {
     gwClient?.close();
     if (core) await killProcessTreeHard(core);

@@ -223,6 +223,12 @@ export function createStdoutTracker(): { write: (text: string) => void; ensureNe
  *      是空字串(只有 `tool-call` 才帶真正的工具名稱,見 session-store.ts 對
  *      這件事的註解)。沒見過對應 `tool-call` 的 result(例如 CLI 在回合中途
  *      才連上)因此不補印——硬印只會得到一行空白的箭頭。
+ *   4. 規則 3 的那個空字串不只影響補印,也影響**工具失敗那一行**:CLI/TUI 過去
+ *      直接拿 `event.toolName` 組「<工具名稱> 執行失敗」,對 Claude session 一律
+ *      渲染成開頭就少一個主詞的「  !  執行失敗:...」。所以 `onResult()` 除了
+ *      「要不要補印」之外,**一律**回報這個 id 宣告時記下的名字
+ *      (`announcedToolName`)——包含已經印過、不需要補印的那些,呼叫端拿它當
+ *      `event.toolName` 為空時的 fallback(見 `resolveToolResultName()`)。
  */
 export interface ToolCallLineTracker {
   /**
@@ -231,11 +237,29 @@ export interface ToolCallLineTracker {
    */
   onCall(event: { toolCallId: string; toolName: string; input?: unknown }): ToolCallLine | undefined;
   /**
-   * `tool-result` 事件 → 規則 2 的補印(`undefined` = 不需要補印)。呼叫端要
-   * 把補印的那一行排在自己的錯誤行(`isError`)**之前**,順序才符合「先呼叫、
-   * 後結果」。
+   * `tool-result` 事件 → 這個 id 的收尾資訊(規則 2 的補印 + 規則 4 的名字)。
+   * 刻意回傳一個「一定存在的物件」、把兩件事一次問完,而不是拆成兩個方法:
+   * 這個方法同時也是「把這個 id 從追蹤表移除」的地方(見實作),拆開就會多出
+   * 一條「誰先誰後」的隱性順序規則,而順序寫反的那一邊會安靜地拿到
+   * `undefined`——那正是這次要修掉的那種「不會爆、只是少印字」的 bug。
    */
-  onResult(event: { toolCallId: string }): ToolCallLine | undefined;
+  onResult(event: { toolCallId: string }): ToolResultInfo;
+}
+
+/** `onResult()` 的回傳——見 `ToolCallLineTracker.onResult()` 為何是一個物件。 */
+export interface ToolResultInfo {
+  /**
+   * 規則 2 的補印行。`undefined` = 不需要補印(這個 id 已經印過,或從來沒有
+   * 宣告過)。呼叫端要把它排在自己的錯誤行(`isError`)**之前**,順序才符合
+   * 「先呼叫、後結果」。
+   */
+  catchUpLine: ToolCallLine | undefined;
+  /**
+   * 規則 4:這個 id 在 `tool-call` 宣告時記下的工具名稱,**不分印過沒印過**都
+   * 給。`undefined` 只代表「這個 id 的 `tool-call` 從來沒經過這個 client」
+   * (例如 CLI 在回合中途才連上,只看得到後半段)。
+   */
+  announcedToolName: string | undefined;
 }
 
 /** 要印的內容本身——怎麼排版是呼叫端的事(CLI 加 `  -> ` 前綴與換行,TUI 塞成
@@ -290,10 +314,39 @@ export function createToolCallLineTracker(): ToolCallLineTracker {
       const entry = seen.get(event.toolCallId);
       // 一律收掉:這個 id 的生命週期到此結束,留著只會讓 Map 無止盡長大。
       seen.delete(event.toolCallId);
-      if (!entry || entry.printed) return undefined;
-      return { toolName: entry.toolName, input: undefined };
+      return {
+        // 規則 2:只有「宣告過、但從頭到尾沒印出來」的 id 才補印。
+        catchUpLine: entry !== undefined && !entry.printed ? { toolName: entry.toolName, input: undefined } : undefined,
+        // 規則 4:名字則不分印過沒印過都給——錯誤行需要它當 fallback。
+        announcedToolName: entry?.toolName,
+      };
     },
   };
+}
+
+/** 兩邊都問不到工具名稱時的佔位字串,見 `resolveToolResultName()`。 */
+export const UNKNOWN_TOOL_NAME = "(未知工具)";
+
+/**
+ * 「<工具名稱> 執行失敗」那一行要顯示的名字,CLI(render.ts)與 TUI
+ * (tui/model.ts)共用同一份——TUI 的 transcript 不經過這個檔案的字串組裝
+ * (它自己 pushLine),但「該顯示哪個名字」這條規則兩邊必須一致,不然同一個
+ * 失敗在兩個介面會長得不一樣。
+ *
+ * `tool-result` 事件自己帶的 `toolName` 對 Claude session **一律是空字串**
+ * ——packages/adapters/src/claude-sdk-adapter.ts 組 `tool-result` 時直接寫死
+ * `toolName: ""`,真正的工具名稱只有 `tool-call` 事件帶(桌面殼早就知道這件
+ * 事,見 apps/desktop/src/stores/session-store.ts 的 `upsertToolItem()`/
+ * `messageRecordsToItems()`)。所以空字串時退回 tracker 在 `tool-call` 記下
+ * 的名字(`ToolResultInfo.announcedToolName`)。
+ *
+ * 兩邊都沒有時才用佔位字串:「  !  執行失敗」這種開頭就少一個主詞的句子,比
+ * 誠實寫出「不知道是哪個工具」更難讀懂,而且看起來像是渲染壞掉。這不是假想
+ * 情境——CLI 在回合中途才連上時,`session-event` 是純直播(見 tui/model.ts 的
+ * `replayHistory()` 註解),那個 id 的 `tool-call` 已經確定性地錯過了。
+ */
+export function resolveToolResultName(eventToolName: string, announcedToolName: string | undefined): string {
+  return eventToolName || announcedToolName || UNKNOWN_TOOL_NAME;
 }
 
 // ---- --json(NDJSON) ------------------------------------------------------
@@ -349,10 +402,13 @@ export function renderAgentEventPretty(event: AgentEvent, opts: PrettyRenderOpti
       // 規則 2 的補印:這個 id 宣告過卻從來沒有拿到 input(被中斷的工具、
       // `tool_call` 沒帶 `rawInput` 的 ACP agent),到這裡才補一行「只有工具
       // 名稱」的呼叫。一定排在下面的錯誤行**之前**,順序才是「先呼叫、後結果」。
-      const missed = opts.toolCalls.onResult(event);
-      const callLine = missed !== undefined ? `  ${ARROW} ${summarizeToolCallOneLine(missed.toolName, missed.input)}\n` : "";
+      const { catchUpLine, announcedToolName } = opts.toolCalls.onResult(event);
+      const callLine =
+        catchUpLine !== undefined ? `  ${ARROW} ${summarizeToolCallOneLine(catchUpLine.toolName, catchUpLine.input)}\n` : "";
       if (!event.isError) return callLine.length > 0 ? callLine : undefined;
-      return `${callLine}  ${paint("!", "red", opts.color)} ${event.toolName} 執行失敗${
+      // 規則 4:不能直接用 `event.toolName`——Claude session 的 tool-result 一律
+      // 帶空字串,直接用會渲染成「  !  執行失敗:...」(少一個主詞)。
+      return `${callLine}  ${paint("!", "red", opts.color)} ${resolveToolResultName(event.toolName, announcedToolName)} 執行失敗${
         event.output !== undefined ? `:${truncate(safeJsonStringify(event.output), 200)}` : ""
       }\n`;
     }

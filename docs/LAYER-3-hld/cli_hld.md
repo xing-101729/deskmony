@@ -171,6 +171,28 @@ tui` 有同一條規則的自己一份(狀態掛在 per-session 的 `SessionView
 cli-tui_hld.md §9),因為 TUI 的 transcript 不經過這裡的字串組裝。迴歸測試:
 scripts/e2e-cli.mjs 案例 11、scripts/e2e-cli-tui.mjs 案例 9f–9i。
 
+⚠️ 2026-09-29 補正之二:`tool-result` 那一列的「印一行」原本直接用事件自己帶
+的 `toolName`,而那個欄位對 Claude session **一律是空字串**——
+packages/adapters/src/claude-sdk-adapter.ts 組 `tool-result` 時寫死
+`toolName: ""`,真正的工具名稱只有 `tool-call` 事件帶(桌面殼早就知道這件事,
+見 apps/desktop/src/stores/session-store.ts 的 `upsertToolItem()` /
+`messageRecordsToItems()`)。結果是每個 Claude session 的工具失敗都印成開頭少
+一個主詞的「`  !  執行失敗:…`」。正確的規則是**事件的 `toolName` 是空字串時,
+退回 `tool-call` 宣告時的名字**:
+
+- 上面那個 tracker 本來就記了每個 toolCallId 宣告時的工具名稱(補印那一行用
+  的就是它),所以 `onResult()` 改成**不分印過沒印過**都一併回報這個名字,
+  呼叫端拿它當 `event.toolName` 為空時的 fallback(`render.ts` 的
+  `resolveToolResultName()`,CLI 與 TUI 共用同一份)。
+- 兩邊都問不到名字時(這個 id 的 `tool-call` 根本沒經過這個 client——
+  `session-event` 是純直播,CLI/TUI 在回合中途才連上時就會這樣)印佔位字串
+  `(未知工具)`,不留一個沒有主詞的句子。
+- `--json` 同樣完全不受影響。
+
+迴歸測試:scripts/e2e-cli.mjs 案例 12、scripts/e2e-cli-tui.mjs 案例 9j–9k
+(9h 的期待值一併修正——它原本斷言的正是那個少了主詞的字串,是這個 bug 被
+寫進測試裡的地方)。
+
 ## 6. 權限請求在終端裡怎麼問
 
 這是 CLI 最需要做對的一段。
