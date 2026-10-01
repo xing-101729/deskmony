@@ -15,6 +15,8 @@
 > ⚠️ **2026-09-04 更正**:本文件原本寫「子程序早已隨 core 一起死」—— **那是錯的,而且錯的方向很要緊**。core 的子程序沒有被綁進任何 OS 層級的連坐回收單位(沒有 Windows Job Object,spawn 也沒帶 `detached`),所以 core 被 SIGKILL / 強制終止 / 斷電時,agent CLI 與它們自己再開的 MCP 孫程序**會繼續活著**,無限期佔用 CPU、記憶體與 worktree。
 >
 > 也就是說崩潰後有**兩種**孤兒要處理,不是一種:DB 裡的孤兒**紀錄**(本文件描述的對帳流程),以及 OS 上的孤兒**行程**(2026-09-04 新增的 `packages/adapters/src/child-registry.ts`——spawn 時把 pid 與其建立時間記進 `<dataDir>/child-pids.json`,下次啟動時比對建立時間後回收;對不上就**不殺**,pid 重用絕不能誤傷無關行程)。
+>
+> **2026-09-17 補充**:Windows 上經 `.cmd` shim(`shell: true`)、`.ps1` 或多層 launcher(codex-acp)啟動的 agent,spawn 當下登記到的 pid 只是**外殼**(`cmd.exe` 等)。外殼先死時,回收查不到它就跳過,真正的 agent 永遠收不到——使用者機器上實際發生過(`opencode.exe serve` 殘留到隔天)。現在 adapter 在 agent 確認就緒後,會把外殼底下當下的子孫也各自連同建立時間登記(`registerChildDescendants()`);回收規則不變,每一筆仍只看自己的 pid + 建立時間。只有外殼紀錄、沒有子孫資料的(升級前的紀錄檔,或 core 在 agent 就緒前就終止),回收時只印「疑似殘留」提示、**不殺**。完整取捨見該檔案頂端。
 
 ---
 

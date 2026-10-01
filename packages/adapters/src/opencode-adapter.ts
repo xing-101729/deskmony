@@ -6,7 +6,7 @@ import type { AgentEvent, AgentProfile, DialogAnswer, PromptInput, SlashCommandI
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
-import { registerChild, unregisterChild } from "./child-registry.js";
+import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { waitForChildExit } from "./child-process.js";
 
 /**
@@ -275,6 +275,15 @@ export class OpenCodeAdapter implements AgentAdapter {
       this.killChild(child);
       throw err;
     }
+
+    // 2026-09-17:Windows 上 `child.pid` 通常只是 cmd.exe(opencode 全域安裝是
+    // `.cmd` shim,見檔案頂端「Windows 注意」),真正吃 300–600MB 的 opencode.exe
+    // 是它底下的子程序。只登記 cmd.exe 的話,core 非正常終止之後 cmd.exe 一不在,
+    // 下次啟動的回收就會把 opencode.exe 當成「已經不在」跳過 —— 使用者機器上實際
+    // 發生過。`/global/health` 已經回應 = 真正的 server 行程一定已經存在,這時把
+    // wrapper 底下的子孫也登記起來。刻意不 await:查詢要 1 秒多,不該拖慢 session
+    // 建立;查不到只是少一層保護。見 child-registry.ts 的 registerChildDescendants()。
+    void registerChildDescendants(child.pid);
 
     let opencodeSessionId: string;
     try {
