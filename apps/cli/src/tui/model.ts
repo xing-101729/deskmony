@@ -1,5 +1,10 @@
 import type { AgentEvent, MessageRecord, PolicyRule, Session, SessionEventEnvelope } from "@deskmony/shared";
-import { buildNarrowestRememberRule, summarizeToolCallOneLine } from "../render.js";
+import {
+  buildNarrowestRememberRule,
+  createToolCallLineTracker,
+  summarizeToolCallOneLine,
+  type ToolCallLineTracker,
+} from "../render.js";
 
 /**
  * `deskmony tui` 的資料模型——design 文件 docs/LAYER-3-hld/cli-tui_hld.md §9
@@ -85,6 +90,14 @@ export interface SessionView {
   pendingAssistant: { messageId: string; text: string } | undefined;
   /** 0 = 貼齊底部(跟隨最新輸出)。> 0 = 使用者往回捲了幾行。 */
   scrollOffset: number;
+  /**
+   * 「同一個 toolCallId 只印一行」的合併狀態(見 render.ts 的
+   * `createToolCallLineTracker()`)。放在 per-session 的檢視狀態裡,不是
+   * `TuiModel` 上的單例——TUI 同時看著所有 session,共用一份會讓 A session
+   * 印過的 id 讓 B session 整行消失。session 從清單裡消失時連同這個 view
+   * 一起被丟掉(見 `replaceSessions()`),不需要額外的清理路徑。
+   */
+  toolCalls: ToolCallLineTracker;
 }
 
 export interface TuiModel {
@@ -225,7 +238,7 @@ function ensureSelection(model: TuiModel): void {
 }
 
 function newSessionView(session: Session): SessionView {
-  return { session, lines: [], pendingAssistant: undefined, scrollOffset: 0 };
+  return { session, lines: [], pendingAssistant: undefined, scrollOffset: 0, toolCalls: createToolCallLineTracker() };
 }
 
 /** `session.list` RPC 的結果(初次載入,或收到 "session-list-updated" 推播
@@ -365,14 +378,24 @@ export function applySessionEvent(model: TuiModel, envelope: SessionEventEnvelop
       }
       return; // 跳過函式尾端「其餘事件型別一律 markDirty」的共用路徑。
     }
-    case "tool-call":
-      pushLine(view, { kind: "tool", text: summarizeToolCallOneLine(event.toolName, event.input) });
+    case "tool-call": {
+      // 同一個 toolCallId 的多個 tool-call 事件是 upsert(claude-sdk-adapter
+      // 先送一次 input 未知的,參數齊了再送一次),只印 tracker 說要印的那次
+      // ——見 render.ts 的 createToolCallLineTracker()。
+      const line = view.toolCalls.onCall(event);
+      if (line) pushLine(view, { kind: "tool", text: summarizeToolCallOneLine(line.toolName, line.input) });
       break;
-    case "tool-result":
+    }
+    case "tool-result": {
+      // 補印那些「宣告過但一直沒拿到 input」的工具(見同一份註解的規則 2)。
+      // 排在錯誤行之前,順序才是「先呼叫、後結果」。
+      const missed = view.toolCalls.onResult(event);
+      if (missed) pushLine(view, { kind: "tool", text: summarizeToolCallOneLine(missed.toolName, missed.input) });
       if (event.isError) {
         pushLine(view, { kind: "tool-error", text: `${event.toolName} 執行失敗` });
       }
       break;
+    }
     case "permission-request": {
       const already = model.pendingPermissions.some((p) => p.sessionId === envelope.sessionId && p.requestId === event.requestId);
       if (!already) {

@@ -57,7 +57,13 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
+import {
+  NO_INPUT_TOOL_TITLE,
+  UPSERT_TOOL_CALLS_PREFIX,
+  UPSERT_TOOL_COMMAND,
+  UPSERT_TOOL_TITLE,
+  WRITE_FILE_PREFIX,
+} from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 
 // 2026-09-04(稽核修補)引入的守門員,2026-09-09 補上 @deskmony/cli 項目
@@ -340,7 +346,7 @@ function testCase3UnreachableUrl() {
 }
 
 // =======================================================================
-// 案例 5/6/7/8/9/10:共用同一個一般(無認證)core + 同一個 ACP profile。
+// 案例 5/6/7/8/9/10/11:共用同一個一般(無認證)core + 同一個 ACP profile。
 //
 // 執行順序刻意是 6 → 5:案例 5(session list --json)的驗收要求「session
 // 存在之後,解析出來的物件要通過 SessionSchema」,所以先跑案例 6(run
@@ -460,11 +466,48 @@ async function testMainCoreCases() {
       `status=${doctorResult.status}, stdout=${JSON.stringify(doctorResult.stdout.slice(0, 300))}`,
     );
 
+    // ---- 案例 11:同一個 toolCallId 只印一行(upsert 語意)------------------
+    // 這一項不在 HLD §9 的原始十項裡,是 2026-09-29 修掉一個真實的顯示 bug 時
+    // 補上的迴歸測試:`tool-call` 事件是以 toolCallId 為鍵的 **upsert**
+    // (見 packages/shared/src/events.ts 的 ToolCallEventSchema),同一個工具
+    // 呼叫會來不只一次——claude-sdk-adapter 先在 content_block_start 送一次
+    // `input: undefined`,參數齊了再送一次完整的。CLI 過去每個事件印一行,於是
+    // 每個 Claude 工具都印兩次:先一行光禿禿的 `-> Bash`,再一行
+    // `-> Bash <指令>`。
+    //
+    // 斷言刻意是**數量**(「-> 開頭的行恰好兩行」),不是「有沒有出現某段
+    // 文字」——後者在 bug 還在的時候一樣會通過(帶參數的那一行本來就有印),
+    // 根本抓不到重複。
+    const upsertResult = runCli([...commonArgs, "run", UPSERT_TOOL_CALLS_PREFIX], { timeoutMs: 30_000 });
+    const upsertLines = upsertResult.stdout
+      .replace(/\r/g, "")
+      .split("\n")
+      .filter((l) => l.startsWith("  -> "));
+    const expectedUpsertLine = `  -> ${UPSERT_TOOL_TITLE} ${UPSERT_TOOL_COMMAND}`;
+    const expectedNoInputLine = `  -> ${NO_INPUT_TOOL_TITLE}`;
+    const upsertHits = upsertLines.filter((l) => l === expectedUpsertLine).length;
+    const noInputHits = upsertLines.filter((l) => l === expectedNoInputLine).length;
+    // 「光禿禿的那一行」——bug 還在的時候會多出這一行(第一個 input 未知的
+    // 事件印出來的)。明確斷言它不存在,而不是只看總行數,失敗訊息才看得出
+    // 是「多印了沒有參數的那次」還是「少印了什麼」。
+    const bareUpsertHits = upsertLines.filter((l) => l === `  -> ${UPSERT_TOOL_TITLE}`).length;
+    record(
+      "案例 11(同一個 toolCallId 的多個 tool-call 事件 → 只印一行,且是帶參數的那一行;永遠沒有 input 的工具改在 tool-result 時補印)",
+      upsertResult.status === 0 &&
+        upsertLines.length === 2 &&
+        upsertHits === 1 &&
+        noInputHits === 1 &&
+        bareUpsertHits === 0,
+      `status=${upsertResult.status}, "-> " 開頭的行數=${upsertLines.length}(需為 2), ` +
+        `帶參數的 ${UPSERT_TOOL_TITLE}=${upsertHits}(需為 1), ${NO_INPUT_TOOL_TITLE}=${noInputHits}(需為 1), ` +
+        `光禿禿的 ${UPSERT_TOOL_TITLE}=${bareUpsertHits}(需為 0), 實際行=${JSON.stringify(upsertLines)}`,
+    );
+
     gwClient.close();
     await killProcessTreeHard(core);
     core = null;
   } catch (err) {
-    record("案例 5/6/7/8/9/10(共用主 core)執行過程發生未預期錯誤", false, String(err));
+    record("案例 5/6/7/8/9/10/11(共用主 core)執行過程發生未預期錯誤", false, String(err));
   } finally {
     gwClient?.close();
     if (core) await killProcessTreeHard(core);
@@ -527,7 +570,7 @@ async function main() {
   testCase2UnknownFlag();
   testCase3UnreachableUrl();
 
-  console.log("\n=== CLI e2e:案例 5/6/7/8/9/10(真的 headless core + fake ACP agent)===");
+  console.log("\n=== CLI e2e:案例 5/6/7/8/9/10/11(真的 headless core + fake ACP agent)===");
   await testMainCoreCases();
 
   console.log("\n=== CLI e2e:案例 4(token 錯誤,獨立的第二個啟用認證的 core)===");

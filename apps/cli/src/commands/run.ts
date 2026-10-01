@@ -2,7 +2,14 @@ import type { GatewayClient } from "@deskmony/client";
 import type { AgentOverride, Session, SessionEventEnvelope } from "@deskmony/shared";
 import type { GlobalOptions } from "../args.js";
 import { CliExitError, closeGateway, connectGateway } from "../connect.js";
-import { createStdoutTracker, formatEventNdjson, renderAgentEventPretty, renderErrorEvent, summarizeToolInputLines } from "../render.js";
+import {
+  createStdoutTracker,
+  createToolCallLineTracker,
+  formatEventNdjson,
+  renderAgentEventPretty,
+  renderErrorEvent,
+  summarizeToolInputLines,
+} from "../render.js";
 
 interface SessionCreateResult {
   session: Session;
@@ -57,6 +64,10 @@ interface TurnOutcome {
  */
 function waitForTurn(client: GatewayClient, sessionId: string, options: GlobalOptions): Promise<TurnOutcome> {
   const tracker = createStdoutTracker();
+  // 一個 `run` 就是一個 session 的一個回合,tracker 的生命週期剛好等於這裡
+  // ——見 render.ts 的 createToolCallLineTracker():同一個 toolCallId 的多個
+  // tool-call 事件是 upsert,只印一行。
+  const toolCalls = createToolCallLineTracker();
   return new Promise<TurnOutcome>((resolve, reject) => {
     const deniedTools: string[] = [];
     let sawDelta = false;
@@ -90,7 +101,7 @@ function waitForTurn(client: GatewayClient, sessionId: string, options: GlobalOp
         process.stdout.write(`${formatEventNdjson(envelope)}\n`);
       } else {
         if (event.type === "message-delta") sawDelta = true;
-        const text = renderAgentEventPretty(event, { color: options.color, verbose: options.verbose });
+        const text = renderAgentEventPretty(event, { color: options.color, verbose: options.verbose, toolCalls });
         if (text !== undefined) tracker.write(text);
       }
 

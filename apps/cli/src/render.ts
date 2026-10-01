@@ -193,6 +193,109 @@ export function createStdoutTracker(): { write: (text: string) => void; ensureNe
   };
 }
 
+// ---- tool-call 去重(同一個 toolCallId 只印一行) ---------------------------
+
+/**
+ * 一個 `tool-call` 事件**不是**「又一次工具呼叫」,而是同一個 `toolCallId`
+ * 的 upsert(見 packages/shared/src/events.ts 的 `ToolCallEventSchema`):
+ * claude-sdk-adapter 在 `content_block_start`(工具剛開始、參數還在串流)先送
+ * 一次 `input: undefined`,等完整的 assistant 訊息抵達時再用同一個 id 送一次
+ * 帶完整 input 的;opencode-adapter 的 `pending` → `running` 是同一套語意。
+ * 桌面殼(apps/desktop/src/stores/session-store.ts 的 `upsertToolItem()`)本來
+ * 就以 toolCallId 合併,CLI/TUI 過去卻是「一個事件印一行」——於是每個 Claude
+ * 工具都印兩次:先一行光禿禿的 `-> Bash`,再一行 `-> Bash <指令>`。
+ *
+ * 這個 tracker 就是那個合併規則。刻意做成「呼叫端自己持有狀態」(同
+ * `createStdoutTracker()` 的形狀),`renderAgentEventPretty()` 本身維持純函式
+ * ——狀態放在呼叫端(run.ts 一個回合一個、chat.ts 一個 session 一個、TUI 放在
+ * per-session 的 `SessionView`),而不是這個模組層級的單例:單例會讓同時看著
+ * 多個 session 的 TUI 互相污染(A session 印過的 id 讓 B session 不印),也讓
+ * 這個檔案不可能被獨立測試。
+ *
+ * 規則:
+ *   1. 只在**第一個 `input !== undefined`** 的事件印——那是第一個真的有摘要
+ *      可看的版本。同一個 id 之後再來幾次都不印。
+ *   2. 有些工具永遠等不到 input:被中斷的工具,或 `tool_call` 沒帶 `rawInput`
+ *      的 ACP agent。這種不能就這樣消失——`tool-result` 抵達時,若這個 id
+ *      宣告過卻從沒印出來,就在那時候補印(只有工具名稱,沒有參數)。
+ *   3. 補印只給「宣告過」的 id,而且用**宣告時**記下的名字,不是 result 事件
+ *      自己帶的那個:claude-sdk-adapter 的 `tool-result` 事件 `toolName` 一律
+ *      是空字串(只有 `tool-call` 才帶真正的工具名稱,見 session-store.ts 對
+ *      這件事的註解)。沒見過對應 `tool-call` 的 result(例如 CLI 在回合中途
+ *      才連上)因此不補印——硬印只會得到一行空白的箭頭。
+ */
+export interface ToolCallLineTracker {
+  /**
+   * `tool-call` 事件 → 這次該用哪一組 (toolName, input) 印一行;`undefined`
+   * 代表這個事件不印(還沒有 input,或同一個 id 已經印過了)。
+   */
+  onCall(event: { toolCallId: string; toolName: string; input?: unknown }): ToolCallLine | undefined;
+  /**
+   * `tool-result` 事件 → 規則 2 的補印(`undefined` = 不需要補印)。呼叫端要
+   * 把補印的那一行排在自己的錯誤行(`isError`)**之前**,順序才符合「先呼叫、
+   * 後結果」。
+   */
+  onResult(event: { toolCallId: string }): ToolCallLine | undefined;
+}
+
+/** 要印的內容本身——怎麼排版是呼叫端的事(CLI 加 `  -> ` 前綴與換行,TUI 塞成
+ *  一個 `TranscriptLine`),這裡只回答「印什麼」。 */
+export interface ToolCallLine {
+  toolName: string;
+  input: unknown;
+}
+
+/**
+ * 追蹤上限。正常的 id 在 `onResult()` 就被收掉(工具結束後那個 id 不會再出現
+ * ——adapter 端的紀律是「補送要在同一個呼叫的 tool-result 之前」),所以這個
+ * Map 平常只裝「正在跑的工具」,個數是個位數。真正會累積的只有**永遠等不到
+ * result** 的 id(回合被中斷時那個還開著的工具),而 `chat`/`tui` 可以開著好
+ * 幾個小時。上限是給那條路徑的保險,不是常態容量規劃——與 tui/model.ts 的
+ * `MAX_TRANSCRIPT_LINES` 同一個精神:沒有上限的緩衝在長時間 session 裡就是
+ * 洩漏。
+ */
+const MAX_TRACKED_TOOL_CALLS = 1000;
+
+export function createToolCallLineTracker(): ToolCallLineTracker {
+  /** toolCallId → { 宣告時的工具名稱, 這個 id 是否已經印過一行 }。 */
+  const seen = new Map<string, { toolName: string; printed: boolean }>();
+
+  function remember(toolCallId: string, toolName: string): { toolName: string; printed: boolean } {
+    if (seen.size >= MAX_TRACKED_TOOL_CALLS) {
+      // Map 保證插入順序,第一個 key 就是最舊的那個。
+      const oldest = seen.keys().next().value;
+      if (oldest !== undefined) seen.delete(oldest);
+    }
+    const entry = { toolName, printed: false };
+    seen.set(toolCallId, entry);
+    return entry;
+  }
+
+  return {
+    onCall(event) {
+      const existing = seen.get(event.toolCallId);
+      if (existing?.printed) return undefined; // 已經印過,這次純粹是補資訊。
+      const entry = existing ?? remember(event.toolCallId, event.toolName);
+      // 規則 1:還沒有摘要可看,先只記下「宣告過」,等帶 input 的那一次
+      // (或等 onResult() 的補印)。
+      if (event.input === undefined) return undefined;
+      entry.printed = true;
+      // 名稱以「真的印出來的這一次」為準:opencode-adapter 會在參數解析完成時
+      // 重寫工具名稱(見該檔案 `handlePartUpdated()` 的註解),宣告那次記下的
+      // 可能已經過時。
+      entry.toolName = event.toolName;
+      return { toolName: event.toolName, input: event.input };
+    },
+    onResult(event) {
+      const entry = seen.get(event.toolCallId);
+      // 一律收掉:這個 id 的生命週期到此結束,留著只會讓 Map 無止盡長大。
+      seen.delete(event.toolCallId);
+      if (!entry || entry.printed) return undefined;
+      return { toolName: entry.toolName, input: undefined };
+    },
+  };
+}
+
 // ---- --json(NDJSON) ------------------------------------------------------
 
 /**
@@ -212,6 +315,13 @@ export function formatEventNdjson(envelope: SessionEventEnvelope): string {
 export interface PrettyRenderOptions {
   color: boolean;
   verbose: boolean;
+  /**
+   * 「同一個 toolCallId 只印一行」的合併狀態,由呼叫端持有(見
+   * `createToolCallLineTracker()`)。刻意是必填而不是選填:漏傳就會退回舊的
+   * 「一個事件印一行」行為(每個 Claude 工具印兩次),那種錯誤應該在編譯期
+   * 就被擋下來,沒有理由留到執行期才靠人眼發現。
+   */
+  toolCalls: ToolCallLineTracker;
 }
 
 /**
@@ -228,13 +338,25 @@ export function renderAgentEventPretty(event: AgentEvent, opts: PrettyRenderOpti
   switch (event.type) {
     case "message-delta":
       return event.delta;
-    case "tool-call":
-      return `  ${ARROW} ${summarizeToolCallOneLine(event.toolName, event.input)}\n`;
-    case "tool-result":
-      if (!event.isError) return undefined;
-      return `  ${paint("!", "red", opts.color)} ${event.toolName} 執行失敗${
+    case "tool-call": {
+      // 同一個 toolCallId 可能來好幾次(upsert 語意),只有 tracker 說要印的
+      // 那一次才印——見 createToolCallLineTracker() 的三條規則。
+      const line = opts.toolCalls.onCall(event);
+      if (line === undefined) return undefined;
+      return `  ${ARROW} ${summarizeToolCallOneLine(line.toolName, line.input)}\n`;
+    }
+    case "tool-result": {
+      // 規則 2 的補印:這個 id 宣告過卻從來沒有拿到 input(被中斷的工具、
+      // `tool_call` 沒帶 `rawInput` 的 ACP agent),到這裡才補一行「只有工具
+      // 名稱」的呼叫。一定排在下面的錯誤行**之前**,順序才是「先呼叫、後結果」。
+      const missed = opts.toolCalls.onResult(event);
+      const callLine = missed !== undefined ? `  ${ARROW} ${summarizeToolCallOneLine(missed.toolName, missed.input)}\n` : "";
+      if (!event.isError) return callLine.length > 0 ? callLine : undefined;
+      return `${callLine}  ${paint("!", "red", opts.color)} ${event.toolName} 執行失敗${
         event.output !== undefined ? `:${truncate(safeJsonStringify(event.output), 200)}` : ""
       }\n`;
+    }
+
     case "usage":
       if (!opts.verbose) return undefined;
       return `  ${paint("*", "dim", opts.color)} usage: ${

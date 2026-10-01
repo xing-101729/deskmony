@@ -508,6 +508,105 @@ async function testPureFunctions() {
       `dirty=${model.dirty}(需為 true —— 若這裡也是 false,代表節流把該畫的也擋掉了)`,
     );
   }
+
+  // ---- 2026-09-29:同一個 toolCallId 只印一行(upsert 語意)---------------
+  // 不在 §10.1 的原始九項裡,是修掉一個真實顯示 bug 時補的迴歸測試,與
+  // scripts/e2e-cli.mjs 的案例 11 是同一條規則在 TUI 側的版本(那邊驗真正的
+  // 子程序 stdout,這邊驗 model reducer 本身——TUI 的 transcript 不經過
+  // render.ts 的字串組裝,是自己 pushLine,所以兩邊都要各自守住)。
+  {
+    const m = await import(pathToFileURL(path.join(REPO_ROOT, "apps/cli/dist/tui/model.js")).href);
+    const now = Date.now();
+    const mkSession = (id, title) => ({
+      id,
+      title,
+      agentProfileId: "p",
+      adapterType: "acp",
+      status: "busy",
+      workingDir: "/tmp",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const send = (model, sessionId, event) => m.applySessionEvent(model, { sessionId, timestamp: Date.now(), event });
+    const toolLines = (model, sessionId) => (model.sessions.get(sessionId)?.lines ?? []).filter((l) => l.kind === "tool");
+
+    // 9f:同一個 toolCallId 兩個 tool-call 事件(先無 input、再補完整 input)
+    // → 只留一行,而且是帶參數的那一行。
+    {
+      const model = m.createModel();
+      m.replaceSessions(model, [mkSession("s0", "焦點")]);
+      send(model, "s0", { type: "tool-call", toolCallId: "tc-1", toolName: "Bash", input: undefined });
+      const afterFirst = toolLines(model, "s0").length;
+      send(model, "s0", { type: "tool-call", toolCallId: "tc-1", toolName: "Bash", input: { command: "echo hi" } });
+      const lines = toolLines(model, "s0");
+      record(
+        "案例 9f(upsert):同一個 toolCallId 的兩個 tool-call 事件只留一行,且是帶參數的那一行",
+        afterFirst === 0 && lines.length === 1 && lines[0]?.text === "Bash echo hi",
+        `input 未知那次之後 ${afterFirst} 行(需為 0),最後共 ${lines.length} 行(需為 1),內容=${JSON.stringify(lines.map((l) => l.text))}`,
+      );
+    }
+
+    // 9g:永遠等不到 input 的工具(被中斷的工具、tool_call 沒帶 rawInput 的
+    // ACP agent)——不能整行消失,tool-result 抵達時要補印,而且用宣告時記下的
+    // 工具名稱(claude-sdk-adapter 的 tool-result 事件 toolName 一律是空字串)。
+    {
+      const model = m.createModel();
+      m.replaceSessions(model, [mkSession("s0", "焦點")]);
+      send(model, "s0", { type: "tool-call", toolCallId: "tc-2", toolName: "Read", input: undefined });
+      const beforeResult = toolLines(model, "s0").length;
+      send(model, "s0", { type: "tool-result", toolCallId: "tc-2", toolName: "", isError: false });
+      const lines = toolLines(model, "s0");
+      record(
+        "案例 9g(補印):只有宣告、永遠沒有 input 的工具,在 tool-result 抵達時補印一行(用宣告時的工具名稱)",
+        beforeResult === 0 && lines.length === 1 && lines[0]?.text === "Read",
+        `result 之前 ${beforeResult} 行(需為 0),之後共 ${lines.length} 行(需為 1),內容=${JSON.stringify(lines.map((l) => l.text))}`,
+      );
+    }
+
+    // 9h:兩條規則在同一段 transcript 裡的交互——
+    //   - 補印要排在錯誤行**之前**(先呼叫、後結果)。
+    //   - 已經印過的工具,不會在 tool-result 抵達時又被印第二次。
+    // 第二個工具刻意也走一次 upsert(先無 input 再補),所以這一項在修正前
+    // 會因為多出一行光禿禿的 `tool:Fine` 而失敗——不是一個兩種實作都會通過的
+    // 空斷言。
+    {
+      const model = m.createModel();
+      m.replaceSessions(model, [mkSession("s0", "焦點")]);
+      send(model, "s0", { type: "tool-call", toolCallId: "tc-3", toolName: "Failing", input: undefined });
+      send(model, "s0", { type: "tool-result", toolCallId: "tc-3", toolName: "", isError: true });
+      send(model, "s0", { type: "tool-call", toolCallId: "tc-4", toolName: "Fine", input: undefined });
+      send(model, "s0", { type: "tool-call", toolCallId: "tc-4", toolName: "Fine", input: { command: "ok" } });
+      send(model, "s0", { type: "tool-result", toolCallId: "tc-4", toolName: "", isError: false });
+      const kinds = (model.sessions.get("s0")?.lines ?? []).map((l) => `${l.kind}:${l.text}`);
+      record(
+        "案例 9h(順序/不重複):補印排在錯誤行之前,且已經印過的工具不會在 tool-result 時再印一次",
+        kinds.length === 3 &&
+          kinds[0] === "tool:Failing" &&
+          kinds[1] === "tool-error: 執行失敗" &&
+          kinds[2] === "tool:Fine ok",
+        `實際的行(依序)=${JSON.stringify(kinds)}(需為 3 行:tool:Failing、tool-error、tool:Fine ok)`,
+      );
+    }
+
+    // 9i:tracker 是 per-session 的——同一個 toolCallId 出現在兩個 session 時,
+    // 兩邊都要各自印一行。若把狀態放成 TuiModel 上的單例,第二個 session 會
+    // 整行消失,而這是一個只有在同時看著多個 session 時才會出現的 bug。
+    {
+      const model = m.createModel();
+      m.replaceSessions(model, [mkSession("s0", "A"), mkSession("s1", "B")]);
+      for (const sid of ["s0", "s1"]) {
+        send(model, sid, { type: "tool-call", toolCallId: "same-id", toolName: "Bash", input: undefined });
+        send(model, sid, { type: "tool-call", toolCallId: "same-id", toolName: "Bash", input: { command: `echo ${sid}` } });
+      }
+      const a = toolLines(model, "s0");
+      const b = toolLines(model, "s1");
+      record(
+        "案例 9i(per-session 隔離):同一個 toolCallId 出現在兩個 session,兩邊各自印一行",
+        a.length === 1 && b.length === 1 && a[0]?.text === "Bash echo s0" && b[0]?.text === "Bash echo s1",
+        `s0=${JSON.stringify(a.map((l) => l.text))}(需 1 行 "Bash echo s0"), s1=${JSON.stringify(b.map((l) => l.text))}(需 1 行 "Bash echo s1")`,
+      );
+    }
+  }
 }
 
 // =======================================================================

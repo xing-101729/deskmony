@@ -106,6 +106,32 @@
  *     team/subagentPort 的一般 ACP session)時,回覆一則固定的錯誤文字
  *     `"BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured"`,不嘗試 spawn
  *     任何東西。
+ *   - 若 prompt 文字等於 UPSERT_TOOL_CALLS_PREFIX("ACP_UPSERT_TOOL_CALLS",
+ *     不接受任何參數)(CLI/TUI「同一個 toolCallId 只印一行」的 e2e 用,見
+ *     scripts/e2e-cli.mjs 的案例 11 與 scripts/e2e-cli-tui.mjs 的案例 9f):
+ *     在同一輪裡送出兩個工具,涵蓋 `ToolCallEventSchema` 的 upsert 語意
+ *     (同一個 `toolCallId` 可以來不只一次)的兩條路徑——
+ *       1. `UpsertTool`:同一個 toolCallId 送**兩則** `tool_call` 通知,第一則
+ *          不帶 `rawInput`(對應 claude-sdk-adapter 在 `content_block_start`
+ *          時 input 還在串流、只能先送 `input: undefined` 的那一次,以及
+ *          opencode-adapter 的 `pending`),第二則帶完整 `rawInput`(對應那兩
+ *          個 adapter 之後「參數齊了再送一次」的那一次),最後一則
+ *          `tool_call_update`(completed)。
+ *          ⚠️ 送兩則 `tool_call`(而不是用 `tool_call_update` 更新)**不是**
+ *          標準 ACP 的用法——`AcpAdapter.handleSessionUpdate()` 把
+ *          `tool_call_update` 轉成 `tool-result`,不是第二個 `tool-call`
+ *          事件,所以唯一能在 ACP 這一層產生「同一個 toolCallId 的兩個
+ *          `tool-call` **AgentEvent**」的方法就是送兩則 `tool_call`。要驗的
+ *          是 AgentEvent 層的 upsert(那是 claude-sdk/opencode 原生就會產生
+ *          的形狀),這裡刻意用這個方式把它在假 ACP agent 上重現出來。
+ *       2. `NoInputTool`:只送一則不帶 `rawInput` 的 `tool_call`,接著直接
+ *          `tool_call_update`(completed)——**永遠等不到 input** 的工具
+ *          (被中斷的工具,或 `tool_call` 本來就沒帶 `rawInput` 的真實 ACP
+ *          agent)。CLI/TUI 不能因為「等帶 input 的那次」而讓這種工具整行
+ *          消失,必須在 tool-result 抵達時補印。
+ *     兩個工具都是 `kind: "other"` 且不帶 `locations`,確保不會意外命中
+ *     `resolveEditSnapshotPath()` 的檔案快照路徑(那是 diff 顯示路徑 B,與
+ *     這個情境無關)。
  */
 
 import * as acp from "@agentclientprotocol/sdk";
@@ -142,6 +168,13 @@ export const CALL_BRIDGE_TOOL_PREFIX = "ACP_CALL_BRIDGE_TOOL ";
  * MCP 管線」兩個不同的斷言面向。
  */
 export const REPORT_MCP_SERVERS_PREFIX = "ACP_REPORT_MCP_SERVERS";
+/** CLI/TUI「同一個 toolCallId 只印一行」e2e 用(不接受參數),見檔頭註解。 */
+export const UPSERT_TOOL_CALLS_PREFIX = "ACP_UPSERT_TOOL_CALLS";
+/** 上面那一輪用到的固定字串——e2e 直接 import,不在兩邊各寫一份字面值。 */
+export const UPSERT_TOOL_TITLE = "UpsertTool";
+export const NO_INPUT_TOOL_TITLE = "NoInputTool";
+export const UPSERT_TOOL_COMMAND = "echo upsert-input-arrived";
+export const UPSERT_DONE_TEXT = "upsert tool calls sent";
 /** 建構出一段「延遲 delayMs 毫秒後把整段 prompt 文字回顯」的標記文字。 */
 export function delayEchoMarker(delayMs) {
   return `[[E2E_DELAY_ECHO:${delayMs}]]`;
@@ -212,6 +245,8 @@ class FakeAcpAgent {
         await this.handleDiffContent(params.sessionId, text.slice(DIFF_CONTENT_PREFIX.length), cx);
       } else if (text.startsWith(CALL_BRIDGE_TOOL_PREFIX)) {
         await this.handleCallBridgeTool(params.sessionId, text.slice(CALL_BRIDGE_TOOL_PREFIX.length), cx);
+      } else if (text === UPSERT_TOOL_CALLS_PREFIX) {
+        await this.handleUpsertToolCalls(params.sessionId, cx);
       } else if (text === REPORT_MCP_SERVERS_PREFIX) {
         await this.handleReportMcpServers(params.sessionId, cx);
       } else {
@@ -430,6 +465,57 @@ class FakeAcpAgent {
         messageId,
         content: { type: "text", text: `MCP_SERVERS:${JSON.stringify(session?.mcpServers ?? [])}` },
       },
+    });
+  }
+
+  /**
+   * CLI/TUI「同一個 toolCallId 只印一行」的 e2e 用,見檔頭註解:同一輪裡送出
+   * 兩個工具,分別重現 upsert 的兩條路徑(先無 input 後補 input / 永遠沒有
+   * input)。刻意固定不帶延遲——這一輪要驗的是「幾行」,不是時序。
+   */
+  async handleUpsertToolCalls(sessionId, cx) {
+    const upsertId = `upsert-${randomUUID()}`;
+
+    // 路徑 1 第一次:input 未知(= claude-sdk-adapter 的 content_block_start)。
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "tool_call", toolCallId: upsertId, title: UPSERT_TOOL_TITLE, kind: "other", status: "pending" },
+    });
+    // 路徑 1 第二次:同一個 id,這次帶完整 input(= 完整 assistant 訊息抵達)。
+    // `command` 是 render.ts 的 COMMAND_KEYS 之一,所以摘要會變成
+    // 「<工具名稱> <指令>」——e2e 就是靠這個字串分辨「印出來的是帶參數的那一
+    // 行」還是「光禿禿的那一行」。
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: upsertId,
+        title: UPSERT_TOOL_TITLE,
+        kind: "other",
+        status: "in_progress",
+        rawInput: { command: UPSERT_TOOL_COMMAND },
+      },
+    });
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "tool_call_update", toolCallId: upsertId, status: "completed", rawOutput: { ok: true } },
+    });
+
+    // 路徑 2:從頭到尾沒有 input,只有 tool_call + tool_call_update。
+    const noInputId = `noinput-${randomUUID()}`;
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "tool_call", toolCallId: noInputId, title: NO_INPUT_TOOL_TITLE, kind: "other", status: "pending" },
+    });
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "tool_call_update", toolCallId: noInputId, status: "completed", rawOutput: { ok: true } },
+    });
+
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: UPSERT_DONE_TEXT } },
     });
   }
 

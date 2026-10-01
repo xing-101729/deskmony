@@ -149,6 +149,28 @@ apps/cli/
 `--json` 是 **NDJSON**(每行一個 JSON 物件),不是最後吐一顆大 JSON——串流
 場景下前者才可用。
 
+⚠️ 2026-09-29 補正:`tool-call` 那一列的「一個事件一行」是錯的,實作已改。
+一個 `tool-call` 事件是以 `toolCallId` 為鍵的 **upsert**(見
+packages/shared/src/events.ts 的 `ToolCallEventSchema`)——同一個工具呼叫會來
+不只一次:claude-sdk-adapter 在 `content_block_start` 先送一次 `input:
+undefined`(那時參數還在串流),等完整的 assistant 訊息抵達再用同一個 id 送
+一次帶完整 input 的;opencode-adapter 的 `pending` → `running` 同理。照字面
+「一個事件一行」實作的結果是每個 Claude 工具都印兩次(先 `→ Bash`,再
+`→ Bash <指令>`)。正確的規則是**一個 toolCallId 一行**:
+
+- 在**第一個 `input !== undefined`** 的事件才印(第一個有摘要可看的版本)。
+- 有些工具永遠等不到 input(被中斷的工具、`tool_call` 沒帶 `rawInput` 的 ACP
+  agent)——這種在 `tool-result` 抵達時補印(只有工具名稱),不能讓它整行消
+  失。所以上表 `tool-result` 那一列除了 `isError` 的那一行之外,還可能多印一
+  行補上的呼叫,排在錯誤行之前。
+- `--json` 完全不受影響:NDJSON 一律照原樣逐一輸出每個事件,不做任何合併。
+
+合併狀態由呼叫端持有(`render.ts` 的 `createToolCallLineTracker()`,形狀比照
+`createStdoutTracker()`),`renderAgentEventPretty()` 本身維持純函式。`deskmony
+tui` 有同一條規則的自己一份(狀態掛在 per-session 的 `SessionView` 上,見
+cli-tui_hld.md §9),因為 TUI 的 transcript 不經過這裡的字串組裝。迴歸測試:
+scripts/e2e-cli.mjs 案例 11、scripts/e2e-cli-tui.mjs 案例 9f–9i。
+
 ## 6. 權限請求在終端裡怎麼問
 
 這是 CLI 最需要做對的一段。
