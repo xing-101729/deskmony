@@ -26,7 +26,7 @@ import { MarkdownMessage } from "./chat/MarkdownMessage.js";
 import { TodoListView, parseTodoWriteInput } from "./chat/TodoListView.js";
 import { DiffHunkView, parseDiffResult } from "./chat/DiffHunkView.js";
 import { ToolImage, parseImageBlock } from "./chat/ToolImage.js";
-import { AskUserQuestionWidget, parseAskUserQuestionInput } from "./chat/AskUserQuestionWidget.js";
+import { AskUserQuestionWidget, PendingUserDialogsDock, isQuestionToolName } from "./chat/AskUserQuestionWidget.js";
 
 /**
  * 2026-09-04(稽核修補):「沒有選中 session」時 `items` selector 的固定回傳值。
@@ -411,9 +411,9 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
       const diff = parseDiffResult(item.structuredResult);
       if (diff) return <DiffHunkView item={item} diff={diff} />;
     }
-    if (item.toolName === "AskUserQuestion") {
-      const questions = parseAskUserQuestionInput(item.input);
-      if (questions) return <AskUserQuestionWidget item={item} questions={questions} />;
+    if (isQuestionToolName(item.toolName)) {
+      // 解析不出題目時,元件內部自己 fallback 回 ToolCallBubble。
+      return <AskUserQuestionWidget item={item} />;
     }
     return <ToolCallBubble item={item} />;
   }
@@ -912,6 +912,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
         {items.map((item) => (
           <ChatBubble key={item.id} item={item} />
         ))}
+        <PendingUserDialogsDock sessionId={currentSessionId} items={items} />
       </div>
 
       <div className="flex-shrink-0 border-t border-line-subtle p-3 sm:p-4">

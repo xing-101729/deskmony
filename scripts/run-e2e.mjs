@@ -21,7 +21,7 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十一支是**決定性**
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十五支是**決定性**
  * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
@@ -49,12 +49,24 @@ const SUITES = [
   // 單元層級、毫秒級跑完(不啟動 core)—— 放第一個當快速煙霧測試。
   "e2e-hard-deny",
   "e2e-session-subagents",
+  // 2026-09-17:OpenCode 的 `question` 工具(模型向使用者提問)——一個 core +
+  // fake-opencode-server,幾秒跑完。
+  "e2e-opencode-question",
   "e2e-cost-governor",
+  // 2026-09-17:OpenCode 工具呼叫補送 input + 回合硬上限每個工具只計一次——一個
+  // core + fake-opencode-server,十幾秒跑完。放在 e2e-cost-governor 之後:它驗的
+  // 是同一個斷路器,底層的回合上限若本身就壞了,應該先在那支看到訊號。
+  "e2e-opencode-tool-input",
   "e2e-message-budget",
   "e2e-lead-gate",
   "e2e-notification",
   "e2e-policy-engine",
   "e2e-agent-lifecycle",
+  // 2026-09-17:OS 層級的孤兒**行程**回收(packages/adapters/src/child-registry.ts),
+  // 與下一支處理的 DB 孤兒**紀錄**是崩潰後的兩半(見 crash-recovery_hld.md 開頭)。
+  // 不啟動 core,但會真的開 `.cmd` shim / node 行程並反覆查 PowerShell CIM(每次約
+  // 1.4 秒),所以不算快。
+  "e2e-child-registry",
   "e2e-crash-recovery",
   "e2e-auto-mode-yolo",
   // 2026-09-09(cli_hld.md §9):驅動編譯後的 `apps/cli/dist/bin.js` 子程序,

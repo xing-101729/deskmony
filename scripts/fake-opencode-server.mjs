@@ -28,18 +28,45 @@
  *     覆寫,見該檔案),回覆文字前面會多一段 `[model:providerID/modelID]`
  *     標記——只用來讓 e2e(步驟24f)斷言「setModel() 之後,實際送出的請求
  *     真的帶新 model」,沒有帶 model 的既有呼叫方式完全不受影響。
- *   - 若 prompt 文字以 TOOL_CALL_PREFIX 開頭:送出 `message.part.updated`
- *     (tool part,status:"pending"),再送 `permission.asked`,等待對應的
- *     `POST /permission/{id}/reply`:
- *       - reply === "once":送出 tool part(status:"completed",帶
- *         output),再送一段結束文字,最後 idle。
+ *   - 若 prompt 文字以 TOOL_CALL_PREFIX 開頭:照真實 opencode 1.18.7 實測到的
+ *     形狀(2026-09-17,見 packages/adapters/src/opencode-adapter.ts 檔頭
+ *     `type==="tool"` 的實測紀錄)送出一個 bash 工具——整個生命週期同一個
+ *     `part.id`:tool part `pending`(`input:{}`、`raw:""`,參數還沒串流完)→
+ *     `running`(帶完整 input TOOL_CALL_INPUT)→ `permission.asked`,等待對應的
+ *     `POST /permission/{id}/reply`。prompt 內含 TOOL_CALL_ASK_FIRST_MARKER 時
+ *     `permission.asked` 改排在 `running` 之前(真實 opencode 兩種順序都會出現,
+ *     `question` 工具實測就是先問;給 e2e-opencode-tool-input.mjs 驗證「晚到的
+ *     input 不會把 waiting 翻回 busy」)。
+ *       - reply === "once":`running` 帶 metadata 重送一次(真實 opencode 執行
+ *         期間會這樣推即時輸出),再送 `completed`(帶 output),再送一段結束
+ *         文字,最後 idle。
  *       - reply === "reject":不送 tool-result,只送一段「已拒絕」文字,
  *         直接 idle(語意比照 fake-acp-agent.mjs 的 deny 路徑)。
+ *   - 若 prompt 文字以 MANY_TOOL_CALLS_PREFIX 開頭(2026-09-17 新增):其後接
+ *     JSON `{"count": number, "delayMs"?: number}`,連續送出 `count` 個不需要
+ *     權限的工具呼叫,每個都是 pending → running(input 為
+ *     `manyToolCallInput(i)`)→ completed。給 e2e-opencode-tool-input.mjs 驗證
+ *     回合硬上限對每個工具只計一次(比照 fake-acp-agent.mjs 的
+ *     MANY_TOOL_CALLS_PREFIX)。兩個工具之間檢查 abort,收到就停下來送
+ *     `MessageAbortedError`。
  *   - 若 prompt 文字以 SLOW_PREFIX 開頭:延遲送出一串較長的 message.part.
  *     delta(每段間隔 SLOW_CHUNK_INTERVAL_MS),模擬「回合還在進行中」,讓
  *     e2e 有時間視窗呼叫 `POST /session/{id}/abort` 測試 interrupt() ——
  *     收到 abort 後,立刻停止後續 chunk、送出帶 `MessageAbortedError` 的
  *     `message.updated`,再送 idle。
+ *   - 若 prompt 文字以 QUESTION_PREFIX 開頭(2026-09-17 新增,給
+ *     e2e-opencode-question.mjs):照真實 opencode 1.18.7 實測到的順序送出
+ *     `question` 工具 part(pending,input `{}`)→ `question.asked`(題目為
+ *     TEST_QUESTIONS)→ part(running),然後等待:
+ *       - `POST /question/{id}/reply`:送 `question.replied` + part
+ *         (completed,`metadata.answers` 就是收到的陣列),再送一段
+ *         `[answers:<收到的 JSON>]` 文字——讓 e2e 能斷言 wire 上實際送出的
+ *         答案陣列(比照既有 `[model:...]` 手法),最後 idle。
+ *       - `POST /question/{id}/reject`:送 `question.rejected` + part(error),
+ *         直接 idle(真實 opencode 被 reject 後回合就結束)。
+ *       - `POST /session/{id}/abort`:**不送** `question.rejected`,只送 part
+ *         (error,「Tool execution aborted」)+ 帶 `MessageAbortedError` 的
+ *         `message.updated`,再 idle——與真實 opencode 的 abort 行為一致。
  *   - 這輪(slash command)新增:`GET /command` 回傳 TEST_COMMANDS(固定測試
  *     清單,形狀比照本機真實 `opencode serve`(1.18.7)`GET /command` 的
  *     `Command[]`,見 packages/adapters/src/opencode-adapter.ts 檔案頂端查證
@@ -56,9 +83,44 @@ import { pathToFileURL } from "node:url";
 
 export const FAKE_OPENCODE_REPLY_CHUNKS = ["Hello", " from", " fake", " OpenCode", " server"];
 export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
+/** TOOL_CALL_PREFIX 流程裡 `running`/`completed` 帶的完整參數(`pending` 一律是 `{}`)。 */
+export const TOOL_CALL_INPUT = { command: "echo hello-fake-opencode" };
+/** prompt 內含這段文字時,`permission.asked` 排在 `running` 之前(見檔頭協定說明)。 */
+export const TOOL_CALL_ASK_FIRST_MARKER = "[ask-before-running]";
+export const MANY_TOOL_CALLS_PREFIX = "OPENCODE_MANY_TOOL_CALLS";
+/** MANY_TOOL_CALLS_PREFIX 流程第 i 個工具的完整參數——e2e 用同一個函式算預期值。 */
+export function manyToolCallInput(index) {
+  return { command: `echo many-tool-${index}` };
+}
 export const SLOW_PREFIX = "OPENCODE_SLOW";
 export const SLOW_CHUNK_COUNT = 20;
 export const SLOW_CHUNK_INTERVAL_MS = 300;
+export const QUESTION_PREFIX = "OPENCODE_QUESTION";
+/**
+ * 2026-09-17 新增:`question.asked` 帶的固定題目,形狀照抄真實 opencode 1.18.7
+ * 的事件(`multiple`/`custom` 省略即預設值)。第二題 `multiple: true`,讓 e2e
+ * 涵蓋多選答案拆回 label 陣列的路徑。
+ */
+export const TEST_QUESTIONS = [
+  {
+    question: "Which color do you prefer?",
+    header: "Color",
+    options: [
+      { label: "Red", description: "Choose red" },
+      { label: "Blue", description: "Choose blue" },
+    ],
+  },
+  {
+    question: "Which features should be enabled?",
+    header: "Features",
+    options: [
+      { label: "Alpha", description: "Feature alpha" },
+      { label: "Beta", description: "Feature beta" },
+      { label: "Gamma", description: "Feature gamma" },
+    ],
+    multiple: true,
+  },
+];
 /**
  * 這輪(slash command)新增:`GET /command` 的固定測試清單——`"greet"` 帶
  * `hints`(模擬有 argument 佔位符的指令),`"noop"` 不帶(模擬無參數指令),
@@ -69,7 +131,7 @@ export const TEST_COMMANDS = [
   { name: "noop", description: "fake no-arg command", source: "command", template: "Do nothing", hints: [] },
 ];
 
-const sessions = new Map(); // sessionId -> { aborted: boolean, pendingPermission: Map<id, resolve> }
+const sessions = new Map(); // sessionId -> { aborted: boolean, pendingPermission: Map<id, resolve>, pendingQuestion: Map<id, resolve> }
 /** @type {Set<http.ServerResponse>} */
 const sseClients = new Set();
 
@@ -180,42 +242,135 @@ async function handlePrompt(sessionId, text, model) {
     session.slowPartId = undefined;
   } else if (text.startsWith(TOOL_CALL_PREFIX)) {
     const callId = `call_${randomUUID()}`;
-    broadcast("message.part.updated", {
-      sessionID: sessionId,
-      part: { id: `prt_${randomUUID()}`, messageID: assistantMessageId, sessionID: sessionId, type: "tool", callID: callId, tool: "bash", state: { status: "pending", input: {}, raw: "" } },
-    });
+    // 真實 opencode 整個工具生命週期共用同一個 part.id(2026-09-17 實測;在這之前
+    // 這裡 pending/completed 各用一個隨機 id,不符合實際形狀)。
+    const partId = `prt_${randomUUID()}`;
+    const toolPart = (state) => ({ id: partId, messageID: assistantMessageId, sessionID: sessionId, type: "tool", callID: callId, tool: "bash", state });
+    const start = Date.now();
+    broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "pending", input: {}, raw: "" }) });
     const requestId = `per_${randomUUID()}`;
     const replyPromise = new Promise((resolve) => {
       session.pendingPermission.set(requestId, resolve);
     });
-    broadcast("permission.asked", {
-      id: requestId,
-      sessionID: sessionId,
-      permission: "bash",
-      patterns: ["echo *"],
-      metadata: {},
-      always: [],
-      tool: { messageID: assistantMessageId, callID: callId },
-    });
+    const sendRunning = () =>
+      broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "running", input: TOOL_CALL_INPUT, time: { start } }) });
+    const askPermission = () =>
+      broadcast("permission.asked", {
+        id: requestId,
+        sessionID: sessionId,
+        permission: "bash",
+        patterns: ["echo *"],
+        metadata: {},
+        always: [],
+        tool: { messageID: assistantMessageId, callID: callId },
+      });
+    if (text.includes(TOOL_CALL_ASK_FIRST_MARKER)) {
+      askPermission();
+      sendRunning();
+    } else {
+      sendRunning();
+      askPermission();
+    }
     const reply = await replyPromise;
     if (reply === "once" || reply === "always") {
+      const output = "hello-fake-opencode\n";
       broadcast("message.part.updated", {
         sessionID: sessionId,
-        part: {
-          id: `prt_${randomUUID()}`,
-          messageID: assistantMessageId,
-          sessionID: sessionId,
-          type: "tool",
-          callID: callId,
-          tool: "bash",
-          state: { status: "completed", input: { command: "echo hello-fake-opencode" }, output: "hello-fake-opencode\n", metadata: { output: "hello-fake-opencode\n", exit: 0 }, time: { start: Date.now(), end: Date.now() } },
-        },
+        part: toolPart({ status: "running", input: TOOL_CALL_INPUT, metadata: { output, description: "" }, time: { start } }),
+      });
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "completed", input: TOOL_CALL_INPUT, output, metadata: { output, exit: 0 }, title: "echo", time: { start, end: Date.now() } }),
       });
       await streamTextReply(sessionId, assistantMessageId, ["Done", " running", " the", " command."]);
     } else {
       await streamTextReply(sessionId, assistantMessageId, ["Permission", " denied,", " not", " running."]);
     }
     broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+  } else if (text.startsWith(QUESTION_PREFIX)) {
+    const callId = `call_${randomUUID()}`;
+    const partId = `prt_${randomUUID()}`;
+    const toolPart = (state) => ({ id: partId, messageID: assistantMessageId, sessionID: sessionId, type: "tool", callID: callId, tool: "question", state });
+    broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "pending", input: {}, raw: "" }) });
+    const requestId = `que_${randomUUID()}`;
+    const outcomePromise = new Promise((resolve) => {
+      session.pendingQuestion.set(requestId, resolve);
+    });
+    broadcast("question.asked", {
+      id: requestId,
+      sessionID: sessionId,
+      questions: TEST_QUESTIONS,
+      tool: { messageID: assistantMessageId, callID: callId },
+    });
+    const input = { questions: TEST_QUESTIONS };
+    const start = Date.now();
+    broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "running", input, time: { start } }) });
+
+    const outcome = await outcomePromise;
+    session.pendingQuestion.delete(requestId);
+    if (outcome.kind === "reply") {
+      broadcast("question.replied", { sessionID: sessionId, requestID: requestId, answers: outcome.answers });
+      const formatted = TEST_QUESTIONS.map(
+        (q, i) => `"${q.question}"="${outcome.answers[i]?.length ? outcome.answers[i].join(", ") : "Unanswered"}"`,
+      ).join(", ");
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({
+          status: "completed",
+          input,
+          output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
+          title: `Asked ${TEST_QUESTIONS.length} questions`,
+          metadata: { answers: outcome.answers, truncated: false },
+          time: { start, end: Date.now() },
+        }),
+      });
+      await streamTextReply(sessionId, assistantMessageId, [`[answers:${JSON.stringify(outcome.answers)}]`]);
+      broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+    } else if (outcome.kind === "reject") {
+      broadcast("question.rejected", { sessionID: sessionId, requestID: requestId });
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "error", input, error: "The user dismissed this question", time: { start, end: Date.now() } }),
+      });
+      broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+    } else {
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "error", input, error: "Tool execution aborted", metadata: { interrupted: true }, time: { start, end: Date.now() } }),
+      });
+      broadcast("message.updated", {
+        sessionID: sessionId,
+        info: { id: assistantMessageId, role: "assistant", sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
+      });
+    }
+  } else if (text.startsWith(MANY_TOOL_CALLS_PREFIX)) {
+    const { count, delayMs = 0 } = JSON.parse(text.slice(MANY_TOOL_CALLS_PREFIX.length));
+    session.aborted = false;
+    for (let i = 0; i < count; i++) {
+      if (session.aborted) break;
+      const callId = `call_${randomUUID()}`;
+      const partId = `prt_${randomUUID()}`;
+      const toolPart = (state) => ({ id: partId, messageID: assistantMessageId, sessionID: sessionId, type: "tool", callID: callId, tool: "bash", state });
+      const input = manyToolCallInput(i);
+      const start = Date.now();
+      const output = `many-tool-${i}\n`;
+      broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "pending", input: {}, raw: "" }) });
+      broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "running", input, time: { start } }) });
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "completed", input, output, metadata: { output, exit: 0 }, title: "echo", time: { start, end: Date.now() } }),
+      });
+      if (delayMs > 0) await delay(delayMs);
+    }
+    if (session.aborted) {
+      broadcast("message.updated", {
+        sessionID: sessionId,
+        info: { id: assistantMessageId, role: "assistant", sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
+      });
+    } else {
+      await streamTextReply(sessionId, assistantMessageId, ["Ran", " all", " tools."]);
+      broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+    }
   } else {
     // `model` 有值時(POST /session/{id}/message body 的 model 欄位,見
     // OpenCodeAdapter.sendPrompt()/setModel())在回覆前面加一段可觀察的
@@ -290,7 +445,7 @@ async function route(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/session") {
     const id = `ses_${randomUUID()}`;
-    sessions.set(id, { aborted: false, pendingPermission: new Map() });
+    sessions.set(id, { aborted: false, pendingPermission: new Map(), pendingQuestion: new Map() });
     sendJson(res, 200, { id, directory: process.cwd() });
     return;
   }
@@ -339,7 +494,32 @@ async function route(req, res, url) {
       return;
     }
     session.aborted = true;
+    for (const resolve of session.pendingQuestion.values()) resolve({ kind: "abort" });
     sendJson(res, 200, true);
+    return;
+  }
+
+  const questionMatch = url.pathname.match(/^\/question\/([^/]+)\/(reply|reject)$/);
+  if (req.method === "POST" && questionMatch) {
+    const [, requestId, action] = questionMatch;
+    const body = await readJsonBody(req);
+    // 比照真實 opencode 的 schema 驗證:answers 必須是 string[][],否則 400。
+    if (
+      action === "reply" &&
+      !(Array.isArray(body.answers) && body.answers.every((a) => Array.isArray(a) && a.every((v) => typeof v === "string")))
+    ) {
+      sendJson(res, 400, { error: "answers must be string[][]" });
+      return;
+    }
+    for (const session of sessions.values()) {
+      const resolve = session.pendingQuestion.get(requestId);
+      if (resolve) {
+        resolve(action === "reply" ? { kind: "reply", answers: body.answers } : { kind: "reject" });
+        sendJson(res, 200, true);
+        return;
+      }
+    }
+    sendJson(res, 404, { _tag: "QuestionNotFoundError", requestID: requestId, message: "question not found" });
     return;
   }
 

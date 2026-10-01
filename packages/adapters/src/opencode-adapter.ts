@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import path from "node:path";
-import type { AgentEvent, AgentProfile, PromptInput, SlashCommandInfo } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, DialogAnswer, PromptInput, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
-import { registerChild, unregisterChild } from "./child-registry.js";
+import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { waitForChildExit } from "./child-process.js";
 
 /**
@@ -61,6 +61,16 @@ import { waitForChildExit } from "./child-process.js";
  *        `type==="reasoning"` 同樣結構但這裡刻意不轉發(如同 ACP/Claude SDK
  *        adapter 都不轉發思考過程文字);`type==="tool"` 帶 `callID`/`tool`/
  *        `state`(`status` 為 `pending`→`running`→`completed`/`error`)。
+ *        2026-09-17 用本機 opencode 1.18.7 + `opencode/big-pickle` 跑一次需要
+ *        權限(`permission.bash:"ask"`)的 bash 呼叫實測:整個生命週期是**同一個
+ *        `part.id`**;`pending` 的 state 是 `{status, input:{}, raw:""}`——
+ *        **input 永遠是 `{}` 佔位**,模型還在串流參數;約 140ms 後 `running`
+ *        才帶完整 input(`{command:"echo …"}`),接著才是 `permission.asked`;
+ *        回覆之後 `running` 又帶著 `metadata`(即時輸出)重送了兩次,最後
+ *        `completed`。`running` 與 `*.asked` 的先後不固定——同日另一次對
+ *        `question` 工具的實測(同版本、同 model)順序是 `pending` →
+ *        `question.asked` → `running`:工具 execute 一開始就發問,比 opencode
+ *        發布 running 還快。tool-call 事件怎麼送,見 `handlePartUpdated()`。
  *      - `message.part.delta`:`properties.field==="text"` 時帶**真正的
  *        增量**片段(`properties.delta`)。實測發現:輸出夠短時(例如單一
  *        英文字 "pong")完全不會有 `message.part.delta` 事件,`message.part.
@@ -76,6 +86,11 @@ import { waitForChildExit } from "./child-process.js";
  *        `permission-request` AgentEvent;`permission.replied` 不需要轉發
  *        (我們自己呼叫 `resolvePermission()` 才會送出回覆,回覆本身的推播
  *        對我們沒有額外資訊)。
+ *      - `question.asked`:模型呼叫 opencode 內建的 `question` 工具向使用者
+ *        提問,轉成 `user-dialog-request` AgentEvent(見下方「提問」段落)。
+ *        在這之前這個事件完全沒有被接,模型一發問,UI 看不到任何選項、回合
+ *        就永遠卡在那個工具上——2026-09-16 使用者實際踩到,DB 裡留下的是一個
+ *        卡了 2.5 分鐘後被中斷的 `question` 工具呼叫。
  *    `message-delta` 的 `messageId` 這裡刻意用 **opencode 的 `part.id`**,
  *    不是 opencode 的 `message.id`——一則 assistant 訊息在 opencode 裡可能
  *    由多個 text part 組成(例如「文字 → 呼叫工具 → 文字」),用 part id
@@ -91,6 +106,33 @@ import { waitForChildExit } from "./child-process.js";
  *    `{reply:"once"|"always"|"reject"}`——`resolvePermission()` 的
  *    `allow`/`deny` 分別對應 `"once"`/`"reject"`(`"always"` 是「記住這個
  *    決定」的進階選項,目前 UI 沒有對應的操作,不使用)。
+ *  - 提問(2026-09-17 用本機 opencode 1.18.7 + `opencode/big-pickle` 真實跑過
+ *    「回答 / 空答案 / reject / abort」四種情境確認,不是讀文件猜的):
+ *      - 事件順序:tool part(`tool:"question"`,`status:"pending"`,input `{}`)
+ *        → `question.asked`(`properties` = `{id:"que_…", sessionID,
+ *        questions:[{question, header, options:[{label, description}],
+ *        multiple?, custom?}], tool?:{messageID, callID}}`)→ tool part
+ *        `running`(這時 input 才有完整的 `questions`)。`tool.callID` 就是
+ *        tool part 的 `callID`,拿來當 `toolUseID`,UI 靠它把表單接到對話串裡
+ *        那筆工具呼叫上。
+ *      - 回覆:`POST /question/{requestID}/reply`,body `{answers: string[][]}`
+ *        (依題目順序、每題一個 label 陣列)→ `question.replied` → tool part
+ *        `completed`,`metadata.answers` 就是剛送出的陣列,`output` 是
+ *        `User has answered your questions: "<題目>"="<a, b>". …`。
+ *      - 每題送空陣列:output 變成 `"<題目>"="Unanswered"`,**模型照常繼續**——
+ *        UI 的「略過」用這個,與 claude-agent-sdk adapter 對 `cancelled` 送
+ *        空答案(不是拒絕)是同一個語意,見 `resolveUserDialog()`。
+ *      - `POST /question/{requestID}/reject`:`question.rejected` → tool part
+ *        `error`(「The user dismissed this question」)→ **回合直接結束**。只在
+ *        `dispose()` 收尾、或題目形狀無法辨識時使用。
+ *      - `POST /session/{id}/abort`:**不會**送 `question.rejected`,tool part
+ *        直接變 `error`(「Tool execution aborted」)——所以清理待答狀態不能只
+ *        靠 `question.replied`/`rejected`,tool part 進入終態時也要清,見
+ *        `handlePartUpdated()`。
+ *      - 題目的 `custom` 省略代表「可以自行輸入答案」:工具說明明講「custom
+ *        開著(預設)時會自動附上 Type your own answer 選項,不要自己放
+ *        Other」,`options` 也沒有最少幾個的限制——UI 一定要提供自由輸入,
+ *        不然模型刻意不列 Other 的問題會變成答不了。
  *
  * ---- capabilities() 據實回報 ----
  *  - `streaming`/`toolEvents`/`permissionRequests`:true(上述事件轉換都有
@@ -234,6 +276,15 @@ export class OpenCodeAdapter implements AgentAdapter {
       throw err;
     }
 
+    // 2026-09-17:Windows 上 `child.pid` 通常只是 cmd.exe(opencode 全域安裝是
+    // `.cmd` shim,見檔案頂端「Windows 注意」),真正吃 300–600MB 的 opencode.exe
+    // 是它底下的子程序。只登記 cmd.exe 的話,core 非正常終止之後 cmd.exe 一不在,
+    // 下次啟動的回收就會把 opencode.exe 當成「已經不在」跳過 —— 使用者機器上實際
+    // 發生過。`/global/health` 已經回應 = 真正的 server 行程一定已經存在,這時把
+    // wrapper 底下的子孫也登記起來。刻意不 await:查詢要 1 秒多,不該拖慢 session
+    // 建立;查不到只是少一層保護。見 child-registry.ts 的 registerChildDescendants()。
+    void registerChildDescendants(child.pid);
+
     let opencodeSessionId: string;
     try {
       const created = await postJson<{ id: string }>(`${baseUrl}/session`, {});
@@ -293,6 +344,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       partMeta: new Map(),
       toolMeta: new Map(),
       pendingPermissions: new Map(),
+      pendingQuestions: new Map(),
       erroredMessageIds: new Set(),
       messageRoles: new Map(),
       busy: false,
@@ -426,6 +478,16 @@ export class OpenCodeAdapter implements AgentAdapter {
       }
     }
     internal.pendingPermissions.clear();
+    // 待答的提問同理:opencode 那邊的 `question` 工具會一直等下去。這裡用 reject
+    // 而不是空答案——session 都要關了,沒有「讓模型繼續下一步」的必要。
+    for (const requestId of internal.pendingQuestions.keys()) {
+      try {
+        await postJson(`${internal.baseUrl}/question/${requestId}/reject`, {});
+      } catch {
+        // 伺服器即將被關閉,忽略。
+      }
+    }
+    internal.pendingQuestions.clear();
     internal.sseController.abort();
     internal.outputQueue.close();
     this.killChild(internal.child);
@@ -461,6 +523,30 @@ export class OpenCodeAdapter implements AgentAdapter {
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode permission/reply 送出失敗",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  /**
+   * 回覆一筆 `question.asked`(見檔案頂端「提問」段落)。`completed` 與
+   * `cancelled` 都走 `/reply`:略過作答時每題送空陣列,opencode 會把它寫成
+   * 「Unanswered」讓模型繼續——不走 `/reject`,那會直接結束這一輪,與
+   * claude-agent-sdk adapter 對同一個 `cancelled` 的處理(空答案、不是拒絕)
+   * 語意不一致。
+   */
+  resolveUserDialog(handle: AgentHandle, requestId: string, result: DialogAnswer): void {
+    const internal = this.mustGet(handle);
+    const pending = internal.pendingQuestions.get(requestId);
+    if (!pending) return;
+    internal.pendingQuestions.delete(requestId);
+    const answers = pending.questions.map((q) =>
+      result.behavior === "completed" ? toOpencodeAnswer(q, result.result.answers[q.question]) : [],
+    );
+    void postJson(`${internal.baseUrl}/question/${requestId}/reply`, { answers }).catch((err: unknown) => {
+      internal.outputQueue.push({
+        type: "error",
+        message: "OpenCode question/reply 送出失敗",
         detail: err instanceof Error ? err.message : String(err),
       });
     });
@@ -651,6 +737,38 @@ export class OpenCodeAdapter implements AgentAdapter {
         });
         break;
       }
+      case "question.asked": {
+        const requestId = properties?.id as string | undefined;
+        if (!requestId) break;
+        const questions = normalizeOpencodeQuestions(properties?.questions);
+        if (!questions) {
+          // opencode 自己會先用 schema 驗過工具參數,理論上到不了這裡;萬一將來
+          // 形狀變了,寧可 reject 讓這一輪結束(對話串會看到工具失敗),也不要
+          // 發一個 UI 畫不出來的請求、讓回合無聲無息地卡住。
+          console.error(`[opencode-adapter] question.asked 的 questions 形狀無法辨識,已 reject: ${JSON.stringify(properties?.questions)}`);
+          void postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}).catch(() => {});
+          break;
+        }
+        const tool = properties?.tool as { callID?: string } | undefined;
+        internal.pendingQuestions.set(requestId, { questions, toolCallId: tool?.callID });
+        internal.outputQueue.push({
+          type: "user-dialog-request",
+          requestId,
+          // 沒有 `tool`(不是由工具呼叫發起的提問)時對話串裡沒有可以對上的工具
+          // 項目,UI 會改在對話串底部顯示,見 PendingUserDialogsDock。
+          toolUseID: tool?.callID ?? requestId,
+          questions,
+        });
+        break;
+      }
+      case "question.replied":
+      case "question.rejected": {
+        // 我們自己回覆時已經刪過了;這裡處理的是被別的 client(例如同時連著這個
+        // server 的 opencode TUI)回覆掉的情況。
+        const requestId = properties?.requestID as string | undefined;
+        if (requestId) internal.pendingQuestions.delete(requestId);
+        break;
+      }
       default:
         // server.connected / plugin.added / session.updated / session.diff /
         // permission.replied 等其餘事件目前不影響串流顯示,略過不轉發(見
@@ -703,19 +821,62 @@ export class OpenCodeAdapter implements AgentAdapter {
     }
 
     if (part.type === "tool" && part.callID && part.tool && part.state) {
+      /**
+       * 2026-09-17 修正:過去只在第一次看到這個 callID 時送一次 tool-call,而第一次
+       * 幾乎一定是 `pending`,input 是 opencode 的 `{}` 佔位(見 class 頂端實測
+       * 紀錄)——桌面端每個 OpenCode 工具泡泡都沒有參數,core 寫進 DB 的也全是
+       * `"input":{}`。
+       *
+       * 現在分兩次送,同一個 toolCallId:
+       *   1. 第一次看到就送(不等 input),UI 立刻出現「執行中」泡泡、core 在這裡
+       *      計入回合硬上限。input 未知時給 `undefined` 而不是 `{}`——`{}` 會被
+       *      當成「這個工具沒有參數」顯示、落地,正是這次修的 bug。
+       *   2. 第一次進入 `running`/`completed` 時補送一次帶完整 input 的 tool-call。
+       * core 把第 2 次當成「補資訊」:不重複計數、就地更新同一筆 row、不經過
+       * ensureBusy()(`running` 可能排在 `permission.asked` 之後,那時翻回 busy 會
+       * 蓋掉 waiting);桌面端照舊以 toolCallId upsert。這與 claude-sdk-adapter
+       * 在 content_block_start 提早送出是同一套語意,取捨見
+       * apps/core/src/session/session-manager.ts 的 `RuntimeState.openToolCalls`。
+       *
+       * 為什麼不乾脆等到 `running` 才送唯一一次:泡泡要等參數串流完才出現(大檔
+       * write/edit 可以好幾秒),而且那次事件在 core 會經過 ensureBusy(),遇到
+       * 先到的 permission.asked 就把 waiting 翻回 busy。
+       *
+       * 只把 `running`/`completed` 帶的 input 當真:沒經過 running 就直接 `error`
+       * 的,是參數串流到一半被 abort/出錯,opencode 收尾時把 pending 原樣改成
+       * error,input 仍是那個 `{}`。`running` 執行期間會帶著 metadata 重送好幾次,
+       * input 不會再變,`inputEmitted` 確保只補一次。
+       */
+      const inputKnown = part.state.status === "running" || part.state.status === "completed";
       let meta = internal.toolMeta.get(part.callID);
       if (!meta) {
-        meta = { toolName: part.tool, emittedCall: false, emittedResult: false };
+        meta = { toolName: part.tool, inputEmitted: inputKnown, emittedResult: false };
         internal.toolMeta.set(part.callID, meta);
-      }
-      if (!meta.emittedCall) {
-        meta.emittedCall = true;
+        internal.outputQueue.push({
+          type: "tool-call",
+          toolCallId: part.callID,
+          toolName: part.tool,
+          input: inputKnown ? part.state.input : undefined,
+        });
+      } else if (!meta.inputEmitted && inputKnown) {
+        meta.inputEmitted = true;
+        // 名稱以 running 這次為準:opencode 在參數解析完成時會重寫 `tool` 欄位
+        // (讀原始碼的推論,例如無效呼叫被修補成別的工具;實測的 bash 沒有改名)。
+        // 沒改名時這行是 no-op;有改名時 permission.asked 查到的名稱才會跟著對。
+        meta.toolName = part.tool;
         internal.outputQueue.push({
           type: "tool-call",
           toolCallId: part.callID,
           toolName: part.tool,
           input: part.state.input,
         });
+      }
+      if (part.state.status === "completed" || part.state.status === "error") {
+        // abort 不會送 `question.rejected`(見檔案頂端「提問」段落),工具進入終態
+        // 就代表這一題再也答不了了。
+        for (const [requestId, pending] of internal.pendingQuestions) {
+          if (pending.toolCallId === part.callID) internal.pendingQuestions.delete(requestId);
+        }
       }
       if (!meta.emittedResult && part.state.status === "completed") {
         meta.emittedResult = true;
@@ -725,6 +886,7 @@ export class OpenCodeAdapter implements AgentAdapter {
           toolName: part.tool,
           output: part.state.output ?? (part.state.metadata as Record<string, unknown> | undefined)?.output,
           isError: false,
+          structuredResult: part.tool === "question" ? questionStructuredResult(part.state) : undefined,
         });
       } else if (!meta.emittedResult && part.state.status === "error") {
         meta.emittedResult = true;
@@ -734,6 +896,7 @@ export class OpenCodeAdapter implements AgentAdapter {
           toolName: part.tool,
           output: part.state.error,
           isError: true,
+          structuredResult: part.tool === "question" ? questionStructuredResult(part.state) : undefined,
         });
       }
       return;
@@ -804,7 +967,8 @@ export class OpenCodeAdapter implements AgentAdapter {
 
 interface ToolMeta {
   toolName: string;
-  emittedCall: boolean;
+  /** 已經送過帶完整 input 的 tool-call(見 handlePartUpdated() 的兩段式說明)。 */
+  inputEmitted: boolean;
   emittedResult: boolean;
 }
 
@@ -824,6 +988,25 @@ interface PendingPermission {
   toolCallId?: string;
 }
 
+/**
+ * `user-dialog-request.questions` 的形狀(見 packages/shared/src/events.ts 的
+ * `UserDialogRequestEventSchema` 註解)——對齊 claude-agent-sdk 的
+ * `AskUserQuestionInput.questions`,讓 UI 只需要認一種形狀。
+ */
+interface DialogQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+  /** `false` 時不提供自由輸入;opencode 省略這個欄位代表允許。 */
+  custom: boolean;
+}
+
+interface PendingQuestion {
+  questions: DialogQuestion[];
+  toolCallId?: string;
+}
+
 interface InternalSession {
   handle: AgentHandle;
   child: OpencodeChildProcess;
@@ -833,6 +1016,8 @@ interface InternalSession {
   partMeta: Map<string, PartMeta>;
   toolMeta: Map<string, ToolMeta>;
   pendingPermissions: Map<string, PendingPermission>;
+  /** `question.asked` 的 requestId -> 待答內容,見 `resolveUserDialog()`。 */
+  pendingQuestions: Map<string, PendingQuestion>;
   erroredMessageIds: Set<string>;
   /** opencode messageID -> role("user"/"assistant"/...),由 message.updated 事件
    *  填入——見 handlePartUpdated() 用它過濾使用者自己訊息的 part。 */
@@ -918,6 +1103,75 @@ function parseModelString(model: string | undefined): { providerID: string; mode
   const slashIndex = model.indexOf("/");
   if (slashIndex <= 0 || slashIndex === model.length - 1) return undefined;
   return { providerID: model.slice(0, slashIndex), modelID: model.slice(slashIndex + 1) };
+}
+
+/**
+ * opencode 的 `QuestionInfo[]`(`multiple?`/`custom?` 皆可省略、`options` 沒有
+ * 最少個數)轉成 `DialogQuestion[]`。只擋 UI 真的畫不出來的形狀(不是陣列、
+ * 題目或選項 label 不是字串),其餘缺的欄位補預設值。
+ */
+function normalizeOpencodeQuestions(raw: unknown): DialogQuestion[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const questions: DialogQuestion[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const { question, header, options, multiple, custom } = entry as Record<string, unknown>;
+    if (typeof question !== "string" || !Array.isArray(options)) return undefined;
+    const normalizedOptions: DialogQuestion["options"] = [];
+    for (const option of options) {
+      if (typeof option !== "object" || option === null) return undefined;
+      const { label, description } = option as Record<string, unknown>;
+      if (typeof label !== "string") return undefined;
+      normalizedOptions.push({ label, description: typeof description === "string" ? description : "" });
+    }
+    questions.push({
+      question,
+      header: typeof header === "string" ? header : "",
+      options: normalizedOptions,
+      multiSelect: multiple === true,
+      custom: custom !== false,
+    });
+  }
+  return questions;
+}
+
+/**
+ * `DialogAnswer` 的答案是「題目文字 -> 字串」(多選以 ", " 串接,對齊
+ * claude-agent-sdk),opencode 要每題一個 label 陣列。整串剛好是一個選項、或
+ * 拆開後每段都是選項時還原成陣列;其餘(含使用者自行輸入的答案)整串當成一個
+ * 答案。兩種寫法模型看到的文字相同(opencode 自己也是用 ", " 串接),差別只在
+ * opencode 記下的 `metadata.answers`。
+ */
+function toOpencodeAnswer(question: DialogQuestion, text: string | undefined): string[] {
+  if (!text) return [];
+  const labels = new Set(question.options.map((option) => option.label));
+  if (labels.has(text)) return [text];
+  const parts = text.split(", ");
+  return parts.every((part) => labels.has(part)) ? parts : [text];
+}
+
+/**
+ * `question` 工具的 `structuredResult`:組成與 claude-agent-sdk
+ * `AskUserQuestionOutput` 相同的 `{questions, answers}`,UI 的已答模式因此不必
+ * 分辨後端,也不必在意 tool-call 的 input 有沒有補送到(見 `handlePartUpdated()`
+ * 的兩段式說明)。沒作答的題目不放進 `answers`,UI 會顯示「未作答」。
+ */
+function questionStructuredResult(
+  state: NonNullable<OpencodePart["state"]>,
+): { questions: DialogQuestion[]; answers: Record<string, string> } | undefined {
+  const questions = normalizeOpencodeQuestions((state.input as { questions?: unknown } | undefined)?.questions);
+  if (!questions) return undefined;
+  const rawAnswers = (state.metadata as { answers?: unknown } | undefined)?.answers;
+  const answers: Record<string, string> = {};
+  if (Array.isArray(rawAnswers)) {
+    questions.forEach((q, index) => {
+      const selected = rawAnswers[index];
+      if (!Array.isArray(selected)) return;
+      const texts = selected.filter((value): value is string => typeof value === "string" && value.length > 0);
+      if (texts.length > 0) answers[q.question] = texts.join(", ");
+    });
+  }
+  return { questions, answers };
 }
 
 function rejectAfter(

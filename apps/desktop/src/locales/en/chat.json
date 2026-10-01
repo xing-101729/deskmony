@@ -34,7 +34,8 @@
   "askUserQuestion": {
     "submitLabel": "Submit",
     "skipLabel": "Skip",
-    "noAnswerLabel": "No answer"
+    "noAnswerLabel": "No answer",
+    "customPlaceholder": "Type your own answer"
   },
   "usage": {
     "cannotMeasureTitle": "This backend cannot measure cost (or it isn't yet confirmed whether it will report it) — the task/daily cost budget doesn't apply to this session; only the turn time/tool-call count limit still protects it.",

@@ -20,7 +20,20 @@ export const MessageDeltaEventSchema = z.object({
 });
 export type MessageDeltaEvent = z.infer<typeof MessageDeltaEventSchema>;
 
-/** 工具呼叫開始 */
+/**
+ * 工具呼叫開始——以及同一個呼叫的資訊補送。
+ *
+ * 同一個 `toolCallId` 可以送不只一次:第一次代表「這個工具呼叫開始了」,之後的
+ * 是同一個呼叫補上更完整的資訊(典型是 input:claude-sdk-adapter 在
+ * content_block_start、opencode-adapter 在 tool part `pending` 時先送一次,
+ * input 為 undefined,參數齊了再送一次)。桌面端(session-store.ts 的
+ * `upsertToolItem()`)與 core(session-manager.ts 的 `RuntimeState.openToolCalls`:
+ * 回合硬上限只計一次、歷史只留一筆)、CLI/TUI(apps/cli/src/render.ts 的
+ * `createToolCallLineTracker()`:同一個 toolCallId 只印一行)都以 toolCallId 合併。
+ *
+ * adapter 端的紀律:補送要在同一個呼叫的 tool-result 之前;已經送出的 input
+ * 不要再用 undefined 覆蓋(桌面端的 upsert 會照單全收)。
+ */
 export const ToolCallEventSchema = z.object({
   type: z.literal("tool-call"),
   toolCallId: z.string(),
@@ -41,9 +54,10 @@ export const ToolResultEventSchema = z.object({
    * tool_use_result`(每個工具各自的完整結構化 Output 物件,例如
    * `FileEditOutput`/`FileWriteOutput` 的 `structuredPatch`)。刻意取通用名稱
    * 而非 `diffResult`——同一條管線之後 Phase 7(AskUserQuestion 的
-   * `answers`)也會沿用,不是 diff 專用欄位。只有 claude-agent-sdk adapter 會
-   * 填這個欄位(且只在能確定歸屬時才填,見該 adapter 的 `case "user":`
-   * 註解),其餘 adapter 一律留 undefined,消費端(UI)須自行 fallback。
+   * `answers`)也會沿用,不是 diff 專用欄位。claude-agent-sdk adapter 只在能
+   * 確定歸屬時才填(見該 adapter 的 `case "user":` 註解);ACP adapter 填 diff;
+   * OpenCode adapter 只對 `question` 工具填與 `AskUserQuestionOutput` 同形狀的
+   * `{questions, answers}`。其餘情況留 undefined,消費端(UI)須自行 fallback。
    */
   structuredResult: z.unknown().optional(),
 });
@@ -77,19 +91,26 @@ export const PermissionRequestEventSchema = z.object({
 export type PermissionRequestEvent = z.infer<typeof PermissionRequestEventSchema>;
 
 /**
- * async-scribbling-llama.md Phase 7:`AskUserQuestion` 的待答問題——由
- * claude-sdk-adapter.ts 的 `canUseTool` 特例攔截後轉發,**不是**
+ * async-scribbling-llama.md Phase 7:agent 向使用者提問的待答問題,**不是**
  * `permission-request` 的變體(這不是一個允許/拒絕的權限決策,見
  * docs/DECISIONS.md §C 的政策引擎範圍——政策引擎管的是「要不要放行一個工具
- * 呼叫」,AskUserQuestion 本身的執行從未被擋下,只是它需要使用者提供答案才能
- * 完成)。`questions` 直接透傳 SDK 的 `AskUserQuestionInput.questions`(未經
- * 加工的 `unknown`——桌面端不 import `@anthropic-ai/claude-agent-sdk` 型別,
- * 由 UI 端自行防禦性驗證,同 Phase 3/4 的 `parseTodoWriteInput()`/
- * `parseDiffResult()` 既有慣例)。`toolUseID` 對應既有 `tool-call` 事件的
- * `toolCallId`(SDK 保證同一個工具呼叫兩邊用同一個 id),UI 靠它把這筆待答
- * 請求與已經在對話串裡顯示的工具呼叫項目對上;`requestId` 是
- * `canUseTool`/`resolveUserDialog()` 用來配對的 control-protocol id,兩者用途
- * 不同,刻意都保留(不能只留一個)。
+ * 呼叫」,提問工具本身的執行從未被擋下,只是它需要使用者提供答案才能完成)。
+ * 來源有兩個:claude-sdk-adapter.ts 的 `canUseTool` 攔截 `AskUserQuestion`、
+ * opencode-adapter.ts 轉發 `question` 工具的 `question.asked` 事件。
+ *
+ * `questions` 的形狀以 SDK 的 `AskUserQuestionInput.questions` 為準
+ * (`{question, header, options:[{label, description}], multiSelect}`);
+ * OpenCode adapter 會先轉成這個形狀,另外帶 `custom: boolean`(`false` 時不讓
+ * 使用者自行輸入答案,省略視為允許——兩個後端的工具說明都告訴模型「自行輸入
+ * 會自動提供,不要自己放 Other 選項」)。型別仍是 `unknown`:桌面端不 import
+ * 各後端的型別,由 UI 端自行防禦性驗證,同 Phase 3/4 的
+ * `parseTodoWriteInput()`/`parseDiffResult()` 既有慣例。
+ *
+ * `toolUseID` 對應既有 `tool-call` 事件的 `toolCallId`(兩個後端都保證同一個
+ * 工具呼叫兩邊用同一個 id),UI 靠它把這筆待答請求與已經在對話串裡顯示的工具
+ * 呼叫項目對上;對不上任何項目時(例如 opencode 的提問沒有帶 `tool`,這時會填
+ * `requestId`)UI 改在對話串底部顯示。`requestId` 是 adapter 用來配對回覆的
+ * id,兩者用途不同,刻意都保留(不能只留一個)。
  */
 export const UserDialogRequestEventSchema = z.object({
   type: z.literal("user-dialog-request"),
@@ -282,7 +303,8 @@ export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
  * 型別可透傳)。
  *
  * `"completed"`:使用者實際選了答案(question text -> 選項 label,多選以逗號
- * 串接,對齊 SDK `AskUserQuestionOutput.answers` 的既有語意)。
+ * 串接,對齊 SDK `AskUserQuestionOutput.answers` 的既有語意;使用者自行輸入的
+ * 答案同樣串在後面,所以值不保證是某個選項的 label)。
  * `"cancelled"`:使用者略過作答,沒有 `result`——`resolveUserDialog()` 對這
  * 兩種 behavior 最終都會讓 SDK 收到空 `answers` 物件(比照 SDK 自己 idle 逾時
  * 未答的語意),差別只在於「是使用者主動略過」還是「送出了具體答案」,兩者都

@@ -205,6 +205,37 @@ interface RuntimeState {
    *  空的),用來讓 `session.getSlashCommands` 的回應區分「還不知道」與「已
    *  確認是空清單」,對齊既有 usage/context-usage 事件的 observed 慣例。 */
   slashCommandsObserved: boolean;
+  /**
+   * 2026-09-17:已經計入回合硬上限、已經寫進 DB,但還沒收到 tool-result 的工具
+   * 呼叫,key 是 toolCallId。`consumeEventsInner()` 的 `"tool-call"` case 靠它分辨
+   * 「一次新的工具呼叫」與「同一個呼叫補上更完整的資訊」。
+   *
+   * `tool-call` 事件實際上是「以 toolCallId 為鍵的 upsert」——桌面端
+   * `upsertToolItem()` 一直是這樣合併的,而有兩個 adapter 會對同一個呼叫送不只
+   * 一次:
+   *   - claude-sdk-adapter.ts:`content_block_start` 先送一次(input 還不知道),
+   *     完整 assistant 訊息抵達時再送一次帶完整 input 的。
+   *   - opencode-adapter.ts:tool part `pending` 時先送一次(opencode 這時 input
+   *     一律是 `{}`),`running` 帶完整參數時再送一次。
+   * core 過去對每個事件都 `recordToolCall()` + insert 一筆 row:Claude 的每次工具
+   * 呼叫在回合硬上限裡被算兩次、歷史裡多一筆沒有 input 的 row;OpenCode 則是
+   * adapter 只送 pending 那一次,歷史裡的 input 全部是 `{}`。
+   *
+   * 生命週期刻意收窄,不是整個 session 永久去重:收到該 toolCallId 的
+   * tool-result 就移除,回合結束(completed/error,與 `turnLimiter.endTurn()`
+   * 同一個位置)整個清空。去重只涵蓋「一個呼叫從開始到有結果」這段期間——後端
+   * 在之後的步驟或回合重複使用同一個 id,那就是新的一次呼叫,照樣計數,不會變成
+   * 繞過斷路器的缺口。
+   */
+  openToolCalls: Map<string, OpenToolCall>;
+}
+
+/** `RuntimeState.openToolCalls` 的值:那筆 `tool` 訊息的 row id,與目前已寫進
+ *  DB 的 toolName/input(補資訊時拿來合併,不需要回頭讀 DB)。 */
+interface OpenToolCall {
+  rowId: string;
+  toolName: string;
+  input: unknown;
 }
 
 /**
@@ -558,6 +589,7 @@ export class SessionManager extends EventEmitter {
       workingDir: input.workingDir,
       parentSessionId: input.parentSessionId,
       slashCommandsObserved: false,
+      openToolCalls: new Map(),
     });
     if (member) {
       this.memberSessions.set(member.id, session.id);
@@ -1271,6 +1303,7 @@ export class SessionManager extends EventEmitter {
       workingDir: session.workingDir,
       backendSessionId: session.backendSessionId,
       slashCommandsObserved: false,
+      openToolCalls: new Map(),
     });
     this.permissions.initialize(sessionId, profile.permissionLevel);
 
@@ -1466,25 +1499,73 @@ export class SessionManager extends EventEmitter {
           break;
         }
         case "tool-call": {
-          await this.ensureBusy(sessionId);
-          // S3b(CostGovernor)§3:回合硬上限的其中一個維度——不依賴 usage,
-          // 對所有 adapter 一律計數。`recordToolCall()` 內部同步判斷是否超標,
-          // 超標時自己觸發 trip + interrupt(fire-and-forget,不阻塞這個事件
-          // 迴圈繼續讀取後續事件)。
-          this.turnLimiter.recordToolCall(sessionId);
-          await this.persistMessage(
-            sessionId,
-            "tool",
-            JSON.stringify({
-              kind: "call",
-              toolCallId: event.toolCallId,
-              toolName: event.toolName,
-              input: event.input,
-            }),
-          );
+          /**
+           * 2026-09-17:同一個 toolCallId 第二次以後的 tool-call 是「補資訊」,不是
+           * 新的工具呼叫(見 `RuntimeState.openToolCalls` 的完整說明)。
+           *
+           * 為什麼在 core 依 toolCallId 去重,而不是另外兩條路:
+           *   - 讓 adapter 等 input 齊了才送唯一一次(opencode 等到 `running`):
+           *     泡泡要等模型把參數串流完才出現(大檔 write/edit 可以是好幾秒);
+           *     更糟的是 opencode 實測 `running` 與 `permission.asked`/
+           *     `question.asked` 誰先到不固定,晚到的那次 tool-call 會經過
+           *     `ensureBusy()`,把正在等人回覆的 waiting 翻回 busy(`waitingSince`
+           *     也跟著被清掉,T1/T2 掛起處理就看不到這條 session)。
+           *   - 另開一種「只補 input」的事件型別:shared schema、CLI、TUI、桌面端
+           *     的 switch 全部要改,而桌面端本來就以 toolCallId upsert 合併重複的
+           *     tool-call(claude-sdk-adapter 從 M1 起就這樣送)——core 是唯一沒有
+           *     跟上這個語意的消費端,補在這裡改動面最小。
+           *
+           * ⚠️ 對 Claude session 的回合硬上限是**有意的語意修正**,不是順手放寬:
+           * 修正前 Claude 每次工具呼叫送兩個 tool-call、被算兩次,`maxToolCalls`
+           * 預設 200 實際約第 101 次呼叫就 trip;修正後回到設定值本身。雙倍計數
+           * 不是設計:content_block_start 那次提早送出是 M1 只為了 UI 顯示加的
+           * (docs/DEVLOG.md 有記),S3b 加回合上限時沒注意到這個交互作用——
+           * config 欄位名、ARCHITECTURE.md 與 cost-governor_detail.md §2 的表格、
+           * 通知文字講的都是「工具呼叫次數」;e2e-cost-governor 只用每個呼叫送
+           * 一次的 ACP 假 agent,所以一直沒浮現。想要更緊的上限應該調低設定值,
+           * 而不是依賴某個 adapter 剛好多送一次事件。
+           */
+          const open = runtime.openToolCalls.get(event.toolCallId);
+          if (!open) {
+            await this.ensureBusy(sessionId);
+            // S3b(CostGovernor)§3:回合硬上限的其中一個維度——不依賴 usage,
+            // 對所有 adapter 一律計數,每個工具呼叫(toolCallId 第一次出現)計一次。
+            // `recordToolCall()` 內部同步判斷是否超標,超標時自己觸發 trip +
+            // interrupt(fire-and-forget,不阻塞這個事件迴圈繼續讀取後續事件)。
+            this.turnLimiter.recordToolCall(sessionId);
+            const rowId = await this.persistMessage(
+              sessionId,
+              "tool",
+              JSON.stringify({
+                kind: "call",
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+                input: event.input,
+              }),
+            );
+            runtime.openToolCalls.set(event.toolCallId, { rowId, toolName: event.toolName, input: event.input });
+          } else {
+            // 補資訊:不計數、不 `ensureBusy()`(補上 input 不代表 agent 有了新
+            // 進展,見上方),就地更新同一筆 row——歷史裡每個工具呼叫只有一筆
+            // call 記錄,位置(createdAt)維持第一次出現的時間。後到的事件沒帶
+            // input/toolName 時保留已知值,不讓一次較空的重送把已經落地的參數洗掉。
+            const toolName = event.toolName || open.toolName;
+            const input = event.input !== undefined ? event.input : open.input;
+            if (toolName !== open.toolName || input !== open.input) {
+              open.toolName = toolName;
+              open.input = input;
+              await this.updateMessageContent(
+                open.rowId,
+                JSON.stringify({ kind: "call", toolCallId: event.toolCallId, toolName, input }),
+              );
+            }
+          }
           break;
         }
         case "tool-result": {
+          // 這個呼叫已經有結果,移出 openToolCalls:之後同一個 toolCallId 再出現
+          // 就是後端重複使用 id 的新呼叫,照樣計數(見 RuntimeState.openToolCalls)。
+          runtime.openToolCalls.delete(event.toolCallId);
           await this.ensureBusy(sessionId);
           await this.persistMessage(
             sessionId,
@@ -1618,8 +1699,9 @@ export class SessionManager extends EventEmitter {
           runtime.streamingText = "";
           await this.setStatus(sessionId, "idle");
           // S3b:回合正常結束,清除回合硬上限的狀態(見 turn-limiter.ts 的
-          // `endTurn()` 註解)。
+          // `endTurn()` 註解)。openToolCalls 跟著一起清(見 RuntimeState 註解)。
           this.turnLimiter.endTurn(sessionId);
+          runtime.openToolCalls.clear();
 
           // S12(session-subagent):若這是子 session,把這一輪的最終結果
           // 回報回父 session: (1) emit "child-result" 讓所有 client 即時看到
@@ -1700,6 +1782,7 @@ export class SessionManager extends EventEmitter {
           runtime.streamingText = "";
           // S3b:回合以錯誤/interrupt 收場,同樣視為回合結束。
           this.turnLimiter.endTurn(sessionId);
+          runtime.openToolCalls.clear();
           break;
         }
         case "terminal-data": {
@@ -1857,6 +1940,7 @@ export class SessionManager extends EventEmitter {
       agentProfileId: profile.id,
       workingDir: session.workingDir,
       slashCommandsObserved: false,
+      openToolCalls: new Map(),
     });
     // memberSessions/sessionMembers 的 key/value 不變(同一 member ↔ 同一
     // sessionId),不需要更新。
@@ -2027,7 +2111,7 @@ export class SessionManager extends EventEmitter {
     role: MessageRecord["role"],
     content: string,
     attachments?: PromptAttachment[],
-  ): Promise<void> {
+  ): Promise<string> {
     const row = {
       id: randomUUID(),
       sessionId,
@@ -2037,6 +2121,20 @@ export class SessionManager extends EventEmitter {
       createdAt: Date.now(),
     };
     await this.db.insert(messagesTable).values(row).run();
+    // 2026-09-17:回傳 row id——`"tool-call"` case 補資訊時要就地更新同一筆
+    // (見 `updateMessageContent()`),其餘呼叫點照舊忽略回傳值。
+    return row.id;
+  }
+
+  /**
+   * 2026-09-17:就地改寫一筆訊息的 content——目前唯一的用途是同一個工具呼叫補上
+   * 完整 input(見 `RuntimeState.openToolCalls`)。刻意不動 `createdAt`:歷史
+   * (`getHistory()` 依 createdAt 排序)裡這筆 call 要留在工具呼叫**開始**的位置,
+   * 不能因為參數晚到,就排到這段期間寫入的其他訊息(例如權限逾時的系統訊息)
+   * 之後。
+   */
+  private async updateMessageContent(messageId: string, content: string): Promise<void> {
+    await this.db.update(messagesTable).set({ content }).where(eq(messagesTable.id, messageId)).run();
   }
 }
 

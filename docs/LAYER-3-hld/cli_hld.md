@@ -302,6 +302,7 @@ CI:`.github/workflows/ci.yml` 新增一個 **`ubuntu-latest`** job,跑
 | `child-process.ts:killProcessTree` | `taskkill /T /F` | `child.kill("SIGTERM")` | 可用(孫程序可能短暫存活,檔案內已如實記載這個限制) |
 | `child-registry.ts:queryProcessCreatedAt` | PowerShell CIM | `ps -o lstart=` | 可用 |
 | `child-registry.ts` 回收殘留 | `taskkill` | `process.kill(pid, "SIGTERM")` | 可用 |
+| `child-registry.ts:registerChildDescendants`(2026-09-17 新增) | PowerShell CIM 行程快照,登記外殼底下的子孫 | 不做(POSIX 不經 shell 啟動 agent;回收本來就只對單一 pid 送 SIGTERM) | 可用(POSIX 行為不變) |
 | `agent-detector.ts` | `where` | `which` | 可用 |
 | `tool-input.ts` 路徑正規化 | 轉小寫 | 保留大小寫 | 正確(POSIX 檔名區分大小寫) |
 

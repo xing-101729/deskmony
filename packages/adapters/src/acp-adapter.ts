@@ -11,7 +11,7 @@ import type { AgentEvent, AgentProfile, McpBridgeTokenGrant, McpBridgeTokenPort,
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, TeamSpawnContext, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
-import { registerChild, unregisterChild } from "./child-registry.js";
+import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 
 /**
@@ -270,6 +270,14 @@ export class AcpAdapter implements AgentAdapter {
         sessionBuilder = sessionBuilder.withMcpServer(bridgeMcpServer);
       }
       const session = await Promise.race([sessionBuilder.start(), spawnFailure]);
+
+      // 2026-09-17:handshake 與 session/new 都成功 = 真正的 agent 行程一定已經在
+      // 回應了。`child.pid` 可能只是外殼 —— `.cmd` shim 的 cmd.exe、`.ps1` 的
+      // powershell.exe,或 codex-acp 那種 node → node(launcher)→ codex.exe 三層
+      // (見 codex-acp-locator.ts)。外殼比 agent 先死時,只登記外殼的話下次啟動就
+      // 回收不到真正的 agent,所以把它底下當下的子孫也登記起來。刻意不 await
+      // (查詢要 1 秒多)。見 child-registry.ts 的 registerChildDescendants()。
+      void registerChildDescendants(child.pid);
 
       const handle: AgentHandle = { id: handleId, profile, workspace };
       const internal: InternalSession = {

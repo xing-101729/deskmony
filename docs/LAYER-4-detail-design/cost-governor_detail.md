@@ -90,13 +90,15 @@ budget: {
 
 ```
 回合開始(sendPrompt / 收到第一個 event)→ 記 turnStartedAt、turnToolCalls = 0
-每個 tool-call 事件 → turnToolCalls++
+每個工具呼叫(toolCallId 第一次出現)→ turnToolCalls++
                     → 若 > budget.turn.maxToolCalls ⇒ trip + interrupt
 定時檢查(每 10s)→ 若 now - turnStartedAt > maxDurationMs ⇒ trip + interrupt
 回合結束(completed / error)→ 清除
 ```
 
 **預設值**:`maxDurationMs = 30 分鐘`、`maxToolCalls = 200`。刻意寬鬆——這是**防失控**,不是防正常長任務;太緊會打斷合法工作,失去信任後使用者會直接關掉。
+
+**計的是工具呼叫,不是 `tool-call` 事件(2026-09-17 釐清)**:同一個 toolCallId 可能送不只一個 `tool-call` 事件補上 input(claude-sdk-adapter 的 content_block_start → 完整訊息、opencode-adapter 的 pending → running)。原本逐事件計數,使 Claude session 的每次呼叫被算兩次(預設 200 實際約第 101 次就 trip);現在由 `session-manager.ts` 依 toolCallId 去重後才計數,去重期間只到該呼叫的 tool-result 或回合結束為止。取捨見該檔案 `RuntimeState.openToolCalls` 與 `"tool-call"` case 的註解。
 
 ---
 

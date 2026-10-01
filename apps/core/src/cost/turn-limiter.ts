@@ -17,7 +17,10 @@ import { enforcementTrip, type SessionControlPort } from "../enforcement/trip.js
  *
  * ---- 語意 ----
  * 回合開始(sendPrompt / 收到第一個 event)→ 記 turnStartedAt、toolCalls=0
- * 每個 tool-call 事件 → toolCalls++;超過 maxToolCalls ⇒ trip + interrupt
+ * 每個工具呼叫 → toolCalls++;超過 maxToolCalls ⇒ trip + interrupt
+ *   (2026-09-17 起明確是「工具呼叫」而非「tool-call 事件」:同一個 toolCallId
+ *   可能送好幾次 tool-call 事件補上 input,去重在呼叫端做,見
+ *   apps/core/src/session/session-manager.ts 的 `RuntimeState.openToolCalls`。)
  * 每 10 秒定時檢查一次 → now - turnStartedAt > maxDurationMs ⇒ trip + interrupt
  * 回合結束(completed / error,或 pty 判定靜止轉 idle)→ 清除這個 session 的
  * 回合狀態(見 apps/core/src/session/session-manager.ts 的呼叫點)。
@@ -89,7 +92,19 @@ export class TurnLimiter {
     this.turns.delete(sessionId);
   }
 
-  /** 每次 `tool-call` 事件呼叫一次。 */
+  /**
+   * 每個工具呼叫呼叫一次——**不是**每個 `tool-call` 事件。
+   *
+   * 2026-09-17:同一個 toolCallId 的後續 tool-call 事件(claude-sdk-adapter 的
+   * content_block_start → 完整訊息、opencode-adapter 的 pending → running)只是
+   * 補上 input,由 session-manager.ts 依 toolCallId 去重後才呼叫這裡(見該檔案
+   * `RuntimeState.openToolCalls` 的取捨說明)。這個類別刻意維持「呼叫端說一次就
+   * 算一次」,不自己記 toolCallId:哪些事件屬於同一個呼叫,跟「那筆呼叫記錄要
+   * insert 還是就地更新」是同一個判斷,放在同一處才不會兩邊標準漂移。
+   *
+   * 修正前 Claude session 每次工具呼叫在這裡被算兩次(`maxToolCalls` 實際只有
+   * 一半)——那不是設計,理由見 session-manager.ts 的 `"tool-call"` case 註解。
+   */
   recordToolCall(sessionId: string): void {
     const state = this.turns.get(sessionId);
     if (!state || state.tripped) return;
