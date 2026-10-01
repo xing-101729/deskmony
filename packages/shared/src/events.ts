@@ -20,7 +20,20 @@ export const MessageDeltaEventSchema = z.object({
 });
 export type MessageDeltaEvent = z.infer<typeof MessageDeltaEventSchema>;
 
-/** 工具呼叫開始 */
+/**
+ * 工具呼叫開始——以及同一個呼叫的資訊補送。
+ *
+ * 同一個 `toolCallId` 可以送不只一次:第一次代表「這個工具呼叫開始了」,之後的
+ * 是同一個呼叫補上更完整的資訊(典型是 input:claude-sdk-adapter 在
+ * content_block_start、opencode-adapter 在 tool part `pending` 時先送一次,
+ * input 為 undefined,參數齊了再送一次)。桌面端(session-store.ts 的
+ * `upsertToolItem()`)與 core(session-manager.ts 的 `RuntimeState.openToolCalls`:
+ * 回合硬上限只計一次、歷史只留一筆)、CLI/TUI(apps/cli/src/render.ts 的
+ * `createToolCallLineTracker()`:同一個 toolCallId 只印一行)都以 toolCallId 合併。
+ *
+ * adapter 端的紀律:補送要在同一個呼叫的 tool-result 之前;已經送出的 input
+ * 不要再用 undefined 覆蓋(桌面端的 upsert 會照單全收)。
+ */
 export const ToolCallEventSchema = z.object({
   type: z.literal("tool-call"),
   toolCallId: z.string(),

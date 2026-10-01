@@ -53,6 +53,10 @@ const SUITES = [
   // fake-opencode-server,幾秒跑完。
   "e2e-opencode-question",
   "e2e-cost-governor",
+  // 2026-09-17:OpenCode 工具呼叫補送 input + 回合硬上限每個工具只計一次——一個
+  // core + fake-opencode-server,十幾秒跑完。放在 e2e-cost-governor 之後:它驗的
+  // 是同一個斷路器,底層的回合上限若本身就壞了,應該先在那支看到訊號。
+  "e2e-opencode-tool-input",
   "e2e-message-budget",
   "e2e-lead-gate",
   "e2e-notification",

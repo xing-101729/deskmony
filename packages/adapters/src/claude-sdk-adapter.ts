@@ -602,6 +602,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
           // 最小版範圍),所以 input 先給 undefined。等 "assistant" case 的完整
           // 訊息抵達時會再送一次帶完整 input 的 tool-call 事件,UI(upsertToolItem)
           // 以 toolCallId 做 upsert,兩次事件會自動合併成同一筆。
+          // 2026-09-17 起 core 也以 toolCallId 認定第二次是「補資訊」:回合硬上限
+          // 只計一次、歷史只留一筆 call(就地補上 input)——在這之前兩者都是兩次,
+          // 見 apps/core/src/session/session-manager.ts 的 `RuntimeState.openToolCalls`。
           outputQueue.push({
             type: "tool-call",
             toolCallId: String(event.content_block.id ?? randomUUID()),

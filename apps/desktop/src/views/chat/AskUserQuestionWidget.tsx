@@ -94,8 +94,8 @@ function parseAskUserQuestionAnswers(value: unknown): Record<string, string> | n
 }
 
 /** 已答模式的題目來源:優先讀 `structuredResult.questions`(claude-agent-sdk 的
- *  `AskUserQuestionOutput`、opencode adapter 組的同形狀物件都有),沒有再讀工具
- *  input。opencode 的 tool-call 事件送出時 input 還是 `{}`,只能靠前者。 */
+ *  `AskUserQuestionOutput`、opencode adapter 組的同形狀物件都有,而且是工具跑完
+ *  之後的定版),沒有再讀工具 input。 */
 function questionsOfToolItem(item: Extract<ChatItem, { kind: "tool" }>): AskUserQuestionQuestion[] | null {
   const fromResult =
     typeof item.structuredResult === "object" && item.structuredResult !== null
@@ -288,7 +288,8 @@ function ResolvedQuestions({
  *     (= `item.id`,見 `UserDialogRequestEventSchema` 註解:與既有 `tool-call`
  *     事件的 `toolCallId` 是同一個 id)的項目 → 可互動的問答表單。題目取自
  *     待答請求本身(adapter 已整理成統一形狀),不依賴工具 input——opencode 的
- *     tool-call 事件送出時 input 還是 `{}`。
+ *     `question.asked` 比帶 input 的 `running` 更早到(實測),表單出現的那一刻
+ *     tool-call 通常還沒有 input。
  *   - **resolved**:tool-result 已抵達(`item.status === "done"`)→ 唯讀顯示
  *     已選答案。工具一有結果就不可能再作答,即使 `pendingUserDialogs` 還殘留
  *     一筆(例如回合被中斷)也不再顯示表單。

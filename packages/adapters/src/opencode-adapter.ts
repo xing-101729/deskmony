@@ -61,6 +61,16 @@ import { waitForChildExit } from "./child-process.js";
  *        `type==="reasoning"` 同樣結構但這裡刻意不轉發(如同 ACP/Claude SDK
  *        adapter 都不轉發思考過程文字);`type==="tool"` 帶 `callID`/`tool`/
  *        `state`(`status` 為 `pending`→`running`→`completed`/`error`)。
+ *        2026-09-17 用本機 opencode 1.18.7 + `opencode/big-pickle` 跑一次需要
+ *        權限(`permission.bash:"ask"`)的 bash 呼叫實測:整個生命週期是**同一個
+ *        `part.id`**;`pending` 的 state 是 `{status, input:{}, raw:""}`——
+ *        **input 永遠是 `{}` 佔位**,模型還在串流參數;約 140ms 後 `running`
+ *        才帶完整 input(`{command:"echo …"}`),接著才是 `permission.asked`;
+ *        回覆之後 `running` 又帶著 `metadata`(即時輸出)重送了兩次,最後
+ *        `completed`。`running` 與 `*.asked` 的先後不固定——同日另一次對
+ *        `question` 工具的實測(同版本、同 model)順序是 `pending` →
+ *        `question.asked` → `running`:工具 execute 一開始就發問,比 opencode
+ *        發布 running 還快。tool-call 事件怎麼送,見 `handlePartUpdated()`。
  *      - `message.part.delta`:`properties.field==="text"` 時帶**真正的
  *        增量**片段(`properties.delta`)。實測發現:輸出夠短時(例如單一
  *        英文字 "pong")完全不會有 `message.part.delta` 事件,`message.part.
@@ -802,13 +812,49 @@ export class OpenCodeAdapter implements AgentAdapter {
     }
 
     if (part.type === "tool" && part.callID && part.tool && part.state) {
+      /**
+       * 2026-09-17 修正:過去只在第一次看到這個 callID 時送一次 tool-call,而第一次
+       * 幾乎一定是 `pending`,input 是 opencode 的 `{}` 佔位(見 class 頂端實測
+       * 紀錄)——桌面端每個 OpenCode 工具泡泡都沒有參數,core 寫進 DB 的也全是
+       * `"input":{}`。
+       *
+       * 現在分兩次送,同一個 toolCallId:
+       *   1. 第一次看到就送(不等 input),UI 立刻出現「執行中」泡泡、core 在這裡
+       *      計入回合硬上限。input 未知時給 `undefined` 而不是 `{}`——`{}` 會被
+       *      當成「這個工具沒有參數」顯示、落地,正是這次修的 bug。
+       *   2. 第一次進入 `running`/`completed` 時補送一次帶完整 input 的 tool-call。
+       * core 把第 2 次當成「補資訊」:不重複計數、就地更新同一筆 row、不經過
+       * ensureBusy()(`running` 可能排在 `permission.asked` 之後,那時翻回 busy 會
+       * 蓋掉 waiting);桌面端照舊以 toolCallId upsert。這與 claude-sdk-adapter
+       * 在 content_block_start 提早送出是同一套語意,取捨見
+       * apps/core/src/session/session-manager.ts 的 `RuntimeState.openToolCalls`。
+       *
+       * 為什麼不乾脆等到 `running` 才送唯一一次:泡泡要等參數串流完才出現(大檔
+       * write/edit 可以好幾秒),而且那次事件在 core 會經過 ensureBusy(),遇到
+       * 先到的 permission.asked 就把 waiting 翻回 busy。
+       *
+       * 只把 `running`/`completed` 帶的 input 當真:沒經過 running 就直接 `error`
+       * 的,是參數串流到一半被 abort/出錯,opencode 收尾時把 pending 原樣改成
+       * error,input 仍是那個 `{}`。`running` 執行期間會帶著 metadata 重送好幾次,
+       * input 不會再變,`inputEmitted` 確保只補一次。
+       */
+      const inputKnown = part.state.status === "running" || part.state.status === "completed";
       let meta = internal.toolMeta.get(part.callID);
       if (!meta) {
-        meta = { toolName: part.tool, emittedCall: false, emittedResult: false };
+        meta = { toolName: part.tool, inputEmitted: inputKnown, emittedResult: false };
         internal.toolMeta.set(part.callID, meta);
-      }
-      if (!meta.emittedCall) {
-        meta.emittedCall = true;
+        internal.outputQueue.push({
+          type: "tool-call",
+          toolCallId: part.callID,
+          toolName: part.tool,
+          input: inputKnown ? part.state.input : undefined,
+        });
+      } else if (!meta.inputEmitted && inputKnown) {
+        meta.inputEmitted = true;
+        // 名稱以 running 這次為準:opencode 在參數解析完成時會重寫 `tool` 欄位
+        // (讀原始碼的推論,例如無效呼叫被修補成別的工具;實測的 bash 沒有改名)。
+        // 沒改名時這行是 no-op;有改名時 permission.asked 查到的名稱才會跟著對。
+        meta.toolName = part.tool;
         internal.outputQueue.push({
           type: "tool-call",
           toolCallId: part.callID,
@@ -912,7 +958,8 @@ export class OpenCodeAdapter implements AgentAdapter {
 
 interface ToolMeta {
   toolName: string;
-  emittedCall: boolean;
+  /** 已經送過帶完整 input 的 tool-call(見 handlePartUpdated() 的兩段式說明)。 */
+  inputEmitted: boolean;
   emittedResult: boolean;
 }
 
@@ -1097,9 +1144,8 @@ function toOpencodeAnswer(question: DialogQuestion, text: string | undefined): s
 /**
  * `question` 工具的 `structuredResult`:組成與 claude-agent-sdk
  * `AskUserQuestionOutput` 相同的 `{questions, answers}`,UI 的已答模式因此不必
- * 分辨後端。題目一定要從這裡帶:這個 adapter 的 tool-call 事件是在 `pending`
- * 時送出的,那時 input 還是 `{}`(見 `handlePartUpdated()`),重新載入歷史後
- * 也只剩這一份。沒作答的題目不放進 `answers`,UI 會顯示「未作答」。
+ * 分辨後端,也不必在意 tool-call 的 input 有沒有補送到(見 `handlePartUpdated()`
+ * 的兩段式說明)。沒作答的題目不放進 `answers`,UI 會顯示「未作答」。
  */
 function questionStructuredResult(
   state: NonNullable<OpencodePart["state"]>,
