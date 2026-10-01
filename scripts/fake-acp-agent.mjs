@@ -132,6 +132,33 @@
  *     兩個工具都是 `kind: "other"` 且不帶 `locations`,確保不會意外命中
  *     `resolveEditSnapshotPath()` 的檔案快照路徑(那是 diff 顯示路徑 B,與
  *     這個情境無關)。
+ *   - 若 prompt 文字等於 EMPTY_RESULT_TOOL_NAME_PREFIX
+ *     ("ACP_EMPTY_RESULT_TOOL_NAME",不接受任何參數)(CLI/TUI「工具失敗那
+ *     一行要有工具名稱」的 e2e 用,見 scripts/e2e-cli.mjs 的案例 12 與
+ *     scripts/e2e-cli-tui.mjs 的案例 9j/9k):在同一輪裡送出兩個**失敗**的
+ *     工具,兩個的 `tool-result` AgentEvent 都帶**空字串** `toolName`——那正是
+ *     packages/adapters/src/claude-sdk-adapter.ts 組 `tool-result` 時寫死的形狀
+ *     (`toolName: ""`,真正的名字只有 `tool-call` 事件帶,見
+ *     apps/desktop/src/stores/session-store.ts 的 `upsertToolItem()`)。CLI/TUI
+ *     過去直接拿它組「<工具名稱> 執行失敗」,於是每個 Claude session 的工具
+ *     失敗都渲染成開頭少一個主詞的「  !  執行失敗:...」。
+ *       1. `FailingUpsertTool`:先一則帶 `rawInput` 的 `tool_call`(呼叫那一行
+ *          會在這時候就印出來),再一則**標題是空字串**的 `tool_call`,最後
+ *          `tool_call_update`(status: "failed")——涵蓋「呼叫那行已經印過」的
+ *          路徑,錯誤行的名字只能從 tracker 記下的名字來。
+ *       2. `FailingNoInputTool`:兩則 `tool_call` 都不帶 `rawInput`(第二則標題
+ *          同樣是空字串),再 `tool_call_update`(status: "failed")——涵蓋
+ *          「呼叫那行是到 tool-result 才補印」的路徑,補印行與錯誤行都要有名字。
+ *     ⚠️ 那則「標題是空字串的第二個 `tool_call`」是這個 fixture 的**裝置**,
+ *     不是真實 ACP agent 的行為:`AcpAdapter` 會把 `tool_call` 的 title 記進
+ *     `internal.toolTitles`,並在 `tool_call_update` 時拿來補 `tool-result` 的
+ *     `toolName`(見 packages/adapters/src/acp-adapter.ts 的
+ *     `handleSessionUpdate()`),所以純 ACP 路徑**不可能**自己產生空的 result
+ *     `toolName`。但要驗的是 CLI/TUI 那條**與 adapter 無關**的渲染規則(它們
+ *     收到的是 AgentEvent,不是 ACP 通知),而在沒有真實 Claude 憑證的情況下,
+ *     唯一能把那個 AgentEvent 形狀餵給**真正的 CLI 子程序**的方法就是讓這個
+ *     假 agent 把 title 蓋成空字串——與上面 UPSERT_TOOL_CALLS 送兩則
+ *     `tool_call` 是同一種取捨,理由見該段的 ⚠️。
  */
 
 import * as acp from "@agentclientprotocol/sdk";
@@ -175,6 +202,14 @@ export const UPSERT_TOOL_TITLE = "UpsertTool";
 export const NO_INPUT_TOOL_TITLE = "NoInputTool";
 export const UPSERT_TOOL_COMMAND = "echo upsert-input-arrived";
 export const UPSERT_DONE_TEXT = "upsert tool calls sent";
+/** CLI/TUI「工具失敗那一行要有工具名稱」e2e 用(不接受參數),見檔頭註解。 */
+export const EMPTY_RESULT_TOOL_NAME_PREFIX = "ACP_EMPTY_RESULT_TOOL_NAME";
+/** 上面那一輪用到的固定字串——e2e 直接 import,不在兩邊各寫一份字面值。 */
+export const FAILING_UPSERT_TOOL_TITLE = "FailingUpsertTool";
+export const FAILING_NO_INPUT_TOOL_TITLE = "FailingNoInputTool";
+export const FAILING_TOOL_COMMAND = "echo will-fail";
+export const FAILING_TOOL_ERROR_TEXT = "boom";
+export const EMPTY_RESULT_DONE_TEXT = "failing tool calls sent";
 /** 建構出一段「延遲 delayMs 毫秒後把整段 prompt 文字回顯」的標記文字。 */
 export function delayEchoMarker(delayMs) {
   return `[[E2E_DELAY_ECHO:${delayMs}]]`;
@@ -247,6 +282,8 @@ class FakeAcpAgent {
         await this.handleCallBridgeTool(params.sessionId, text.slice(CALL_BRIDGE_TOOL_PREFIX.length), cx);
       } else if (text === UPSERT_TOOL_CALLS_PREFIX) {
         await this.handleUpsertToolCalls(params.sessionId, cx);
+      } else if (text === EMPTY_RESULT_TOOL_NAME_PREFIX) {
+        await this.handleEmptyResultToolName(params.sessionId, cx);
       } else if (text === REPORT_MCP_SERVERS_PREFIX) {
         await this.handleReportMcpServers(params.sessionId, cx);
       } else {
@@ -516,6 +553,59 @@ class FakeAcpAgent {
     await cx.notify(acp.methods.client.session.update, {
       sessionId,
       update: { sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: UPSERT_DONE_TEXT } },
+    });
+  }
+
+  /**
+   * 見檔頭註解:兩個**失敗**的工具,兩個的 `tool-result` 都帶空字串 `toolName`。
+   * 每個工具的第二則 `tool_call` 標題刻意是空字串——那是把 `AcpAdapter` 的
+   * `internal.toolTitles` 蓋掉、讓它在 `tool_call_update` 時補不出名字的唯一
+   * 手段(這個 fixture 的裝置,不是真實 agent 的行為,理由見檔頭註解的 ⚠️)。
+   * 這一則本身不會在 CLI/TUI 多印一行:同一個 toolCallId 已經被
+   * `createToolCallLineTracker()` 的規則 1 收斂掉了。
+   */
+  async handleEmptyResultToolName(sessionId, cx) {
+    const sendCall = (toolCallId, title, rawInput) =>
+      cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId,
+          title,
+          kind: "other",
+          status: rawInput ? "in_progress" : "pending",
+          ...(rawInput ? { rawInput } : {}),
+        },
+      });
+    const sendFailed = (toolCallId) =>
+      cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "failed",
+          rawOutput: { error: FAILING_TOOL_ERROR_TEXT },
+        },
+      });
+
+    // 路徑 1:呼叫那一行在第一則就印出來了(帶 rawInput),錯誤行的名字只能
+    // 從 tracker 宣告時記下的名字來。
+    const upsertId = `fail-upsert-${randomUUID()}`;
+    await sendCall(upsertId, FAILING_UPSERT_TOOL_TITLE, { command: FAILING_TOOL_COMMAND });
+    await sendCall(upsertId, "", undefined);
+    await sendFailed(upsertId);
+
+    // 路徑 2:從頭到尾沒有 rawInput,呼叫那一行要到 tool-result 才補印——補印
+    // 行與錯誤行都要有名字。
+    const noInputId = `fail-noinput-${randomUUID()}`;
+    await sendCall(noInputId, FAILING_NO_INPUT_TOOL_TITLE, undefined);
+    await sendCall(noInputId, "", undefined);
+    await sendFailed(noInputId);
+
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: EMPTY_RESULT_DONE_TEXT } },
     });
   }
 

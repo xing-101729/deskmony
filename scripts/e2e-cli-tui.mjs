@@ -509,13 +509,16 @@ async function testPureFunctions() {
     );
   }
 
-  // ---- 2026-09-29:同一個 toolCallId 只印一行(upsert 語意)---------------
-  // 不在 §10.1 的原始九項裡,是修掉一個真實顯示 bug 時補的迴歸測試,與
-  // scripts/e2e-cli.mjs 的案例 11 是同一條規則在 TUI 側的版本(那邊驗真正的
-  // 子程序 stdout,這邊驗 model reducer 本身——TUI 的 transcript 不經過
-  // render.ts 的字串組裝,是自己 pushLine,所以兩邊都要各自守住)。
+  // ---- 2026-09-29:工具呼叫/結果那幾行的顯示規則 --------------------------
+  // 不在 §10.1 的原始九項裡,是修掉兩個真實顯示 bug 時補的迴歸測試,與
+  // scripts/e2e-cli.mjs 的案例 11(9f–9i:同一個 toolCallId 只印一行)/
+  // 案例 12(9j–9k:失敗那一行要有工具名稱)是同兩條規則在 TUI 側的版本
+  // (那邊驗真正的子程序 stdout,這邊驗 model reducer 本身——TUI 的 transcript
+  // 不經過 render.ts 的字串組裝,是自己 pushLine,所以兩邊都要各自守住)。
   {
     const m = await import(pathToFileURL(path.join(REPO_ROOT, "apps/cli/dist/tui/model.js")).href);
+    // 佔位字串不在這裡寫死第二份——9k 要的就是「跟實作用的是同一個字串」。
+    const r = await import(pathToFileURL(path.join(REPO_ROOT, "apps/cli/dist/render.js")).href);
     const now = Date.now();
     const mkSession = (id, title) => ({
       id,
@@ -582,9 +585,9 @@ async function testPureFunctions() {
         "案例 9h(順序/不重複):補印排在錯誤行之前,且已經印過的工具不會在 tool-result 時再印一次",
         kinds.length === 3 &&
           kinds[0] === "tool:Failing" &&
-          kinds[1] === "tool-error: 執行失敗" &&
+          kinds[1] === "tool-error:Failing 執行失敗" &&
           kinds[2] === "tool:Fine ok",
-        `實際的行(依序)=${JSON.stringify(kinds)}(需為 3 行:tool:Failing、tool-error、tool:Fine ok)`,
+        `實際的行(依序)=${JSON.stringify(kinds)}(需為 3 行:tool:Failing、tool-error:Failing 執行失敗、tool:Fine ok)`,
       );
     }
 
@@ -604,6 +607,42 @@ async function testPureFunctions() {
         "案例 9i(per-session 隔離):同一個 toolCallId 出現在兩個 session,兩邊各自印一行",
         a.length === 1 && b.length === 1 && a[0]?.text === "Bash echo s0" && b[0]?.text === "Bash echo s1",
         `s0=${JSON.stringify(a.map((l) => l.text))}(需 1 行 "Bash echo s0"), s1=${JSON.stringify(b.map((l) => l.text))}(需 1 行 "Bash echo s1")`,
+      );
+    }
+
+    // 9j:**已經印過**呼叫那一行的工具失敗時,錯誤行仍然要有工具名稱。
+    // `tool-result` 的 toolName 對 Claude session 一律是空字串,而這個 id 不
+    // 需要補印(呼叫那行在 tool-call 就印過了),所以名字只能靠 tracker 對
+    // 「印過的 id」也回報宣告時的名字——修正前 onResult() 對印過的 id 一律回
+    // undefined,這一行會渲染成開頭就少一個主詞的「 執行失敗」。
+    // 9h 走的是另一條分支(那個 id 從沒印過、是補印出來的),兩條都要守。
+    {
+      const model = m.createModel();
+      m.replaceSessions(model, [mkSession("s0", "焦點")]);
+      send(model, "s0", { type: "tool-call", toolCallId: "tc-5", toolName: "Bash", input: { command: "boom" } });
+      send(model, "s0", { type: "tool-result", toolCallId: "tc-5", toolName: "", isError: true });
+      const kinds = (model.sessions.get("s0")?.lines ?? []).map((l) => `${l.kind}:${l.text}`);
+      record(
+        "案例 9j(失敗行的名字):呼叫那行已經印過的工具失敗時,錯誤行用 tool-call 宣告的名稱(tool-result 的 toolName 是空字串)",
+        kinds.length === 2 && kinds[0] === "tool:Bash boom" && kinds[1] === "tool-error:Bash 執行失敗",
+        `實際的行(依序)=${JSON.stringify(kinds)}(需為 ["tool:Bash boom","tool-error:Bash 執行失敗"])`,
+      );
+    }
+
+    // 9k:連對應的 tool-call 都沒看過的 tool-result——`session-event` 是純直播
+    // (見 model.ts 的 replayHistory() 註解),TUI 在回合中途才連上時,那個 id
+    // 的 tool-call 已經確定性地錯過了。兩邊都問不到名字時要誠實印佔位字串,
+    // 不能留一個開頭就少主詞的「 執行失敗」;同時守住「沒見過的 id 不補印呼叫
+    // 行」(硬補只會得到一行空白)。
+    {
+      const model = m.createModel();
+      m.replaceSessions(model, [mkSession("s0", "焦點")]);
+      send(model, "s0", { type: "tool-result", toolCallId: "never-announced", toolName: "", isError: true });
+      const kinds = (model.sessions.get("s0")?.lines ?? []).map((l) => `${l.kind}:${l.text}`);
+      record(
+        "案例 9k(沒見過的 id):沒有任何來源知道工具名稱時,錯誤行印佔位字串而不是空白,且不補印呼叫行",
+        kinds.length === 1 && kinds[0] === `tool-error:${r.UNKNOWN_TOOL_NAME} 執行失敗`,
+        `實際的行=${JSON.stringify(kinds)}(需為 1 行 "tool-error:${r.UNKNOWN_TOOL_NAME} 執行失敗")`,
       );
     }
   }
