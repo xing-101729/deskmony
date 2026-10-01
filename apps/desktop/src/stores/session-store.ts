@@ -333,8 +333,8 @@ interface SessionStoreState {
     rememberRule?: PolicyRule,
   ) => void;
   /**
-   * async-scribbling-llama.md Phase 7:回覆一筆 pending 的 AskUserQuestion
-   * (見 AskUserQuestionWidget.tsx)。比照上面的 `resolvePermission()`——樂觀地
+   * async-scribbling-llama.md Phase 7:回覆一筆 pending 的提問(AskUserQuestion /
+   * opencode `question`,見 AskUserQuestionWidget.tsx)。比照上面的 `resolvePermission()`——樂觀地
    * 立即從 `pendingUserDialogs` 移除,其餘已連線的 client 靠 `user-dialog-
    * resolved` 推播同步。`sessionId` 必須明講(不像 `permission.resolve` 那樣
    * 只靠 `requestId` 就能讓 Core 端反查,見 gateway.ts 對應 RPC 的註解)。
@@ -1054,9 +1054,23 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
   },
 
   resolveUserDialog: (sessionId, requestId, result) => {
-    void client.call("dialog.resolve", { sessionId, requestId, result });
+    // 失敗處理比照上面的 `resolvePermission()`:樂觀移除之後若 RPC 失敗,把那筆
+    // 放回去。原本是 `void client.call(...)`——一失敗表單就消失、agent 仍在等,
+    // 使用者又回到「看不到可以回答的地方」。
+    const snapshot = get().pendingUserDialogs.find((d) => d.sessionId === sessionId && d.requestId === requestId);
+    client.call("dialog.resolve", { sessionId, requestId, result }).catch((err: unknown) => {
+      console.error(`[dialog] 送出答案失敗(session=${sessionId}, request=${requestId}),已把問題放回待答清單:`, err);
+      if (!snapshot) return;
+      set((state) =>
+        state.pendingUserDialogs.some((d) => d.sessionId === sessionId && d.requestId === requestId)
+          ? {}
+          : { pendingUserDialogs: [...state.pendingUserDialogs, snapshot] },
+      );
+    });
     set((state) => ({
-      pendingUserDialogs: state.pendingUserDialogs.filter((d) => d.requestId !== requestId),
+      // 與 `resolvePermission()` 同一個跨 session 碰撞問題:`requestId` 只保證在
+      // 同一個 session 內唯一。
+      pendingUserDialogs: state.pendingUserDialogs.filter((d) => !(d.sessionId === sessionId && d.requestId === requestId)),
     }));
   },
 
@@ -1344,7 +1358,9 @@ function handleUserDialogResolved(
   payload: UserDialogResolvedPush,
 ): void {
   set((state) => ({
-    pendingUserDialogs: state.pendingUserDialogs.filter((d) => d.requestId !== payload.requestId),
+    pendingUserDialogs: state.pendingUserDialogs.filter(
+      (d) => !(d.sessionId === payload.sessionId && d.requestId === payload.requestId),
+    ),
   }));
 }
 
@@ -1484,6 +1500,16 @@ function handleSessionEvent(
           { output: event.output, isError: event.isError, structuredResult: event.structuredResult, status: "done" },
           envelope.timestamp,
         );
+        // 提問工具有了結果就不可能再作答。回合被中斷時沒有人會送 `user-dialog-
+        // resolved`(opencode 的 abort 也不另外通知提問已取消),這裡不清掉的話
+        // 殘留會一直留在待答清單裡,對不上工具項目時還會在對話串底部留下一份
+        // 按了也沒用的表單。
+        const pendingUserDialogs = state.pendingUserDialogs.filter(
+          (d) => !(d.sessionId === sessionId && d.toolUseID === event.toolCallId),
+        );
+        if (pendingUserDialogs.length !== state.pendingUserDialogs.length) {
+          return { itemsBySession: { ...state.itemsBySession, [sessionId]: capItems(items) }, pendingUserDialogs };
+        }
         break;
       }
       case "permission-request": {

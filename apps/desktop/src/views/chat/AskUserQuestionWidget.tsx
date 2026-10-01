@@ -1,11 +1,23 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { DialogAnswer } from "@deskmony/shared";
-import { useSessionStore, type ChatItem } from "../../stores/session-store.js";
+import { useSessionStore, type ChatItem, type PendingUserDialog } from "../../stores/session-store.js";
 import { Badge } from "../../ui/Badge.js";
 import { Button } from "../../ui/Button.js";
+import { Input } from "../../ui/Field.js";
 import { Icon } from "../../ui/icons.js";
 import { ToolCallBubble } from "../ChatView.js";
+
+/**
+ * 會被渲染成問答表單的提問工具:claude-agent-sdk 的 `AskUserQuestion`、
+ * opencode 的 `question`(2026-09-17 補上——在那之前只認前者,opencode 的提問
+ * 只會顯示成一個永遠「執行中」的通用工具氣泡,使用者看不到任何選項)。
+ */
+const QUESTION_TOOL_NAMES = new Set(["AskUserQuestion", "question"]);
+
+export function isQuestionToolName(toolName: string): boolean {
+  return QUESTION_TOOL_NAMES.has(toolName);
+}
 
 /** 對應 SDK 的 `AskUserQuestionInput.questions[]`(見 async-scribbling-llama.md
  *  Phase 7)。跟 TodoListView.tsx/DiffHunkView.tsx 一樣不 import SDK 型別
@@ -21,23 +33,28 @@ export interface AskUserQuestionQuestion {
   header: string;
   options: AskUserQuestionOption[];
   multiSelect: boolean;
+  /** 是否提供自行輸入答案的欄位。只有後端明講 `custom: false` 時才關掉——兩個
+   *  後端的工具說明都告訴模型「自行輸入會自動提供,不要自己放 Other 選項」。 */
+  custom: boolean;
 }
 
-/** 防禦性驗證:形狀不符就回傳 null,呼叫端(ChatView.tsx)據此 fallback 回
- *  通用的 `ToolCallBubble`——同 `parseTodoWriteInput()`/`parseDiffResult()`
- *  既有慣例。`options` 最少 2 個(SDK 保證 2-4 個),`questions` 至少 1 題。 */
-export function parseAskUserQuestionInput(input: unknown): AskUserQuestionQuestion[] | null {
-  if (typeof input !== "object" || input === null) return null;
-  const questions = (input as { questions?: unknown }).questions;
+/** 防禦性驗證:形狀不符就回傳 null,呼叫端據此 fallback 回通用的
+ *  `ToolCallBubble`——同 `parseTodoWriteInput()`/`parseDiffResult()` 既有慣例。
+ *  同時接受 claude-agent-sdk 的原始形狀(`multiSelect`)與 opencode 的原始形狀
+ *  (`multiple?`/`custom?`),因為已答模式讀的是工具自己的 input/output。
+ *  `options` 不限個數:opencode 沒有下限,模型可能只靠自行輸入來問開放式問題。 */
+export function parseAskUserQuestions(questions: unknown): AskUserQuestionQuestion[] | null {
   if (!Array.isArray(questions) || questions.length === 0) return null;
 
   const parsed: AskUserQuestionQuestion[] = [];
   for (const entry of questions) {
     if (typeof entry !== "object" || entry === null) return null;
-    const { question, header, options, multiSelect } = entry as Record<string, unknown>;
+    const { question, header, options, multiSelect, multiple, custom } = entry as Record<string, unknown>;
     if (typeof question !== "string" || typeof header !== "string") return null;
-    if (typeof multiSelect !== "boolean") return null;
-    if (!Array.isArray(options) || options.length < 2) return null;
+    if (!Array.isArray(options)) return null;
+    if (multiSelect !== undefined && typeof multiSelect !== "boolean") return null;
+    if (multiple !== undefined && typeof multiple !== "boolean") return null;
+    if (custom !== undefined && typeof custom !== "boolean") return null;
 
     const parsedOptions: AskUserQuestionOption[] = [];
     for (const opt of options) {
@@ -47,13 +64,24 @@ export function parseAskUserQuestionInput(input: unknown): AskUserQuestionQuesti
       if (preview !== undefined && typeof preview !== "string") return null;
       parsedOptions.push(preview !== undefined ? { label, description, preview } : { label, description });
     }
-    parsed.push({ question, header, options: parsedOptions, multiSelect });
+    parsed.push({
+      question,
+      header,
+      options: parsedOptions,
+      multiSelect: multiSelect ?? multiple ?? false,
+      custom: custom !== false,
+    });
   }
   return parsed;
 }
 
+export function parseAskUserQuestionInput(input: unknown): AskUserQuestionQuestion[] | null {
+  if (typeof input !== "object" || input === null) return null;
+  return parseAskUserQuestions((input as { questions?: unknown }).questions);
+}
+
 /** 對應 SDK 的 `AskUserQuestionOutput.answers`(question text -> 選項 label,
- *  多選以逗號串接,見 sdk-tools.d.ts)——同上方 `parseAskUserQuestionInput()`
+ *  多選以逗號串接,見 sdk-tools.d.ts)——同上方 `parseAskUserQuestions()`
  *  的防禦性驗證慣例,形狀不符回傳 null。 */
 function parseAskUserQuestionAnswers(value: unknown): Record<string, string> | null {
   if (typeof value !== "object" || value === null) return null;
@@ -65,12 +93,23 @@ function parseAskUserQuestionAnswers(value: unknown): Record<string, string> | n
   return answers as Record<string, string>;
 }
 
+/** 已答模式的題目來源:優先讀 `structuredResult.questions`(claude-agent-sdk 的
+ *  `AskUserQuestionOutput`、opencode adapter 組的同形狀物件都有),沒有再讀工具
+ *  input。opencode 的 tool-call 事件送出時 input 還是 `{}`,只能靠前者。 */
+function questionsOfToolItem(item: Extract<ChatItem, { kind: "tool" }>): AskUserQuestionQuestion[] | null {
+  const fromResult =
+    typeof item.structuredResult === "object" && item.structuredResult !== null
+      ? parseAskUserQuestions((item.structuredResult as { questions?: unknown }).questions)
+      : null;
+  return fromResult ?? parseAskUserQuestionInput(item.input);
+}
+
 const MULTI_SELECT_JOIN = ", ";
 
 function QuestionHeader({ header, question }: { header: string; question: string }): JSX.Element {
   return (
     <div className="mb-1.5">
-      <Badge tone="accent">{header}</Badge>
+      {header && <Badge tone="accent">{header}</Badge>}
       <p className="mt-1 text-sm leading-relaxed text-fg">{question}</p>
     </div>
   );
@@ -78,25 +117,24 @@ function QuestionHeader({ header, question }: { header: string; question: string
 
 /**
  * 待答模式:選項渲成可點按鈕。單選點下即切換本題的選取(單選鈕視覺);
- * `multiSelect` 可切換多個(checkbox 視覺)。**所有題目都至少選了一個選項後
- * 底部的送出按鈕才會啟用**——`resolveUserDialog()` 是整批一次解析同一個
- * `requestId`(見 claude-sdk-adapter.ts 的 `canUseTool` 特例),無法只答一部分
- * 就送出,多題時必須全部選完。「略過」則不受此限制,隨時可送出空答案
- * (比照 SDK 自己 idle 逾時的語意,見 session-store.ts 的 `resolveUserDialog`
- * action 註解)。
+ * `multiSelect` 可切換多個(checkbox 視覺)。`custom` 的題目下方多一個自行輸入
+ * 欄——單選時輸入文字會取消已選的選項(反之亦然,兩者擇一),多選時輸入的文字
+ * 附加在已選選項後面。**所有題目都有答案(選了選項或輸入了文字)後底部的送出
+ * 按鈕才會啟用**——adapter 是整批一次解析同一個 `requestId`,無法只答一部分就
+ * 送出,多題時必須全部答完。「略過」則不受此限制,隨時可送出空答案(比照 SDK
+ * 自己 idle 逾時的語意,見 session-store.ts 的 `resolveUserDialog` action 註解)。
  */
 function PendingQuestions({
-  sessionId,
-  requestId,
+  dialog,
   questions,
 }: {
-  sessionId: string;
-  requestId: string;
+  dialog: PendingUserDialog;
   questions: AskUserQuestionQuestion[];
 }): JSX.Element {
   const { t } = useTranslation(["chat"]);
   const resolveUserDialog = useSessionStore((s) => s.resolveUserDialog);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
+  const [customText, setCustomText] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
   const toggleOption = (q: AskUserQuestionQuestion, label: string): void => {
@@ -110,21 +148,32 @@ function PendingQuestions({
         : [label];
       return { ...prev, [q.question]: next };
     });
+    if (!q.multiSelect) setCustomText((prev) => ({ ...prev, [q.question]: "" }));
   };
 
-  const allAnswered = questions.every((q) => (selected[q.question]?.length ?? 0) > 0);
+  const changeCustomText = (q: AskUserQuestionQuestion, text: string): void => {
+    setCustomText((prev) => ({ ...prev, [q.question]: text }));
+    if (!q.multiSelect && text.trim()) setSelected((prev) => ({ ...prev, [q.question]: [] }));
+  };
+
+  const answerOf = (q: AskUserQuestionQuestion): string[] => {
+    const typed = q.custom ? (customText[q.question] ?? "").trim() : "";
+    return typed ? [...(selected[q.question] ?? []), typed] : (selected[q.question] ?? []);
+  };
+
+  const allAnswered = questions.every((q) => answerOf(q).length > 0);
 
   const submit = (result: DialogAnswer): void => {
     if (submitting) return;
     setSubmitting(true);
-    resolveUserDialog(sessionId, requestId, result);
+    resolveUserDialog(dialog.sessionId, dialog.requestId, result);
   };
 
   const handleSubmit = (): void => {
     if (!allAnswered) return;
     const answers: Record<string, string> = {};
     for (const q of questions) {
-      answers[q.question] = (selected[q.question] ?? []).join(MULTI_SELECT_JOIN);
+      answers[q.question] = answerOf(q).join(MULTI_SELECT_JOIN);
     }
     submit({ behavior: "completed", result: { answers } });
   };
@@ -163,6 +212,23 @@ function PendingQuestions({
                 </button>
               );
             })}
+            {q.custom && (
+              <Input
+                fieldSize="md"
+                value={customText[q.question] ?? ""}
+                disabled={submitting}
+                onChange={(e) => changeCustomText(q, e.target.value)}
+                onKeyDown={(e) => {
+                  // 輸入法選字時的 Enter 是在確認候選字,不是送出。
+                  if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
+                }}
+                placeholder={t("chat:askUserQuestion.customPlaceholder")}
+                aria-label={t("chat:askUserQuestion.customPlaceholder")}
+              />
+            )}
           </div>
         </div>
       ))}
@@ -179,15 +245,17 @@ function PendingQuestions({
 }
 
 /** 已答模式:唯讀顯示每題選了什麼。`answers` 是已經解析過的
- *  `AskUserQuestionOutput.answers`(可能是 null——見下方 `AskUserQuestionWidget`
- *  對 `parseAskUserQuestionAnswers()` 失敗時仍進入這個模式的說明),缺值的題目
- *  顯示中性的「未作答」徽章,而不是留白或整個 fallback。 */
+ *  `AskUserQuestionOutput.answers`(可能是 null——工具失敗或中斷時沒有答案),
+ *  缺值的題目顯示中性的「未作答」徽章,而不是留白或整個 fallback。工具以錯誤
+ *  收場(例如回合被中斷)時,把錯誤訊息附在最後,不然看不出為什麼沒有答案。 */
 function ResolvedQuestions({
   questions,
   answers,
+  errorText,
 }: {
   questions: AskUserQuestionQuestion[];
   answers: Record<string, string> | null;
+  errorText?: string;
 }): JSX.Element {
   const { t } = useTranslation(["chat"]);
   return (
@@ -207,47 +275,77 @@ function ResolvedQuestions({
           </div>
         );
       })}
+      {errorText && <p className="text-2xs text-fg-faint">{errorText}</p>}
     </div>
   );
 }
 
 /**
- * async-scribbling-llama.md Phase 7:`item.toolName === "AskUserQuestion"` 且
- * `parseAskUserQuestionInput(item.input)` 驗證成功時,ChatView.tsx 的
- * `ChatBubble` 分派到這裡渲染(`questions` 已由呼叫端解析好)。三種模式:
+ * async-scribbling-llama.md Phase 7:提問工具(`isQuestionToolName()`)在對話串
+ * 裡的渲染。三種模式:
  *
- *   - **pending**:`pendingUserDialogs` 有對應 `toolUseID`(= `item.id`,見
- *     `UserDialogRequestEventSchema` 註解:與既有 `tool-call` 事件的
- *     `toolCallId` 是同一個 id)的項目 → 可互動的問答表單。
- *   - **resolved**:不是 pending,且 tool-result 已抵達(`item.output`/
- *     `item.structuredResult` 其中之一有值,不要求 structuredResult 一定要
- *     解析成功——後者依 Phase 4 的保守判斷,一次 turn 裡有多個平行
- *     tool_result 時可能刻意不填,見 claude-sdk-adapter.ts 的 `case "user"`
- *     註解)→ 唯讀顯示已選答案,優先讀 `item.structuredResult` 解析出的
- *     `answers`。
- *   - **兩者皆非**:SDK 已送出 tool-call(所以 `item.input` 才解析得到)但
- *     `canUseTool` 觸發的 `user-dialog-request` 還沒抵達,或 reload 後
- *     `pendingUserDialogs` 這個純記憶體狀態沒有重建——與既有
- *     `pendingPermissions` reload 後不會重建是同一種已存在的限制,不是這次
- *     新引入的缺口 → fallback 回通用的 `ToolCallBubble`。
+ *   - **pending**:工具還沒有結果,且 `pendingUserDialogs` 有對應 `toolUseID`
+ *     (= `item.id`,見 `UserDialogRequestEventSchema` 註解:與既有 `tool-call`
+ *     事件的 `toolCallId` 是同一個 id)的項目 → 可互動的問答表單。題目取自
+ *     待答請求本身(adapter 已整理成統一形狀),不依賴工具 input——opencode 的
+ *     tool-call 事件送出時 input 還是 `{}`。
+ *   - **resolved**:tool-result 已抵達(`item.status === "done"`)→ 唯讀顯示
+ *     已選答案。工具一有結果就不可能再作答,即使 `pendingUserDialogs` 還殘留
+ *     一筆(例如回合被中斷)也不再顯示表單。
+ *   - **兩者皆非**:還沒收到待答請求,或 reload 後 `pendingUserDialogs` 這個純
+ *     記憶體狀態沒有重建——與既有 `pendingPermissions` reload 後不會重建是同一種
+ *     已存在的限制 → fallback 回通用的 `ToolCallBubble`。
  */
-export function AskUserQuestionWidget({
-  item,
-  questions,
-}: {
-  item: Extract<ChatItem, { kind: "tool" }>;
-  questions: AskUserQuestionQuestion[];
-}): JSX.Element {
-  const pendingUserDialogs = useSessionStore((s) => s.pendingUserDialogs);
-  const pending = pendingUserDialogs.find((d) => d.toolUseID === item.id);
+export function AskUserQuestionWidget({ item }: { item: Extract<ChatItem, { kind: "tool" }> }): JSX.Element {
+  const pending = useSessionStore((s) => s.pendingUserDialogs.find((d) => d.toolUseID === item.id));
 
-  if (pending) {
-    return <PendingQuestions sessionId={pending.sessionId} requestId={pending.requestId} questions={questions} />;
-  }
-
-  if (item.output !== undefined || item.structuredResult !== undefined) {
-    return <ResolvedQuestions questions={questions} answers={parseAskUserQuestionAnswers(item.structuredResult)} />;
+  if (item.status === "done") {
+    const questions = questionsOfToolItem(item);
+    if (questions) {
+      return (
+        <ResolvedQuestions
+          questions={questions}
+          answers={parseAskUserQuestionAnswers(item.structuredResult)}
+          errorText={item.isError && typeof item.output === "string" ? item.output : undefined}
+        />
+      );
+    }
+  } else if (pending) {
+    const questions = parseAskUserQuestions(pending.questions) ?? parseAskUserQuestionInput(item.input);
+    if (questions) return <PendingQuestions dialog={pending} questions={questions} />;
   }
 
   return <ToolCallBubble item={item} />;
+}
+
+/**
+ * 對話串裡對不上任何提問工具項目的待答請求,改在對話串底部顯示——例如 opencode
+ * 的提問沒有帶 `tool`,或是由不在 `isQuestionToolName()` 清單裡的工具發起
+ * (opencode 的 plan 模式離開確認也走同一套提問機制)。沒有這一層,這些請求
+ * 會讓 agent 無聲無息地一直等,與 2026-09-16 使用者回報「看不到選項」是同一種
+ * 症狀。
+ */
+export function PendingUserDialogsDock({
+  sessionId,
+  items,
+}: {
+  sessionId: string;
+  items: readonly ChatItem[];
+}): JSX.Element | null {
+  const pendingUserDialogs = useSessionStore((s) => s.pendingUserDialogs);
+  const unmatched = pendingUserDialogs.filter(
+    (d) =>
+      d.sessionId === sessionId &&
+      !items.some((item) => item.kind === "tool" && item.id === d.toolUseID && isQuestionToolName(item.toolName)),
+  );
+  if (unmatched.length === 0) return null;
+
+  return (
+    <>
+      {unmatched.map((dialog) => {
+        const questions = parseAskUserQuestions(dialog.questions);
+        return questions ? <PendingQuestions key={dialog.requestId} dialog={dialog} questions={questions} /> : null;
+      })}
+    </>
+  );
 }

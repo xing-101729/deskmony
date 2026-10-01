@@ -21,7 +21,7 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十一支是**決定性**
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十三支是**決定性**
  * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
@@ -49,6 +49,9 @@ const SUITES = [
   // 單元層級、毫秒級跑完(不啟動 core)—— 放第一個當快速煙霧測試。
   "e2e-hard-deny",
   "e2e-session-subagents",
+  // 2026-09-17:OpenCode 的 `question` 工具(模型向使用者提問)——一個 core +
+  // fake-opencode-server,幾秒跑完。
+  "e2e-opencode-question",
   "e2e-cost-governor",
   "e2e-message-budget",
   "e2e-lead-gate",

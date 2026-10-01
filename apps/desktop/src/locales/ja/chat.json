@@ -34,7 +34,8 @@
   "askUserQuestion": {
     "submitLabel": "送信",
     "skipLabel": "スキップ",
-    "noAnswerLabel": "未回答"
+    "noAnswerLabel": "未回答",
+    "customPlaceholder": "回答を自由に入力"
   },
   "usage": {
     "cannotMeasureTitle": "このバックエンドは費用を計測できません(または報告されるかまだ未確認です)。このセッションにはタスク/1日ごとのコスト予算は適用されません。ターンの時間/ツール呼び出し回数の上限のみが引き続き保護します。",

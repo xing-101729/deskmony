@@ -364,7 +364,7 @@ interface AgentAdapter {
   setModel(handle, model): Promise<void>;
   setEffort(handle, effort): Promise<void>;
   // 以下為選配 —— 只有特定 adapter 有,不是遺漏
-  resolveUserDialog?(handle, requestId, result: DialogAnswer): void;  // 僅 Claude SDK
+  resolveUserDialog?(handle, requestId, result: DialogAnswer): void;  // Claude SDK、OpenCode
   writeInput?(handle, data): void;                                     // 僅 PTY
   resize?(handle, cols, rows): void;                                   // 僅 PTY
   getBackendSessionId?(handle): string | undefined;                    // 僅 Claude SDK

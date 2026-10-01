@@ -40,6 +40,19 @@
  *     e2e 有時間視窗呼叫 `POST /session/{id}/abort` 測試 interrupt() ——
  *     收到 abort 後,立刻停止後續 chunk、送出帶 `MessageAbortedError` 的
  *     `message.updated`,再送 idle。
+ *   - 若 prompt 文字以 QUESTION_PREFIX 開頭(2026-09-17 新增,給
+ *     e2e-opencode-question.mjs):照真實 opencode 1.18.7 實測到的順序送出
+ *     `question` 工具 part(pending,input `{}`)→ `question.asked`(題目為
+ *     TEST_QUESTIONS)→ part(running),然後等待:
+ *       - `POST /question/{id}/reply`:送 `question.replied` + part
+ *         (completed,`metadata.answers` 就是收到的陣列),再送一段
+ *         `[answers:<收到的 JSON>]` 文字——讓 e2e 能斷言 wire 上實際送出的
+ *         答案陣列(比照既有 `[model:...]` 手法),最後 idle。
+ *       - `POST /question/{id}/reject`:送 `question.rejected` + part(error),
+ *         直接 idle(真實 opencode 被 reject 後回合就結束)。
+ *       - `POST /session/{id}/abort`:**不送** `question.rejected`,只送 part
+ *         (error,「Tool execution aborted」)+ 帶 `MessageAbortedError` 的
+ *         `message.updated`,再 idle——與真實 opencode 的 abort 行為一致。
  *   - 這輪(slash command)新增:`GET /command` 回傳 TEST_COMMANDS(固定測試
  *     清單,形狀比照本機真實 `opencode serve`(1.18.7)`GET /command` 的
  *     `Command[]`,見 packages/adapters/src/opencode-adapter.ts 檔案頂端查證
@@ -59,6 +72,32 @@ export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
 export const SLOW_PREFIX = "OPENCODE_SLOW";
 export const SLOW_CHUNK_COUNT = 20;
 export const SLOW_CHUNK_INTERVAL_MS = 300;
+export const QUESTION_PREFIX = "OPENCODE_QUESTION";
+/**
+ * 2026-09-17 新增:`question.asked` 帶的固定題目,形狀照抄真實 opencode 1.18.7
+ * 的事件(`multiple`/`custom` 省略即預設值)。第二題 `multiple: true`,讓 e2e
+ * 涵蓋多選答案拆回 label 陣列的路徑。
+ */
+export const TEST_QUESTIONS = [
+  {
+    question: "Which color do you prefer?",
+    header: "Color",
+    options: [
+      { label: "Red", description: "Choose red" },
+      { label: "Blue", description: "Choose blue" },
+    ],
+  },
+  {
+    question: "Which features should be enabled?",
+    header: "Features",
+    options: [
+      { label: "Alpha", description: "Feature alpha" },
+      { label: "Beta", description: "Feature beta" },
+      { label: "Gamma", description: "Feature gamma" },
+    ],
+    multiple: true,
+  },
+];
 /**
  * 這輪(slash command)新增:`GET /command` 的固定測試清單——`"greet"` 帶
  * `hints`(模擬有 argument 佔位符的指令),`"noop"` 不帶(模擬無參數指令),
@@ -69,7 +108,7 @@ export const TEST_COMMANDS = [
   { name: "noop", description: "fake no-arg command", source: "command", template: "Do nothing", hints: [] },
 ];
 
-const sessions = new Map(); // sessionId -> { aborted: boolean, pendingPermission: Map<id, resolve> }
+const sessions = new Map(); // sessionId -> { aborted: boolean, pendingPermission: Map<id, resolve>, pendingQuestion: Map<id, resolve> }
 /** @type {Set<http.ServerResponse>} */
 const sseClients = new Set();
 
@@ -216,6 +255,62 @@ async function handlePrompt(sessionId, text, model) {
       await streamTextReply(sessionId, assistantMessageId, ["Permission", " denied,", " not", " running."]);
     }
     broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+  } else if (text.startsWith(QUESTION_PREFIX)) {
+    const callId = `call_${randomUUID()}`;
+    const partId = `prt_${randomUUID()}`;
+    const toolPart = (state) => ({ id: partId, messageID: assistantMessageId, sessionID: sessionId, type: "tool", callID: callId, tool: "question", state });
+    broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "pending", input: {}, raw: "" }) });
+    const requestId = `que_${randomUUID()}`;
+    const outcomePromise = new Promise((resolve) => {
+      session.pendingQuestion.set(requestId, resolve);
+    });
+    broadcast("question.asked", {
+      id: requestId,
+      sessionID: sessionId,
+      questions: TEST_QUESTIONS,
+      tool: { messageID: assistantMessageId, callID: callId },
+    });
+    const input = { questions: TEST_QUESTIONS };
+    const start = Date.now();
+    broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "running", input, time: { start } }) });
+
+    const outcome = await outcomePromise;
+    session.pendingQuestion.delete(requestId);
+    if (outcome.kind === "reply") {
+      broadcast("question.replied", { sessionID: sessionId, requestID: requestId, answers: outcome.answers });
+      const formatted = TEST_QUESTIONS.map(
+        (q, i) => `"${q.question}"="${outcome.answers[i]?.length ? outcome.answers[i].join(", ") : "Unanswered"}"`,
+      ).join(", ");
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({
+          status: "completed",
+          input,
+          output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
+          title: `Asked ${TEST_QUESTIONS.length} questions`,
+          metadata: { answers: outcome.answers, truncated: false },
+          time: { start, end: Date.now() },
+        }),
+      });
+      await streamTextReply(sessionId, assistantMessageId, [`[answers:${JSON.stringify(outcome.answers)}]`]);
+      broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+    } else if (outcome.kind === "reject") {
+      broadcast("question.rejected", { sessionID: sessionId, requestID: requestId });
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "error", input, error: "The user dismissed this question", time: { start, end: Date.now() } }),
+      });
+      broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+    } else {
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "error", input, error: "Tool execution aborted", metadata: { interrupted: true }, time: { start, end: Date.now() } }),
+      });
+      broadcast("message.updated", {
+        sessionID: sessionId,
+        info: { id: assistantMessageId, role: "assistant", sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
+      });
+    }
   } else {
     // `model` 有值時(POST /session/{id}/message body 的 model 欄位,見
     // OpenCodeAdapter.sendPrompt()/setModel())在回覆前面加一段可觀察的
@@ -290,7 +385,7 @@ async function route(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/session") {
     const id = `ses_${randomUUID()}`;
-    sessions.set(id, { aborted: false, pendingPermission: new Map() });
+    sessions.set(id, { aborted: false, pendingPermission: new Map(), pendingQuestion: new Map() });
     sendJson(res, 200, { id, directory: process.cwd() });
     return;
   }
@@ -339,7 +434,32 @@ async function route(req, res, url) {
       return;
     }
     session.aborted = true;
+    for (const resolve of session.pendingQuestion.values()) resolve({ kind: "abort" });
     sendJson(res, 200, true);
+    return;
+  }
+
+  const questionMatch = url.pathname.match(/^\/question\/([^/]+)\/(reply|reject)$/);
+  if (req.method === "POST" && questionMatch) {
+    const [, requestId, action] = questionMatch;
+    const body = await readJsonBody(req);
+    // 比照真實 opencode 的 schema 驗證:answers 必須是 string[][],否則 400。
+    if (
+      action === "reply" &&
+      !(Array.isArray(body.answers) && body.answers.every((a) => Array.isArray(a) && a.every((v) => typeof v === "string")))
+    ) {
+      sendJson(res, 400, { error: "answers must be string[][]" });
+      return;
+    }
+    for (const session of sessions.values()) {
+      const resolve = session.pendingQuestion.get(requestId);
+      if (resolve) {
+        resolve(action === "reply" ? { kind: "reply", answers: body.answers } : { kind: "reject" });
+        sendJson(res, 200, true);
+        return;
+      }
+    }
+    sendJson(res, 404, { _tag: "QuestionNotFoundError", requestID: requestId, message: "question not found" });
     return;
   }
 

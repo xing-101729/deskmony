@@ -186,8 +186,8 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   程式碼語法高亮、todo 清單追蹤、工具產生的圖片輸出。
 - **內嵌終端機**(xterm.js + node-pty):給 PTY 後端用,支援即時尺寸同步、
   逐鍵輸入透傳。
-- **互動式提問**:agent 能透過 `AskUserQuestion` 跳出結構化問題,由使用者
-  在對話框內選答案。
+- **互動式提問**:agent 能跳出結構化問題(claude-agent-sdk 的 `AskUserQuestion`、
+  OpenCode 的 `question` 工具),由使用者在對話框內選答案,或自行輸入答案。
 - **檔案附件**:除了圖片,也支援 PDF、純文字檔與任意檔案的貼上/附加。
 - **Slash command**:輸入 `/` 叫出後端原生支援的指令清單(claude-agent-sdk、
   ACP、OpenCode 三種來源都支援,清單即時更新)。

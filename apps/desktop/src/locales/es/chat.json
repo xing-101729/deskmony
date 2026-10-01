@@ -34,7 +34,8 @@
   "askUserQuestion": {
     "submitLabel": "Enviar",
     "skipLabel": "Omitir",
-    "noAnswerLabel": "Sin respuesta"
+    "noAnswerLabel": "Sin respuesta",
+    "customPlaceholder": "Escribe tu propia respuesta"
   },
   "usage": {
     "cannotMeasureTitle": "Este backend no puede medir el costo (o aún no se ha confirmado si lo reportará) — el presupuesto de costo diario/de la tarea no aplica a esta sesión; solo el límite de tiempo por turno/número de llamadas a herramientas sigue protegiendo.",

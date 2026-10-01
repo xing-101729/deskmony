@@ -34,7 +34,8 @@
   "askUserQuestion": {
     "submitLabel": "送出答案",
     "skipLabel": "略過",
-    "noAnswerLabel": "未作答"
+    "noAnswerLabel": "未作答",
+    "customPlaceholder": "自行輸入答案"
   },
   "usage": {
     "cannotMeasureTitle": "此後端無法量測花費(或尚未確認會不會回報)——任務/每日成本預算對這個 session 不會生效,只有回合時間/工具呼叫次數上限仍在保護。",
