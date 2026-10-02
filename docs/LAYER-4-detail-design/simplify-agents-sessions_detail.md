@@ -91,13 +91,14 @@ export const CreateSessionInputSchema = z.object({
 - `listAvailable(): ResolvedProvider[]` = `enabled && installed` 的項目。
 - `buildLaunchSpec(providerId, model?, effort?)`:找不到 / 未安裝 / 已停用 → 丟 `DeskmonyError`(新錯誤碼,UI 要能顯示中文訊息)。偵測快取尚未完成時,`await` 那一次偵測(不是回錯)。
 - **`custom-pty`(手動輸入 command 的逃生閥)從 `BUILTIN_PROVIDERS` 移除**——新模型的前提是「從電腦找到的 agent」。
+- **e2e 測試掛鉤**:原本 e2e 透過 profile 的 `acpConfig.command/args` 指定 fake agent 執行檔。沒有 profile 之後,core 啟動時若設了環境變數 `DESKMONY_E2E_EXTRA_PROVIDERS`(JSON 陣列,元素 = `ProviderCatalogEntry` 欄位 + `command`/`args`),就把它們併入 catalog 當成已安裝的 provider。**只吃環境變數、gateway 不得有任何能新增任意 command 的方法**(否則等於遠端可執行任意程式);能設 core 環境變數的人本來就能執行任意程式,這個掛鉤不擴大攻擊面。
 
 ### P2.3 session 自帶啟動資訊
 
 - `SessionSchema`:拿掉 `agentProfileId`;新增 `providerId: string`。保留 `adapterType`、`model`、`effort`。
 - DB `sessions` 表新增欄位(冪等 `ensure*` 遷移,比照既有 `ensureSessionsParentColumn`):`provider_id TEXT`、`launch_command TEXT`、`launch_args TEXT`(JSON)。
   - 既有 `agent_profile_id` 是 `NOT NULL`,SQLite 不能直接改約束:新 session 寫入 `providerId` 當值,drizzle 欄位改名 `legacyAgentProfileId` 並加註解。
-- **續接 / checkpoint 重啟(`continueSession()`、`performContextCheckpointRestart()`)一律從 session 自己的資料重建**:先用 `providerId` 走 `AgentCatalog.buildLaunchSpec(providerId, session.model, session.effort)`;provider 已不存在 / 未安裝時,退回 `adapterType + launch_command + launch_args`。**不得再讀 `agent_profiles` 表。**
+- **續接(`continueSession()`,以及 recovery 的「接手」等任何重新 spawn 既有 session 的路徑)一律從 session 自己的資料重建**(P1 已隨 team 移除 context checkpoint 重啟,它唯一的觸發條件是 persistent team 成員):先用 `providerId` 走 `AgentCatalog.buildLaunchSpec(providerId, session.model, session.effort)`;provider 已不存在 / 未安裝時,退回 `adapterType + launch_command + launch_args`。**不得再讀 `agent_profiles` 表。**
   - 這同時修掉一個既有 bug:舊設計下用 `agentOverride` 建的 session,續接時會 `profiles.get()` 讀回 base profile,換回錯的 agent。
 - **舊資料遷移(啟動時一次,冪等)**:對 `provider_id IS NULL` 的 session 列,用 raw SQL 讀 `agent_profiles` 對應列 → 回填 `provider_id`(profile 有 `provider_id` 用它;否則 `claude-agent-sdk` → `"claude-agent-sdk"`,其他 → `"legacy-<software>"`)、`launch_command`/`launch_args`(從 `acp_config`/`pty_config`/`opencode_config` JSON 取)。`agent_profiles` 表找不到對應列就回填 `"legacy-unknown"`、不填 launch,續接時明確報錯。`agent_profiles` 表若不存在(全新安裝)直接略過。
 
@@ -109,7 +110,8 @@ export const CreateSessionInputSchema = z.object({
 | `model` / `effort` | session 建立參數;沒給就用 provider 的 `defaultModelId` |
 | `env` | 既有 provider 層級 env(`getProviderEnv()`,設定介面已有) |
 | `permissionLevel` | 一律從 `"always-ask"` 開始;既有 session 級 auto/YOLO 切換不變 |
-| `systemPrompt` | 不再有;`withNotesPointer()` 照舊附加指路段落(displayName 改用 session title 或 provider label) |
+| `systemPrompt` | 不再有;`withNotesPointer()` 照舊附加指路段落(displayName 改用 session title 或 provider label;段落中「團隊記憶 / team.md」的措辭改成不提 team 的中性說法) |
+| `role` / `profileId`(權限規則範圍) | 見 §P2.8 |
 | `workingDir` | session 建立參數(本來就是) |
 | `name` / `role` / `mcpConfig` | 刪除 |
 
@@ -129,6 +131,24 @@ export const CreateSessionInputSchema = z.object({
 - 「開子 agent」對話框改用同一組 agent/model 選單。
 - `ChatView` 顯示 agent 名稱改看 `session.providerId` → provider label。
 
+### P2.8 權限規則的 profile 範圍(安全,必做)
+
+`PolicyRuleScopeSchema`(`packages/shared/src/core-config.ts`)目前有 `profileId` / `role` 兩個範圍欄位,
+`PolicyEngine.ruleMatches()` 用 `PermissionRequest.profileId/role` 比對。profile 移除後:
+
+- `PolicyRuleScopeSchema` **保留** `profileId`/`role` 兩個欄位的解析(schema 是 `.strict()`,拿掉會讓使用者既有
+  `~/.deskmony/config.json` 解析失敗、core 起不來),註解標明「2026-10-02 起為舊欄位」;新增 `providerId?: string`。
+- `PermissionRequest` 拿掉 `profileId`/`role`,新增 `providerId`(= session.providerId)。
+- `ruleMatches()` 對**帶舊範圍(`profileId` 或 `role` 有值)**的規則:
+  - `effect: "allow"` → **一律不匹配**(變嚴格:原本放行的改成升級給人)。
+  - `effect: "deny"` → **忽略舊範圍、對所有 session 匹配**(變寬:原本只擋某 profile 的,現在全擋)。
+  - 理由:若讓 deny 規則因舊範圍失效而不再匹配,在 auto 模式下那個操作會落入「未分類中間地帶自動放行」——
+    等於靜默 fail-open。兩個方向都往安全側偏。
+- core 啟動時若 config 內有帶舊範圍的規則,`console.warn` 逐條列出(規則 id + 處理方式),不靜默。
+- `providerId` 範圍正常精確比對。
+- `PermissionsSection.tsx`:新增規則的範圍輸入改成「agent」下拉(providerId,可留空=全部);既有規則顯示舊範圍時標示「舊 profile 範圍(allow 已停用 / deny 已套用全部)」。
+- e2e(加在 `scripts/e2e-policy-engine.mjs`):①舊範圍 allow 規則不再放行(升級);②舊範圍 deny 規則在 auto 模式下對任何 session 仍然 deny;③`providerId` 範圍只對該 agent 的 session 生效。
+
 ### P2.7 驗收
 
 - `pnpm test` 全綠。e2e 改寫所有原本先 `profile.create` 再 `session.create` 的步驟。
@@ -138,6 +158,7 @@ export const CreateSessionInputSchema = z.object({
   3. **續接重建**:用 ACP provider 建 session → 停 core → 重啟 → `session.continue`(或對應方法)後 `adapterType` 仍是 `acp`,不是 claude-agent-sdk。
   4. **舊資料遷移**:先用舊 schema 塞一筆 `agent_profiles` + 一筆指向它的 `sessions`(`provider_id` NULL)→ 啟動 core → 該 session 的 `providerId`/`launch_*` 已回填。
   5. gateway 上 `profile.list` 已不存在(回 unknown method)。
+- §P2.8 的三個斷言加在 `scripts/e2e-policy-engine.mjs`。
 
 ---
 
