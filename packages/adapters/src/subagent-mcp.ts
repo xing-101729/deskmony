@@ -19,16 +19,20 @@ export const SUBAGENT_ALLOWED_TOOL_NAMES = [
 ];
 
 /** parentSessionId 由呼叫端(ClaudeAgentSdkAdapter)以自己的 handle.id 帶入,
- *  閉包捕捉,agent 無法覆寫(工具參數只有 prompt/title/profileId,或
- *  childSessionId/message)。 */
+ *  閉包捕捉,agent 無法覆寫(工具參數只有 prompt/title/agent/model,或
+ *  childSessionId/message)。
+ *
+ *  2026-10-02(P2:移除 profile):`list_profiles` 改回傳可用 agent 清單
+ *  (`AgentCatalog.listAvailable()` 摘要),`spawn_subagent` 的 `profileId` 參數改成
+ *  `agent`(providerId)+ 選填 `model`。工具名稱沿用,P3 會整組換成 session 網路。 */
 export function createSubagentMcpServer(port: SubagentPort, parentSessionId: string): McpSdkServerConfigWithInstance {
   return createSdkMcpServer({
     name: SUBAGENT_MCP_SERVER_NAME,
     version: "1.0.0",
     instructions:
       "spawn_subagent:開一個子 agent 去做一段被明確界定的子任務,預設沿用你自己的" +
-      "agent profile;也可以先呼叫 list_profiles 查詢目前有哪些 profile 可選,自行" +
-      "決定要用哪一個(例如用更適合的 model 處理某段子任務)。" +
+      "agent 與 model;也可以先呼叫 list_profiles 查詢目前有哪些 agent 可用,自行" +
+      "決定要用哪一個(例如用更適合的 agent 或 model 處理某段子任務)。" +
       "子 agent 跑完後,它的結果會自動出現在你的對話裡,你再據此繼續。" +
       "適合把一個大任務切成可並行/可獨立完成的小塊分出去。" +
       "send_to_subagent:對一個你已經開過的子 agent 追加訊息(不開新的子任務)," +
@@ -41,7 +45,8 @@ export function createSubagentMcpServer(port: SubagentPort, parentSessionId: str
     tools: [
       tool(
         "list_profiles",
-        "查詢目前可用的 agent profile(id/name/software/model/role),決定 spawn_subagent 要用哪一個。",
+        "查詢目前可用的 agent(id/label/software/models/defaultModelId),決定 spawn_subagent 要用哪一個。" +
+          "id 就是 spawn_subagent 的 agent 參數。",
         {},
         async () => {
           const profiles = await port.listProfiles();
@@ -63,23 +68,29 @@ export function createSubagentMcpServer(port: SubagentPort, parentSessionId: str
       tool(
         "spawn_subagent",
         "開一個子 agent 去執行一段子任務。prompt 是給子 agent 的完整任務描述;" +
-          "title 選填,只是顯示名稱;profileId 選填,指定要用哪個 agent profile 建立" +
-          "子 agent(呼叫 list_profiles 查詢可用選項)。省略 profileId 時沿用你自己的" +
-          "profile。回傳子 session id;子完成後結果會自動注入你的對話。",
+          "title 選填,只是顯示名稱;agent 選填,指定要用哪個 agent 建立子 agent(填" +
+          "list_profiles 回傳的 id);model 選填,指定該 agent 的 model(從 list_profiles" +
+          "回傳的 models 挑)。省略 agent 時沿用你自己的 agent 與 model。" +
+          "回傳子 session id;子完成後結果會自動注入你的對話。",
         {
           prompt: z.string().min(1).describe("給子 agent 的完整任務描述(它看不到你的對話歷史,要寫清楚)"),
           title: z.string().optional().describe("選填:子 agent 的顯示名稱"),
-          profileId: z
+          agent: z
             .string()
             .optional()
-            .describe("選填:子 agent 要使用的 agent profile id(呼叫 list_profiles 查詢)。省略時沿用你自己的 profile。"),
+            .describe("選填:子 agent 要使用的 agent id(list_profiles 回傳的 id)。省略時沿用你自己的 agent 與 model。"),
+          model: z
+            .string()
+            .optional()
+            .describe("選填:子 agent 要使用的 model id(list_profiles 回傳的 models 之一)。只在有指定 agent 時有意義。"),
         },
         async (args) => {
           const { childSessionId } = await port.spawnChild({
             parentSessionId,
             prompt: args.prompt,
             title: args.title,
-            agentProfileId: args.profileId,
+            agent: args.agent,
+            model: args.model,
           });
           return { content: [{ type: "text" as const, text: `已建立子 agent(session ${childSessionId})。它跑完後結果會自動出現在這裡。` }] };
         },

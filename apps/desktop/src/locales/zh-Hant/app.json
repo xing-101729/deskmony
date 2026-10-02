@@ -13,13 +13,9 @@
     "groupSessions": "對話",
     "newSession": {
       "title": "新對話",
-      "subtitleWithProfile": "使用 Profile:{{name}}",
-      "subtitleNoProfile": "尚無可用的 Agent Profile",
+      "subtitleWithAgent": "使用 {{name}}",
+      "subtitleNoAgent": "尚無可用的 agent",
       "keywords": "new session create 建立 對話"
-    },
-    "newProfile": {
-      "title": "建立 Agent Profile",
-      "keywords": "profile agent provider 建立"
     },
     "settings": {
       "title": "設定",

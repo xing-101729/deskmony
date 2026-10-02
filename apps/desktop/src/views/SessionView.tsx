@@ -9,9 +9,9 @@ import { TerminalView } from "./TerminalView.js";
  * ARCHITECTURE.md 3.4 節「能力探測(capabilities)+ 優雅降級」與 3.1 節
  * 「Session 視圖」。
  *
- * 判斷依據:`Session.adapterType`(即建立 session 時的 `AgentProfile.software`)
- * → 查 `capabilitiesBySoftware` 快取(`refreshProfiles`/`createSession`/
- * `createProfile` 都會主動預先查詢並快取,見 stores/session-store.ts)。快取
+ * 判斷依據:`Session.adapterType`(即建立 session 時 agent 的 software)
+ * → 查 `capabilitiesBySoftware` 快取(`refreshSessions`/`createSession`
+ * 都會主動預先查詢並快取,見 stores/session-store.ts)。快取
  * 還沒到位時(理論上只會發生在極短暫的初次連線瞬間)預設先渲染 ChatView,
  * 不阻塞畫面 —— 對聊天類 adapter(絕大多數情況)這本來就是正確答案,對 pty
  * session 則會在 capabilities 抵達後的下一次渲染自動切換過去。

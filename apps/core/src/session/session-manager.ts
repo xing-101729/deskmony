@@ -10,8 +10,7 @@ import {
   DeskmonyError,
   ErrorCodes,
   type AdapterCapabilities,
-  type AgentOverride,
-  type AgentProfile,
+  type AgentLaunchSpec,
   type AgentSoftware,
   type CreateSessionInput,
   type DialogAnswer,
@@ -32,7 +31,7 @@ import {
   type SubagentChildSummary,
   type UserDialogResolvedPush,
 } from "@deskmony/shared";
-import type { ProfileStore } from "../profiles.js";
+import { storedLaunchFromSpec, type AgentCatalog, type StoredLaunchInfo } from "../agents/agent-catalog.js";
 import type { PermissionGateway } from "../permissions/permission-gateway.js";
 import { getProviderEnv, type SettingsStore } from "../settings/settings-store.js";
 import type { PolicyEngine, PermissionRequest, ExecContext } from "../permissions/policy-engine.js";
@@ -111,16 +110,24 @@ async function ensureNotesDir(workingDir: string): Promise<void> {
   }
 }
 
-/** §3.2:附加(不取代)在 systemPrompt 尾端的「指路」段落,文字比照 L4 規格。 */
+/** §3.2:附加(不取代)在 systemPrompt 尾端的「指路」段落,文字比照 L4 規格。
+ *  2026-10-02(P2):措辭改成不提 team 的中性說法(團隊/team 概念已隨 P1 移除);`team.md`
+ *  這個檔名為了相容既有專案目錄仍然會被建立(見 `ensureNotesDir()`),但指路文字不再點名它。 */
 function buildNotesPointerBlock(displayName: string): string {
   return [
-    "【團隊記憶】",
-    "你的團隊筆記位於 .deskmony/notes/(相對於工作目錄):",
-    "- team.md:全隊共用的專案慣例與決策紀錄",
-    `- ${displayName}.md:你的個人筆記`,
+    "【專案筆記】",
+    "這個專案的筆記位於 .deskmony/notes/(相對於工作目錄):",
+    "- 該目錄下的共用筆記(例如既有的 team.md):跨 session 共用的專案慣例與決策紀錄",
+    `- ${displayName}.md:你這個 agent 的個人筆記`,
     "開始工作前先讀取相關筆記;學到值得跨任務保留的結論時,寫回筆記。",
     "筆記會進 git,請像寫程式碼一樣審慎。",
   ].join("\n");
+}
+
+/** 個人筆記的檔名(`<name>.md`)用 provider 的顯示名稱——不能含檔名非法字元。 */
+function toNoteFileName(label: string): string {
+  const cleaned = label.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-").trim();
+  return cleaned.length > 0 ? cleaned : "agent";
 }
 
 function withNotesPointer(existingSystemPrompt: string | undefined, displayName: string): string {
@@ -132,7 +139,7 @@ function withNotesPointer(existingSystemPrompt: string | undefined, displayName:
 
 interface RuntimeState {
   handle: AgentHandle;
-  /** 這個 session 建立時依 profile.software 從 AdapterRegistry 選出的 adapter 實例。
+  /** 這個 session 建立時依 spec.software 從 AdapterRegistry 選出的 adapter 實例。
    * 後續 sendPrompt/interrupt/resolvePermission/dispose 都必須透過它,不能假設
    * 全 core 只有單一 adapter(M2 Round A:多 adapter 並存,見 AdapterRegistry)。 */
   adapter: AgentAdapter;
@@ -140,12 +147,13 @@ interface RuntimeState {
   streamingText: string;
   /** 只有 terminal 能力的 adapter(pty)才會用到,見 PTY_IDLE_TIMEOUT_MS 說明。 */
   ptyIdleTimer?: ReturnType<typeof setTimeout>;
-  /** S1(PolicyEngine)新增:這個 session 建立時的 `AgentProfile.id`/`workingDir`,
-   * 供 permission-request 事件到達時組裝 `PermissionRequest`(profileId/role 供
+  /** S1(PolicyEngine)新增:這個 session 的 `providerId`/`workingDir`,
+   * 供 permission-request 事件到達時組裝 `PermissionRequest`(providerId 供
    * 規則 scope 精確比對、workingDir 當作 hard-deny 的 worktree 邊界)——直接存
    * 在 RuntimeState 上,避免每次權限請求都多一次 DB 查詢 session 記錄。`ExecContext` 的三個欄位**不**來自這裡,見
-   * `buildExecContext()`。 */
-  agentProfileId: string;
+   * `buildExecContext()`。(2026-10-02 P2:原本是 `agentProfileId`,權限判斷那段還要多查一次
+   * `profiles.get()` 取 role——profile 移除後都不需要了。) */
+  providerId: string;
   workingDir: string;
   /** S6(crash-recovery)L4 §4.1:這條 session 的後端持久化 session 識別碼
    *  (捕捉到之前是 undefined)——見 `persistBackendSessionId()`。 */
@@ -247,7 +255,7 @@ interface OpenToolCall {
  *    (idle / busy / waiting-permission / error)」
  *
  * M2 Round A:一個 session 對應一個 AgentAdapter handle,但 adapter 種類依
- * `AgentProfile.software` 從建構子注入的 `AdapterRegistry` 動態選擇(M1 時
+ * `AgentLaunchSpec.software` 從建構子注入的 `AdapterRegistry` 動態選擇(M1 時
  * 是固定的單一 ClaudeAgentSdkAdapter)。session 中斷後重啟需要重新 spawn
  * (尚未支援 SDK 的 resume/continue)。
  */
@@ -292,14 +300,16 @@ export class SessionManager extends EventEmitter {
   constructor(
     private readonly adapters: AdapterRegistry,
     private readonly db: NexusDb,
-    private readonly profiles: ProfileStore,
+    /**
+     * 2026-10-02(P2:移除 profile):取代原本的 `ProfileStore`。`createSession()`/
+     * `continueSession()` 等所有 spawn 路徑都向它要 `AgentLaunchSpec`(見
+     * apps/core/src/agents/agent-catalog.ts)。
+     */
+    private readonly catalog: AgentCatalog,
     private readonly permissionGateway: PermissionGateway,
     /**
-     * 這輪新增(provider 目錄重構):`createSession()` 依 `profile.providerId`
-     * 查詢 provider 層級的預設 env(settings 的 per-provider 偏好),疊在
-     * `profile.env` 之下(profile 自己的 env 優先覆寫,見下方 createSession()
-     * 內的合併邏輯與 packages/shared/src/agent-profile.ts 的 `providerId`/
-     * `env` 欄位註解)。
+     * 這輪新增(provider 目錄重構):spawn 前依 `spec.providerId` 查詢 provider 層級的
+     * env(settings 的 per-provider 偏好,見下方 `prepareSpawnSpec()`)。
      */
     private readonly settingsStore: SettingsStore,
     /**
@@ -421,66 +431,71 @@ export class SessionManager extends EventEmitter {
       }));
   }
 
+  /**
+   * 2026-10-02(P2:移除 profile):session 直接以偵測到的 agent(`providerId`)+ model 建立。
+   * 啟動資訊(command/args)由 `AgentCatalog.buildLaunch()` 組出——找不到/未安裝/已停用時
+   * 丟 `DeskmonyError`(`agent.notFound`/`agent.notInstalled`/`agent.disabled`)。
+   * 權限模式一律從 `"always-ask"` 開始(原本取自 profile.permissionLevel,現在沒有 profile 了);
+   * 既有的 session 級 auto/YOLO 切換不變。
+   */
   async createSession(input: CreateSessionInput): Promise<Session> {
-    const profile = await this.profiles.get(input.agentProfileId);
-    if (!profile) {
-      throw new DeskmonyError(
-        ErrorCodes.ENTITY_NOT_FOUND,
-        { entityType: "agentProfile", id: input.agentProfileId },
-        `找不到 agent profile: ${input.agentProfileId}`,
-      );
-    }
+    const { spec, label } = await this.catalog.buildLaunch(input.providerId, input.model, input.effort);
+    return this.spawnNewSession(spec, label, {
+      workingDir: input.workingDir,
+      title: input.title,
+      parentSessionId: input.parentSessionId,
+    });
+  }
 
-    // 這輪新增:agentOverride 有提供時,套用出一份「這次真正要拿去 spawn」的
-    // profile 形狀(不寫回 DB,base profile 記錄本身不變),見
-    // `applyAgentOverride()` 的完整說明。沒有 override 時原樣等於 profile。
-    const overriddenProfile = this.applyAgentOverride(profile, input.agentOverride);
+  /**
+   * 真正 spawn 一個新 adapter handle、寫 DB、登記 runtime 的共用路徑——`createSession()`、
+   * `spawnChild()`(從父 session 自己的資料重建)、`takeoverWithSummary()` 都走這裡。
+   */
+  private async spawnNewSession(
+    spec: AgentLaunchSpec,
+    label: string,
+    opts: { workingDir: string; title?: string; parentSessionId?: string },
+  ): Promise<Session> {
+    // S8(agent-lifecycle)L4 §3.2:provider env 合併 + `.deskmony/notes/` 確保存在 +
+    // systemPrompt 附加「指路」段落,三件事都收斂到 `prepareSpawnSpec()`。
+    const effectiveSpec = await this.prepareSpawnSpec(spec, opts.workingDir, toNoteFileName(label));
 
-    // S8(agent-lifecycle)L4 §3.2:env 合併 + `.deskmony/notes/` 確保存在 +
-    // systemPrompt 附加「指路」段落,三件事都收斂到 `prepareSpawnProfile()`。
-    const effectiveProfile = await this.prepareSpawnProfile(overriddenProfile, input.workingDir, profile.name);
+    const adapter = this.adapters.get(spec.software);
+    const handle = await adapter.spawn(effectiveSpec, { path: opts.workingDir });
 
-    const adapter = this.adapters.get(overriddenProfile.software);
-    const handle = await adapter.spawn(effectiveProfile, { path: input.workingDir });
-
+    const providerId = spec.providerId ?? spec.software;
     const now = Date.now();
     const session: Session = {
       id: handle.id,
-      title: input.title ?? "新對話",
-      // agentProfileId 仍指回 base profile(provenance/permissionLevel 等的
-      // 權威來源不變),adapterType/model 則反映套用 override 之後的最終值。
-      agentProfileId: profile.id,
-      adapterType: overriddenProfile.software,
+      title: opts.title ?? "新對話",
+      providerId,
+      adapterType: spec.software,
       status: "idle",
-      workingDir: input.workingDir,
+      workingDir: opts.workingDir,
       createdAt: now,
       updatedAt: now,
-      // M5 Round C:session 級別的 model 預設取自 profile.model(profile 本身
-      // 沒設定時維持 undefined,不臆測一個預設值——UI fallback 顯示邏輯見
-      // packages/shared/src/session.ts 的 SessionSchema.model 註解)。這輪起
-      // 若有 agentOverride.model 則反映覆寫後的值(overriddenProfile.model)。
-      model: overriddenProfile.model,
-      // 比照上面的 model:session 級別的 effort 預設取自 profile.effort,若有
-      // agentOverride.effort 則反映覆寫後的值(overriddenProfile.effort)。
-      effort: overriddenProfile.effort,
+      // M5 Round C:session 級別的 model/effort 取自建立參數(`AgentCatalog.buildLaunch()` 已套用
+      // 「沒給就用 provider 明確標記的預設 model、否則維持 undefined」與「effort 只有
+      // claude-agent-sdk 有意義」的規則),不臆測任何預設值。
+      model: spec.model,
+      effort: spec.effort,
       // S9:建立子 session 時帶入 parent id
-      parentSessionId: input.parentSessionId,
+      parentSessionId: opts.parentSessionId,
     };
 
-    await this.db.insert(sessionsTable).values(sessionToRow(session)).run();
+    await this.db.insert(sessionsTable).values(sessionToRow(session, storedLaunchFromSpec(spec))).run();
     this.runtime.set(session.id, {
       handle,
       adapter,
       streamingText: "",
-      agentProfileId: profile.id,
-      workingDir: input.workingDir,
-      parentSessionId: input.parentSessionId,
+      providerId,
+      workingDir: opts.workingDir,
+      parentSessionId: opts.parentSessionId,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
     });
-    // S7:初值 = profile.permissionLevel(必為 "always-ask"/"auto-accept-edits"
-    // 之一,見 PermissionLevelSchema 收窄後的定義,不可能是 YOLO)。
-    this.permissions.initialize(session.id, profile.permissionLevel);
+    // S7:一律從 "always-ask" 開始(見上方 createSession() 說明)。
+    this.permissions.initialize(session.id, "always-ask");
 
     void this.consumeEvents(session.id);
 
@@ -791,7 +806,7 @@ export class SessionManager extends EventEmitter {
    * `ClaudeAgentSdkAdapter.setEffort()` 呼叫 SDK 的
    * `Query.applyFlagSettings({ effortLevel })`,對話上下文原封不動保留,不需要
    * dispose/respawn。只有 `software="claude-agent-sdk"` 驗證得到這個能力(見
-   * packages/shared/src/agent-profile.ts 的 `EffortLevelSchema` 註解)——其餘
+   * packages/shared/src/agent-launch.ts 的 `EffortLevelSchema` 註解)——其餘
    * adapter(含 opencode)的 `setEffort()` 會直接丟出明確錯誤,這裡不特別
    * 攔截、原樣往外傳,呼叫端(gateway)會收到 `ok:false` + 明確的錯誤訊息,
    * 不會誤以為成功。
@@ -831,6 +846,10 @@ export class SessionManager extends EventEmitter {
    * 並立即送出第一段 prompt。子 session 跑完(completed)時,會把結果回報
    * 回父 session(見 consumeEvents 的 completed case)。父 session 必須
    * 目前正在跑(runtime 有對應 handle)。
+   *
+   * 2026-10-02(P2):`providerId` 省略時沿用父 session 自己的 agent 與 model/effort(從父
+   * session 自己存的資料重建,父的 provider 已不在偵測清單時退回它的 `launch_*`);有指定
+   * `providerId` 時走一般的 `AgentCatalog.buildLaunch()`,model/effort 只取輸入給的值。
    */
   async spawnChild(input: SpawnChildSessionInput): Promise<Session> {
     const parent = await this.getSession(input.parentSessionId);
@@ -841,41 +860,40 @@ export class SessionManager extends EventEmitter {
         `找不到父 session: ${input.parentSessionId}`,
       );
     }
-    const child = await this.createSession({
+    const { spec, label } =
+      input.providerId === undefined
+        ? await this.catalog.buildLaunchSpecForSession(
+            { providerId: parent.providerId, adapterType: parent.adapterType, model: input.model ?? parent.model, effort: input.effort ?? parent.effort },
+            await this.getStoredLaunch(parent.id),
+          )
+        : await this.catalog.buildLaunch(input.providerId, input.model, input.effort);
+    const child = await this.spawnNewSession(spec, label, {
       title: input.title ?? `子 agent（${parent.title}）`,
-      agentProfileId: input.agentProfileId,
       workingDir: input.workingDir ?? parent.workingDir,
       parentSessionId: input.parentSessionId,
-      agentOverride: input.agentOverride,
     });
     await this.sendPrompt(child.id, { text: input.prompt });
     return child;
   }
 
-  /** S12 Phase2 R2:給 `spawn_subagent` MCP 工具用——預設用父 session 自己的
-   *  profile spawn 子 session;agent 也可以透過 `list_profiles` 查詢後,自行指定
-   *  agentProfileId 改用別的 profile(這輪新增,讓 agent 能自己決定要不要換一個
-   *  profile,而不是永遠被迫繼承父 session)。agentProfileId 若指定但不存在,
-   *  沿用 `spawnChild()`→`createSession()` 既有的驗證,直接拋錯讓 agent 看到
-   *  明確訊息(不在這裡重複驗證)。找不到父 session 時也拋錯(工具端會把錯誤
-   *  回給 agent)。 */
+  /** S12 Phase2 R2:給 `spawn_subagent` MCP 工具用——預設沿用父 session 自己的 agent 與
+   *  model spawn 子 session;agent 也可以透過 `list_profiles` 查詢後,自行指定 `agent`
+   *  (providerId)與 `model` 改用別的(讓 agent 能自己決定要不要換一個 agent,而不是永遠被迫
+   *  繼承父 session)。2026-10-02(P2):原本的 `agentProfileId` 參數改成 `agent`+`model`。
+   *  `agent` 若指定但不存在/未安裝/已停用,沿用 `AgentCatalog.buildLaunch()` 既有的驗證,
+   *  直接拋錯讓 agent 看到明確訊息(不在這裡重複驗證)。找不到父 session 時也拋錯(工具端會把
+   *  錯誤回給 agent)。 */
   async spawnChildFromTool(input: {
     parentSessionId: string;
     prompt: string;
     title?: string;
-    agentProfileId?: string;
+    agent?: string;
+    model?: string;
   }): Promise<{ childSessionId: string }> {
-    const parent = await this.getSession(input.parentSessionId);
-    if (!parent) {
-      throw new DeskmonyError(
-        ErrorCodes.ENTITY_NOT_FOUND,
-        { entityType: "session", id: input.parentSessionId },
-        `找不到父 session: ${input.parentSessionId}`,
-      );
-    }
     const child = await this.spawnChild({
       parentSessionId: input.parentSessionId,
-      agentProfileId: input.agentProfileId ?? parent.agentProfileId,
+      providerId: input.agent,
+      model: input.model,
       prompt: input.prompt,
       title: input.title,
     });
@@ -935,7 +953,7 @@ export class SessionManager extends EventEmitter {
    * `listSessions()`(R3 UI 的 SessionList 巢狀顯示本身就是同一份資料的
    * client 端 filter,見 apps/desktop/src/views/SessionList.tsx),避免另開
    * 一條 DB 查詢路徑。只回傳決策/回答問題需要的最小欄位,不含 workingDir/
-   * agentProfileId 等內部細節(同 `listProfiles()` 的最小揭露原則)。
+   * providerId 等內部細節(同 `listProfiles()` 的最小揭露原則)。
    */
   async listChildrenFromTool(parentSessionId: string): Promise<SubagentChildSummary[]> {
     const all = await this.listSessions();
@@ -1118,17 +1136,16 @@ export class SessionManager extends EventEmitter {
       );
     }
 
-    const profile = await this.profiles.get(session.agentProfileId);
-    if (!profile) {
-      throw new DeskmonyError(
-        ErrorCodes.ENTITY_NOT_FOUND,
-        { entityType: "agentProfile", id: session.agentProfileId },
-        `找不到 session ${sessionId} 對應的 agent profile: ${session.agentProfileId}`,
-      );
-    }
+    // 2026-10-02(P2:移除 profile):一律從 session 自己的資料重建啟動規格——先用 providerId 走
+    // `AgentCatalog.buildLaunchSpec(providerId, session.model, session.effort)`,provider 已不存在/
+    // 未安裝時退回 `adapterType + launch_command + launch_args`,**不再讀 agent_profiles 表**。
+    // (同時修掉舊設計的一個既有 bug:用 agentOverride 建的 session,續接時會 `profiles.get()` 讀回
+    // base profile,換回錯的 agent。)
+    const { spec, label } = await this.catalog.buildLaunchSpecForSession(session, await this.getStoredLaunch(sessionId));
+    const effectiveSpec = await this.prepareSpawnSpec(spec, session.workingDir, toNoteFileName(label));
 
-    const adapter = this.adapters.get(profile.software);
-    const handle = await adapter.spawn(profile, { path: session.workingDir }, {
+    const adapter = this.adapters.get(spec.software);
+    const handle = await adapter.spawn(effectiveSpec, { path: session.workingDir }, {
       backendSessionId: session.backendSessionId,
     });
 
@@ -1136,13 +1153,13 @@ export class SessionManager extends EventEmitter {
       handle,
       adapter,
       streamingText: "",
-      agentProfileId: profile.id,
+      providerId: session.providerId,
       workingDir: session.workingDir,
       backendSessionId: session.backendSessionId,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
     });
-    this.permissions.initialize(sessionId, profile.permissionLevel);
+    this.permissions.initialize(sessionId, "always-ask");
 
     await this.db
       .update(sessionsTable)
@@ -1173,69 +1190,52 @@ export class SessionManager extends EventEmitter {
 
   /**
    * S6(crash-recovery)L4 §4.2:「接手(讀摘要重啟)」——開一個全新的 session
-   * (呼叫既有的 `createSession()`,不重用舊的 DB row/handle),再把摘要文字
-   * 當作**第一則 prompt** 送給這個全新的 agent(見 `RecoveryService.takeover()`
-   * 內對摘要組裝與「為什麼用 sendPrompt 而不是只存進 DB 歷史」的完整說明)。
-   * 這裡只是把「新 session + 送出摘要」包成一個方法,實際的摘要文字組裝
+   * (不重用舊的 DB row/handle),再把摘要文字當作**第一則 prompt** 送給這個全新的 agent
+   * (見 `RecoveryService.takeover()` 內對摘要組裝與「為什麼用 sendPrompt 而不是只存進 DB
+   * 歷史」的完整說明)。這裡只是把「新 session + 送出摘要」包成一個方法,實際的摘要文字組裝
    * (只讀 DB + git,不呼叫 LLM)在 `RecoveryService` 完成。
+   *
+   * 2026-10-02(P2):新 session 的 agent 從**舊 session 自己的資料**重建(同
+   * `continueSession()`):providerId + model/effort,provider 已不在偵測清單時退回
+   * `adapterType + launch_*`——所以 ACP 的 session 接手後 `adapterType` 仍是 acp。
    */
-  async takeoverWithSummary(input: CreateSessionInput, summary: string): Promise<Session> {
-    const session = await this.createSession(input);
+  async takeoverWithSummary(source: Session, title: string, summary: string): Promise<Session> {
+    const { spec, label } = await this.catalog.buildLaunchSpecForSession(source, await this.getStoredLaunch(source.id));
+    const session = await this.spawnNewSession(spec, label, { workingDir: source.workingDir, title });
     await this.sendPrompt(session.id, { text: summary });
     return session;
   }
 
-  /**
-   * S8 L4 §3.2:任何一次真正 spawn 新 adapter handle 之前都要做的三件事——
-   * (1) provider 層級預設 env 疊上 profile 自己的 env;
-   * (2) 確保 `.deskmony/notes/` 存在(§3.1,失敗不阻擋啟動,只記警告);
-   * (3) 在 systemPrompt 尾端附加「指路」段落(§3.2,**不是**取代原本的
-   * systemPrompt,也**不**讀取筆記內容塞進去)。
-   */
-  /**
-   * 這輪新增:套用 `CreateSessionInput.agentOverride`/`SpawnChildSessionInput.
-   * agentOverride`(見 packages/shared/src/session.ts 的 `AgentOverrideSchema`
-   * 註解)——回傳一份「這次真正要拿去 spawn」的 profile 形狀物件,**不**寫回
-   * DB(base profile 記錄本身不變,覆寫只影響這一次 spawn)。
-   *
-   *   - 沒有 override:原樣回傳 profile。
-   *   - override.software 省略:software 沒變,只換 model——acpConfig/
-   *     ptyConfig/opencodeConfig 沿用 profile 原本的(舊 config 仍然對得上
-   *     沒變的 software)。
-   *   - override.software 有提供且與 profile 原本不同:整批取代該 software
-   *     對應的那個 config 欄位(用 override.command/args),其餘兩個 config
-   *     欄位設回 undefined——避免 profile 原本 software 的舊 config 殘留在
-   *     錯的欄位裡造成混淆;此時要求 override.command 必須提供(除非新
-   *     software 是不需要 command 的 claude-agent-sdk),否則直接拋錯,不臆測
-   *     一個空字串 command 讓錯誤延後到 adapter.spawn() 才發作。
-   */
-  private applyAgentOverride(profile: AgentProfile, override: AgentOverride | undefined): AgentProfile {
-    if (!override) return profile;
-    const software = override.software ?? profile.software;
-    const softwareChanged = override.software !== undefined && override.software !== profile.software;
-    if (softwareChanged && software !== "claude-agent-sdk" && !override.command) {
-      throw new DeskmonyError(
-        "sessionManager.agentOverrideMissingCommand",
-        { software },
-        `agentOverride.software="${software}" 需要一併提供 command`,
-      );
+  /** session 列自己存的 `launch_command`/`launch_args`(續接/接手的退路,見 `AgentCatalog.buildLaunchSpecForSession()`)。 */
+  private async getStoredLaunch(sessionId: string): Promise<StoredLaunchInfo> {
+    const rows = await this.db.select().from(sessionsTable).where(eq(sessionsTable.id, sessionId)).all();
+    const row = rows[0];
+    if (!row) return {};
+    let args: string[] | undefined;
+    if (row.launchArgs) {
+      try {
+        const parsed: unknown = JSON.parse(row.launchArgs);
+        if (Array.isArray(parsed) && parsed.every((a) => typeof a === "string")) args = parsed as string[];
+      } catch {
+        // 壞掉的 JSON 當作沒有 args(command 仍可用)——不讓續接因此多一種失敗模式。
+      }
     }
-    return {
-      ...profile,
-      software,
-      providerId: override.providerId ?? (softwareChanged ? undefined : profile.providerId),
-      model: override.model ?? profile.model,
-      effort: override.effort ?? profile.effort,
-      acpConfig: software === "acp" ? (softwareChanged ? { command: override.command!, args: override.args } : profile.acpConfig) : undefined,
-      ptyConfig: software === "pty" ? (softwareChanged ? { command: override.command!, args: override.args } : profile.ptyConfig) : undefined,
-      opencodeConfig: software === "opencode" ? (softwareChanged ? { command: override.command! } : profile.opencodeConfig) : undefined,
-    };
+    return { command: row.launchCommand ?? undefined, args };
   }
 
-  private async prepareSpawnProfile(profile: AgentProfile, workingDir: string, displayName: string): Promise<AgentProfile> {
-    const providerEnv = profile.providerId ? await getProviderEnv(this.settingsStore, profile.providerId) : {};
-    const mergedEnv = { ...providerEnv, ...profile.env };
-    const withEnv = Object.keys(mergedEnv).length > 0 ? { ...profile, env: mergedEnv } : profile;
+  /**
+   * S8 L4 §3.2:任何一次真正 spawn 新 adapter handle 之前都要做的兩件事——
+   * (1) provider 層級的 env(settings 的 per-provider 偏好,**每次 spawn 重新讀,不落地**)
+   *     併進 `spec.env`;
+   * (2) 確保 `.deskmony/notes/` 存在(§3.1,失敗不阻擋啟動,只記警告),並把「指路」段落
+   *     設成 `spec.systemPrompt`(§3.2,**不**讀取筆記內容塞進去)。
+   * 2026-10-02(P2):原本的 `prepareSpawnProfile()`——profile 自己的 `env`/`systemPrompt` 已不存在,
+   * 只剩 provider 層級 env 與指路段落。
+   */
+  private async prepareSpawnSpec(spec: AgentLaunchSpec, workingDir: string, displayName: string): Promise<AgentLaunchSpec> {
+    const providerEnv = spec.providerId ? await getProviderEnv(this.settingsStore, spec.providerId) : {};
+    const mergedEnv = { ...providerEnv, ...spec.env };
+    const withEnv = Object.keys(mergedEnv).length > 0 ? { ...spec, env: mergedEnv } : spec;
 
     await ensureNotesDir(workingDir).catch((err) => {
       console.warn(
@@ -1252,7 +1252,7 @@ export class SessionManager extends EventEmitter {
    *
    * 三個呼叫點都是 `void this.consumeEvents(...)`(fire-and-forget,因為這是一條
    * 要跑到 session 結束的長命迴圈,呼叫端不能 await 它)。在補這道圍籬之前,
-   * 迴圈內任何一次 `await this.persistMessage(...)`/DB 寫入/`profiles.get()`
+   * 迴圈內任何一次 `await this.persistMessage(...)`/DB 寫入
    * 拋錯,都會變成 unhandled rejection —— 在 Node ≥ 20 底下**直接終止整個 core**,
    * 連帶炸掉所有其他的 session。`apps/core/src/index.ts` 那道全域兜底
    * 是最後防線;這裡才是就地、能講清楚是哪一條 session 出事的正確位置。
@@ -1436,7 +1436,6 @@ export class SessionManager extends EventEmitter {
             if (updated) this.emit("session-updated", updated);
           }
 
-          const profile = await this.profiles.get(runtime.agentProfileId);
           const ctx = this.permissions.buildExecContext(permState);
           const permissionReq: PermissionRequest = {
             sessionId,
@@ -1444,8 +1443,7 @@ export class SessionManager extends EventEmitter {
             toolName: event.toolName,
             input: event.input,
             workingDir: runtime.workingDir,
-            profileId: runtime.agentProfileId,
-            role: profile?.role,
+            providerId: runtime.providerId,
           };
           const decision = this.policyEngine.decide(permissionReq, ctx);
           const strong = decision.effect === "escalate-strong";
@@ -1795,7 +1793,8 @@ function rowToSession(row: typeof sessionsTable.$inferSelect): Session {
   return {
     id: row.id,
     title: row.title,
-    agentProfileId: row.agentProfileId,
+    // 啟動時的回填遷移之後 provider_id 一律非 NULL;型別上仍是 nullable,保險起見給 legacy-unknown。
+    providerId: row.providerId ?? "legacy-unknown",
     adapterType: row.adapterType as Session["adapterType"],
     status: row.status as SessionStatus,
     workingDir: row.workingDir,
@@ -1811,11 +1810,16 @@ function rowToSession(row: typeof sessionsTable.$inferSelect): Session {
   };
 }
 
-function sessionToRow(session: Session): typeof sessionsTable.$inferInsert {
+function sessionToRow(session: Session, launch: StoredLaunchInfo): typeof sessionsTable.$inferInsert {
   return {
     id: session.id,
     title: session.title,
-    agentProfileId: session.agentProfileId,
+    // `agent_profile_id` 在既有 DB 是 NOT NULL,無法改約束,新 session 寫入 providerId 當值(見 schema.ts 的
+    // legacyAgentProfileId 註解);真正的資料在 provider_id/launch_command/launch_args。
+    legacyAgentProfileId: session.providerId,
+    providerId: session.providerId,
+    launchCommand: launch.command ?? null,
+    launchArgs: launch.args ? JSON.stringify(launch.args) : null,
     adapterType: session.adapterType,
     status: session.status,
     workingDir: session.workingDir,

@@ -4,7 +4,6 @@ import { CliExitError } from "./connect.js";
 import { chatCommand } from "./commands/chat.js";
 import { configShowCommand } from "./commands/config.js";
 import { doctorCommand } from "./commands/doctor.js";
-import { profileListCommand } from "./commands/profile.js";
 import { runCommand } from "./commands/run.js";
 import { serveCommand } from "./commands/serve.js";
 import { sessionListCommand, sessionRmCommand } from "./commands/session.js";
@@ -22,7 +21,7 @@ import { tuiCommand } from "./commands/tui.js";
  * 故 130),不屬於這個工具自訂的退出碼語意,任何看得懂這個慣例的呼叫端
  * (CI、其他腳本)本來就會把它跟「應用程式自訂的退出碼」分開看待。
  *
- * `run`/`session`/`profile`/`doctor`/`config` 這幾個一次性指令,這個檔案
+ * `run`/`session`/`doctor`/`config` 這幾個一次性指令,這個檔案
  * **刻意不**替它們安裝任何 `process.on("SIGINT", ...)`——Node.js 對「沒有
  * 監聽者的 SIGINT」有明確定義的預設行為:終止行程,父層 shell 依上述慣例
  * 把結果回報成 130。這正是 HLD §7「非互動模式 = 直接離開,退出碼 130」要
@@ -65,8 +64,6 @@ async function dispatch(parsed: ParsedCommand): Promise<void> {
       return sessionListCommand(parsed.options);
     case "session-rm":
       return sessionRmCommand(parsed.options, parsed.sessionId);
-    case "profile-list":
-      return profileListCommand(parsed.options);
     case "doctor":
       return doctorCommand(parsed.options);
     case "config-show":

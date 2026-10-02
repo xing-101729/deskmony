@@ -8,7 +8,7 @@
   "adapter": {
     "unsupportedOperation": "{{software}} 不支援這個操作:{{operation}}",
     "unknownHandle": "找不到對應的執行中 session:{{handleId}}",
-    "missingConfig": "Profile「{{profileId}}」缺少 {{software}} 需要的設定:{{configField}}"
+    "missingConfig": "Agent「{{providerId}}」缺少 {{software}} 需要的設定:{{configField}}"
   },
   "auth": {
     "notYetAuthenticated": "尚未完成認證:第一則訊息必須是帶正確 token 的 auth 請求",

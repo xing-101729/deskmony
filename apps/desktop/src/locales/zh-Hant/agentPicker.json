@@ -1,0 +1,19 @@
+{
+  "agentAriaLabel": "選擇 agent",
+  "agentLabel": "Agent",
+  "redetect": "重新偵測",
+  "modelAriaLabel": "選擇 model",
+  "modelLabel": "Model",
+  "defaultModelOption": "(預設 model)",
+  "effortAriaLabel": "選擇思考程度",
+  "effortLabel": "思考程度",
+  "defaultEffortOption": "(預設思考程度)",
+  "workingDirLabel": "工作資料夾",
+  "workingDirPlaceholder": "預設:{{dir}}",
+  "workingDirPlaceholderNoDefault": "工作資料夾(留空使用預設)",
+  "browseButton": "瀏覽…",
+  "noAgent": {
+    "title": "沒有偵測到可用的 agent",
+    "description": "這台電腦上找不到可以開對話的 agent 軟體,或它們都在設定中被停用了。安裝後按「重新偵測」,或到設定檢查 agent 清單。"
+  }
+}

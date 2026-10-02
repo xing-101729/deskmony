@@ -8,22 +8,23 @@ import { CLAUDE_MODEL_ALIASES } from "./known-models.js";
  * (Deskmony 的設定存在 SQLite,見 apps/core/src/settings/settings-store.ts),
  * 而是移植這套「provider 目錄 + 繼承覆寫」的**概念**。
  *
+ * 2026-10-02(P2:移除 profile):這份目錄現在是「session 能以哪些 agent 建立」的唯一
+ * 來源——`AgentCatalog`(apps/core/src/agents/agent-catalog.ts)把它與偵測結果、使用者偏好
+ * 合併後,`session.create({providerId})` 直接依此建 session,不再有 profile 當中介。
+ *
  * 這裡只定義**內建 provider 目錄**本身(靜態常數 + zod schema),純函式
  * `resolveProviders()`(見 resolve-providers.ts)才是「內建目錄 + 偵測結果 +
- * 使用者偏好 → 可直接用來建立 profile 的清單」這件事的實際邏輯,兩者分開
+ * 使用者偏好 → 可直接用來建立 session 的清單」這件事的實際邏輯,兩者分開
  * 是因為目錄是靜態資料、resolve 是每次呼叫都要重新套用偵測/偏好的計算。
  *
  * 刻意不做(記入未來項目,對齊需求描述「這輪不做」的範圍)：
  *   - `thinkingOptions`(Paseo 模型物件的思考預算選項)。
  *   - `disallowedTools`(Paseo provider 層級的工具黑名單)。
  *   - Paseo 的「具名 provider 多實例」(例如同時存在 `claude-work`/
- *     `claude-personal` 兩個都 extends `claude` 的具名 provider)——這輪改用
- *     更簡單的對應:`AgentProfile` 本身新增 `providerId`/`env`(見
- *     agent-profile.ts),同一個 provider 目錄項目可以被多個 profile 引用,
- *     每個 profile 各自帶不同的 `env`(例如不同的 `ANTHROPIC_API_KEY`),效果
- *     等同 Paseo 的「同 provider 多組憑證」,但資料模型更貼近 Deskmony 既有的
- *     「profile 是可建立 session 的具體設定檔」這個核心概念,不需要在 provider
- *     目錄本身之外再發明一層「具名 provider 實例」。
+ *     `claude-personal` 兩個都 extends `claude` 的具名 provider)。(曾經用
+ *     `AgentProfile.providerId`/`env` 的組合對應過;2026-10-02 profile 整個移除後,
+ *     同一個 provider 只有一組 provider 層級 env,見 settings-store.ts 的
+ *     `getProviderEnv()`——要多組憑證得在目錄裡多加一個項目。)
  */
 
 /** 對齊 Paseo 模型物件的形狀(id/label/description/isDefault),先不含
@@ -44,9 +45,9 @@ export type ProviderModel = z.infer<typeof ProviderModelSchema>;
  * 手法(那裡用 TS 的 `Extract<...>`,這裡用獨立的 zod enum 常數,避免依賴
  * zod 版本是否支援 `ZodEnum.extract()`),在型別與執行期驗證兩層都保證
  * `BUILTIN_PROVIDERS`/使用者自訂的 provider 不會產生 AdapterRegistry 建不起來
- * 的組合(呼應 e2e 步驟22 系列「codex 不可產生建不起來的 profile」的既有精神,
- * 這裡是對 provider 目錄套用同一條原則,見 scripts/e2e-gateway.mjs 新增的
- * provider-catalog 決定性測試)。
+ * 的組合(呼應「codex 不可產生建不起來的 session」的既有精神,這裡是對
+ * provider 目錄套用同一條原則,見 scripts/e2e-gateway.mjs 的 provider-catalog
+ * 決定性測試)。
  */
 export const RegisteredAgentSoftwareSchema = z.enum(["claude-agent-sdk", "acp", "pty", "opencode"]);
 export type RegisteredAgentSoftware = z.infer<typeof RegisteredAgentSoftwareSchema>;
@@ -61,8 +62,9 @@ export const ProviderCatalogEntrySchema = z.object({
   /**
    * 對應 `AgentDetectionEntry.key`(見 detect.ts),`resolveProviders()` 依此
    * 帶入安裝狀態與解析出的執行檔路徑。省略代表這個 provider 沒有對應的自動
-   * 偵測項(目前只有 `custom-pty` 這個逃生閥)——一律視為「可選,但 command
-   * 需要使用者手動輸入」,不臆測任何路徑。
+   * 偵測項——2026-10-02(P2)起內建目錄裡已沒有這種項目(原本唯一的一個是手動輸入
+   * command 的 `custom-pty` 逃生閥,新模型的前提是「從電腦找到的 agent」,已移除);
+   * 只有 e2e 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入的測試 provider 會省略它。
    */
   detectKey: z.string().optional(),
   /** 附加在偵測到的 command 後面的固定參數(例如 gemini 需要 `--acp` 才會講
@@ -171,9 +173,9 @@ export type ProviderPrefsPatchInput = z.infer<typeof ProviderPrefsPatchInputSche
  *     `defaultArgs`(這個項目刻意不寫 `defaultArgs`,見下方 codex 項目定義)。
  *     `docs/DECISIONS.md` B2 對這個取捨(依賴非 OpenAI 官方維護的第三方套件)
  *     有更完整的說明。
- *   - `custom-pty`:逃生閥,無 `detectKey`,`resolveProviders()` 一律回傳
- *     `command: undefined`,由使用者在 UI 手動輸入(比照既有
- *     ProfileCreateDialog 的「自訂…」選項)。
+ *   - (2026-10-02 P2 移除:`custom-pty` 逃生閥——手動輸入 command 與「session 只能用
+ *     從電腦偵測到的 agent 建立」的前提衝突,而且 gateway 不能有任何接受任意
+ *     command 的入口。)
  */
 export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
   {
@@ -198,8 +200,8 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     detectKey: "claude-code-cli",
     // pty 是無結構化終端直通,建立後不能像 SDK 一樣中途切換 model(見
     // packages/adapters/src/pty-adapter.ts 的 setModel() 一律 throw)——這裡的
-    // 「支援 model 選擇」意思是「建立 profile 時把 --model <別名> 烤進固定的
-    // 啟動參數」(見 ProfileCreateDialog.tsx 的 resolveTarget()),不是隨時可
+    // 「支援 model 選擇」意思是「建立 session 時把 --model <別名> 烤進固定的
+    // 啟動參數」(見 AgentCatalog.buildLaunchSpec()),不是隨時可
     // 切換。底層是同一支 claude 執行檔,同樣的別名清單直接適用。
     models: CLAUDE_MODEL_ALIASES,
     supportsModelSelection: true,
@@ -280,14 +282,5 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     models: [],
     supportsModelSelection: false,
     order: 50,
-  },
-  {
-    id: "custom-pty",
-    label: "自訂…(進階,手動輸入 command)",
-    description: "沒有自動偵測,command 需要手動輸入(逃生閥,比照既有 ProfileCreateDialog 的自訂選項)。",
-    software: "pty",
-    models: [],
-    supportsModelSelection: false,
-    order: 9999,
   },
 ];

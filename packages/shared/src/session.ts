@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-profile.js";
+import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-launch.js";
 import { PromptAttachmentSchema } from "./prompt.js";
 
 /**
@@ -19,7 +19,16 @@ export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 export const SessionSchema = z.object({
   id: z.string(),
   title: z.string().default("新對話"),
-  agentProfileId: z.string(),
+  /**
+   * 2026-10-02(P2:移除 profile):這個 session 是用哪個 provider 目錄項目
+   * (`ProviderCatalogEntry.id`,例如 "claude-agent-sdk"、"codex"、"opencode")建立的。
+   * 取代過去的 `agentProfileId`。舊 session 由 `packages/db/src/client.ts` 的啟動遷移回填:
+   * 能對應到 profile 的用 profile 的 providerId,否則是 `"claude-agent-sdk"`
+   * (software 為 claude-agent-sdk)、`"legacy-<software>"`,或找不到 profile 時的
+   * `"legacy-unknown"`——這些 `legacy-*` 值不在 provider 目錄裡,UI 顯示時直接當成
+   * 標籤文字、續接時退回 session 自己存的 `launch_command`/`launch_args`。
+   */
+  providerId: z.string(),
   adapterType: AgentSoftwareSchema,
   status: SessionStatusSchema,
   workingDir: z.string(),
@@ -27,26 +36,26 @@ export const SessionSchema = z.object({
   updatedAt: z.number(),
   lastError: z.string().optional(),
   /**
-   * session 級別的 model 覆寫(M5 Round C:對話中切換 model)。建立時預設取自
-   * `AgentProfile.model`(見 `SessionManager.createSession()`);之後可透過
+   * session 級別的 model(M5 Round C:對話中切換 model)。建立時取自
+   * `CreateSessionInput.model`(沒給時用 provider 明確標記 `isDefault` 的 model,
+   * 都沒有就維持 undefined,見 `AgentCatalog.buildLaunchSpec()`);之後可透過
    * `session.setModel` gateway 方法變更,`adapterType === "claude-agent-sdk"`
    * 與 `"opencode"` 的 session 支援(見 packages/adapters/src/types.ts 的
    * `AgentAdapter.setModel()` 介面註解——兩者實作方式不同:前者呼叫 SDK
    * 官方的 `Query.setModel()`,後者是 adapter 內部的 session 覆寫,下一則
-   * 訊息才真正生效)。acp/pty session 呼叫這個方法會得到明確錯誤。舊 session
-   * (建立於這個欄位存在之前)這個欄位可能是 `undefined` —— UI 應 fallback
-   * 顯示 profile 的 model,或標示「(由 agent 管理)」。
+   * 訊息才真正生效)。acp/pty session 呼叫這個方法會得到明確錯誤。這個欄位
+   * 可能是 `undefined`(建立時沒指定 model、由 agent 自己決定)—— UI 應標示
+   * 「(由 agent 管理)」。
    */
   model: z.string().optional(),
   /**
-   * session 級別的 effort(思考程度)覆寫,比照上面的 `model` 欄位。建立時預設
-   * 取自 `AgentProfile.effort`(見 `SessionManager.createSession()`);之後可
+   * session 級別的 effort(思考程度),比照上面的 `model` 欄位。建立時取自
+   * `CreateSessionInput.effort`(見 `SessionManager.createSession()`);之後可
    * 透過 `session.setEffort` gateway 方法變更,只有 `adapterType ===
    * "claude-agent-sdk"` 的 session 支援(見 packages/adapters/src/types.ts 的
    * `AgentAdapter.setEffort()` 介面註解——呼叫 SDK 的
    * `Query.applyFlagSettings({ effortLevel })`)。其餘 adapter(含 opencode)
-   * 呼叫這個方法會得到明確錯誤。舊 session(建立於這個欄位存在之前)這個欄位
-   * 可能是 `undefined` —— UI 應 fallback 顯示 profile 的 effort,或視為
+   * 呼叫這個方法會得到明確錯誤。這個欄位可能是 `undefined` —— UI 應視為
    * 「(未指定,使用 CLI 預設)」。
    */
   effort: EffortLevelSchema.optional(),
@@ -106,63 +115,45 @@ export const SessionSchema = z.object({
 export type Session = z.infer<typeof SessionSchema>;
 
 /**
- * 這輪新增:建立 session 時,除了套用 agentProfile,也能就這一次建立臨時
- * 覆寫要用的 agent software/model——不落地成新的 AgentProfile 記錄(profile
- * 本身還是 permissionLevel/systemPrompt/env/workingDir 的權威來源),純粹是
- * 「這次 spawn 用這個 software/model 而不是 profile 原本設定的那個」。
- *
- * 語意刻意設計成「部分覆寫、以 software 是否提供分流」(見
- * apps/core/src/session/session-manager.ts 的 `applyAgentOverride()`):
- *   - 只給 `model`(省略 `software`):software/command/args 全部沿用
- *     profile 原本的設定,只換 model——對應 UI「不換 agent,只想換個更省成本
- *     的 model」這個最常見的情境。
- *   - 給了 `software`:整批取代該 software 對應的 config(acpConfig/
- *     ptyConfig/opencodeConfig 三選一,其餘設回 undefined,不與 profile 原本
- *     的舊 config 混用)——`command`/`args` 由前端從 `resolveProviders()`
- *     解析出的已知(已偵測到、免手動輸入)provider 帶入,見
- *     apps/desktop/src/lib/agent-override.ts 的 `buildAgentOverride()`。
+ * 2026-10-02(P2:移除 profile):session 直接以「偵測到的 agent(providerId)+
+ * model」建立,不再有 `agentProfileId`/`agentOverride`(`AgentOverrideSchema` 已整個
+ * 移除)。啟動資訊(command/args)由 core 的 `AgentCatalog.buildLaunchSpec()` 依
+ * `providerId` 組出——**gateway 不接受任何 command/args 參數**,否則等於遠端可執行
+ * 任意程式。
  */
-export const AgentOverrideSchema = z.object({
-  software: AgentSoftwareSchema.optional(),
-  /** 對應 ProviderCatalogEntry.id,純中繼資訊(顯示/env 查找用),不影響 spawn。 */
-  providerId: z.string().optional(),
-  /** 只在提供 `software` 時有意義(claude-agent-sdk 不需要 command)。 */
-  command: z.string().optional(),
-  args: z.array(z.string()).optional(),
-  model: z.string().optional(),
-  effort: EffortLevelSchema.optional(),
-});
-export type AgentOverride = z.infer<typeof AgentOverrideSchema>;
-
 export const CreateSessionInputSchema = z.object({
-  title: z.string().optional(),
-  agentProfileId: z.string(),
+  /** `BUILTIN_PROVIDERS` 的 id(例如 "claude-agent-sdk"、"codex"、"opencode")。 */
+  providerId: z.string().min(1),
+  /** 省略時用該 provider 明確標記 `isDefault` 的 model;都沒有就由 agent 自己決定。 */
+  model: z.string().optional(),
+  /** 只有 claude-agent-sdk 有意義(見 `EffortLevelSchema` 註解)。 */
+  effort: EffortLevelSchema.optional(),
   workingDir: z.string(),
+  title: z.string().optional(),
   /**
    * S12(session-subagent):建立子 session 時帶入 parent session id。
    * (2026-10-02:原本還有 `teamMemberId`——team 已移除,見 DECISIONS §H。)
    */
   parentSessionId: z.string().optional(),
-  /** 見 `AgentOverrideSchema` 註解。 */
-  agentOverride: AgentOverrideSchema.optional(),
 });
 export type CreateSessionInput = z.infer<typeof CreateSessionInputSchema>;
 
 /**
  * S12(session-subagent):spawn child session 的輸入參數。
- * parentSessionId 與 agentProfileId 為必填,其餘選填;child 的 adapter
- * 取自 agentProfile 的 software。
+ * 2026-10-02(P2):`agentProfileId`/`agentOverride` 改成 `providerId`/`model`/`effort`
+ * (P3 會再把整組子 agent 工具換成 session 網路,這裡先讓它在沒有 profile 的世界裡
+ * 能編譯運作)。`providerId`/`model`/`effort` 省略時沿用父 session 自己的值。
  */
 export const SpawnChildSessionInputSchema = z.object({
   parentSessionId: z.string(),
-  agentProfileId: z.string(),
+  providerId: z.string().min(1).optional(),
+  model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
   /** 省略時沿用父 session 的 workingDir。 */
   workingDir: z.string().optional(),
   title: z.string().optional(),
   /** 建立子 session 後立即送出的第一段 prompt（子 agent 的任務）。 */
   prompt: z.string().min(1),
-  /** 見 `AgentOverrideSchema` 註解。 */
-  agentOverride: AgentOverrideSchema.optional(),
 });
 export type SpawnChildSessionInput = z.infer<typeof SpawnChildSessionInputSchema>;
 

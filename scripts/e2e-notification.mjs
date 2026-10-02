@@ -30,6 +30,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -38,7 +39,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 
 const results = [];
@@ -547,6 +547,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -627,19 +629,9 @@ async function liveE2e() {
   let client;
   const createdSessions = [];
 
-  const alwaysAskProfile = async (name) =>
-    (
-      await client.rpc("profile.create", {
-        name,
-        software: "acp",
-        workingDir: workspaceDir,
-        acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-        permissionLevel: "always-ask",
-      })
-    ).profile;
-
-  const createSessionFor = async (profileId, title) => {
-    const created = await client.rpc("session.create", { agentProfileId: profileId, workingDir: workspaceDir, title }, 30_000);
+  // 新 session 一律從 always-ask 開始(2026-10-02 P2:不再有 profile.permissionLevel)。
+  const createSessionFor = async (title) => {
+    const created = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
     createdSessions.push(created.session.id);
     return created.session.id;
   };
@@ -669,8 +661,6 @@ async function liveE2e() {
     await waitForPort(`ws://127.0.0.1:${PORT}`, 20_000);
     client = new MiniGatewayClient(`ws://127.0.0.1:${PORT}`);
     await client.connect();
-
-    const profile = await alwaysAskProfile("E2E Notification");
 
     // ---- 2a: config.getEffective 遮罩 webhook url(不是明碼) ----
     {
@@ -706,7 +696,7 @@ async function liveE2e() {
     //          stub server 也收到結構相同、同樣不含 SECRET_MARKER 的 POST。 ----
     let sessionA;
     {
-      sessionA = await createSessionFor(profile.id, "Notif-A");
+      sessionA = await createSessionFor("Notif-A");
       const targetFile = path.join(workspaceDir, `${SECRET_MARKER}`, "a.txt");
       const notifPromise = client.waitForNotificationCount(1, 15_000);
       await triggerWritePermission(sessionA, targetFile, "content-a");
@@ -750,8 +740,8 @@ async function liveE2e() {
     //          sessionId——保守做法,見 notifier.ts 的 buildPayload() 說明)。 ----
     {
       const beforeCount = client.enforcementNotifications.length;
-      const sessionB = await createSessionFor(profile.id, "Notif-B");
-      const sessionC = await createSessionFor(profile.id, "Notif-C");
+      const sessionB = await createSessionFor("Notif-B");
+      const sessionC = await createSessionFor("Notif-C");
       const targetFileB = path.join(workspaceDir, "b.txt");
       const targetFileC = path.join(workspaceDir, "c.txt");
 
@@ -815,8 +805,7 @@ async function liveE2e() {
     client = new MiniGatewayClient(`ws://127.0.0.1:${PORT}`);
     await client.connect();
 
-    const profile2 = await alwaysAskProfile("E2E Notification 2");
-    const sessionD = await createSessionFor(profile2.id, "Notif-D");
+    const sessionD = await createSessionFor("Notif-D");
     const targetFileD = path.join(workspaceDir, "d.txt");
     const permEvent = await triggerWritePermission(sessionD, targetFileD, "content-d");
 

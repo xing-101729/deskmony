@@ -23,7 +23,7 @@
     "disableLabel": "Disable {{name}}",
     "collapseModelsEnv": "Collapse (models / env vars)",
     "expandModelsEnv": "Expand (models / env vars)",
-    "modelsHint": "Enabled models (unchecked ones won't appear in the \"Create Profile\" dropdown or the in-conversation \"switch model\" dropdown)",
+    "modelsHint": "Enabled models (unchecked ones won't appear in the new-conversation dropdown or the in-conversation \"switch model\" dropdown)",
     "addUpdate": "Add / update",
     "envHint": "Environment variables (e.g. ANTHROPIC_API_KEY) — values are always shown masked as ***; this list only shows which keys are set and can't be read back in plaintext.",
     "envKeyPlaceholder": "KEY",
@@ -86,13 +86,16 @@
     "whenKindCommandMatches": "Command matches a regex",
     "whenKindPathUnder": "Path is under this prefix",
     "whenValueLabel": "Condition value",
-    "scopeProfileLabel": "Limit to Profile ID (optional)",
-    "scopeRoleLabel": "Limit to role (optional)",
-    "scopeProfile": "profile: {{id}}",
-    "scopeRole": "role: {{role}}",
     "addedByUser": "Added manually",
     "addedByRemember": "From \"always allow\"",
     "toolRequired": "Enter a tool name (use * for any tool)",
-    "addRuleButton": "Add rule"
+    "addRuleButton": "Add rule",
+    "scopeProvider": "agent: {{id}}",
+    "legacyScopeAllow": "Legacy profile scope (allow disabled)",
+    "legacyScopeDeny": "Legacy profile scope (deny applies to all)",
+    "legacyScopeTitle": "This rule carries a profile scope that no longer exists. Profiles are gone: allow rules no longer match (what they used to allow is now escalated to you), and deny rules now apply to every session. Delete it and recreate it with an agent scope.",
+    "scopeAgentLabel": "Limit to agent (optional)",
+    "scopeAgentHint": "Only applies to conversations started with this agent; empty = all.",
+    "scopeAgentAll": "(All agents)"
   }
 }

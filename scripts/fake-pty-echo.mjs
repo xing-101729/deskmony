@@ -3,7 +3,8 @@
  * scripts/fake-pty-echo.mjs
  *
  * 給 scripts/e2e-gateway.mjs 步驟 10 使用的最小互動式 CLI —— 用來當作
- * `software="pty"` 的 `AgentProfile.ptyConfig.command`,讓 `GenericPtyAdapter`
+ * `software="pty"` 的 `AgentLaunchSpec.ptyConfig.command`(2026-10-02 P2 起經
+ * `DESKMONY_E2E_EXTRA_PROVIDERS` 注入,見 scripts/lib/e2e-providers.mjs),讓 `GenericPtyAdapter`
  * 的 e2e 測試不必依賴 `cmd.exe`/`bash` 的當地語系化輸出或分行慣例(那些會
  * 因作業系統/語系而不同,不夠決定性),而是有一個完全確定性、跨平台一致的
  * 終端輸出可以斷言。

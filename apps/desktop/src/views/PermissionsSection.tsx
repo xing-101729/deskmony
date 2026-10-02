@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { PolicyRule, PolicyRuleWhen } from "@deskmony/shared";
-import { useSessionStore } from "../stores/session-store.js";
+import { selectResolvedProviders, useSessionStore } from "../stores/session-store.js";
 import { Button } from "../ui/Button.js";
 import { Badge } from "../ui/Badge.js";
 import { Field, Input, Select } from "../ui/Field.js";
@@ -86,8 +86,13 @@ function RuleRow({ rule }: { rule: PolicyRule }): JSX.Element {
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs text-fg-soft">{describeWhen(rule, t)}</p>
         <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-fg-faint">
-          {rule.scope?.profileId && <span>{t("settings:permission.scopeProfile", { id: rule.scope.profileId })}</span>}
-          {rule.scope?.role && <span>{t("settings:permission.scopeRole", { role: rule.scope.role })}</span>}
+          {rule.scope?.providerId && <span>{t("settings:permission.scopeProvider", { id: rule.scope.providerId })}</span>}
+          {/* 2026-10-02(P2.8):profile 已移除,舊的 profileId/role 範圍規則——allow 已停用、deny 已對所有 session 套用。 */}
+          {(rule.scope?.profileId !== undefined || rule.scope?.role !== undefined) && (
+            <span className="text-warn" title={t("settings:permission.legacyScopeTitle")}>
+              {t(rule.effect === "allow" ? "settings:permission.legacyScopeAllow" : "settings:permission.legacyScopeDeny")}
+            </span>
+          )}
           <span>
             {t(rule.addedBy === "ui-remember" ? "settings:permission.addedByRemember" : "settings:permission.addedByUser")}
           </span>
@@ -117,9 +122,12 @@ function AddRuleForm(): JSX.Element {
   const [effect, setEffect] = useState<"allow" | "deny">("allow");
   const [whenKind, setWhenKind] = useState<WhenKind>("none");
   const [whenValue, setWhenValue] = useState("");
-  const [profileId, setProfileId] = useState("");
-  const [role, setRole] = useState("");
+  const [providerId, setProviderId] = useState("");
   const [saving, setSaving] = useState(false);
+  const detectedAgents = useSessionStore((s) => s.detectedAgents);
+  const providerPrefs = useSessionStore((s) => s.providerPrefs);
+  // 範圍的「agent」下拉:列出所有內建 provider(含沒偵測到的——規則是政策,不必等 agent 裝好),留空 = 全部。
+  const agentOptions = selectResolvedProviders(detectedAgents, providerPrefs);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (): Promise<void> => {
@@ -139,15 +147,11 @@ function AddRuleForm(): JSX.Element {
             : whenKind === "commandMatches"
               ? { commandMatches: whenValue.trim() }
               : { pathUnder: whenValue.trim() };
-      const scope =
-        profileId.trim() || role.trim()
-          ? { profileId: profileId.trim() || undefined, role: role.trim() || undefined }
-          : undefined;
+      const scope = providerId ? { providerId } : undefined;
       await addPolicyRule({ tool: trimmedTool, effect, when, scope });
       setTool("");
       setWhenValue("");
-      setProfileId("");
-      setRole("");
+      setProviderId("");
       setWhenKind("none");
     } catch (err) {
       setError(translateError(err, t));
@@ -185,12 +189,16 @@ function AddRuleForm(): JSX.Element {
           />
         </Field>
       </div>
-      <div className="mt-2 grid grid-cols-2 gap-2">
-        <Field label={t("settings:permission.scopeProfileLabel")}>
-          <Input value={profileId} onChange={(e) => setProfileId(e.target.value)} />
-        </Field>
-        <Field label={t("settings:permission.scopeRoleLabel")}>
-          <Input value={role} onChange={(e) => setRole(e.target.value)} />
+      <div className="mt-2">
+        <Field label={t("settings:permission.scopeAgentLabel")} hint={t("settings:permission.scopeAgentHint")}>
+          <Select value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+            <option value="">{t("settings:permission.scopeAgentAll")}</option>
+            {agentOptions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </Select>
         </Field>
       </div>
       <div className="mt-2 flex items-center gap-2">

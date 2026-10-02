@@ -1,12 +1,6 @@
-import {
-  DeskmonyError,
-  ErrorCodes,
-  type CreateSessionInput,
-  type RecoverySessionInfo,
-  type Session,
-} from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes, type RecoverySessionInfo, type Session } from "@deskmony/shared";
 import type { SessionManager } from "../session/session-manager.js";
-import type { ProfileStore } from "../profiles.js";
+import type { AgentCatalog } from "../agents/agent-catalog.js";
 
 /**
  * RecoveryService(S6:崩潰復原,見
@@ -26,23 +20,29 @@ import type { ProfileStore } from "../profiles.js";
  * 與「session ↔ team member ↔ task ↔ workspace」的反查,全部是任務 git worktree
  * 專用——沒有任務就沒有 worktree 可看/重跑——一併移除。復原只剩 session 對帳:
  * interrupted → 繼續 / 接手 / 放棄。
+ *
+ * 2026-10-02(P2:移除 profile):不再有 `ProfileStore`——「這個 session 是哪個 agent」改看
+ * session 自己的 `providerId`(顯示用名稱取自 `AgentCatalog` 的 provider label),「接手」等重新 spawn 的
+ * 路徑由 `SessionManager.takeoverWithSummary()` 從 session 自己的資料重建啟動規格。
  */
 export class RecoveryService {
   constructor(
     private readonly sessionManager: SessionManager,
-    private readonly profiles: ProfileStore,
+    private readonly catalog: AgentCatalog,
   ) {}
 
   /** §5.1:復原視圖的資料來源。 */
   async list(): Promise<RecoverySessionInfo[]> {
     const sessions = await this.sessionManager.listInterruptedSessions();
+    // 顯示名稱只讀一次(只有真的有中斷的 session 才需要);不等偵測結果,見 `AgentCatalog.labelsById()`。
+    const labelById = sessions.length > 0 ? await this.catalog.labelsById() : new Map<string, string>();
     const results: RecoverySessionInfo[] = [];
     for (const session of sessions) {
-      const profile = await this.profiles.get(session.agentProfileId);
       results.push({
         sessionId: session.id,
         sessionTitle: session.title,
-        profileName: profile?.name,
+        // provider 已不在目錄裡(舊 session 的 `legacy-*`,或 agent 被移除)時退回 providerId 本身當標籤。
+        agentLabel: labelById.get(session.providerId) ?? session.providerId,
         status: "interrupted",
         interruptedAt: session.interruptedAt,
         lastSeenAt: session.lastSeenAt,
@@ -72,12 +72,7 @@ export class RecoveryService {
       const session = await this.mustGetInterrupted(sessionId);
       const summary = await this.buildTakeoverSummary(session);
 
-      const input: CreateSessionInput = {
-        title: `${session.title}(接手)`,
-        agentProfileId: session.agentProfileId,
-        workingDir: session.workingDir,
-      };
-      const newSession = await this.sessionManager.takeoverWithSummary(input, summary);
+      const newSession = await this.sessionManager.takeoverWithSummary(session, `${session.title}(接手)`, summary);
       await this.sessionManager.abandonInterruptedSession(sessionId);
       return newSession;
     });

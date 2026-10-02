@@ -7,7 +7,8 @@
  * 父 session(父據此又跑一輪、最終回到 idle)完整生命週期**且 child 不被
  * auto-dispose**,全程不依賴真實模型。
  *
- * 使用 software="acp" + scripts/fake-acp-agent.mjs 做決定性後端。
+ * 使用 software="acp" + scripts/fake-acp-agent.mjs 做決定性後端(2026-10-02 P2:經
+ * `DESKMONY_E2E_EXTRA_PROVIDERS` 注入的 fake provider,見 lib/e2e-providers.mjs)。
  *
  * 用法:
  *   node scripts/e2e-session-subagents.mjs
@@ -23,6 +24,7 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -84,6 +86,8 @@ function startCore(port, dataDir, workspaceDir) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_WORKSPACE: workspaceDir,
     DESKMONY_PERMISSION_TIMEOUT_MS: String(PERMISSION_TIMEOUT_MS),
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
@@ -249,18 +253,9 @@ async function main() {
     await client.connect();
     console.log("[setup] WS connected");
 
-    // ---- 建立 fake-acp-agent 的 AgentProfile (software="acp") ----
-    const { profile } = await client.rpc("profile.create", {
-      name: "E2E S12 Parent",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
-    record("建立 AgentProfile(software=acp)", true, `profileId=${profile.id}`);
-
-    // ---- 建立 parent session ----
+    // ---- 建立 parent session(fake-acp-agent,經 DESKMONY_E2E_EXTRA_PROVIDERS 注入的 provider)----
     const parentCreated = await client.rpc("session.create", {
-      agentProfileId: profile.id,
+      providerId: FAKE_ACP,
       workingDir: workspaceDir,
       title: "e2e-s12-parent",
     });
@@ -277,7 +272,7 @@ async function main() {
     try {
       spawned = await client.rpc("session.spawnChild", {
         parentSessionId: parentId,
-        agentProfileId: profile.id,
+        providerId: FAKE_ACP,
         prompt: "請執行 E2E 測試任務",
       });
       childId = spawned.session.id;

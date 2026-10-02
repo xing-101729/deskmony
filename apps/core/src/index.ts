@@ -5,9 +5,9 @@ import { AcpAdapter, AdapterRegistry, ClaudeAgentSdkAdapter, GenericPtyAdapter, 
 import { initChildRegistry, reapOrphans } from "@deskmony/adapters";
 import type { SubagentPort } from "@deskmony/shared";
 import { initDb } from "./db.js";
-import { ProfileStore, createDefaultProfile } from "./profiles.js";
+import { AgentCatalog, E2E_EXTRA_PROVIDERS_ENV } from "./agents/agent-catalog.js";
 import { PermissionGateway } from "./permissions/permission-gateway.js";
-import { PolicyEngine } from "./permissions/policy-engine.js";
+import { PolicyEngine, warnLegacyScopedRules } from "./permissions/policy-engine.js";
 import { SqliteAuditLog } from "./enforcement/audit-log.js";
 import { RealNotifier } from "./enforcement/notifier.js";
 import { SessionManager } from "./session/session-manager.js";
@@ -28,16 +28,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * M2 Round A:AdapterRegistry 註冊了 ClaudeAgentSdkAdapter(software=
  * "claude-agent-sdk")與 AcpAdapter(software="acp")。
  * M2 Round B:另外註冊 GenericPtyAdapter(software="pty"),SessionManager
- * 依 AgentProfile.software 動態選擇 adapter(見 packages/adapters 的
+ * 依 AgentLaunchSpec.software 動態選擇 adapter(見 packages/adapters 的
  * AdapterRegistry)。
  * 這輪(修復 opencode 只是 PTY 直通的問題):補上一直是 TODO 的
  * OpenCodeAdapter(software="opencode",HTTP + SSE 對接 opencode 的 headless
  * server,見 packages/adapters/src/opencode-adapter.ts 頂端對接策略註解)。
  * 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):原本的
  * team 管理、團隊訊息匯流、任務、任務 worktree 四個服務與它們之間的建構
- * 順序/事後注入手法已全部移除。現在的建構順序:ProfileStore → SessionManager
- * (需要 CostGovernor/TurnLimiter,它們又回頭需要 SessionManager,用
+ * 順序/事後注入手法已全部移除。現在的建構順序:SettingsStore → AgentCatalog →
+ * SessionManager(需要 CostGovernor/TurnLimiter,它們又回頭需要 SessionManager,用
  * `setSessionControl()` 事後注入打破循環)→ RecoveryService → WsGateway。
+ * 2026-10-02(P2:移除 profile):原本的 `ProfileStore` 與預設 profile seed 已整個移除,
+ * 由 `AgentCatalog`(偵測到的 agent 清單 + 啟動規格組裝)取代。
  * 尚不含 Scheduler(見 README 已知限制,規劃於 M4+)。
  *
  * M5 Round A:apps/core 正式化為可獨立部署(headless)——`pnpm start:core`
@@ -130,10 +132,6 @@ async function main(): Promise<void> {
   initChildRegistry(config.data.dataDir);
 
   const db = initDb(config.data.dataDir);
-  const profiles = new ProfileStore(db);
-  // M3 Round A:profile 落地成資料表後,預設 profile 改用冪等 seed(core
-  // 重啟多次不會重複插入,也不會覆蓋使用者已修改過的版本)。
-  await profiles.ensureSeed(createDefaultProfile(config.workspace.defaultWorkingDir));
   // M5 Round E:「設定」介面的持久化偏好(目前只有「啟用哪些偵測到的 Claude
   // model」,見 apps/core/src/settings/settings-store.ts)。不依賴任何其他
   // core 模組,只需要 db。
@@ -144,6 +142,12 @@ async function main(): Promise<void> {
   // per-provider 偏好的邏輯(SessionManager/WsGateway)開始運作之前跑完,
   // 確保第一次讀取就拿到遷移後的一致狀態。
   await migrateLegacyEnabledModelIds(settingsStore);
+  // 2026-10-02(P2:移除 profile):偵測到的 agent 目錄。啟動時**背景**跑一次偵測(不 await、不阻塞
+  // 啟動;`buildLaunchSpec()` 需要偵測結果時自己會等那一次)。`DESKMONY_E2E_EXTRA_PROVIDERS` 是 e2e
+  // 專用的測試掛鉤——只吃環境變數、不經 gateway,安全理由見 agent-catalog.ts 的說明;與
+  // `DESKMONY_YOLO_DURATION_MS` 等既有覆寫一樣,不經 `loadConfig()` 的分層合併、不落地任何設定檔。
+  const catalog = new AgentCatalog(settingsStore, { extraProvidersJson: process.env[E2E_EXTRA_PROVIDERS_ENV] });
+  catalog.startBackgroundDetection();
   // S12 Phase2 R2:保留 claude adapter 的具名參考——SessionManager 建好後要用
   // `setSubagentPort()` 把 `spawn_subagent` 的實作(SpawningChildFromTool)注入
   // 給它(見下方 sessionManager 建好後的注入行),adapter 建立時 SessionManager
@@ -175,6 +179,9 @@ async function main(): Promise<void> {
   // 註解)——**必須**用它的回傳值(而不是原始 `config.policy.rules`)建構
   // `PolicyEngine`,否則記憶體裡的規則會跟剛寫回 config.json 的版本不一致。
   const backfilledPolicyRules = backfillPolicyRuleIds(configPath, config.policy.rules);
+  // 2026-10-02(P2.8,安全項目):profile 移除後,帶舊 `scope.profileId`/`scope.role` 的規則行為改變
+  // (allow → 不匹配、deny → 對所有 session 套用,見 policy-engine.ts)——逐條 console.warn,不靜默。
+  warnLegacyScopedRules(backfilledPolicyRules);
   const policyEngine = new PolicyEngine({ rules: backfilledPolicyRules, allowedHosts: config.policy.allowedHosts });
   const auditLog = new SqliteAuditLog(db);
   // S11(Notification):`DESKMONY_NOTIFICATION_BATCH_INTERVAL_MS` 比照
@@ -251,7 +258,7 @@ async function main(): Promise<void> {
   const sessionManager = new SessionManager(
     adapters,
     db,
-    profiles,
+    catalog,
     permissionGateway,
     settingsStore,
     policyEngine,
@@ -281,8 +288,9 @@ async function main(): Promise<void> {
   });
   // S12 Phase2 R2+R4+R5:注入 `spawn_subagent`/`send_to_subagent`/
   // `list_subagents` 的 SubagentPort——子 session 預設沿用父 session 自己的
-  // profile,agent 也可以呼叫 list_profiles 查完可用選項後自行指定別的
-  // profile(見 session-manager.ts 的 spawnChildFromTool());`send_to_subagent`
+  // agent 與 model,agent 也可以呼叫 list_profiles(2026-10-02 P2:現在回傳
+  // `AgentCatalog` 的可用 agent 摘要)查完可用選項後自行指定別的 agent/model
+  // (見 session-manager.ts 的 spawnChildFromTool());`send_to_subagent`
   // (R4)讓 agent 對已經開好的子 session 追加訊息(見 sendToChildFromTool());
   // `list_subagents`(R5)讓 agent 查自己名下有哪些子——包含使用者透過 UI
   // 手動開、agent 完全不知情的那些(見 listChildrenFromTool())。
@@ -300,7 +308,7 @@ async function main(): Promise<void> {
   // (惰性建立,只在 agent 真的呼叫工具時才連線)WS 連線。選擇這樣接的理由:
   // (a) 讓 ACP 也具備與 ClaudeAgentSdkAdapter 對等的 subagent 能力;
   // (b) 唯有這樣接,`session.spawnChildForSubagent`/
-  // `session.sendToChild`/`session.listChildren`/`profile.listForSubagent`
+  // `session.sendToChild`/`session.listChildren`/`agent.listForSubagent`
   // 這四個這輪新增的 gateway 方法才能透過標準的 `apps/core/dist/index.js`
   // 產物被 e2e 決定性測試真正走過一次完整管線(見
   // scripts/e2e-gateway.mjs 的 `scopedMcpBridgeTokenSmokeTest()`),而不是
@@ -311,24 +319,21 @@ async function main(): Promise<void> {
     spawnChild: (input: Parameters<SubagentPort["spawnChild"]>[0]) => sessionManager.spawnChildFromTool(input),
     sendToChild: (input: Parameters<SubagentPort["sendToChild"]>[0]) => sessionManager.sendToChildFromTool(input),
     listChildren: (input: Parameters<SubagentPort["listChildren"]>[0]) => sessionManager.listChildrenFromTool(input.parentSessionId),
-    // listProfiles:只回傳 agent 決策需要的最小欄位,不把 env/mcpConfig 等可能
-    // 含密鑰的欄位送進 agent 的對話 context(見 SubagentPort.listProfiles() 的
-    // 介面註解)。
-    listProfiles: async () => {
-      const list = await profiles.list();
-      return list.map((p) => ({ id: p.id, name: p.name, software: p.software, model: p.model, role: p.role }));
-    },
+    // listProfiles:只回傳 agent 決策需要的最小欄位,不把 command/args/env 等可能
+    // 含本機路徑/密鑰的欄位送進 agent 的對話 context(見 SubagentPort.listProfiles() 的
+    // 介面註解)。與 gateway 的 `agent.listForSubagent` 共用同一個函式,結構上保證一致。
+    listProfiles: () => catalog.summarizeAvailable(),
   };
   claudeAdapter.setSubagentPort(subagentPort);
   acpAdapter.setSubagentPort(subagentPort);
 
   // S6(crash-recovery):純組合層,不擁有任何狀態,見 recovery-service.ts 頂端
-  // 說明。放在這裡是因為它需要 sessionManager/profiles 建構完成。
-  const recoveryService = new RecoveryService(sessionManager, profiles);
+  // 說明。放在這裡是因為它需要 sessionManager/catalog 建構完成。
+  const recoveryService = new RecoveryService(sessionManager, catalog);
 
   const gateway = new WsGateway(
     sessionManager,
-    profiles,
+    catalog,
     settingsStore,
     costGovernor,
     recoveryService,

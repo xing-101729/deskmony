@@ -1,0 +1,8 @@
+{
+  "agent": {
+    "notFound": "找不到 agent「{{providerId}}」,請先用 agent 清單確認可用的 id",
+    "disabled": "Agent「{{label}}」已在設定中停用",
+    "notInstalled": "Agent「{{label}}」目前沒有在這台電腦上偵測到,請安裝後到設定重新偵測",
+    "launchInfoMissing": "這個 session 的 agent「{{providerId}}」已不在偵測清單裡,而且 session 沒有留下啟動資訊(建立於舊版),無法重新啟動;請改用新的 session"
+  }
+}

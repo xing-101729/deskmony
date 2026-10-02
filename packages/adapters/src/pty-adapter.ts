@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
-import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, PromptInput } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
@@ -41,7 +41,7 @@ import { registerChild, unregisterChild } from "./child-registry.js";
  * terminal = false` 並在 spawn() 丟出清楚的錯誤訊息),不在本次改動範圍內。
  *
  * 已知限制 / TODO(M2 Round B 範圍):
- *  - 終端尺寸(`cols`/`rows`)只能在 spawn 當下透過 `AgentProfile.ptyConfig`
+ *  - 終端尺寸(`cols`/`rows`)只能在 spawn 當下透過 `AgentLaunchSpec.ptyConfig`
  *    決定,`AgentAdapter` 介面尚未有 `resize()` 方法,UI 端 xterm 視圖 resize
  *    不會回傳給後端的實際 pty(僅前端顯示跟著容器縮放,不影響 CLI 內部
  *    换行寬度判斷)。
@@ -91,13 +91,14 @@ export class GenericPtyAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
-    const ptyConfig = profile.ptyConfig;
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+    const ptyConfig = launch.ptyConfig;
     if (!ptyConfig) {
+      const agentLabel = launch.providerId ?? "pty";
       throw new DeskmonyError(
         ErrorCodes.ADAPTER_MISSING_CONFIG,
-        { profileId: profile.id, software: "pty", configField: "command" },
-        `AgentProfile "${profile.id}" 的 software="pty" 缺少 ptyConfig(command)`,
+        { providerId: agentLabel, software: "pty", configField: "command" },
+        `agent "${agentLabel}" 的 software="pty" 缺少 ptyConfig(command)`,
       );
     }
 
@@ -114,11 +115,11 @@ export class GenericPtyAdapter implements AgentAdapter {
 
     let ptyProcess: IPty;
     try {
-      // 這輪新增:profile.env 疊在 process.env 之上,ptyConfig.env(既有欄位)
+      // launch.env(provider 層級 env)疊在 process.env 之上,ptyConfig.env(既有欄位)
       // 最優先——同 acp-adapter.ts 的合併順序說明。
       ptyProcess = pty.spawn(ptyConfig.command, ptyConfig.args ?? [], {
         cwd: workspace.path,
-        env: { ...process.env, ...profile.env, ...ptyConfig.env } as Record<string, string>,
+        env: { ...process.env, ...launch.env, ...ptyConfig.env } as Record<string, string>,
         cols: ptyConfig.cols ?? 80,
         rows: ptyConfig.rows ?? 24,
         name: "xterm-color",
@@ -133,7 +134,7 @@ export class GenericPtyAdapter implements AgentAdapter {
       );
     }
 
-    const handle: AgentHandle = { id: randomUUID(), profile, workspace };
+    const handle: AgentHandle = { id: randomUUID(), launch, workspace };
     const internal: InternalSession = {
       handle,
       ptyProcess,

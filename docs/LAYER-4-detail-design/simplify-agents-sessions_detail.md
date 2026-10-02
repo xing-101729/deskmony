@@ -160,6 +160,16 @@ export const CreateSessionInputSchema = z.object({
   5. gateway 上 `profile.list` 已不存在(回 unknown method)。
 - §P2.8 的三個斷言加在 `scripts/e2e-policy-engine.mjs`。
 
+### P2.9 實作備註(與上文不同、經 review 接受的地方)
+
+- `AgentCatalog.resolve()`/`listAvailable()` 是 async(provider 偏好在 SQLite)。外部 CLI 才等偵測;claude-agent-sdk 與 e2e provider 不等。
+- 預設 model **只取 provider 明確標 `isDefault` 的那個**,不退回清單第一項(`opencode models` 是字母序,退回第一項會悄悄換掉使用者在 opencode 裡設定的 model)。
+- 舊資料回填多一個邊界:profile.software ≠ session.adapter_type(當初用 agentOverride 換過 agent)時,不採用 profile 的 provider/launch。
+- 續接時 provider **被停用**也退回 session 存的啟動資訊(停用只影響新建 session)。
+- `policy.addRule` 的輸入不再接受 `profileId`/`role`(否則能加一條擋全部 session 的 deny);config.json 仍可解析這兩個舊欄位。
+- 側欄多一個「工作資料夾」欄位(profile 拿掉後選資料夾的唯一入口)。
+- e2e:§P2.7 的斷言主體在新的決定性 `scripts/e2e-agent-catalog.mjs`(`pnpm test` 會跑),`e2e-gateway.mjs` 步驟 36 另有一份。
+
 ---
 
 ## P3. Session 網路

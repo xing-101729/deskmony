@@ -60,7 +60,7 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
           <p className="truncate text-sm font-medium text-fg">{session.sessionTitle}</p>
           <p className="mt-0.5 text-2xs text-fg-faint">
             {t("recovery:sessionMetaLine", {
-              profile: session.profileName ?? t("recovery:unknownProfile"),
+              agent: session.agentLabel ?? t("recovery:unknownAgent"),
               interruptedAt: formatTime(session.interruptedAt, locale, t("common:unknown")),
               lastSeenAt: formatTime(session.lastSeenAt, locale, t("common:unknown")),
             })}

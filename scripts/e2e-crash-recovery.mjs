@@ -40,6 +40,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -48,7 +49,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const GRACEFUL_BOOTSTRAP = path.join(REPO_ROOT, "scripts", "e2e-crash-recovery-graceful-bootstrap.mjs");
 // better-sqlite3 不是這個 script 所在目錄的直接依賴,借用 apps/core 已安裝好的
@@ -186,6 +186,9 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake ACP agent 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs);
+    // `extraEnv` 排在後面,測試可以覆寫(例如設成空字串模擬「provider 已不在偵測清單」)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -203,6 +206,9 @@ function startCoreGraceful({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake ACP agent 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs);
+    // `extraEnv` 排在後面,測試可以覆寫(例如設成空字串模擬「provider 已不在偵測清單」)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [GRACEFUL_BOOTSTRAP], {
@@ -268,21 +274,9 @@ async function gracefulShutdown(proc, timeoutMs = 10_000) {
   return exited;
 }
 
-async function createAcpSession(client, workspaceDir, title, extra = {}) {
-  const { profile } = await client.rpc("profile.create", {
-    name: `E2E ${title}`,
-    software: "acp",
-    workingDir: workspaceDir,
-    acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    permissionLevel: "always-ask",
-    ...extra.profileFields,
-  });
-  const { session } = await client.rpc(
-    "session.create",
-    { agentProfileId: profile.id, workingDir: workspaceDir, title },
-    30_000,
-  );
-  return { profileId: profile.id, sessionId: session.id };
+async function createAcpSession(client, workspaceDir, title) {
+  const { session } = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
+  return { sessionId: session.id };
 }
 
 function rmDirs(dirs) {
@@ -305,9 +299,9 @@ async function insertSyntheticSessionRow(dataDir, { id, status }) {
   try {
     const now = Date.now();
     db.prepare(
-      `INSERT INTO sessions (id, title, agent_profile_id, adapter_type, status, working_dir, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, `synthetic-${status}`, "synthetic-profile", "acp", status, "/tmp/synthetic", now, now);
+      `INSERT INTO sessions (id, title, agent_profile_id, provider_id, adapter_type, status, working_dir, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, `synthetic-${status}`, "synthetic-agent", "synthetic-agent", "acp", status, "/tmp/synthetic", now, now);
   } finally {
     db.close();
   }
@@ -577,9 +571,9 @@ async function testContinueAbandonTakeover() {
     const oldClosed = sessionsAfterTakeover.find((s) => s.id === sessionForTakeover)?.status === "closed";
 
     record(
-      "D(§4.2「接手」: 新 session + 注入摘要): 新 session 標題含「接手」、第一則 user 訊息是摘要(含【前次工作中斷】標頭與任務標題、長度 <=4000)、舊 session 收尾成 closed 並離開復原視圖",
-      titleMarksTakeover && summaryLooksRight && oldGoneFromRecovery && oldClosed,
-      `newTitle=${newSession.title}, summaryLen=${firstUserMsg?.content?.length}, oldClosed=${oldClosed}, oldGoneFromRecovery=${oldGoneFromRecovery}`,
+      "D(§4.2「接手」: 新 session + 注入摘要): 新 session 標題含「接手」、第一則 user 訊息是摘要(含【前次工作中斷】標頭與任務標題、長度 <=4000)、舊 session 收尾成 closed 並離開復原視圖;新 session 的 agent 從舊 session 自己的資料重建(adapterType 仍是 acp、providerId 不變——2026-10-02 P2)",
+      titleMarksTakeover && summaryLooksRight && oldGoneFromRecovery && oldClosed && newSession.adapterType === "acp" && newSession.providerId === FAKE_ACP,
+      `newTitle=${newSession.title}, summaryLen=${firstUserMsg?.content?.length}, oldClosed=${oldClosed}, oldGoneFromRecovery=${oldGoneFromRecovery}, adapterType=${newSession.adapterType}, providerId=${newSession.providerId}`,
     );
 
     clientB.close();

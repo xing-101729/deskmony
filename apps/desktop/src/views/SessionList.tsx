@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import type { AgentOverride, AgentProfile, EffortLevel, Session } from "@deskmony/shared";
-import { useSessionStore, selectContextReporting, selectResolvedProviders, selectProviderModels } from "../stores/session-store.js";
-import { ProfileCreateDialog } from "./ProfileCreateDialog.js";
+import type { Session } from "@deskmony/shared";
+import { useSessionStore, selectContextReporting, selectAvailableProviders } from "../stores/session-store.js";
+import { AgentPicker } from "./AgentPicker.js";
 import { Icon } from "../ui/icons.js";
 import { Button, IconButton, Kbd } from "../ui/Button.js";
-import { Field, Input, Select, Textarea } from "../ui/Field.js";
+import { Field, Input, Textarea } from "../ui/Field.js";
 import { StatusDot, Meta } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
 import { Dialog } from "../ui/Dialog.js";
@@ -17,8 +17,8 @@ import { useLocale } from "../ui/locale.js";
 import { LOCALES, type Locale } from "../lib/locale-storage.js";
 import { FONT_SCALES, useFontScale } from "../ui/font-scale.js";
 import { groupSessionsByWorkspace } from "../lib/workspaces.js";
-import { buildAgentOverride } from "../lib/agent-override.js";
 import { translateError } from "../lib/error-i18n.js";
+import { reconcileSelection, type NewSessionSelection } from "../lib/new-session-selection.js";
 
 /**
  * S3a(usage-metering)L4 §4:「SessionList 每列顯示 context 使用率(如 32%)」。
@@ -54,14 +54,17 @@ interface SessionListProps {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   connectionStatus: string;
-  selectedProfileId: string;
-  onSelectProfile: (id: string) => void;
-  /** 這輪新增選填參數:「進階」揭露區選了 agent/model 覆寫時,建立當下一併帶入
-   *  (見 apps/desktop/src/lib/agent-override.ts 的 buildAgentOverride())。 */
-  onCreateSession: (agentOverride?: AgentOverride) => void;
+  /** 2026-10-02(P2:移除 profile):「新對話」選的 agent/model/effort/資料夾,由 App.tsx 持有
+   *  (⌘N/命令面板共用同一份,上次的選擇存 localStorage)。 */
+  selection: NewSessionSelection;
+  onChangeSelection: (next: NewSessionSelection) => void;
+  /** core 的預設工作資料夾(資料夾欄位留空時實際會用的值,只當 placeholder 顯示)。 */
+  defaultWorkingDir: string;
+  onCreateSession: () => void;
   creatingSession: boolean;
-  profileDialogOpen: boolean;
-  onSetProfileDialogOpen: (open: boolean) => void;
+  /** 建立失敗(agent 沒裝/被停用/啟動失敗…)的訊息,顯示在「新對話」按鈕下方。 */
+  createError: string | null;
+  onDismissCreateError: () => void;
   onOpenPalette: () => void;
   onOpenSettings: () => void;
   themePreference: ThemePreference;
@@ -89,9 +92,8 @@ interface SessionListProps {
  *   3. **可收合成圖示列**:比照 VS Code/Cursor 的 activity bar,`collapsed`
  *      時只留圖示,滑鼠 hover 用 `title` 顯示文字(⌘B 切換)。
  *
- * 「+ Profile」與「+ 新對話」的邏輯與改版前完全相同,只是版面重排;
- * `ProfileCreateDialog` 的開關狀態改由 App.tsx 持有(命令面板也能觸發同一個
- * 對話框),這裡透過 props 收放。
+ * 2026-10-02(P2:移除 profile):頂部的「選 profile」下拉 + 「+ Profile」/刪除 profile 兩顆鈕整個換成
+ * `AgentPicker`(agent 下拉 + model 下拉 + effort + 資料夾)+「新對話」鈕;選擇狀態由 App.tsx 持有。
  */
 export function SessionList({
   mobileOpen,
@@ -99,12 +101,13 @@ export function SessionList({
   collapsed,
   onToggleCollapsed,
   connectionStatus,
-  selectedProfileId,
-  onSelectProfile,
+  selection,
+  onChangeSelection,
+  defaultWorkingDir,
   onCreateSession,
   creatingSession,
-  profileDialogOpen,
-  onSetProfileDialogOpen,
+  createError,
+  onDismissCreateError,
   onOpenPalette,
   onOpenSettings,
   themePreference,
@@ -114,37 +117,26 @@ export function SessionList({
 }: SessionListProps): JSX.Element {
   const { t } = useTranslation(["sessionList", "common"]);
   const sessions = useSessionStore((s) => s.sessions);
-  const profiles = useSessionStore((s) => s.profiles);
   const sessionUsage = useSessionStore((s) => s.sessionUsage);
   const capabilitiesBySoftware = useSessionStore((s) => s.capabilitiesBySoftware);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const selectSession = useSessionStore((s) => s.selectSession);
   const deleteSession = useSessionStore((s) => s.deleteSession);
-  const deleteProfile = useSessionStore((s) => s.deleteProfile);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set());
   const [spawnParent, setSpawnParent] = useState<Session | null>(null);
-  // 這輪新增:「新對話」的進階 agent/model 覆寫(見 AgentOverrideFields)——
-  // 預設收合、不覆寫,不影響既有一鍵建立/⌘N 的手感。
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [overrideProviderId, setOverrideProviderId] = useState("");
-  const [overrideModel, setOverrideModel] = useState("");
-  const [overrideEffort, setOverrideEffort] = useState<EffortLevel | "">("");
 
-  const selectedProfile = profiles.find((p) => p.id === selectedProfileId);
+  // 有沒有「現在真的能開 session」的 agent——沒有時「新對話」鈕停用(AgentPicker 會顯示說明 + 重新偵測)。
+  const availableProviders = useMemo(
+    () => selectAvailableProviders(detectedAgents, providerPrefs),
+    [detectedAgents, providerPrefs],
+  );
   const workspaces = useMemo(
     () => groupSessionsByWorkspace(sessions, t("sessionList:unnamedWorkspace")),
     [sessions, t],
   );
   const conn = connectionMeta(connectionStatus, t);
-
-  // 換 profile 時重置覆寫——理由同 SpawnChildDialog 的同名 effect。
-  useEffect(() => {
-    setOverrideProviderId("");
-    setOverrideModel("");
-    setOverrideEffort("");
-  }, [selectedProfileId]);
 
   /**
    * 刪除對話:原生 `confirm()` 二次確認(既有作法維持不變)——低頻、不可逆但
@@ -154,20 +146,6 @@ export function SessionList({
   const handleDelete = (sessionId: string, title: string): void => {
     if (!window.confirm(t("sessionList:confirmDeleteSession", { title }))) return;
     void deleteSession(sessionId);
-  };
-
-  /**
-   * 刪除 Agent Profile:與 handleDelete()(刪對話)同樣的原生 confirm() 二次
-   * 確認作風。額外算一下目前有幾個既有對話是用這個 profile 建立的,一併提示
-   * ——刪除不會動到那些對話本身(core 端 ProfileStore.delete() 無條件刪除,
-   * 不檢查引用,見 apps/core/src/profiles.ts),只是讓使用者刪之前心裡有數。
-   */
-  const handleDeleteProfile = (profile: AgentProfile): void => {
-    const inUseCount = sessions.filter((s) => s.agentProfileId === profile.id).length;
-    const usageNote =
-      inUseCount > 0 ? t("sessionList:confirmDeleteProfileUsageNote", { count: inUseCount }) : "";
-    if (!window.confirm(t("sessionList:confirmDeleteProfile", { name: profile.name, usageNote }))) return;
-    void deleteProfile(profile.id);
   };
 
   const toggleWorkspace = (key: string): void => {
@@ -305,77 +283,35 @@ export function SessionList({
 
       <div className="mx-3 mb-2 h-px flex-shrink-0 bg-line-subtle" />
 
-      {/* ---- Profile + 新對話 ---- */}
+      {/* ---- Agent / model 選單 + 新對話 ---- */}
       <div className="flex-shrink-0 space-y-1.5 px-2 pb-2">
-        <Select
-          aria-label={t("sessionList:selectProfileAriaLabel")}
-          value={selectedProfileId}
-          onChange={(e) => onSelectProfile(e.target.value)}
-          disabled={profiles.length === 0}
+        <AgentPicker
+          selection={selection}
+          onChange={onChangeSelection}
+          compact
+          showWorkingDir
+          defaultWorkingDir={defaultWorkingDir}
+        />
+        <Button
+          variant="primary"
+          size="sm"
+          icon="plus"
+          block
+          loading={creatingSession}
+          disabled={availableProviders.length === 0}
+          onClick={() => {
+            onDismissCreateError();
+            onCreateSession();
+          }}
+          title={`${t("sessionList:newSessionButton")}(${MOD_LABEL}N)`}
         >
-          {profiles.length === 0 && <option value="">{t("sessionList:noProfileOption")}</option>}
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}({softwareLabel(p.software)})
-            </option>
-          ))}
-        </Select>
-        <button
-          type="button"
-          onClick={() => setAdvancedOpen((v) => !v)}
-          className="focus-ring flex h-5 items-center gap-1 text-2xs text-fg-faint underline decoration-dotted hover:text-accent"
-        >
-          <Icon name="chevron-right" size={10} className={`flex-shrink-0 transition-transform ${advancedOpen ? "rotate-90" : ""}`} />
-          {t("sessionList:advancedToggle")}
-        </button>
-        {advancedOpen && (
-          <div className="space-y-1.5 rounded-md border border-line-subtle bg-surface p-2">
-            <AgentOverrideFields
-              baseProfile={selectedProfile}
-              overrideProviderId={overrideProviderId}
-              onChangeOverrideProviderId={setOverrideProviderId}
-              model={overrideModel}
-              onChangeModel={setOverrideModel}
-              effort={overrideEffort}
-              onChangeEffort={setOverrideEffort}
-            />
-          </div>
+          {creatingSession ? t("sessionList:creating") : t("sessionList:newSessionButton")}
+        </Button>
+        {createError && (
+          <Alert tone="danger" onDismiss={onDismissCreateError}>
+            {createError}
+          </Alert>
         )}
-        <div className="flex gap-1.5">
-          <Button
-            variant="primary"
-            size="sm"
-            icon="plus"
-            block
-            loading={creatingSession}
-            disabled={!selectedProfile}
-            onClick={() => {
-              const overrideProvider = overrideProviderId
-                ? selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === overrideProviderId)
-                : undefined;
-              onCreateSession(buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model, overrideEffort, selectedProfile?.effort));
-            }}
-            title={`${t("sessionList:newSessionButton")}(${MOD_LABEL}N)`}
-          >
-            {creatingSession ? t("sessionList:creating") : t("sessionList:newSessionButton")}
-          </Button>
-          <IconButton
-            icon="sparkle"
-            aria-label={t("sessionList:createProfileAriaLabel")}
-            title={t("sessionList:createProfileAriaLabel")}
-            variant="outline"
-            onClick={() => onSetProfileDialogOpen(true)}
-          />
-          <IconButton
-            icon="trash"
-            aria-label={t("sessionList:deleteProfileAriaLabel")}
-            title={t("sessionList:deleteProfileAriaLabel")}
-            variant="outline"
-            className="hover:!text-danger"
-            disabled={!selectedProfile}
-            onClick={() => selectedProfile && handleDeleteProfile(selectedProfile)}
-          />
-        </div>
       </div>
 
       {/* ---- 工作區分組的 session 清單 ---- */}
@@ -483,14 +419,6 @@ export function SessionList({
           />
         )}
       </div>
-
-      {profileDialogOpen && (
-        <ProfileCreateDialog
-          onClose={() => onSetProfileDialogOpen(false)}
-          onCreated={(profileId) => onSelectProfile(profileId)}
-          defaultWorkingDir={selectedProfile?.workingDir ?? ""}
-        />
-      )}
 
       {spawnParent && <SpawnChildDialog session={spawnParent} onClose={() => setSpawnParent(null)} />}
     </aside>
@@ -629,45 +557,43 @@ function FontScaleSwitcher(): JSX.Element {
 
 /**
  * S12 Phase2 R3:從選定的 session 開一個子 agent 的極簡對話框。
- * 這輪新增:Profile 預設帶入父 session 自己的 agentProfileId(維持原本「順手就是
- * 沿用」的體感),但使用者可以在送出前改選別的 profile —— 不再寫死繼承(呼應
- * agent 自己呼叫 spawn_subagent 時也能透過 list_profiles 自行決定的對稱設計)。
+ * 2026-10-02(P2:移除 profile):agent/model/effort 改用與側欄「新對話」同一組 `AgentPicker`
+ * (預設帶入父 session 自己的 agent 與 model——父的 provider 已不可用時退回第一個可用的);
+ * 送出時由 core 端依選擇組啟動規格,子 session 的資料夾沿用父的。
  */
 function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () => void }): JSX.Element {
   const { t } = useTranslation(["sessionList", "common"]);
   const spawnChild = useSessionStore((s) => s.spawnChild);
-  const profiles = useSessionStore((s) => s.profiles);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
-  const [profileId, setProfileId] = useState(session.agentProfileId);
-  const [overrideProviderId, setOverrideProviderId] = useState("");
-  const [overrideModel, setOverrideModel] = useState("");
-  const [overrideEffort, setOverrideEffort] = useState<EffortLevel | "">("");
+  const [selection, setSelection] = useState<NewSessionSelection>({
+    providerId: session.providerId,
+    model: session.model ?? "",
+    effort: session.effort ?? "",
+    workingDir: "",
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selectedProfile = profiles.find((p) => p.id === profileId);
-
-  // 換 profile 時重置 agent/model/effort 覆寫——舊的覆寫是針對舊 profile 選的,
-  // 換了 base profile 之後繼續沿用容易造成不對應的混淆狀態(比照
-  // ProfileCreateDialog 換 software 時重置 model 的既有作法)。
-  useEffect(() => {
-    setOverrideProviderId("");
-    setOverrideModel("");
-    setOverrideEffort("");
-  }, [profileId]);
+  const availableProviders = useMemo(
+    () => selectAvailableProviders(detectedAgents, providerPrefs),
+    [detectedAgents, providerPrefs],
+  );
+  const effective = useMemo(() => reconcileSelection(selection, availableProviders), [selection, availableProviders]);
+  const hasAgent = availableProviders.some((p) => p.id === effective.providerId);
 
   const handleSubmit = async (): Promise<void> => {
     setError(null);
     setSubmitting(true);
     try {
-      const overrideProvider = overrideProviderId
-        ? selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === overrideProviderId)
-        : undefined;
-      const agentOverride = buildAgentOverride(overrideProvider, overrideModel, selectedProfile?.model, overrideEffort, selectedProfile?.effort);
-      await spawnChild(session.id, prompt.trim(), profileId, title.trim() || undefined, agentOverride);
+      await spawnChild(
+        session.id,
+        prompt.trim(),
+        { providerId: effective.providerId, model: effective.model || undefined, effort: effective.effort || undefined },
+        title.trim() || undefined,
+      );
       onClose();
     } catch (err) {
       setError(translateError(err, t));
@@ -688,35 +614,14 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
           <Button variant="secondary" disabled={submitting} onClick={onClose}>
             {t("common:cancel")}
           </Button>
-          <Button variant="primary" disabled={!prompt.trim() || !profileId || submitting} loading={submitting} onClick={() => void handleSubmit()}>
+          <Button variant="primary" disabled={!prompt.trim() || !hasAgent || submitting} loading={submitting} onClick={() => void handleSubmit()}>
             {submitting ? t("sessionList:creating") : t("sessionList:spawnChildDialog.submit")}
           </Button>
         </div>
       }
     >
       <div className="space-y-3">
-        <Field label="Agent Profile">
-          <Select
-            aria-label={t("sessionList:spawnChildDialog.profileSelectAriaLabel")}
-            value={profileId}
-            onChange={(e) => setProfileId(e.target.value)}
-          >
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}({softwareLabel(p.software)})
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <AgentOverrideFields
-          baseProfile={selectedProfile}
-          overrideProviderId={overrideProviderId}
-          onChangeOverrideProviderId={setOverrideProviderId}
-          model={overrideModel}
-          onChangeModel={setOverrideModel}
-          effort={overrideEffort}
-          onChangeEffort={setOverrideEffort}
-        />
+        <AgentPicker selection={selection} onChange={setSelection} />
         <Field label={t("sessionList:spawnChildDialog.promptLabel")}>
           <Textarea
             value={prompt}
@@ -732,111 +637,5 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
         {error && <Alert tone="danger">{error}</Alert>}
       </div>
     </Dialog>
-  );
-}
-
-/**
- * 這輪新增:「Agent 軟體(選填)」+「Model(選填)」兩個覆寫欄位,SpawnChildDialog
- * 與 SessionList 側欄的「進階」揭露區共用同一份——只負責選,不負責組送給
- * `session.create`/`session.spawnChild` 的 payload(那是呼叫端在送出時呼叫
- * `buildAgentOverride()` 做的事,見 apps/desktop/src/lib/agent-override.ts)。
- *
- * 「已知免設定」範圍(呼應「決定 agent」只做到這個深度的既有共識):software
- * 選單只列出 claude-agent-sdk,或本機已偵測到(installed)的其餘 provider——
- * 不含 custom-pty 這種需要手動輸入 command 的逃生閥,選了就一定能直接建立,
- * 不需要再填任何欄位。
- */
-function AgentOverrideFields({
-  baseProfile,
-  overrideProviderId,
-  onChangeOverrideProviderId,
-  model,
-  onChangeModel,
-  effort,
-  onChangeEffort,
-}: {
-  baseProfile: AgentProfile | undefined;
-  overrideProviderId: string;
-  onChangeOverrideProviderId: (id: string) => void;
-  model: string;
-  onChangeModel: (model: string) => void;
-  effort: EffortLevel | "";
-  onChangeEffort: (effort: EffortLevel | "") => void;
-}): JSX.Element {
-  const { t } = useTranslation(["sessionList", "common"]);
-  const detectedAgents = useSessionStore((s) => s.detectedAgents);
-  const detectingAgents = useSessionStore((s) => s.detectingAgents);
-  const detectAgents = useSessionStore((s) => s.detectAgents);
-  const providerPrefs = useSessionStore((s) => s.providerPrefs);
-  const enabledModelIds = useSessionStore((s) => s.enabledModelIds);
-
-  useEffect(() => {
-    if (detectedAgents.length === 0 && !detectingAgents) {
-      void detectAgents();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const resolvedProviders = useMemo(
-    () => selectResolvedProviders(detectedAgents, providerPrefs),
-    [detectedAgents, providerPrefs],
-  );
-  const selectableProviders = useMemo(
-    () => resolvedProviders.filter((p) => p.enabled && p.id !== "custom-pty" && (p.software === "claude-agent-sdk" || p.installed)),
-    [resolvedProviders],
-  );
-  const overrideProvider = resolvedProviders.find((p) => p.id === overrideProviderId);
-
-  const models = overrideProvider
-    ? overrideProvider.models
-    : selectProviderModels(baseProfile, detectedAgents, providerPrefs, enabledModelIds);
-
-  // 思考程度只有 claude-agent-sdk 驗證支援(見 packages/shared/src/
-  // agent-profile.ts 的 EffortLevelSchema 註解)——這裡的「有效 software」要
-  // 先看有沒有覆寫 provider,沒有才落回 baseProfile 原本的 software,比照
-  // ChatView.tsx 的 EffortControl 對 session.adapterType 的既有判斷式。
-  const effectiveSoftware = overrideProvider?.software ?? baseProfile?.software;
-
-  return (
-    <>
-      <Field label={t("sessionList:overrideFields.softwareLabel")}>
-        <Select value={overrideProviderId} onChange={(e) => onChangeOverrideProviderId(e.target.value)}>
-          <option value="">{t("sessionList:overrideFields.useProfileDefault")}</option>
-          {selectableProviders.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-        </Select>
-      </Field>
-      {models.length > 0 && (
-        <Field label={t("sessionList:overrideFields.modelLabel")}>
-          <Select value={model} onChange={(e) => onChangeModel(e.target.value)}>
-            <option value="">
-              {overrideProvider ? t("sessionList:overrideFields.useDefaultPlain") : t("sessionList:overrideFields.useDefaultProfile")}
-            </option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      )}
-      {effectiveSoftware === "claude-agent-sdk" && (
-        <Field label={t("sessionList:overrideFields.effortLabel")}>
-          <Select value={effort} onChange={(e) => onChangeEffort(e.target.value as EffortLevel | "")}>
-            <option value="">
-              {overrideProvider ? t("sessionList:overrideFields.useDefaultPlain") : t("sessionList:overrideFields.useDefaultProfile")}
-            </option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
-            <option value="max">max</option>
-          </Select>
-        </Field>
-      )}
-    </>
   );
 }

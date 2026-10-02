@@ -640,14 +640,14 @@ async function runWindowsCases() {
         labelPrefix: "opencode:",
         backend: path.join(REPO_ROOT, "scripts", "fake-opencode-server.mjs"),
         adapter: new OpenCodeAdapter(),
-        profileFor: (command, workingDir) => ({ software: "opencode", workingDir, opencodeConfig: { command } }),
+        launchFor: (command) => ({ software: "opencode", opencodeConfig: { command } }),
       },
       {
         name: "AcpAdapter",
         labelPrefix: "acp:",
         backend: path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs"),
         adapter: new AcpAdapter(),
-        profileFor: (command, workingDir) => ({ software: "acp", workingDir, acpConfig: { command, args: [] } }),
+        launchFor: (command) => ({ software: "acp", acpConfig: { command, args: [] } }),
       },
     ];
 
@@ -659,20 +659,16 @@ async function runWindowsCases() {
       writeFileSync(shimPath, `@echo off\r\n"${process.execPath}" "${c.backend}"\r\n`);
       registry.initChildRegistry(dataDir);
 
-      const now = Date.now();
-      const profile = {
-        id: `e2e-child-registry-${c.name}`,
-        name: `E2E child-registry ${c.name}`,
-        role: "Coder",
-        permissionLevel: "always-ask",
-        createdAt: now,
-        updatedAt: now,
-        ...c.profileFor(shimPath, workspaceDir),
+      // 2026-10-02(P2:移除 profile):`adapter.spawn()` 吃的是 `AgentLaunchSpec`(software + 各 adapter 的
+      // *Config),不再是 AgentProfile。
+      const launch = {
+        providerId: `e2e-child-registry-${c.name}`,
+        ...c.launchFor(shimPath),
       };
 
       let handle;
       try {
-        handle = await withTimeout(c.adapter.spawn(profile, { path: workspaceDir }), 60_000, `${c.name}.spawn()`);
+        handle = await withTimeout(c.adapter.spawn(launch, { path: workspaceDir }), 60_000, `${c.name}.spawn()`);
         // adapter 刻意不 await 子孫登記(見 adapter 內註解),這裡輪詢紀錄檔。
         const saved = await pollRegistryFile(dataDir, (list) => list.some((e) => e.rootPid !== undefined));
         const root = saved.find((e) => e.rootPid === undefined && e.label.startsWith(c.labelPrefix));

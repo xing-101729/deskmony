@@ -21,7 +21,7 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十三支是**決定性**
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十四支是**決定性**
  * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
@@ -60,6 +60,10 @@ const SUITES = [
   "e2e-notification",
   "e2e-policy-engine",
   "e2e-agent-lifecycle",
+  // 2026-10-02(P2:移除 profile):session 以 providerId 建立(AgentCatalog)——provider → 啟動規格、錯誤碼、
+  // 重啟後接手仍是 ACP(含 provider 已不在偵測清單的退路)、舊 schema 的 agent_profiles/sessions 遷移。
+  // 這些都能用 fake backend 決定性驗證,所以放在 `pnpm test` 跑得到的地方(e2e-gateway.mjs 不在其中)。
+  "e2e-agent-catalog",
   // 2026-09-17:OS 層級的孤兒**行程**回收(packages/adapters/src/child-registry.ts),
   // 與下一支處理的 DB 孤兒**紀錄**是崩潰後的兩半(見 crash-recovery_hld.md 開頭)。
   // 不啟動 core,但會真的開 `.cmd` shim / node 行程並反覆查 PowerShell CIM(每次約

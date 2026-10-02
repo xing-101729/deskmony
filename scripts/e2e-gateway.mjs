@@ -45,6 +45,7 @@ import {
 } from "./fake-acp-agent.mjs";
 import { FAKE_OPENCODE_REPLY_CHUNKS, TOOL_CALL_PREFIX, SLOW_PREFIX, TEST_COMMANDS } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP, FAKE_OPENCODE, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -57,6 +58,33 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_PORT = 4319;
 const PERMISSION_TIMEOUT_MS = 10_000; // 縮短逾時,測試逾時死鎖修復用
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
+
+// 步驟 11(Windows `.cmd` wrapper)需要的額外 fake provider。2026-10-02(P2:移除 profile)之前是步驟自己
+// `profile.create({ acpConfig: { command: wrapperPath, args: [...] } })`;現在 provider 只能在 core 啟動時
+// 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入,所以 wrapper(路徑含空白的暫存目錄 + `.cmd`)提前在這裡建立。
+const CMD_WRAPPER_PROVIDER_ID = "e2e-cmd-wrapper";
+const CMD_WRAPPER_DIR =
+  process.platform === "win32" ? mkdtempSync(path.join(os.tmpdir(), "deskmony e2e cmd wrapper ")) : undefined;
+const CMD_WRAPPER_PATH = CMD_WRAPPER_DIR ? path.join(CMD_WRAPPER_DIR, "fake-acp-agent.cmd") : undefined;
+if (CMD_WRAPPER_PATH) {
+  writeFileSync(
+    CMD_WRAPPER_PATH,
+    `@echo off\r\n"${process.execPath}" "${path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs")}" %*\r\n`,
+    "utf8",
+  );
+}
+const CMD_WRAPPER_PROVIDERS = CMD_WRAPPER_PATH
+  ? [
+      {
+        id: CMD_WRAPPER_PROVIDER_ID,
+        label: "E2E Windows .cmd Wrapper",
+        software: "acp",
+        command: CMD_WRAPPER_PATH,
+        // 額外帶一個含空白的 arg,一併驗證 args 陣列元素的 quoting。
+        args: ["extra arg with spaces"],
+      },
+    ]
+  : [];
 
 // ---------------------------------------------------------------------
 // M5 Round A 任務0:套件切分 —— `--only=deterministic` / `--only=model-behavior`
@@ -160,6 +188,9 @@ function startCore({ port, dataDir, workspaceDir, permissionTimeoutMs, authToken
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_WORKSPACE: workspaceDir,
     DESKMONY_PERMISSION_TIMEOUT_MS: String(permissionTimeoutMs),
+    // 2026-10-02(P2:移除 profile):fake ACP/PTY/opencode 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入
+    // (見 lib/e2e-providers.mjs);`extraEnv` 排在後面,測試可以覆寫。
+    ...e2eProvidersEnv(CMD_WRAPPER_PROVIDERS),
     ...(extraEnv ?? {}),
   };
   if (authToken) env.DESKMONY_AUTH_TOKEN = authToken;
@@ -309,7 +340,7 @@ class GatewayClient {
       if (pending) {
         this.pendingRpc.delete(msg.id);
         if (msg.ok) pending.resolve(msg.result);
-        else pending.reject(new Error(msg.error ?? "unknown gateway error"));
+        else pending.reject(Object.assign(new Error(msg.error ?? "unknown gateway error"), { errorCode: msg.errorCode, errorParams: msg.errorParams }));
       }
       return;
     }
@@ -434,10 +465,10 @@ class GatewayClient {
  * 單一步驟的獨立 FAIL)。隔離成各自的 session 後,一步失敗不會波及其他
  * 步驟的判定,且測完立刻 delete,不留執行中的 session。
  */
-async function withIsolatedSession(client, profile, workspaceDir, title, fn) {
+async function withIsolatedSession(client, providerId, workspaceDir, title, fn) {
   const created = await client.rpc(
     "session.create",
-    { agentProfileId: profile.id, workingDir: workspaceDir, title },
+    { providerId, workingDir: workspaceDir, title },
     30_000,
   );
   const isolatedSessionId = created.session.id;
@@ -521,32 +552,22 @@ function summarizeStructuredPatch(structuredResult) {
 // 步驟 9: AcpAdapter + fake ACP agent(決定性測試,不依賴外部模型)
 // ---------------------------------------------------------------------
 async function acpFakeAgentSmokeTest(client, workspaceDir) {
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
-  let acpProfile;
   let acpSessionId;
 
   try {
-    const created = await client.rpc("profile.create", {
-      name: "E2E Fake ACP Agent",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
-    acpProfile = created.profile;
-
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: acpProfile.id, workingDir: workspaceDir, title: "e2e-acp-smoke" },
+      { providerId: FAKE_ACP, workingDir: workspaceDir, title: "e2e-acp-smoke" },
       30_000,
     );
     acpSessionId = sessionCreated.session.id;
     record(
-      "步驟9a 建立 software=\"acp\" 的 AgentProfile + session(AdapterRegistry 選到 AcpAdapter)",
-      true,
-      `profileId=${acpProfile.id}, sessionId=${acpSessionId}`,
+      "步驟9a 以 software=\"acp\" 的 fake provider 建立 session(AdapterRegistry 選到 AcpAdapter)",
+      sessionCreated.session.adapterType === "acp" && sessionCreated.session.providerId === FAKE_ACP,
+      `providerId=${sessionCreated.session.providerId}, adapterType=${sessionCreated.session.adapterType}, sessionId=${acpSessionId}`,
     );
   } catch (err) {
-    record("步驟9a 建立 software=\"acp\" 的 AgentProfile + session", false, String(err));
+    record("步驟9a 以 software=\"acp\" 的 fake provider 建立 session", false, String(err));
     return; // 沒有 session 就無法跑後續子步驟
   }
 
@@ -743,11 +764,9 @@ async function waitForTerminalText(client, sessionId, predicate, timeoutMs) {
 // 步驟 10: GenericPtyAdapter(fake pty echo,決定性測試,不依賴外部模型)
 // ---------------------------------------------------------------------
 async function ptyAdapterSmokeTest(client, workspaceDir) {
-  const fakeEchoPath = path.join(REPO_ROOT, "scripts", "fake-pty-echo.mjs");
-  let ptyProfile;
   let ptySessionId;
 
-  // ---- 10a: capabilities 正確 + 建立 profile/session ----
+  // ---- 10a: capabilities 正確 + 建立 session ----
   try {
     const capsResult = await client.rpc("adapter.capabilities", { software: "pty" });
     const caps = capsResult.capabilities;
@@ -759,29 +778,21 @@ async function ptyAdapterSmokeTest(client, workspaceDir) {
       caps.interrupt === true &&
       caps.terminal === true;
 
-    const created = await client.rpc("profile.create", {
-      name: "E2E Fake PTY Agent",
-      software: "pty",
-      workingDir: workspaceDir,
-      ptyConfig: { command: process.execPath, args: [fakeEchoPath] },
-    });
-    ptyProfile = created.profile;
-
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: ptyProfile.id, workingDir: workspaceDir, title: "e2e-pty-smoke" },
+      { providerId: FAKE_PTY, workingDir: workspaceDir, title: "e2e-pty-smoke" },
       30_000,
     );
     ptySessionId = sessionCreated.session.id;
 
     record(
-      "步驟10a GenericPtyAdapter capabilities 正確(terminal:true,其餘 false/interrupt:true)+ 建立 software=\"pty\" 的 profile/session",
-      capsOk,
-      `capabilities=${JSON.stringify(caps)}, profileId=${ptyProfile.id}, sessionId=${ptySessionId}`,
+      "步驟10a GenericPtyAdapter capabilities 正確(terminal:true,其餘 false/interrupt:true)+ 以 software=\"pty\" 的 fake provider 建立 session",
+      capsOk && sessionCreated.session.adapterType === "pty",
+      `capabilities=${JSON.stringify(caps)}, adapterType=${sessionCreated.session.adapterType}, sessionId=${ptySessionId}`,
     );
   } catch (err) {
     record(
-      "步驟10a GenericPtyAdapter capabilities 正確 + 建立 software=\"pty\" 的 profile/session",
+      "步驟10a GenericPtyAdapter capabilities 正確 + 以 software=\"pty\" 的 fake provider 建立 session",
       false,
       String(err),
     );
@@ -880,9 +891,9 @@ async function ptyAdapterSmokeTest(client, workspaceDir) {
 // 修復「opencode 只是把 TUI 塞進終端視圖」的問題:這輪補上 OpenCodeAdapter
 // (packages/adapters/src/opencode-adapter.ts,HTTP + SSE 對接 opencode 的
 // headless server API)。用 scripts/fake-opencode-server.mjs 當作
-// software="opencode" 的 AgentProfile 啟動目標(node:http 實作與真實
+// software="opencode" 的 fake provider 啟動目標(node:http 實作與真實
 // opencode serve 相同形狀的端點/SSE 事件,見該檔案頂端註解),驗證:
-//   - AdapterRegistry 依 profile.software="opencode" 選到 OpenCodeAdapter、
+//   - AdapterRegistry 依 provider 的 software="opencode" 選到 OpenCodeAdapter、
 //     capabilities() 據實回報。
 //   - message.part.updated/message.part.delta → message-delta 轉換正確
 //     (分組/done)、session.idle → completed。
@@ -898,11 +909,9 @@ async function ptyAdapterSmokeTest(client, workspaceDir) {
 //   - session.delete 清理成功(子程序與 SSE 連線一併結束)。
 // ---------------------------------------------------------------------
 async function opencodeAdapterSmokeTest(client, workspaceDir) {
-  const fakeServerPath = path.join(REPO_ROOT, "scripts", "fake-opencode-server.mjs");
-  let opencodeProfile;
   let opencodeSessionId;
 
-  // ---- 24a: capabilities 正確 + 建立 profile/session ----
+  // ---- 24a: capabilities 正確 + 建立 session ----
   try {
     const capsResult = await client.rpc("adapter.capabilities", { software: "opencode" });
     const caps = capsResult.capabilities;
@@ -914,28 +923,20 @@ async function opencodeAdapterSmokeTest(client, workspaceDir) {
       caps.interrupt === true &&
       caps.terminal === false;
 
-    const created = await client.rpc("profile.create", {
-      name: "E2E Fake OpenCode Agent",
-      software: "opencode",
-      workingDir: workspaceDir,
-      opencodeConfig: { command: process.execPath, args: [fakeServerPath] },
-    });
-    opencodeProfile = created.profile;
-
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: opencodeProfile.id, workingDir: workspaceDir, title: "e2e-opencode-smoke" },
+      { providerId: FAKE_OPENCODE, workingDir: workspaceDir, title: "e2e-opencode-smoke" },
       30_000,
     );
     opencodeSessionId = sessionCreated.session.id;
 
     record(
-      "步驟24a OpenCodeAdapter capabilities 正確(streaming/toolEvents/permissionRequests/interrupt:true,diff/terminal:false)+ 建立 software=\"opencode\" 的 profile/session",
-      capsOk,
-      `capabilities=${JSON.stringify(caps)}, profileId=${opencodeProfile.id}, sessionId=${opencodeSessionId}`,
+      "步驟24a OpenCodeAdapter capabilities 正確(streaming/toolEvents/permissionRequests/interrupt:true,diff/terminal:false)+ 以 software=\"opencode\" 的 fake provider 建立 session",
+      capsOk && sessionCreated.session.adapterType === "opencode",
+      `capabilities=${JSON.stringify(caps)}, adapterType=${sessionCreated.session.adapterType}, sessionId=${opencodeSessionId}`,
     );
   } catch (err) {
-    record("步驟24a OpenCodeAdapter capabilities + 建立 profile/session", false, String(err));
+    record("步驟24a OpenCodeAdapter capabilities + 以 fake provider 建立 session", false, String(err));
     return; // 沒有 session 就無法跑後續子步驟
   }
 
@@ -1125,8 +1126,8 @@ async function windowsCmdSpawnRegressionTest(client, workspaceDir) {
     return;
   }
 
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
-  // 故意把 wrapper 放在「路徑含空白」的暫存目錄下:
+  // 故意把 wrapper 放在「路徑含空白」的暫存目錄下(wrapper 本身在檔案頂端的 `CMD_WRAPPER_*` 常數建立,
+  // 因為 provider 必須在 core 啟動時就經 DESKMONY_E2E_EXTRA_PROVIDERS 注入):
   //   1. .cmd 副檔名必須用 shell:true 才能 spawn —— 修復前的 bug 是把
   //      `.cmd`(不論絕對或相對路徑)錯誤分類到 useShell:false 分支,
   //      Node 對不帶 shell 的 .cmd spawn 會直接丟 EINVAL(已在開發過程中
@@ -1134,23 +1135,15 @@ async function windowsCmdSpawnRegressionTest(client, workspaceDir) {
   //      resolveWindowsSpawnCommand() 的註解)。
   //   2. command 本身路徑含空白時,shell:true 下需要手動 quoting
   //      (quoteWindowsShellArg)才能正確 spawn,不會被 cmd.exe 依空白拆開。
-  const wrapperDir = mkdtempSync(path.join(os.tmpdir(), "deskmony e2e cmd wrapper "));
-  const wrapperPath = path.join(wrapperDir, "fake-acp-agent.cmd");
-  writeFileSync(wrapperPath, `@echo off\r\n"${process.execPath}" "${fakeAgentPath}" %*\r\n`, "utf8");
+  //   3. provider 額外帶一個含空白的 arg,一併驗證 args 陣列元素的 quoting。
+  const wrapperDir = CMD_WRAPPER_DIR;
+  const wrapperPath = CMD_WRAPPER_PATH;
 
   let sessionId;
   try {
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Windows .cmd Wrapper",
-      software: "acp",
-      workingDir: workspaceDir,
-      // 額外帶一個含空白的 arg,一併驗證 args 陣列元素的 quoting。
-      acpConfig: { command: wrapperPath, args: ["extra arg with spaces"] },
-    });
-
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-cmd-wrapper" },
+      { providerId: CMD_WRAPPER_PROVIDER_ID, workingDir: workspaceDir, title: "e2e-cmd-wrapper" },
       30_000,
     );
     sessionId = sessionCreated.session.id;
@@ -1208,14 +1201,13 @@ async function windowsCmdSpawnRegressionTest(client, workspaceDir) {
 //       對」這種系統行為,不是模型當輪講了什麼,故仍屬 deterministic 分組。
 // ---------------------------------------------------------------------
 async function usageMeteringSmokeTest(client, workspaceDir) {
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 
   try {
     const caps = await client.rpc("adapter.capabilities", { software: "acp" });
     // §7.5 ④:這裡刻意斷言 "unknown" 而不是 "supported"。AcpAdapter 確實有
     // usage_update 的轉發邏輯(29b/29c 就是在驗證它),但「agent 會不會送這個
     // 通知」不是 adapter 能決定的——實測 Claude Code 經 bridge 一次都不送。
-    // 回報 "supported" 會讓 UI 對那個 profile 顯示「有花費可看」然後永遠空著。
+    // 回報 "supported" 會讓 UI 對那個 agent 顯示「有花費可看」然後永遠空著。
     const ok = caps.capabilities.usageReporting === "unknown" && caps.capabilities.contextReporting === "unknown";
     record(
       '步驟29a AcpAdapter capabilities() 回報 usageReporting="unknown"、contextReporting="unknown"(不對 UI 說謊,收斂交給實際收到的事件)',
@@ -1228,15 +1220,9 @@ async function usageMeteringSmokeTest(client, workspaceDir) {
 
   let sessionWithCost;
   try {
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Usage Metering (with cost)",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-usage-with-cost" },
+      { providerId: FAKE_ACP, workingDir: workspaceDir, title: "e2e-usage-with-cost" },
       30_000,
     );
     sessionWithCost = sessionCreated.session.id;
@@ -1278,15 +1264,9 @@ async function usageMeteringSmokeTest(client, workspaceDir) {
 
   let sessionNoCost;
   try {
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Usage Metering (no cost)",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-usage-no-cost" },
+      { providerId: FAKE_ACP, workingDir: workspaceDir, title: "e2e-usage-no-cost" },
       30_000,
     );
     sessionNoCost = sessionCreated.session.id;
@@ -1346,14 +1326,9 @@ async function usageMeteringSmokeTest(client, workspaceDir) {
 
   let sdkUsageSessionId;
   try {
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Usage Metering (claude-agent-sdk)",
-      software: "claude-agent-sdk",
-      workingDir: workspaceDir,
-    });
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-usage-sdk" },
+      { providerId: "claude-agent-sdk", workingDir: workspaceDir, title: "e2e-usage-sdk" },
       30_000,
     );
     sdkUsageSessionId = sessionCreated.session.id;
@@ -1436,8 +1411,6 @@ async function usageMeteringSmokeTest(client, workspaceDir) {
 //       available-commands,清單非空。
 // ---------------------------------------------------------------------
 async function slashCommandSmokeTest(client, workspaceDir) {
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
-  const fakeOpencodeServerPath = path.join(REPO_ROOT, "scripts", "fake-opencode-server.mjs");
 
   // ---- 31a: ACP ----
   let acpSessionId;
@@ -1445,15 +1418,9 @@ async function slashCommandSmokeTest(client, workspaceDir) {
     const caps = await client.rpc("adapter.capabilities", { software: "acp" });
     const capsOk = caps.capabilities.slashCommands === "unknown";
 
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Slash Command (acp)",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-slash-acp" },
+      { providerId: FAKE_ACP, workingDir: workspaceDir, title: "e2e-slash-acp" },
       30_000,
     );
     acpSessionId = sessionCreated.session.id;
@@ -1506,15 +1473,9 @@ async function slashCommandSmokeTest(client, workspaceDir) {
     const caps = await client.rpc("adapter.capabilities", { software: "opencode" });
     const capsOk = caps.capabilities.slashCommands === "unknown";
 
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Slash Command (opencode)",
-      software: "opencode",
-      workingDir: workspaceDir,
-      opencodeConfig: { command: process.execPath, args: [fakeOpencodeServerPath] },
-    });
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-slash-opencode" },
+      { providerId: FAKE_OPENCODE, workingDir: workspaceDir, title: "e2e-slash-opencode" },
       30_000,
     );
     opencodeSessionId = sessionCreated.session.id;
@@ -1621,14 +1582,9 @@ async function slashCommandSmokeTest(client, workspaceDir) {
     const caps = await client.rpc("adapter.capabilities", { software: "claude-agent-sdk" });
     const capsOk = caps.capabilities.slashCommands === "supported";
 
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Slash Command (claude-agent-sdk)",
-      software: "claude-agent-sdk",
-      workingDir: workspaceDir,
-    });
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir, title: "e2e-slash-sdk" },
+      { providerId: "claude-agent-sdk", workingDir: workspaceDir, title: "e2e-slash-sdk" },
       30_000,
     );
     sdkSessionId = sessionCreated.session.id;
@@ -1717,8 +1673,8 @@ function parseBridgeEnvFromReport(fullText) {
 /** 建一個 ACP session(fake-acp-agent.mjs),送出 REPORT_MCP_SERVERS_PREFIX,
  *  回傳解析後的 bridge env(見上方)——`undefined` 代表這個 session 沒有掛
  *  任何 MCP server(不應該發生,除非 tokenMinter/subagentPort 都沒注入)。 */
-async function createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, title) {
-  const created = await client.rpc("session.create", { agentProfileId: acpProfileId, workingDir: workspaceDir, title }, 30_000);
+async function createAcpSessionAndGetBridgeEnv(client, providerId, workspaceDir, title) {
+  const created = await client.rpc("session.create", { providerId, workingDir: workspaceDir, title }, 30_000);
   const sessionId = created.session.id;
   const { finalEvent, collected } = await client.drivePrompt(sessionId, REPORT_MCP_SERVERS_PREFIX, {
     onPermission: async () => "deny",
@@ -1747,26 +1703,17 @@ async function connectAndAuth(gatewayUrl, token) {
 }
 
 async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 
-  // ---- 32a: 準備——ACP profile + 兩個 session(主要的一個、另一個當「別人的
+  // ---- 32a: 準備——fake ACP provider + 兩個 session(主要的一個、另一個當「別人的
   //           session」用來驗證冒名防護),各自取得真實核發的 bridge env。----
   let primarySessionId, otherSessionId;
   let primaryBridgeEnv, otherBridgeEnv;
   try {
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Scoped MCP Bridge Token",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
-    const acpProfileId = profileCreated.profile.id;
-
-    const primaryResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-primary");
+    const primaryResult = await createAcpSessionAndGetBridgeEnv(client, FAKE_ACP, workspaceDir, "e2e-scoped-primary");
     primarySessionId = primaryResult.sessionId;
     primaryBridgeEnv = primaryResult.bridgeEnv;
 
-    const otherResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-other");
+    const otherResult = await createAcpSessionAndGetBridgeEnv(client, FAKE_ACP, workspaceDir, "e2e-scoped-other");
     otherSessionId = otherResult.sessionId;
     otherBridgeEnv = otherResult.bridgeEnv;
 
@@ -1798,15 +1745,20 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
 
     const listChildrenResult = await bridgeClient.rpc("session.listChildren", { parentSessionId: primarySessionId });
-    const listProfilesResult = await bridgeClient.rpc("profile.listForSubagent", {});
+    // 2026-10-02(P2:移除 profile):原 `profile.listForSubagent`,現在回傳 `AgentCatalog` 的可用 agent 摘要。
+    const listAgentsResult = await bridgeClient.rpc("agent.listForSubagent", {});
 
     bridgeClient.close();
 
-    const ok = Array.isArray(listChildrenResult?.children) && Array.isArray(listProfilesResult?.profiles);
+    const agents = listAgentsResult?.agents;
+    const fakeAcp = Array.isArray(agents) ? agents.find((a) => a.id === FAKE_ACP) : undefined;
+    // 最小揭露:摘要只有 id/label/software/models/defaultModelId,**不含** command/args/env。
+    const minimalFields = Array.isArray(agents) && agents.every((a) => Object.keys(a).every((k) => ["id", "label", "software", "models", "defaultModelId"].includes(k)));
+    const ok = Array.isArray(listChildrenResult?.children) && Boolean(fakeAcp) && fakeAcp.software === "acp" && minimalFields;
     record(
-      "步驟32b scoped token 呼叫白名單內的方法(session.listChildren/profile.listForSubagent)全部成功",
+      "步驟32b scoped token 呼叫白名單內的方法(session.listChildren/agent.listForSubagent)全部成功,且 agent 摘要只含最小欄位(無 command/args/env)",
       ok,
-      `listChildren=${JSON.stringify(listChildrenResult)}, listProfiles 數=${listProfilesResult?.profiles?.length}`,
+      `listChildren=${JSON.stringify(listChildrenResult)}, agents=${JSON.stringify(agents)}`,
     );
   } catch (err) {
     record("步驟32b scoped token 呼叫白名單內方法全部成功", false, String(err));
@@ -1819,8 +1771,8 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
 
     const forbiddenMethods = [
-      ["session.create", { agentProfileId: "whatever", workingDir: workspaceDir }],
-      ["profile.delete", { id: "whatever" }],
+      ["session.create", { providerId: "whatever", workingDir: workspaceDir }],
+      ["session.delete", { sessionId: otherSessionId }],
       ["config.setFile", { log: { level: "warn" } }],
       ["session.setPermissionMode", { sessionId: primarySessionId, mode: "auto-accept-all" }],
     ];
@@ -1837,7 +1789,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
 
     const ok = rejections.every((r) => r.rejected && r.message.includes("無權呼叫"));
     record(
-      "步驟32c scoped token 呼叫白名單外的方法(session.create/profile.delete/config.setFile/session.setPermissionMode)全部被拒絕",
+      "步驟32c scoped token 呼叫白名單外的方法(session.create/session.delete/config.setFile/session.setPermissionMode)全部被拒絕",
       ok,
       JSON.stringify(rejections),
     );
@@ -1882,11 +1834,9 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
   try {
     // 用一個獨立的 session(不是 32a 那兩個,避免影響後面步驟還要用到
     // primarySessionId/otherSessionId)。
-    const profileList = await client.rpc("profile.list", {});
-    const acpProfile = profileList.profiles.find((p) => p.name === "E2E Scoped MCP Bridge Token");
     const { sessionId: disposableSessionId, bridgeEnv: disposableBridgeEnv } = await createAcpSessionAndGetBridgeEnv(
       client,
-      acpProfile.id,
+      FAKE_ACP,
       workspaceDir,
       "e2e-scoped-dispose",
     );
@@ -1894,7 +1844,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     // 先確認 token 一開始確實可用(排除「本來就核發失敗」這個混淆變因)。
     const { client: beforeClient, ok: beforeOk } = await connectAndAuth(disposableBridgeEnv.gatewayUrl, disposableBridgeEnv.token);
     if (!beforeOk) throw new Error("dispose 前 scoped token 認證失敗,預期應該成功");
-    await beforeClient.rpc("profile.listForSubagent", {});
+    await beforeClient.rpc("agent.listForSubagent", {});
     beforeClient.close();
 
     await client.rpc("session.delete", { sessionId: disposableSessionId });
@@ -1931,18 +1881,16 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
   //             送出下一個 request**(不重新認證),驗證的是「同一條連線」而
   //             非「新連線」這個關鍵差異。 ----
   try {
-    const profileList = await client.rpc("profile.list", {});
-    const acpProfile = profileList.profiles.find((p) => p.name === "E2E Scoped MCP Bridge Token");
     const { sessionId: disposableSessionId2, bridgeEnv: disposableBridgeEnv2 } = await createAcpSessionAndGetBridgeEnv(
       client,
-      acpProfile.id,
+      FAKE_ACP,
       workspaceDir,
       "e2e-scoped-dispose-live-conn",
     );
 
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(disposableBridgeEnv2.gatewayUrl, disposableBridgeEnv2.token);
     if (!authOk) throw new Error("dispose 前 scoped token 認證失敗,預期應該成功");
-    await bridgeClient.rpc("profile.listForSubagent", {}); // dispose 前:確認這條連線本來就能正常呼叫。
+    await bridgeClient.rpc("agent.listForSubagent", {}); // dispose 前:確認這條連線本來就能正常呼叫。
 
     await client.rpc("session.delete", { sessionId: disposableSessionId2 });
 
@@ -1951,7 +1899,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     let liveConnRejected = false;
     let liveConnMessage = "";
     try {
-      await bridgeClient.rpc("profile.listForSubagent", {});
+      await bridgeClient.rpc("agent.listForSubagent", {});
     } catch (err) {
       liveConnRejected = true;
       liveConnMessage = String(err);
@@ -2031,7 +1979,6 @@ async function scopedTokenTtlSmokeTest() {
   const url = `ws://localhost:${PORT}`;
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-ttl-data-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-ttl-ws-"));
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
   let coreProc;
   let client;
 
@@ -2041,7 +1988,7 @@ async function scopedTokenTtlSmokeTest() {
       dataDir,
       workspaceDir,
       permissionTimeoutMs: PERMISSION_TIMEOUT_MS,
-      // 300ms 太短——光是 profile.create → session.create → 真的 spawn 一個
+      // 300ms 太短——光是 session.create → 真的 spawn 一個
       // fake-acp-agent.mjs 子行程做 ACP initialize/session-new/prompt 握手
       // 拿到 bridgeEnv,實測就可能已經逼近甚至超過這個時間,導致「過期前」
       // 這個檢查點本身就先失敗(steps 32a 全程平均耗時觀察後訂出的值,留足
@@ -2052,19 +1999,13 @@ async function scopedTokenTtlSmokeTest() {
     client = new GatewayClient(url);
     await client.connect();
 
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Token TTL",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
-    const { bridgeEnv } = await createAcpSessionAndGetBridgeEnv(client, profileCreated.profile.id, workspaceDir, "e2e-ttl", undefined);
+    const { bridgeEnv } = await createAcpSessionAndGetBridgeEnv(client, FAKE_ACP, workspaceDir, "e2e-ttl", undefined);
     if (!bridgeEnv?.token) throw new Error("未能取得 scoped token(bridgeEnv 為空)");
 
     // ---- 33a: 過期前,一條已認證的連線正常可用。----
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(bridgeEnv.gatewayUrl, bridgeEnv.token);
     if (!authOk) throw new Error("過期前 scoped token 認證失敗,預期應該成功");
-    await bridgeClient.rpc("profile.listForSubagent", {});
+    await bridgeClient.rpc("agent.listForSubagent", {});
     record("步驟33a scoped token 在 TTL 過期前,認證與方法呼叫皆正常", true);
 
     await sleep(6_000); // TTL 5000ms,睡到肯定已過期。
@@ -2075,7 +2016,7 @@ async function scopedTokenTtlSmokeTest() {
     let existingConnRejected = false;
     let existingConnMessage = "";
     try {
-      await bridgeClient.rpc("profile.listForSubagent", {});
+      await bridgeClient.rpc("agent.listForSubagent", {});
     } catch (err) {
       existingConnRejected = true;
       existingConnMessage = String(err);
@@ -2124,7 +2065,6 @@ async function scopedTokenAuthInterplaySmokeTest() {
   const url = `ws://localhost:${PORT}`;
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-interplay-data-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-token-interplay-ws-"));
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
   const MASTER_TOKEN = `e2e-master-${randomUUID()}`;
   let coreProc;
   let client;
@@ -2136,13 +2076,7 @@ async function scopedTokenAuthInterplaySmokeTest() {
     await client.connect();
     await client.rpc("auth", { token: MASTER_TOKEN });
 
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Token Interplay",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
-    const { bridgeEnv } = await createAcpSessionAndGetBridgeEnv(client, profileCreated.profile.id, workspaceDir, "e2e-interplay", undefined);
+    const { bridgeEnv } = await createAcpSessionAndGetBridgeEnv(client, FAKE_ACP, workspaceDir, "e2e-interplay", undefined);
     if (!bridgeEnv?.token) throw new Error("未能取得 scoped token(bridgeEnv 為空)");
 
     // ---- 34a: 即使 core 已設定 DESKMONY_AUTH_TOKEN,scoped token 仍然能
@@ -2154,13 +2088,13 @@ async function scopedTokenAuthInterplaySmokeTest() {
       let createRejected = false;
       if (authOk) {
         try {
-          const r = await bridgeClient.rpc("profile.listForSubagent", {});
-          listOk = Array.isArray(r?.profiles);
+          const r = await bridgeClient.rpc("agent.listForSubagent", {});
+          listOk = Array.isArray(r?.agents);
         } catch {
           // listOk 維持 false
         }
         try {
-          await bridgeClient.rpc("session.create", { agentProfileId: profileCreated.profile.id, workingDir: workspaceDir });
+          await bridgeClient.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir });
         } catch (err) {
           createRejected = String(err).includes("無權呼叫");
         }
@@ -2244,12 +2178,12 @@ async function scopedTokenAuthInterplaySmokeTest() {
 // 完全不送出任何 prompt,純粹驗證 `session.list` → `session.delete` →
 // `session.list` 的生命週期,結果 100% 決定性。
 // ---------------------------------------------------------------------
-async function sessionDeleteSmokeTest(client, workspaceDir, defaultProfile) {
+async function sessionDeleteSmokeTest(client, workspaceDir, providerId) {
   let sessionId;
   try {
     const created = await client.rpc(
       "session.create",
-      { agentProfileId: defaultProfile.id, workingDir: workspaceDir, title: "e2e-step19-delete" },
+      { providerId, workingDir: workspaceDir, title: "e2e-step19-delete" },
       30_000,
     );
     sessionId = created.session.id;
@@ -2299,23 +2233,14 @@ async function sessionDeleteSmokeTest(client, workspaceDir, defaultProfile) {
 async function sessionSetModelSmokeTest(client, workspaceDir) {
   const FROM_MODEL = "claude-sonnet-5";
   const TO_MODEL = "claude-opus-4-8";
-  let sdkProfileId;
   let sdkSessionId;
 
-  // ---- 20a: 建立明確指定 model 的 claude-agent-sdk profile + session,驗證
-  //           session.model 建立時預設等於 profile.model ----
+  // ---- 20a: 建立明確指定 model 的 claude-agent-sdk session,驗證
+  //           session.model 等於建立時指定的 model(2026-10-02 P2:原本是「預設等於 profile.model」)----
   try {
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E SetModel SDK Agent",
-      software: "claude-agent-sdk",
-      workingDir: workspaceDir,
-      model: FROM_MODEL,
-    });
-    sdkProfileId = profileCreated.profile.id;
-
     const sessionCreated = await client.rpc(
       "session.create",
-      { agentProfileId: sdkProfileId, workingDir: workspaceDir, title: "e2e-step20-setmodel" },
+      { providerId: "claude-agent-sdk", model: FROM_MODEL, workingDir: workspaceDir, title: "e2e-step20-setmodel" },
       30_000,
     );
     sdkSessionId = sessionCreated.session.id;
@@ -2324,12 +2249,12 @@ async function sessionSetModelSmokeTest(client, workspaceDir) {
     const sessionRow = listAfterCreate.sessions.find((s) => s.id === sdkSessionId);
 
     record(
-      "步驟20a session.create 時 session.model 預設等於 profile.model",
+      "步驟20a session.create 帶 model 時 session.model 等於建立時指定的 model",
       sessionCreated.session.model === FROM_MODEL && sessionRow?.model === FROM_MODEL,
-      `profile.model=${FROM_MODEL}, session.create 回應的 model=${sessionCreated.session.model}, session.list 查得的 model=${sessionRow?.model}`,
+      `指定的 model=${FROM_MODEL}, session.create 回應的 model=${sessionCreated.session.model}, session.list 查得的 model=${sessionRow?.model}`,
     );
   } catch (err) {
-    record("步驟20a session.create 時 session.model 預設等於 profile.model", false, String(err));
+    record("步驟20a session.create 帶 model 時 session.model 等於建立時指定的 model", false, String(err));
     return; // 沒有 session 就無法跑後續子步驟
   }
 
@@ -2366,32 +2291,15 @@ async function sessionSetModelSmokeTest(client, workspaceDir) {
   // ---- 20d: acp/pty session 呼叫 session.setModel 應得到明確錯誤(不可默默
   //           成功)----
   const rejectionCases = [
-    {
-      software: "acp",
-      configKey: "acpConfig",
-      args: [path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs")],
-    },
-    {
-      software: "pty",
-      configKey: "ptyConfig",
-      args: [path.join(REPO_ROOT, "scripts", "fake-pty-echo.mjs")],
-    },
+    { software: "acp", providerId: FAKE_ACP },
+    { software: "pty", providerId: FAKE_PTY },
   ];
-  for (const { software, configKey, args } of rejectionCases) {
-    let rejectProfileId;
+  for (const { software, providerId } of rejectionCases) {
     let rejectSessionId;
     try {
-      const profileCreated = await client.rpc("profile.create", {
-        name: `E2E SetModel Reject (${software})`,
-        software,
-        workingDir: workspaceDir,
-        [configKey]: { command: process.execPath, args },
-      });
-      rejectProfileId = profileCreated.profile.id;
-
       const sessionCreated = await client.rpc(
         "session.create",
-        { agentProfileId: rejectProfileId, workingDir: workspaceDir, title: `e2e-step20d-${software}` },
+        { providerId, workingDir: workspaceDir, title: `e2e-step20d-${software}` },
         30_000,
       );
       rejectSessionId = sessionCreated.session.id;
@@ -2597,167 +2505,133 @@ async function detectAgentsGatewaySmokeTest(client) {
 }
 
 // ---------------------------------------------------------------------
-// 步驟 22:「偵測項 → 可建立 (software,command) 映射」純函式
-// (packages/shared/src/agent-target.ts,M5 Round E 新增,決定性測試,
-// 不需要 core/gateway,直接 import 編譯產物驗證)
+// 步驟 22:(2026-10-02 P2「移除 profile」已移除)
 //
-// 對應 ProfileCreateDialog.tsx 需求2「software 下拉只能選偵測到的項目,且
-// 每個選項都必須映射到可建立的 (software, command)」——這裡驗證的正是那個
-// 推導邏輯本身:claude-agent-sdk 內嵌項不需要 command;偵測分類為
-// "opencode" 的項目這輪映射成 software="opencode"(OpenCodeAdapter 已實作,
-// 見步驟24);key==="codex-acp" 的項目(Codex ACP 橋接切換 Phase 1 新增)映射
-// 成 software="acp"(見 22b-3);其餘偵測分類(acp/codex/pty)一律預設映射成
-// software="pty" + command=偵測到的路徑(codex 這個 software 分類值目前已無
-// 任何偵測項會產生,型別上仍保留防禦性 fallback,不會產生
-// software="codex" 這種 AdapterRegistry 建不起來的 profile);只有偵測分類
-// 本身就是 "acp" 且 key !== "codex-acp" 的項目才有「進階:改用 ACP」的候選
-// 可用(見 22d)。
+// 原本這裡驗證 `packages/shared/src/agent-target.ts` 的 `deriveDefaultAgentTarget()` 等純函式——「偵測項 →
+// 可建立的 (software, command) 映射」,是 ProfileCreateDialog 的推導邏輯。profile 與那個對話框都已
+// 移除,這個檔案也一併刪除;同一件事(provider + 偵測結果 → 啟動規格)現在由 core 的
+// `AgentCatalog.buildLaunchSpec()` 負責,決定性測試在 scripts/e2e-agent-catalog.mjs(`pnpm test` 會跑)。
 // ---------------------------------------------------------------------
-async function agentTargetDerivationSmokeTest() {
+
+// ---------------------------------------------------------------------
+// 步驟 36(2026-10-02 P2「移除 profile」新增,docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md
+// §P2.7,決定性測試,用 fake backend,不依賴真實模型):session 直接以偵測到的 agent(providerId)建立。
+//
+//   36a session.create({providerId:"claude-agent-sdk"}) 不需要任何 profile 就成功,回傳的 session 有 providerId
+//   36b session.create({providerId:"不存在的"}) 回明確錯誤碼(agent.notFound)
+//   36c gateway 上 profile.list/create/delete 已不存在(回 gateway.invalidRequest)
+//   36d gateway 不接受任何 command/args:session.create 帶 command 參數被忽略,啟動方式只由 provider 決定
+//
+// 「續接重建」(重啟 core 後 ACP session 接手仍是 acp)與「舊資料遷移」需要重啟 core、動 DB,放在
+// scripts/e2e-agent-catalog.mjs(`pnpm test` 會跑)與 scripts/e2e-crash-recovery.mjs。
+// ---------------------------------------------------------------------
+async function providerCatalogSmokeTest(client, workspaceDir) {
   if (!shouldRun("deterministic")) {
-    skipNote("步驟22 偵測項 → 可建立 (software,command) 映射(packages/shared/src/agent-target.ts)", "deterministic");
+    skipNote("步驟36 session 直接以 providerId 建立(不需要 profile)", "deterministic");
     return;
   }
 
-  let mod;
+  // ---- 36a ----
+  let sdkSessionId;
   try {
-    const modulePath = path.join(REPO_ROOT, "packages", "shared", "dist", "agent-target.js");
-    mod = await import(pathToFileURL(modulePath).href);
+    const created = await client.rpc(
+      "session.create",
+      { providerId: "claude-agent-sdk", workingDir: workspaceDir, title: "e2e-step36a" },
+      30_000,
+    );
+    sdkSessionId = created.session.id;
+    record(
+      "步驟36a session.create({providerId:\"claude-agent-sdk\"}) 不需要任何 profile 就成功,回傳的 session 有 providerId、adapterType、always-ask 權限模式",
+      created.session.providerId === "claude-agent-sdk" &&
+        created.session.adapterType === "claude-agent-sdk" &&
+        created.session.permissionMode === "always-ask" &&
+        !("agentProfileId" in created.session),
+      `session=${JSON.stringify({ id: created.session.id, providerId: created.session.providerId, adapterType: created.session.adapterType, permissionMode: created.session.permissionMode })}`,
+    );
   } catch (err) {
-    record("步驟22a 載入 packages/shared/dist/agent-target.js(需先 pnpm build)", false, String(err));
-    return;
+    record("步驟36a session.create({providerId:\"claude-agent-sdk\"}) 不需要 profile", false, String(err));
+  } finally {
+    if (sdkSessionId) {
+      try {
+        await client.rpc("session.delete", { sessionId: sdkSessionId });
+      } catch (err) {
+        log(`[cleanup] 刪除步驟36a session 時發生錯誤(忽略): ${err}`);
+      }
+    }
   }
 
-  const makeEntry = (overrides) => ({
-    key: "fixture",
-    displayName: "Fixture",
-    installed: true,
-    models: [],
-    ...overrides,
-  });
-
-  // ---- 22a: claude-agent-sdk 內嵌項 → software 固定 claude-agent-sdk,不需要 command ----
+  // ---- 36b ----
   try {
-    const entry = makeEntry({ software: "claude-agent-sdk" });
-    const target = mod.deriveDefaultAgentTarget(entry);
+    let code;
+    let message = "";
+    try {
+      await client.rpc("session.create", { providerId: "不存在的", workingDir: workspaceDir, title: "e2e-step36b" }, 30_000);
+    } catch (err) {
+      code = err.errorCode;
+      message = String(err.message);
+    }
     record(
-      '步驟22a deriveDefaultAgentTarget(claude-agent-sdk 內嵌項) → software="claude-agent-sdk",不需要 command',
-      target.software === "claude-agent-sdk" && target.command === undefined,
-      `target=${JSON.stringify(target)}`,
+      "步驟36b session.create({providerId:\"不存在的\"}) 回明確錯誤碼 agent.notFound(訊息含該 id),不建立任何 session",
+      code === "agent.notFound" && message.includes("不存在的"),
+      `errorCode=${code}, message=${message}`,
     );
   } catch (err) {
-    record("步驟22a deriveDefaultAgentTarget(claude-agent-sdk 內嵌項)", false, String(err));
+    record("步驟36b session.create 不存在的 providerId", false, String(err));
   }
 
-  // ---- 22b: acp/codex/pty 這幾種偵測分類一律預設映射成 pty + command 非空
-  //           —— software 一定是 claude-agent-sdk/acp/pty/opencode 之一
-  //           (AdapterRegistry 實際註冊過的四種),不會是 codex(codex 目前
-  //           仍無對應 adapter)----
+  // ---- 36c ----
   try {
-    const classifications = ["acp", "codex", "pty"];
-    const results = classifications.map((software) => {
-      const entry = makeEntry({ software, path: `C:\\fake\\${software}.exe` });
-      return { software, target: mod.deriveDefaultAgentTarget(entry) };
-    });
-    const validSoftwareSet = new Set(["claude-agent-sdk", "acp", "pty", "opencode"]);
-    const allOk = results.every(
-      (r) =>
-        validSoftwareSet.has(r.target.software) &&
-        r.target.software === "pty" &&
-        typeof r.target.command === "string" &&
-        r.target.command.length > 0,
-    );
+    const outcomes = [];
+    for (const method of ["profile.list", "profile.create", "profile.delete", "profile.listForSubagent"]) {
+      try {
+        await client.rpc(method, method === "profile.delete" ? { id: "x" } : {});
+        outcomes.push({ method, rejected: false });
+      } catch (err) {
+        outcomes.push({ method, rejected: true, errorCode: err.errorCode });
+      }
+    }
     record(
-      '步驟22b deriveDefaultAgentTarget(外部 CLI:acp/codex/pty 分類)一律預設映射為 software="pty" 且 command 非空(不會產生建不起來的 codex profile)',
-      allOk,
-      `results=${JSON.stringify(results)}`,
+      "步驟36c gateway 上 profile.list/create/delete/listForSubagent 已不存在(一律回 gateway.invalidRequest,即 unknown method)",
+      outcomes.every((o) => o.rejected && o.errorCode === "gateway.invalidRequest"),
+      JSON.stringify(outcomes),
     );
   } catch (err) {
-    record("步驟22b deriveDefaultAgentTarget(外部 CLI 分類)一律映射為 pty", false, String(err));
+    record("步驟36c profile.* 方法已不存在", false, String(err));
   }
 
-  // ---- 22b-2: opencode 分類這輪已經有真正的 adapter,映射成 software="opencode"
-  //             本身(不再退化成 pty),command 帶入偵測到的路徑 ----
+  // ---- 36d ----
+  let fakeSessionId;
   try {
-    const entry = makeEntry({ software: "opencode", path: "C:\\fake\\opencode.exe" });
-    const target = mod.deriveDefaultAgentTarget(entry);
+    // 一個「如果被採信就會啟動失敗」的 command——session 仍成功建立,證明 gateway 完全不讀這個參數。
+    const created = await client.rpc(
+      "session.create",
+      {
+        providerId: FAKE_ACP,
+        workingDir: workspaceDir,
+        title: "e2e-step36d",
+        command: "definitely-not-a-real-binary-xyz",
+        args: ["--evil"],
+        acpConfig: { command: "definitely-not-a-real-binary-xyz" },
+      },
+      30_000,
+    );
+    fakeSessionId = created.session.id;
+    const { finalEvent } = await client.drivePrompt(fakeSessionId, "hello", { onPermission: async () => "deny", timeoutMs: 20_000 });
     record(
-      '步驟22b-2 deriveDefaultAgentTarget(opencode 分類) → software="opencode"(OpenCodeAdapter 已實作,不再退化成 pty),command 非空',
-      target.software === "opencode" && target.command === "C:\\fake\\opencode.exe",
-      `target=${JSON.stringify(target)}`,
+      "步驟36d gateway 不接受 command/args:session.create 帶 command/args/acpConfig 被忽略,啟動方式只由 provider(經 DESKMONY_E2E_EXTRA_PROVIDERS 注入)決定,session 仍能正常完成一輪",
+      created.session.adapterType === "acp" && finalEvent.event.type === "completed",
+      `adapterType=${created.session.adapterType}, finalEvent=${finalEvent.event.type}`,
     );
   } catch (err) {
-    record("步驟22b-2 deriveDefaultAgentTarget(opencode 分類)", false, String(err));
-  }
-
-  // ---- 22b-3: key==="codex-acp"(Codex ACP 橋接切換 Phase 1 新增)一律映射
-  //             成 software="acp",不受 pty fallback 規則影響——即使 software
-  //             欄位本身也已經是 "acp"(detectCodexAcp() 的實際回傳值),這裡
-  //             刻意驗證的是「用 key 判斷」這條路徑本身有效,不是巧合命中
-  //             既有的 acp 分類。command 帶入偵測到的路徑。----
-  try {
-    const entry = makeEntry({ key: "codex-acp", software: "acp", path: "C:\\fake\\node.exe" });
-    const target = mod.deriveDefaultAgentTarget(entry);
-    record(
-      '步驟22b-3 deriveDefaultAgentTarget(key="codex-acp") → software="acp",command=偵測到的路徑',
-      target.software === "acp" && target.command === "C:\\fake\\node.exe",
-      `target=${JSON.stringify(target)}`,
-    );
-  } catch (err) {
-    record('步驟22b-3 deriveDefaultAgentTarget(key="codex-acp")', false, String(err));
-  }
-
-  // ---- 22c: 沒有偵測到路徑的項目 → command 為 undefined(呼叫端只應讓
-  //           installed=true 且有 path 的項目可被選取,這裡驗證推導函式本身
-  //           不會憑空捏造一個 command)----
-  try {
-    const entry = makeEntry({ software: "pty", path: undefined, installed: false });
-    const target = mod.deriveDefaultAgentTarget(entry);
-    record(
-      "步驟22c deriveDefaultAgentTarget(未偵測到 path 的項目) → command 為 undefined",
-      target.software === "pty" && target.command === undefined,
-      `target=${JSON.stringify(target)}`,
-    );
-  } catch (err) {
-    record("步驟22c deriveDefaultAgentTarget(未偵測到 path 的項目)", false, String(err));
-  }
-
-  // ---- 22d: canUseAcpAdvanced/deriveAcpAdvancedTarget 只對偵測分類本身是
-  //           "acp" 且有 path 的項目開放進階選項(opencode/codex/aider 沒有
-  //           這個選項);key==="codex-acp" 這個特例即使 software==="acp" 也要
-  //           被排除(Codex ACP 橋接切換 Phase 1 新增——預設已經是 acp 了,
-  //           不需要多一個形同雞肋的「進階」選項,見 agent-target.ts
-  //           canUseAcpAdvanced() 的排除條件)----
-  try {
-    const acpEntry = makeEntry({ software: "acp", path: "C:\\fake\\claude.exe" });
-    const opencodeEntry = makeEntry({ software: "opencode", path: "C:\\fake\\opencode.exe" });
-    const acpNoPathEntry = makeEntry({ software: "acp", path: undefined });
-    const codexAcpEntry = makeEntry({ key: "codex-acp", software: "acp", path: "C:\\fake\\node.exe" });
-
-    const acpAdvancedOk = mod.canUseAcpAdvanced(acpEntry) === true;
-    const opencodeAdvancedOk = mod.canUseAcpAdvanced(opencodeEntry) === false;
-    const acpNoPathOk = mod.canUseAcpAdvanced(acpNoPathEntry) === false;
-    const codexAcpAdvancedOk = mod.canUseAcpAdvanced(codexAcpEntry) === false;
-
-    const acpTarget = mod.deriveAcpAdvancedTarget(acpEntry);
-    const acpTargetOk =
-      acpTarget?.software === "acp" && typeof acpTarget.command === "string" && acpTarget.command.length > 0;
-    const opencodeTargetUndefined = mod.deriveAcpAdvancedTarget(opencodeEntry) === undefined;
-    const codexAcpTargetUndefined = mod.deriveAcpAdvancedTarget(codexAcpEntry) === undefined;
-
-    record(
-      "步驟22d canUseAcpAdvanced/deriveAcpAdvancedTarget 只對偵測分類本身是 acp 且有 path、key!==\"codex-acp\" 的項目開放「進階:改用 ACP」(opencode/codex/aider 沒有這個選項,codex-acp 預設已是 acp 故也排除)",
-      acpAdvancedOk &&
-        opencodeAdvancedOk &&
-        acpNoPathOk &&
-        codexAcpAdvancedOk &&
-        acpTargetOk &&
-        opencodeTargetUndefined &&
-        codexAcpTargetUndefined,
-      `acpAdvancedOk=${acpAdvancedOk}, opencodeAdvancedOk=${opencodeAdvancedOk}, acpNoPathOk=${acpNoPathOk}, codexAcpAdvancedOk=${codexAcpAdvancedOk}, acpTarget=${JSON.stringify(acpTarget)}, opencodeTargetUndefined=${opencodeTargetUndefined}, codexAcpTargetUndefined=${codexAcpTargetUndefined}`,
-    );
-  } catch (err) {
-    record("步驟22d canUseAcpAdvanced/deriveAcpAdvancedTarget", false, String(err));
+    record("步驟36d gateway 不接受 command/args", false, String(err));
+  } finally {
+    if (fakeSessionId) {
+      try {
+        await client.rpc("session.delete", { sessionId: fakeSessionId });
+      } catch (err) {
+        log(`[cleanup] 刪除步驟36d session 時發生錯誤(忽略): ${err}`);
+      }
+    }
   }
 }
 
@@ -3017,18 +2891,22 @@ async function resolveProvidersSmokeTest() {
     record("步驟25d 已安裝偵測項帶入路徑/版本", false, String(err));
   }
 
-  // ---- 25e: custom-pty(無 detectKey)一律 installed=true、command=undefined,
-  //           不受偵測結果影響(即使偵測陣列整個是空的)。----
+  // ---- 25e: custom-pty(手動輸入 command 的逃生閥)已於 2026-10-02(P2:移除 profile)從
+  //           BUILTIN_PROVIDERS 移除——新模型的前提是「從電腦找到的 agent」,gateway 也不接受任何 command。
+  //           剩下的每個內建 provider 都有 detectKey(偵測項)或是內嵌的 claude-agent-sdk;偵測陣列整個
+  //           是空的時,只有 claude-agent-sdk 是已安裝。----
   try {
     const resolved = resolveProviders(BUILTIN_PROVIDERS, [], {});
-    const custom = resolved.find((p) => p.id === "custom-pty");
+    const noCustom = !BUILTIN_PROVIDERS.some((p) => p.id === "custom-pty") && !resolved.some((p) => p.id === "custom-pty");
+    const allDetectable = BUILTIN_PROVIDERS.every((p) => p.software === "claude-agent-sdk" || typeof p.detectKey === "string");
+    const onlySdkInstalled = resolved.filter((p) => p.installed).every((p) => p.software === "claude-agent-sdk");
     record(
-      "步驟25e custom-pty(無 detectKey)一律 installed=true 且 command=undefined,不受偵測結果影響",
-      custom?.installed === true && custom?.command === undefined,
-      `custom=${JSON.stringify(custom)}`,
+      "步驟25e custom-pty 已移除;每個外部 provider 都有 detectKey,沒有偵測結果時只有內嵌的 claude-agent-sdk 是已安裝",
+      noCustom && allDetectable && onlySdkInstalled,
+      `noCustom=${noCustom}, allDetectable=${allDetectable}, onlySdkInstalled=${onlySdkInstalled}, installed=${JSON.stringify(resolved.filter((p) => p.installed).map((p) => p.id))}`,
     );
   } catch (err) {
-    record("步驟25e custom-pty 不受偵測影響", false, String(err));
+    record("步驟25e custom-pty 已移除", false, String(err));
   }
 
   // ---- 25f: enabled/order/label 覆寫生效 ----
@@ -3470,8 +3348,8 @@ async function legacyEnabledModelIdsMigrationSmokeTest() {
 // 這個子測試的重點不是 dataDir 本身)——沒有這一條,沒設定檔/沒 env 覆寫時
 // core 會真的在使用者機器的 `~/.deskmony` 建立/開啟 SQLite 檔案,這是絕對
 // 不能發生的事。相對地,`workspace.defaultWorkingDir` 預設是 `os.homedir()`
-// 這個純字串值(不會被拿去寫入任何檔案——只是存進 DB 的 profile.workingDir
-// 欄位),讓它在 28a 維持真正預設、不覆寫,才能驗證「等同現行預設」。
+// 這個純字串值(不會被拿去寫入任何檔案——只是 UI 建立 session 時預設帶入的 workingDir),
+// 讓它在 28a 維持真正預設、不覆寫,才能驗證「等同現行預設」。
 // ---------------------------------------------------------------------
 
 /** 完全掌控子程序看到的 `DESKMONY_*` 環境變數——先清掉繼承自這支腳本自身
@@ -3816,10 +3694,10 @@ async function configLayeringSmokeTest() {
       const realClient = new GatewayClient(url);
       await realClient.connect();
       const authResult = await realClient.rpc("auth", { token: REAL_TOKEN });
-      const result = await realClient.rpc("profile.list", {});
+      const result = await realClient.rpc("session.list", {});
       record(
         "步驟28g-3 用真正的 DESKMONY_AUTH_TOKEN(環境變數)認證 → 成功,證明認證仍然只認環境變數 token",
-        authResult?.ok === true && Array.isArray(result.profiles),
+        authResult?.ok === true && Array.isArray(result.sessions),
         `authResult=${JSON.stringify(authResult)}`,
       );
 
@@ -3989,26 +3867,17 @@ async function main() {
     client = new GatewayClient(gatewayUrl);
     await client.connect();
 
-    // ---- profile 檢查 ----
-    const profileListResult = await client.rpc("profile.list", {});
-    let profile = profileListResult.profiles.find((p) => p.id === "default-claude-code");
-    if (!profile) {
-      log("[setup] 找不到預設 profile,改用 profile.create 建立一個");
-      const created = await client.rpc("profile.create", {
-        name: "E2E Claude",
-        software: "claude-agent-sdk",
-        workingDir: workspaceDir,
-      });
-      profile = created.profile;
-    }
-    record("步驟1b profile.list 取得可用 AgentProfile", true, `profileId=${profile.id}`);
+    // ---- 2026-10-02(P2:移除 profile):不再有 profile 可查——session 直接以內嵌的 claude-agent-sdk
+    // provider 建立(它不需要偵測、永遠可用)。新的 provider 相關決定性斷言見 `providerCatalogSmokeTest()`
+    // (步驟 36)。----
+    const claudeProviderId = "claude-agent-sdk";
 
     // ---- 步驟 2: 建立 session ----
     let createResult;
     try {
       createResult = await client.rpc(
         "session.create",
-        { agentProfileId: profile.id, workingDir: workspaceDir, title: "e2e-smoke" },
+        { providerId: claudeProviderId, workingDir: workspaceDir, title: "e2e-smoke" },
         30_000,
       );
       sessionId = createResult.session.id;
@@ -4126,7 +3995,7 @@ async function main() {
     // FAIL(見 README「e2e 的殘留 flakiness」),整段獨立 session、獨立可略過。
     if (shouldRun("model-behavior")) {
       try {
-        await withIsolatedSession(client, profile, workspaceDir, "e2e-step5-deny", async (denySessionId) => {
+        await withIsolatedSession(client, claudeProviderId, workspaceDir, "e2e-step5-deny", async (denySessionId) => {
           const targetFile = path.join(workspaceDir, "denied.txt");
           const targetFilePosix = targetFile.split(path.sep).join("/");
           const prompt = `請直接使用你的檔案寫入工具建立檔案,不要詢問我任何問題也不要先說明,直接執行:在路徑 ${targetFilePosix} 建立檔案,內容為: should not exist`;
@@ -4170,7 +4039,7 @@ async function main() {
     // "ignore" 不回覆,逾時純粹是 core 端的計時器行為)。
     if (shouldRun("deterministic")) {
       try {
-        await withIsolatedSession(client, profile, workspaceDir, "e2e-step6-timeout", async (timeoutSessionId) => {
+        await withIsolatedSession(client, claudeProviderId, workspaceDir, "e2e-step6-timeout", async (timeoutSessionId) => {
         const targetFile = path.join(workspaceDir, "timeout.txt");
         const targetFilePosix = targetFile.split(path.sep).join("/");
         const prompt = `請直接使用你的檔案寫入工具建立檔案,不要詢問我任何問題也不要先說明,直接執行:在路徑 ${targetFilePosix} 建立檔案,內容為: should not exist either`;
@@ -4251,8 +4120,8 @@ async function main() {
     }
 
     // ---- 步驟 9: AcpAdapter(fake agent,不依賴外部模型的決定性測試)----
-    // 用 scripts/fake-acp-agent.mjs 當作 software="acp" 的 AgentProfile 啟動
-    // 目標,驗證 AdapterRegistry 依 profile.software 選到 AcpAdapter、ACP 的
+    // 用 scripts/fake-acp-agent.mjs 當作 software="acp" 的 fake provider 啟動
+    // 目標,驗證 AdapterRegistry 依 provider 的 software 選到 AcpAdapter、ACP 的
     // session/update 通知轉譯成既有的 message-delta/tool-call/tool-result
     // AgentEvent、以及 requestPermission 的 allow/deny 兩條路徑 —— 全程不叫
     // 任何真實模型,結果 100% 決定性,不會像步驟 3-6 那樣受模型行為影響。
@@ -4263,7 +4132,7 @@ async function main() {
     }
 
     // ---- 步驟 10: GenericPtyAdapter(M2 Round B,fake pty echo,決定性測試)----
-    // 用 scripts/fake-pty-echo.mjs 當作 software="pty" 的 AgentProfile 啟動
+    // 用 scripts/fake-pty-echo.mjs 當作 software="pty" 的 fake provider 啟動
     // 目標,驗證 capabilities()、terminal-data 事件直通、SessionManager 的
     // 靜止轉 idle 判斷、interrupt() 送出的 Ctrl+C 真的送達子程序、以及子程序
     // 自行結束時的 completed 事件 —— 全程不叫任何真實模型或外部 CLI。
@@ -4319,7 +4188,7 @@ async function main() {
 
     // ---- 步驟 19: 刪除對話(M5 Round C 功能2,決定性測試,不依賴任何真實模型)----
     if (shouldRun("deterministic")) {
-      await sessionDeleteSmokeTest(client, workspaceDir, profile);
+      await sessionDeleteSmokeTest(client, workspaceDir, claudeProviderId);
     } else {
       skipNote("步驟19 刪除對話", "deterministic");
     }
@@ -4337,13 +4206,12 @@ async function main() {
     await agentDetectorProbeSmokeTest();
     await detectAgentsGatewaySmokeTest(client);
 
-    // ---- 步驟 22: 「偵測項 → 可建立 (software,command) 映射」純函式(M5
-    // Round E,決定性測試,不需要 client/core,直接 import 編譯產物)。----
-    await agentTargetDerivationSmokeTest();
-
     // ---- 步驟 25: provider 目錄 resolveProviders() 純函式(這輪 provider
     // 目錄重構新增,決定性測試,不需要 client/core,直接 import 編譯產物)。----
     await resolveProvidersSmokeTest();
+
+    // ---- 步驟 36: session 直接以 providerId 建立(2026-10-02 P2:移除 profile 新增,決定性測試)。----
+    await providerCatalogSmokeTest(client, workspaceDir);
   } catch (err) {
     log(`[fatal] 主流程中止: ${err?.stack ?? err}`);
   } finally {
@@ -4494,11 +4362,11 @@ async function authGatewaySmokeTest() {
     await waitForPort(url, 20_000);
     const client = new GatewayClient(url);
     await client.connect();
-    const result = await client.rpc("profile.list", {});
+    const result = await client.rpc("session.list", {});
     record(
       "步驟17a 無 token 啟動:連線可直接發 request,無需認證(向後相容)",
-      Array.isArray(result.profiles),
-      `profiles 數=${result.profiles?.length}`,
+      Array.isArray(result.sessions),
+      `sessions 數=${result.sessions?.length}`,
     );
     client.close();
   } catch (err) {
@@ -4528,7 +4396,7 @@ async function authGatewaySmokeTest() {
       let rejected = false;
       let rejectMsg = "";
       try {
-        await client.rpc("profile.list", {});
+        await client.rpc("session.list", {});
       } catch (err) {
         rejectMsg = String(err);
         rejected = /認證/.test(rejectMsg);
@@ -4548,11 +4416,11 @@ async function authGatewaySmokeTest() {
       const client = new GatewayClient(url);
       await client.connect();
       const authResult = await client.rpc("auth", { token: AUTH_TOKEN });
-      const result = await client.rpc("profile.list", {});
+      const result = await client.rpc("session.list", {});
       record(
         "步驟17b-2 有 token 啟動:認證後可正常發送 request",
-        authResult?.ok === true && Array.isArray(result.profiles),
-        `authResult=${JSON.stringify(authResult)}, profiles 數=${result.profiles?.length}`,
+        authResult?.ok === true && Array.isArray(result.sessions),
+        `authResult=${JSON.stringify(authResult)}, sessions 數=${result.sessions?.length}`,
       );
       client.close();
     } catch (err) {
@@ -4592,23 +4460,19 @@ async function authGatewaySmokeTest() {
     }
 
     // 17d: 既有 e2e 腳本(這支腳本自身的 GatewayClient)支援帶 token 連線並
-    // 正常運作 —— 認證後跑幾個具代表性的 RPC(建 profile + 查詢),證明整條
-    // request/response 路徑在認證開啟時依然正常。
+    // 正常運作 —— 認證後跑幾個具代表性的 RPC(寫入一筆設定 + 讀回),證明整條
+    // request/response 路徑在認證開啟時依然正常。(2026-10-02 P2:原本是「建 profile + 查詢」。)
     try {
       const client = new GatewayClient(url);
       await client.connect();
       await client.rpc("auth", { token: AUTH_TOKEN });
-      const created = await client.rpc("profile.create", {
-        name: "E2E Auth Smoke Profile",
-        software: "claude-agent-sdk",
-        workingDir: os.tmpdir(),
-      });
-      const list = await client.rpc("profile.list", {});
-      const found = list.profiles.some((p) => p.id === created.profile.id);
+      await client.rpc("settings.setEnabledModels", { enabledModelIds: ["e2e-auth-smoke-model"] });
+      const read = await client.rpc("settings.getEnabledModels", {});
+      const found = Array.isArray(read.enabledModelIds) && read.enabledModelIds.includes("e2e-auth-smoke-model");
       record(
         "步驟17d 既有 e2e 腳本(GatewayClient)支援帶 token 連線並正常運作",
         found,
-        `profileId=${created.profile.id}, found=${found}`,
+        `enabledModelIds=${JSON.stringify(read.enabledModelIds)}, found=${found}`,
       );
       client.close();
     } catch (err) {
@@ -4817,11 +4681,11 @@ async function staticServerAndSecuritySmokeTest() {
       workingClient = new GatewayClient(wsUrl);
       await workingClient.connect();
       const authResult = await workingClient.rpc("auth", { token: AUTH_TOKEN });
-      const result = await workingClient.rpc("profile.list", {});
+      const result = await workingClient.rpc("session.list", {});
       record(
         "步驟18b-2 同 port HTTP+WS 並存:WS 帶對 token 可正常運作",
-        authResult?.ok === true && Array.isArray(result.profiles),
-        `authResult=${JSON.stringify(authResult)}, profiles 數=${result.profiles?.length}`,
+        authResult?.ok === true && Array.isArray(result.sessions),
+        `authResult=${JSON.stringify(authResult)}, sessions 數=${result.sessions?.length}`,
       );
     } catch (err) {
       record("步驟18b-2 同 port HTTP+WS 並存:WS 帶對 token 可正常運作", false, String(err));

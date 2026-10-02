@@ -2,7 +2,6 @@ import readline from "node:readline";
 import type { GatewayClient } from "@deskmony/client";
 import {
   SessionPermissionModeSchema,
-  type AgentOverride,
   type MessageRecord,
   type Session,
   type SessionEventEnvelope,
@@ -26,15 +25,13 @@ function describeError(err: unknown): string {
 }
 
 async function createNewSession(client: GatewayClient, options: GlobalOptions): Promise<Session> {
-  // 同 commands/run.ts 的 agentOverride 建構邏輯(刻意保留兩份而不是抽成
-  // 共用模組——HLD §4.2 給的檔案佈局沒有「session 共用邏輯」這一個檔案,
-  // 這幾行本身也短到抽出去反而要多繞一層 import)。
-  const agentOverride: AgentOverride | undefined =
-    options.model !== undefined || options.effort !== undefined ? { model: options.model, effort: options.effort } : undefined;
+  // 2026-10-02(P2:移除 profile):`--agent`(providerId)+ 選填 `--model`/`--effort`
+  // 直接帶進 session.create,與 commands/run.ts 相同。
   const { session } = (await client.call("session.create", {
-    agentProfileId: options.profile,
+    providerId: options.agent,
+    model: options.model,
+    effort: options.effort,
     workingDir: options.cwd,
-    agentOverride,
   })) as { session: Session };
   return session;
 }
@@ -70,7 +67,7 @@ async function replayHistory(client: GatewayClient, sessionId: string, color: bo
 function printBanner(options: GlobalOptions, session: Session): void {
   process.stdout.write(
     `Deskmony CLI —— 已連線 ${options.url}\n` +
-      `session: ${session.id}(profile: ${session.agentProfileId}, adapter: ${session.adapterType}, cwd: ${session.workingDir})\n` +
+      `session: ${session.id}(agent: ${session.providerId}, adapter: ${session.adapterType}, cwd: ${session.workingDir})\n` +
       "輸入 /help 查看指令,Ctrl+D 或 /exit 離開,Ctrl+C 中斷這一輪(兩秒內再按一次離開)。\n",
   );
 }
@@ -168,7 +165,7 @@ export async function chatCommand(options: GlobalOptions): Promise<void> {
    * 對照組:**互動模式** Ctrl+C 完全不對應任何 §2 的退出碼,離開 REPL
    * (不論是 /exit、Ctrl+D、還是雙擊 Ctrl+C)一律視為使用者正常結束操作,
    * 退出碼 0。130 只保留給「使用者根本沒有機會表達『正常離開』意圖、
-   * 一次性指令被強制中斷」的情境(見 bin.ts 對 run/session/profile/doctor/
+   * 一次性指令被強制中斷」的情境(見 bin.ts 對 run/session/doctor/
    * config 完全不裝 SIGINT handler、刻意讓 Node 預設行為接管的說明)。
    */
   const cleanupAndExit = (code: number): void => {

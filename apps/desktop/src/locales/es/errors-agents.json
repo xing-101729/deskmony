@@ -1,0 +1,8 @@
+{
+  "agent": {
+    "notFound": "No se encontró el agent \"{{providerId}}\"; consulte la lista de agents para ver los id disponibles",
+    "disabled": "El agent \"{{label}}\" está desactivado en Ajustes",
+    "notInstalled": "No se detectó el agent \"{{label}}\" en este equipo; instálelo y vuelva a detectar en Ajustes",
+    "launchInfoMissing": "El agent \"{{providerId}}\" de esta sesión ya no está en la lista detectada y la sesión no conserva información de arranque (se creó con una versión anterior), por lo que no se puede reiniciar; use una sesión nueva"
+  }
+}

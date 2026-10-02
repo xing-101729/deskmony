@@ -23,7 +23,7 @@
     "disableLabel": "Desactivar {{name}}",
     "collapseModelsEnv": "Contraer (models / variables de entorno)",
     "expandModelsEnv": "Expandir (models / variables de entorno)",
-    "modelsHint": "Models activados (los que no estén marcados no aparecerán en el desplegable de \"Crear Profile\" ni en el de \"cambiar model\" durante la conversación)",
+    "modelsHint": "Models activados (los que no estén marcados no aparecerán en el desplegable de nueva conversación ni en el de \"cambiar model\" durante la conversación)",
     "addUpdate": "Añadir/actualizar",
     "envHint": "Variables de entorno (por ejemplo, ANTHROPIC_API_KEY): los valores siempre se muestran enmascarados como ***; esta lista solo indica qué keys están configuradas y no se puede leer el texto plano.",
     "envKeyPlaceholder": "KEY",
@@ -86,13 +86,16 @@
     "whenKindCommandMatches": "El comando coincide con una expresión regular",
     "whenKindPathUnder": "La ruta está bajo este prefijo",
     "whenValueLabel": "Valor de la condición",
-    "scopeProfileLabel": "Limitar a Profile ID (opcional)",
-    "scopeRoleLabel": "Limitar a role (opcional)",
-    "scopeProfile": "profile: {{id}}",
-    "scopeRole": "role: {{role}}",
     "addedByUser": "Añadida manualmente",
     "addedByRemember": "Desde \"permitir siempre\"",
     "toolRequired": "Indica un nombre de herramienta (usa * para cualquier herramienta)",
-    "addRuleButton": "Añadir regla"
+    "addRuleButton": "Añadir regla",
+    "scopeProvider": "agent: {{id}}",
+    "legacyScopeAllow": "Ámbito de profile heredado (allow desactivado)",
+    "legacyScopeDeny": "Ámbito de profile heredado (deny se aplica a todo)",
+    "legacyScopeTitle": "Esta regla tiene un ámbito de profile que ya no existe. Los profiles se eliminaron: las reglas allow ya no coinciden (lo que antes permitían ahora se escala para que usted lo confirme) y las reglas deny pasan a aplicarse a todas las sesiones. Elimínela y vuelva a crearla con un ámbito de agent.",
+    "scopeAgentLabel": "Limitar a agent (opcional)",
+    "scopeAgentHint": "Solo se aplica a las conversaciones iniciadas con este agent; vacío = todos.",
+    "scopeAgentAll": "(Todos los agents)"
   }
 }

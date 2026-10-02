@@ -41,6 +41,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WRITE_FILE_PREFIX, USAGE_UPDATE_PREFIX, MANY_TOOL_CALLS_PREFIX, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -49,7 +50,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 
 const results = [];
@@ -191,6 +191,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake ACP agent 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -250,21 +252,9 @@ function writeConfigWithBudget(configPath, budget) {
   writeFileSync(configPath, JSON.stringify({ version: 1, budget: { warnAtPercent: 80, ...budget } }, null, 2), "utf8");
 }
 
-async function createAcpSession(client, workspaceDir, title, extra = {}) {
-  const { profile } = await client.rpc("profile.create", {
-    name: `E2E ${title}`,
-    software: "acp",
-    workingDir: workspaceDir,
-    acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    permissionLevel: "always-ask",
-    ...extra.profileFields,
-  });
-  const { session } = await client.rpc(
-    "session.create",
-    { agentProfileId: profile.id, workingDir: workspaceDir, title },
-    30_000,
-  );
-  return { profileId: profile.id, sessionId: session.id };
+async function createAcpSession(client, workspaceDir, title) {
+  const { session } = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
+  return { sessionId: session.id };
 }
 
 // =======================================================================

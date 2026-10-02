@@ -30,6 +30,15 @@
  * gateway RPC 本身(含遠端可達性、前置條件、YOLO 過期連帶清除)的即時 e2e 驗證
  * 在 scripts/e2e-auto-mode-yolo.mjs(該檔案的 E-6/E-7/J/D2),不在這裡重複。
  *
+ * 2026-10-02(P2:移除 profile,見 docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md §P2.8,
+ * **安全項目**):Part 1 的 1n/1o/1p/1q 與 Part 3 驗證權限規則的「舊 profile 範圍」——
+ *   ①帶舊範圍(`scope.profileId`/`scope.role`)的 allow 規則不再放行(升級給人);
+ *   ②帶舊範圍的 deny 規則在 auto 模式下對**任何** session 仍然 deny(否則 deny 規則靜默失效,在 auto
+ *     模式下那個操作會落入「未分類中間地帶自動放行」,等於 fail-open);
+ *   ③`scope.providerId` 只對該 agent 的 session 生效(Part 3 另外用真的 core + fake ACP provider 驗證
+ *     `PermissionRequest.providerId` 確實從 session 一路帶進引擎);
+ *   另外 core 啟動時對每一條帶舊範圍的規則 console.warn(不靜默),且 `policy.addRule` 不再接受舊範圍。
+ *
  * 前置需求:`pnpm build` 已跑過(apps/core/dist、packages/db/dist 存在)。
  *
  * 用法:node scripts/e2e-policy-engine.mjs
@@ -43,6 +52,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -51,7 +61,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 
 const results = [];
@@ -358,6 +367,110 @@ async function unitTests() {
     );
   }
 
+  // ---- 1n【2026-10-02 P2.8 斷言①】:帶舊 profile 範圍的 **allow** 規則不再放行(原本放行的改成升級給人)。
+  //         profileId 範圍與 role 範圍各測一次;對照組:同一條規則去掉舊範圍就會 allow。 ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const req = baseReq({ toolName: "Bash", input: { command: "pnpm test" }, providerId: "claude-agent-sdk" });
+    const mk = (scope) => new PolicyEngine({ rules: [{ tool: "Bash", when: { commandEquals: "pnpm test" }, effect: "allow", ...(scope ? { scope } : {}) }], allowedHosts: [] });
+    const control = mk(undefined).decide(req, ctx);
+    const legacyProfile = mk({ profileId: "removed-profile" }).decide(req, ctx);
+    const legacyRole = mk({ role: "Coder" }).decide(req, ctx);
+    // 就算請求帶著「看起來吻合」的欄位也不行——profile 已不存在,舊範圍沒有任何對應物。
+    const legacyAnyway = mk({ profileId: "removed-profile" }).decide({ ...req, profileId: "removed-profile", role: "Coder" }, ctx);
+    record(
+      "1n 舊 profile 範圍(profileId/role)的 allow 規則一律不匹配 → 升級給人(escalate);同一條規則沒有舊範圍時才是 allow(對照組)",
+      control.effect === "allow" &&
+        legacyProfile.effect === "escalate" &&
+        legacyRole.effect === "escalate" &&
+        legacyAnyway.effect === "escalate",
+      `control=${control.effect}, legacyProfile=${legacyProfile.effect}, legacyRole=${legacyRole.effect}, legacyAnyway=${legacyAnyway.effect}`,
+    );
+  }
+
+  // ---- 1o【P2.8 斷言②,關鍵 fail-open 防護】:帶舊 profile 範圍的 **deny** 規則忽略舊範圍、對所有 session
+  //         匹配——autoMode 下對**任何** session(任何 providerId、沒有 providerId)都仍然 deny,絕不落入
+  //         「未分類中間地帶自動放行」。對照組:同一個請求沒有 deny 規則時,autoMode 會自動放行。 ----
+  {
+    const autoCtx = { attended: true, local: true, autoMode: true };
+    const req = baseReq({ toolName: "Bash", input: { command: "rm -rf build" } });
+    const rule = (scope) => ({ tool: "Bash", when: { commandEquals: "rm -rf build" }, effect: "deny", scope });
+    const noRule = new PolicyEngine({ rules: [], allowedHosts: [] }).decide(req, autoCtx);
+    const byProfile = new PolicyEngine({ rules: [rule({ profileId: "removed-profile" })], allowedHosts: [] });
+    const byRole = new PolicyEngine({ rules: [rule({ role: "Coder" })], allowedHosts: [] });
+    const sessions = [{ providerId: "claude-agent-sdk" }, { providerId: "codex" }, { providerId: "opencode" }, {}];
+    const outcomes = [];
+    for (const engine of [byProfile, byRole]) {
+      for (const extra of sessions) outcomes.push(engine.decide({ ...req, ...extra }, autoCtx).effect);
+    }
+    // 無人值守(非 attended)+ autoMode 也一樣。
+    const unattended = byProfile.decide({ ...req, providerId: "codex" }, { attended: false, local: true, autoMode: true }).effect;
+    record(
+      "1o 舊 profile 範圍的 deny 規則在 auto 模式下對任何 session 仍然 deny(忽略舊範圍、全部套用);對照組:沒有這條規則時 auto 模式會自動放行(這正是要防的 fail-open)",
+      noRule.effect === "allow" && outcomes.every((e) => e === "deny") && unattended === "deny",
+      `noRule(auto)=${noRule.effect}, outcomes=${JSON.stringify(outcomes)}, unattended=${unattended}`,
+    );
+  }
+
+  // ---- 1p【P2.8 斷言③】:`scope.providerId` 精確比對——只對該 agent 的 session 生效,其他 agent 與沒帶 providerId 的請求都不匹配。 ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const req = baseReq({ toolName: "Bash", input: { command: "pnpm test" } });
+    const allowEngine = new PolicyEngine({
+      rules: [{ tool: "Bash", when: { commandEquals: "pnpm test" }, effect: "allow", scope: { providerId: "codex" } }],
+      allowedHosts: [],
+    });
+    const forCodex = allowEngine.decide({ ...req, providerId: "codex" }, ctx).effect;
+    const forSdk = allowEngine.decide({ ...req, providerId: "claude-agent-sdk" }, ctx).effect;
+    const forNone = allowEngine.decide(req, ctx).effect;
+    // deny 範圍同理:只擋 codex;auto 模式下其他 agent 仍走自動放行(證明範圍真的在起作用,不是變成全擋)。
+    const denyEngine = new PolicyEngine({
+      rules: [{ tool: "Bash", when: { commandEquals: "pnpm test" }, effect: "deny", scope: { providerId: "codex" } }],
+      allowedHosts: [],
+    });
+    const autoCtx = { attended: true, local: true, autoMode: true };
+    const denyCodex = denyEngine.decide({ ...req, providerId: "codex" }, autoCtx).effect;
+    const denySdk = denyEngine.decide({ ...req, providerId: "claude-agent-sdk" }, autoCtx).effect;
+    record(
+      "1p scope.providerId 精確比對:allow 只對該 agent 放行(其他 agent/無 providerId 升級);deny 只擋該 agent(其他 agent 在 auto 模式下仍自動放行)",
+      forCodex === "allow" && forSdk === "escalate" && forNone === "escalate" && denyCodex === "deny" && denySdk === "allow",
+      `allow: codex=${forCodex}, sdk=${forSdk}, none=${forNone}; deny(auto): codex=${denyCodex}, sdk=${denySdk}`,
+    );
+  }
+
+  // ---- 1q【P2.8】:`warnLegacyScopedRules()` 對每一條帶舊範圍的規則逐條 console.warn(含規則 id 與處理方式),
+  //         沒有舊範圍的規則(含 providerId 範圍)不產生警告——不靜默。 ----
+  {
+    const rules = [
+      { id: "r-legacy-deny", tool: "Bash", effect: "deny", scope: { profileId: "p1" } },
+      { id: "r-legacy-allow", tool: "Bash", effect: "allow", scope: { role: "Coder" } },
+      { id: "r-provider", tool: "Bash", effect: "allow", scope: { providerId: "codex" } },
+      { id: "r-plain", tool: "Bash", effect: "allow" },
+    ];
+    const warns = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warns.push(args.join(" "));
+    let legacy;
+    try {
+      legacy = policyEngineMod.warnLegacyScopedRules(rules);
+    } finally {
+      console.warn = originalWarn;
+    }
+    const denyLine = warns.find((w) => w.includes("r-legacy-deny"));
+    const allowLine = warns.find((w) => w.includes("r-legacy-allow"));
+    record(
+      "1q warnLegacyScopedRules():逐條 console.warn 帶舊範圍的規則(含 id 與處理方式:allow=已停用、deny=套用全部),providerId 範圍/無範圍的規則不警告",
+      legacy.length === 2 &&
+        warns.length === 2 &&
+        Boolean(denyLine) &&
+        denyLine.includes("所有 session") &&
+        Boolean(allowLine) &&
+        allowLine.includes("已停用") &&
+        !warns.some((w) => w.includes("r-provider") || w.includes("r-plain")),
+      `warns=${JSON.stringify(warns)}`,
+    );
+  }
+
   rmSync(workingDir, { recursive: true, force: true });
   rmSync(outsideDir, { recursive: true, force: true });
 }
@@ -478,6 +591,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir, permissionTimeoutMs }
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
     DESKMONY_PERMISSION_TIMEOUT_MS: String(permissionTimeoutMs),
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
@@ -559,34 +674,18 @@ async function liveE2e() {
 
   let coreProc;
   let client;
-  // S7 L4 §2.1 之後,profile.permissionLevel 只決定 session 暫態的**初值**
-  // (⇒ `ExecContext.autoMode`),**不再**決定 `attended`——後者只看「現在有沒
-  // 有 client 連線中」。所以這兩個 helper 的差別純粹是 autoMode 開/關。
-  const alwaysAskProfileFor = async (name) =>
-    client.rpc("profile.create", {
-      name,
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-      permissionLevel: "always-ask", // autoMode = false
-    });
-  const autoModeProfileFor = async (name) =>
-    client.rpc("profile.create", {
-      name,
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-      // S7(auto-mode-and-yolo)L4 §1.1 收窄了 PermissionLevelSchema,移除
-      // "auto-accept-all"(YOLO 現在只能是 session 暫態,見
-      // packages/shared/src/agent-profile.ts),所以「開著 auto 的 session」
-      // 這裡用 "auto-accept-edits" 當初值,不必額外呼叫 setPermissionMode。
-      permissionLevel: "auto-accept-edits", // autoMode = true
-    });
-
+  // S7 L4 §2.1 之後,session 的權限模式只決定 `ExecContext.autoMode`,**不再**決定 `attended`——
+  // 後者只看「現在有沒有 client 連線中」。所以「always-ask 的 session」與「開著 auto 的 session」
+  // 的差別純粹是 autoMode 開/關。2026-10-02(P2:移除 profile):新 session 一律從 always-ask
+  // 開始(autoMode = false);要「開著 auto 的 session」就在建立後呼叫 `session.setPermissionMode`
+  // (原本是用 profile.permissionLevel = "auto-accept-edits" 當初值)。
   const createdSessions = [];
-  const createSessionFor = async (profileId, title) => {
-    const created = await client.rpc("session.create", { agentProfileId: profileId, workingDir: workspaceDir, title }, 30_000);
+  const createSessionFor = async (title, { autoMode = false } = {}) => {
+    const created = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
     createdSessions.push(created.session.id);
+    if (autoMode) {
+      await client.rpc("session.setPermissionMode", { sessionId: created.session.id, mode: "auto-accept-edits" });
+    }
     return created.session.id;
   };
 
@@ -620,12 +719,9 @@ async function liveE2e() {
     client = new MiniGatewayClient(`ws://localhost:${PORT}`);
     await client.connect();
 
-    const attendedProfile = (await alwaysAskProfileFor("E2E Policy AlwaysAsk")).profile;
-    const autoModeProfile = (await autoModeProfileFor("E2E Policy AutoMode")).profile;
-
     // ---- 2a: config allow 規則命中 → 自動放行,完全不進 waiting,source="policy" ----
     {
-      const sessionId = await createSessionFor(attendedProfile.id, "2a-allow");
+      const sessionId = await createSessionFor("2a-allow");
       const updatesBefore = client.sessionUpdates.length;
       const targetFile = path.join(allowedSubDir, "allow-me.txt");
       const permEvent = await triggerWritePermission(sessionId, targetFile, "allow content");
@@ -653,7 +749,7 @@ async function liveE2e() {
 
     // ---- 2b: config deny 規則命中 → 自動拒絕,完全不進 waiting,不寫檔 ----
     {
-      const sessionId = await createSessionFor(attendedProfile.id, "2b-deny");
+      const sessionId = await createSessionFor("2b-deny");
       const updatesBefore = client.sessionUpdates.length;
       const targetFile = path.join(deniedSubDir, "deny-me.txt");
       const permEvent = await triggerWritePermission(sessionId, targetFile, "deny content");
@@ -682,7 +778,7 @@ async function liveE2e() {
     // ---- 2c: hard-deny(worktree 外寫入)+ 本機 + attended → escalate-strong,
     //          仍走 waiting(不是自動 deny,人可以強確認),手動 resolve 清理 ----
     {
-      const sessionId = await createSessionFor(attendedProfile.id, "2c-harddeny-attended");
+      const sessionId = await createSessionFor("2c-harddeny-attended");
       const targetFile = path.join(outsideWorktreeDir, "escape-attended.txt");
       const permEvent = await triggerWritePermission(sessionId, targetFile);
 
@@ -710,9 +806,9 @@ async function liveE2e() {
     //          連著(attended=true),開了 auto 就不降級成 escalate-strong
     //          (C6:auto 開著時硬性類仍是硬地板,見 policy-engine.ts 第 1 步)。
     //          S7 L4 §2.1 修正前這條測的是「非 attended」,修正後 attended 不
-    //          再由 profile 決定,同一個 session 改由 autoMode 這條分支命中。 ----
+    //          再由權限模式決定,同一個 session 改由 autoMode 這條分支命中。 ----
     {
-      const sessionId = await createSessionFor(autoModeProfile.id, "2d-harddeny-automode");
+      const sessionId = await createSessionFor("2d-harddeny-automode", { autoMode: true });
       const updatesBefore = client.sessionUpdates.length;
       const targetFile = path.join(outsideWorktreeDir, "escape-automode.txt");
       const permEvent = await triggerWritePermission(sessionId, targetFile);
@@ -740,7 +836,7 @@ async function liveE2e() {
 
     // ---- 2e: 未分類長尾(非 hard-deny、無 config 規則命中)→ escalate,走 waiting ----
     {
-      const sessionId = await createSessionFor(attendedProfile.id, "2e-escalate-unclassified");
+      const sessionId = await createSessionFor("2e-escalate-unclassified");
       const targetFile = path.join(unclassifiedSubDir, "unclassified.txt");
       const permEvent = await triggerWritePermission(sessionId, targetFile);
 
@@ -777,7 +873,7 @@ async function liveE2e() {
     //          才送出權限請求 ⇒ decide() 當下 hasConnectedClient() === false。
     {
       const PROMPT_DELAY_MS = 2500;
-      const sessionId = await createSessionFor(attendedProfile.id, "2f-unattended-hangs");
+      const sessionId = await createSessionFor("2f-unattended-hangs");
       const targetFile = path.join(unclassifiedSubDir, "unattended-hangs.txt");
       await sendWritePrompt(sessionId, targetFile, { delayMs: PROMPT_DELAY_MS });
 
@@ -812,7 +908,7 @@ async function liveE2e() {
     //          → 逐筆問,逾時 5 分鐘(這裡縮短為 PERMISSION_TIMEOUT_MS)後
     //          deny。與 2f 唯一的差別就是「此刻有沒有人看得到彈窗」。 ----
     {
-      const sessionId = await createSessionFor(attendedProfile.id, "2g-attended-timeout-deny");
+      const sessionId = await createSessionFor("2g-attended-timeout-deny");
       const targetFile = path.join(unclassifiedSubDir, "attended-timeout.txt");
       const permEvent = await triggerWritePermission(sessionId, targetFile);
 
@@ -916,6 +1012,235 @@ async function liveE2e() {
 }
 
 // =======================================================================
+// Part 3(2026-10-02 P2.8):舊 profile 範圍規則與 providerId 範圍規則的即時 e2e——真的 core + fake ACP provider。
+//
+// 獨立一個 core(不與 Part 2 共用):Part 2 的 2i 斷言 config.json 剛好兩條規則,這裡需要額外的規則,
+// 也需要捕捉 core 的 stdout 驗證啟動警告。
+// =======================================================================
+async function legacyScopeLiveE2e() {
+  const PORT = 4335;
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-legacy-data-"));
+  const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-legacy-home-"));
+  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-legacy-ws-"));
+  const legacyAllowDir = path.join(workspaceDir, "legacy-allow");
+  const legacyDenyDir = path.join(workspaceDir, "legacy-deny");
+  const providerAllowDir = path.join(workspaceDir, "provider-allow");
+  const providerOtherDir = path.join(workspaceDir, "provider-other");
+  for (const dir of [legacyAllowDir, legacyDenyDir, providerAllowDir, providerOtherDir]) mkdirSync(dir, { recursive: true });
+
+  // 規則的 id 都帶著(沿用,不被 backfill 改寫),方便對照啟動警告。
+  const configJson = {
+    version: 1,
+    policy: {
+      rules: [
+        { id: "legacy-deny-rule", tool: "Write file", when: { pathUnder: legacyDenyDir }, effect: "deny", scope: { profileId: "removed-profile" } },
+        { id: "legacy-allow-rule", tool: "Write file", when: { pathUnder: legacyAllowDir }, effect: "allow", scope: { role: "Coder" } },
+        { id: "provider-allow-rule", tool: "Write file", when: { pathUnder: providerAllowDir }, effect: "allow", scope: { providerId: FAKE_ACP } },
+        { id: "provider-other-rule", tool: "Write file", when: { pathUnder: providerOtherDir }, effect: "allow", scope: { providerId: "some-other-agent" } },
+      ],
+      allowedHosts: [],
+    },
+  };
+  writeFileSync(path.join(homeDir, "config.json"), JSON.stringify(configJson, null, 2), "utf8");
+
+  let coreProc;
+  let client;
+  let coreStdout = "";
+  const createdSessions = [];
+  const createSession = async (title, { autoMode = false } = {}) => {
+    const created = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
+    createdSessions.push(created.session.id);
+    if (autoMode) await client.rpc("session.setPermissionMode", { sessionId: created.session.id, mode: "auto-accept-edits" });
+    return created.session.id;
+  };
+  const sendWrite = async (sessionId, targetPath, content = "content") => {
+    const startIdx = client.events.length;
+    const posixPath = targetPath.split(path.sep).join("/");
+    await client.rpc("session.sendPrompt", { sessionId, prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath, content })}` } });
+    return startIdx;
+  };
+  const waitPermissionRequest = async (sessionId, startIdx) =>
+    (await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "permission-request", 15_000, startIdx)).event;
+  const waitTurnEnd = (sessionId, startIdx) =>
+    client.waitForEvent((e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error"), 15_000, startIdx);
+
+  try {
+    // 自己起 core(要捕捉 stdout)。
+    const env = {
+      ...process.env,
+      DESKMONY_CORE_PORT: String(PORT),
+      DESKMONY_DATA_DIR: dataDir,
+      DESKMONY_HOME: homeDir,
+      DESKMONY_WORKSPACE: workspaceDir,
+      DESKMONY_PERMISSION_TIMEOUT_MS: "20000",
+      ...e2eProvidersEnv(),
+    };
+    coreProc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+    coreProc.stdout.on("data", (chunk) => {
+      coreStdout += chunk.toString();
+      process.stdout.write(`[core:legacy] ${chunk}`);
+    });
+    coreProc.stderr.on("data", (chunk) => {
+      coreStdout += chunk.toString(); // console.warn 走 stderr
+      process.stderr.write(`[core:legacy:err] ${chunk}`);
+    });
+    await waitForPort(`ws://localhost:${PORT}`, 20_000);
+    client = new MiniGatewayClient(`ws://localhost:${PORT}`);
+    await client.connect();
+
+    // ---- 3a:啟動時逐條 console.warn 帶舊範圍的規則(不靜默),沒有舊範圍的規則不警告 ----
+    {
+      const warnLines = coreStdout.split("\n").filter((l) => l.includes("[policy][legacy-scope]"));
+      const denyLine = warnLines.find((l) => l.includes("legacy-deny-rule"));
+      const allowLine = warnLines.find((l) => l.includes("legacy-allow-rule"));
+      record(
+        "3a core 啟動時逐條 console.warn 帶舊 profile 範圍的規則(規則 id + 處理方式);providerId 範圍的規則不警告",
+        warnLines.length === 2 &&
+          Boolean(denyLine) &&
+          denyLine.includes("所有 session") &&
+          Boolean(allowLine) &&
+          allowLine.includes("已停用") &&
+          !warnLines.some((l) => l.includes("provider-allow-rule") || l.includes("provider-other-rule")),
+        `warnLines=${JSON.stringify(warnLines)}`,
+      );
+    }
+
+    // ---- 3b:舊範圍 allow 規則不再放行——attended + always-ask 的 session 寫入該規則「原本會放行」的路徑,
+    //          改成升級給人(permission-request 進 waiting),人回 deny 後檔案不存在。 ----
+    {
+      const sessionId = await createSession("3b-legacy-allow");
+      const target = path.join(legacyAllowDir, "legacy-allow.txt");
+      const startIdx = await sendWrite(sessionId, target);
+      const permEvent = await waitPermissionRequest(sessionId, startIdx);
+      await sleep(500);
+      const status = (await client.rpc("session.list", {})).sessions.find((x) => x.id === sessionId)?.status;
+      await client.rpc("permission.resolve", { sessionId, requestId: permEvent.requestId, decision: "deny" });
+      await waitTurnEnd(sessionId, startIdx);
+      record(
+        "3b 舊 profile 範圍的 allow 規則不再放行:原本會被它放行的寫入改成升級給人(session 進 waiting),人拒絕後檔案未寫入",
+        status === "waiting" && !existsSync(target),
+        `status=${status}, fileExists=${existsSync(target)}`,
+      );
+    }
+
+    // ---- 3c:舊範圍 deny 規則在 auto 模式下對任何 session 仍然 deny(關鍵 fail-open 防護):
+    //          兩個不同的 auto 模式 session 寫入該規則擋的路徑,都被自動拒絕(source="policy"),不進 waiting。
+    //          對照:同一個 auto session 寫入沒有規則的路徑會被「未分類中間地帶」自動放行。 ----
+    {
+      const sessions = [await createSession("3c-legacy-deny-A", { autoMode: true }), await createSession("3c-legacy-deny-B", { autoMode: true })];
+      const outcomes = [];
+      for (const [i, sessionId] of sessions.entries()) {
+        const target = path.join(legacyDenyDir, `legacy-deny-${i}.txt`);
+        const updatesBefore = client.sessionUpdates.length;
+        const startIdx = await sendWrite(sessionId, target);
+        const permEvent = await waitPermissionRequest(sessionId, startIdx);
+        await waitTurnEnd(sessionId, startIdx);
+        await sleep(300);
+        const wentWaiting = client.sessionUpdates.slice(updatesBefore).some((u) => u.id === sessionId && u.status === "waiting");
+        const deniedByPolicy = (client.permissionResolvedEvents ?? []).some(
+          (r) => r.sessionId === sessionId && r.requestId === permEvent.requestId && r.decision === "deny" && r.source === "policy",
+        );
+        outcomes.push({ wentWaiting, deniedByPolicy, fileWritten: existsSync(target) });
+      }
+      // 對照組:沒有任何規則涵蓋的路徑 → auto 模式自動放行(證明上面的 deny 是規則造成的,不是 auto 模式本身擋)。
+      const controlTarget = path.join(workspaceDir, "control-auto.txt");
+      const controlStart = await sendWrite(sessions[0], controlTarget);
+      const controlPerm = await waitPermissionRequest(sessions[0], controlStart);
+      await waitTurnEnd(sessions[0], controlStart);
+      await sleep(300);
+      const controlAllowed = (client.permissionResolvedEvents ?? []).some(
+        (r) => r.sessionId === sessions[0] && r.requestId === controlPerm.requestId && r.decision === "allow" && r.source === "policy",
+      );
+      record(
+        "3c 舊 profile 範圍的 deny 規則在 auto 模式下對任何 session 仍然 deny(兩個 auto session 都被自動拒絕、不進 waiting、檔案未寫入);對照:沒有規則的路徑在 auto 模式下自動放行",
+        outcomes.every((o) => o.deniedByPolicy && !o.wentWaiting && !o.fileWritten) && controlAllowed && existsSync(controlTarget),
+        `outcomes=${JSON.stringify(outcomes)}, controlAllowed=${controlAllowed}`,
+      );
+    }
+
+    // ---- 3d:providerId 範圍的即時驗證——`PermissionRequest.providerId` 真的從 session 一路帶進引擎:
+    //          範圍 = 這個 session 的 provider 的 allow 規則 → 自動放行(不進 waiting);
+    //          範圍 = 別的 agent 的 allow 規則 → 不匹配 → 升級給人。 ----
+    {
+      const sessionId = await createSession("3d-provider-scope");
+      const okTarget = path.join(providerAllowDir, "provider-allow.txt");
+      const updatesBefore = client.sessionUpdates.length;
+      const startIdx = await sendWrite(sessionId, okTarget);
+      const perm1 = await waitPermissionRequest(sessionId, startIdx);
+      await waitTurnEnd(sessionId, startIdx);
+      await sleep(300);
+      const allowedByScope = (client.permissionResolvedEvents ?? []).some(
+        (r) => r.sessionId === sessionId && r.requestId === perm1.requestId && r.decision === "allow" && r.source === "policy",
+      );
+      const wentWaiting = client.sessionUpdates.slice(updatesBefore).some((u) => u.id === sessionId && u.status === "waiting");
+
+      const otherTarget = path.join(providerOtherDir, "provider-other.txt");
+      const startIdx2 = await sendWrite(sessionId, otherTarget);
+      const perm2 = await waitPermissionRequest(sessionId, startIdx2);
+      await sleep(500);
+      const status2 = (await client.rpc("session.list", {})).sessions.find((x) => x.id === sessionId)?.status;
+      await client.rpc("permission.resolve", { sessionId, requestId: perm2.requestId, decision: "deny" });
+      await waitTurnEnd(sessionId, startIdx2);
+      record(
+        "3d scope.providerId 即時驗證:範圍=這個 session 的 agent 的 allow 規則 → 自動放行(不進 waiting、檔案寫入);範圍=別的 agent 的 allow 規則 → 不匹配、升級給人",
+        allowedByScope && !wentWaiting && existsSync(okTarget) && status2 === "waiting" && !existsSync(otherTarget),
+        `allowedByScope=${allowedByScope}, wentWaiting=${wentWaiting}, fileWritten=${existsSync(okTarget)}, otherStatus=${status2}, otherFileExists=${existsSync(otherTarget)}`,
+      );
+    }
+
+    // ---- 3e:`policy.addRule` 不再接受舊範圍(否則一條 {deny, scope:{profileId}} 會變成「擋所有 session」,與寫它的人本意不符);
+    //          providerId 範圍正常接受,且 listRules 看得到。 ----
+    {
+      const rejected = [];
+      for (const scope of [{ profileId: "x" }, { role: "Coder" }]) {
+        try {
+          await client.rpc("policy.addRule", { tool: "Bash", effect: "deny", scope });
+          rejected.push(false);
+        } catch (err) {
+          rejected.push(true);
+        }
+      }
+      let accepted = false;
+      let listed = false;
+      try {
+        const added = await client.rpc("policy.addRule", { tool: "Bash", effect: "deny", scope: { providerId: FAKE_ACP } });
+        accepted = added.rule?.scope?.providerId === FAKE_ACP;
+        const list = await client.rpc("policy.listRules", {});
+        listed = list.rules.some((r) => r.id === added.rule.id && r.scope?.providerId === FAKE_ACP);
+      } catch (err) {
+        // accepted 維持 false
+      }
+      record(
+        "3e policy.addRule 拒絕舊 profileId/role 範圍(schema 層就擋),providerId 範圍正常新增且 policy.listRules 看得到",
+        rejected.every(Boolean) && accepted && listed,
+        `舊範圍被拒=${JSON.stringify(rejected)}, providerId 範圍 accepted=${accepted}, listed=${listed}`,
+      );
+    }
+
+    for (const sid of createdSessions) {
+      try {
+        await client.rpc("session.delete", { sessionId: sid });
+      } catch {
+        // ignore
+      }
+    }
+  } catch (err) {
+    record("Part 3 即時 e2e 執行過程發生未預期錯誤", false, String(err));
+  } finally {
+    client?.close();
+    await killProcessTree(coreProc);
+  }
+
+  for (const dir of [dataDir, homeDir, workspaceDir]) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// =======================================================================
 async function main() {
   if (!existsSync(CORE_ENTRY)) {
     console.error(`找不到 ${CORE_ENTRY} —— 請先執行 pnpm build`);
@@ -927,6 +1252,9 @@ async function main() {
 
   log("\n=== Part 2:即時 e2e(真實 WS Gateway + fake ACP agent) ===");
   await liveE2e();
+
+  log("\n=== Part 3:舊 profile 範圍規則 + providerId 範圍的即時 e2e(P2.8) ===");
+  await legacyScopeLiveE2e();
 
   const failed = results.filter((r) => !r.ok);
   log(`\n\n========== 總結:${results.length - failed.length}/${results.length} 通過 ==========`);

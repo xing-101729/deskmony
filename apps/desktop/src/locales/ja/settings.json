@@ -23,7 +23,7 @@
     "disableLabel": "{{name}} を無効化",
     "collapseModelsEnv": "折りたたむ(model / 環境変数)",
     "expandModelsEnv": "展開(model / 環境変数)",
-    "modelsHint": "有効な model(チェックを外した model は「Profile 作成」や会話中の「model 切り替え」のドロップダウンに表示されません)",
+    "modelsHint": "有効な model(チェックを外した model は新規会話や会話中の「model 切り替え」のドロップダウンに表示されません)",
     "addUpdate": "追加/更新",
     "envHint": "環境変数(例:ANTHROPIC_API_KEY)——値は常に *** でマスクして表示されます。ここに表示されるのは「どの key が設定されているか」だけで、平文で読み出すことはできません。",
     "envKeyPlaceholder": "KEY",
@@ -86,13 +86,16 @@
     "whenKindCommandMatches": "コマンドが正規表現に一致",
     "whenKindPathUnder": "パスがこのプレフィックス配下",
     "whenValueLabel": "条件の値",
-    "scopeProfileLabel": "Profile ID で限定(任意)",
-    "scopeRoleLabel": "role で限定(任意)",
-    "scopeProfile": "profile: {{id}}",
-    "scopeRole": "role: {{role}}",
     "addedByUser": "手動で追加",
     "addedByRemember": "「常に許可」から追加",
     "toolRequired": "ツール名を入力してください(任意のツールは * で指定)",
-    "addRuleButton": "ルールを追加"
+    "addRuleButton": "ルールを追加",
+    "scopeProvider": "agent: {{id}}",
+    "legacyScopeAllow": "旧 profile スコープ(allow は無効)",
+    "legacyScopeDeny": "旧 profile スコープ(deny は全体に適用)",
+    "legacyScopeTitle": "このルールには、すでに存在しない profile スコープが付いています。profile は廃止されたため、allow ルールは一致しなくなり(これまで許可されていた操作は確認を求められます)、deny ルールはすべての session に適用されます。削除して agent スコープで作り直すことをお勧めします。",
+    "scopeAgentLabel": "agent で限定(任意)",
+    "scopeAgentHint": "この agent で開始した会話にのみ適用されます。空欄 = すべて。",
+    "scopeAgentAll": "(すべての agent)"
   }
 }

@@ -13,13 +13,9 @@
     "groupSessions": "Conversations",
     "newSession": {
       "title": "New conversation",
-      "subtitleWithProfile": "Using profile: {{name}}",
-      "subtitleNoProfile": "No Agent Profile available yet",
+      "subtitleWithAgent": "Using {{name}}",
+      "subtitleNoAgent": "No agent available yet",
       "keywords": "new session create conversation"
-    },
-    "newProfile": {
-      "title": "Create Agent Profile",
-      "keywords": "profile agent provider create"
     },
     "settings": {
       "title": "Settings",

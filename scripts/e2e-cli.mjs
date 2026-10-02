@@ -55,7 +55,6 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EMPTY_RESULT_TOOL_NAME_PREFIX,
@@ -69,6 +68,7 @@ import {
   WRITE_FILE_PREFIX,
 } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補)引入的守門員,2026-09-09 補上 @deskmony/cli 項目
 // ——見 scripts/lib/require-fresh-build.mjs。忘記先 pnpm build 的話,這裡會
@@ -77,7 +77,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const CLI_ENTRY = path.join(REPO_ROOT, "apps", "cli", "dist", "bin.js");
 
@@ -96,86 +95,13 @@ function sleep(ms) {
 }
 
 // =======================================================================
-// 以下四個 helper(MiniGatewayClient/startCore/waitForPort/killProcessTreeHard)
-// 逐字沿用 scripts/e2e-agent-lifecycle.mjs 的既有寫法(已經被其他六支測試
-// 驗證過的手法)——這支檔案只用 MiniGatewayClient 做一件事:呼叫
-// `profile.create` 建立 CLI 要用的 ACP profile(Phase 1 的 CLI 命令表面刻意
-// 不提供 `profile create`,見 apps/cli/src/commands/profile.ts 的檔頭註解),
-// 其餘所有動作都改成呼叫真正的 CLI 子程序,不再直接用這個 client 送指令。
+// 以下三個 helper(startCore/waitForPort/killProcessTreeHard)逐字沿用
+// scripts/e2e-agent-lifecycle.mjs 的既有寫法(已經被其他測試驗證過的手法)。
+// 2026-10-02(P2:移除 profile):原本還有一個 MiniGatewayClient,只用來
+// `profile.create` 建立 CLI 要用的 ACP profile——profile 已不存在,fake ACP agent 改經
+// `DESKMONY_E2E_EXTRA_PROVIDERS` 注入 core,CLI 用 `--agent e2e-fake-acp` 指定,所有動作都是
+// 真正的 CLI 子程序,不再直接用 gateway client 送指令。
 // =======================================================================
-class MiniGatewayClient {
-  constructor(url, token) {
-    this.url = url;
-    this.token = token;
-    this.pendingRpc = new Map();
-  }
-
-  async connect() {
-    this.ws = new WebSocket(this.url);
-    await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`WS connect timeout (${this.url})`)), 10_000);
-      this.ws.addEventListener("open", () => {
-        clearTimeout(t);
-        resolve();
-      });
-      this.ws.addEventListener("error", (e) => {
-        clearTimeout(t);
-        reject(new Error(`WS error (${this.url}): ${e.message ?? e}`));
-      });
-    });
-    this.ws.addEventListener("message", (e) => this._handleMessage(e.data));
-    if (this.token !== undefined) {
-      await this.rpc("auth", { token: this.token });
-    }
-  }
-
-  close() {
-    try {
-      this.ws?.close();
-    } catch {
-      // ignore
-    }
-  }
-
-  _handleMessage(raw) {
-    let msg;
-    try {
-      msg = JSON.parse(typeof raw === "string" ? raw : raw.toString());
-    } catch {
-      return;
-    }
-    if (msg.kind === "response") {
-      const pending = this.pendingRpc.get(msg.id);
-      if (pending) {
-        this.pendingRpc.delete(msg.id);
-        if (msg.ok) pending.resolve(msg.result);
-        else pending.reject(new Error(msg.error ?? "unknown gateway error"));
-      }
-    }
-  }
-
-  rpc(method, params, timeoutMs = 30_000) {
-    const id = randomUUID();
-    return new Promise((resolve, reject) => {
-      const t = setTimeout(() => {
-        this.pendingRpc.delete(id);
-        reject(new Error(`rpc ${method} 逾時 (${timeoutMs}ms)`));
-      }, timeoutMs);
-      this.pendingRpc.set(id, {
-        resolve: (v) => {
-          clearTimeout(t);
-          resolve(v);
-        },
-        reject: (e) => {
-          clearTimeout(t);
-          reject(e);
-        },
-      });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-}
-
 function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
   const env = {
     ...process.env,
@@ -183,6 +109,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -241,17 +169,6 @@ function rmDirs(dirs) {
       // ignore
     }
   }
-}
-
-async function createAcpProfile(client, name, workingDir) {
-  const { profile } = await client.rpc("profile.create", {
-    name,
-    software: "acp",
-    workingDir,
-    acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    permissionLevel: "always-ask",
-  });
-  return profile;
 }
 
 // =======================================================================
@@ -316,7 +233,7 @@ function testCase1VersionAndHelp() {
   const helpResult = runCli(["--help"]);
   // HLD §2 的完整指令表面——逐一比對子字串,而不是整段比對,避免措辭微調
   // 就打斷這支測試(這裡在乎的是「有沒有列出」,不是「排版長怎樣」)。
-  const requiredSubstrings = ["chat", "run", "serve", "session list", "session rm", "profile list", "doctor", "config show"];
+  const requiredSubstrings = ["chat", "run", "serve", "session list", "session rm", "--agent", "doctor", "config show"];
   const missing = requiredSubstrings.filter((s) => !helpResult.stdout.includes(s));
   const ok = versionResult.status === 0 && helpResult.status === 0 && missing.length === 0;
   record(
@@ -350,7 +267,7 @@ function testCase3UnreachableUrl() {
 }
 
 // =======================================================================
-// 案例 5/6/7/8/9/10/11:共用同一個一般(無認證)core + 同一個 ACP profile。
+// 案例 5/6/7/8/9/10/11:共用同一個一般(無認證)core + 同一個 fake ACP provider。
 //
 // 執行順序刻意是 6 → 5:案例 5(session list --json)的驗收要求「session
 // 存在之後,解析出來的物件要通過 SessionSchema」,所以先跑案例 6(run
@@ -363,15 +280,11 @@ async function testMainCoreCases() {
   const url = `ws://127.0.0.1:${PORT_MAIN}`;
 
   let core;
-  let gwClient;
   try {
     core = startCore({ port: PORT_MAIN, dataDir, homeDir, workspaceDir });
     await waitForPort(url, 20_000);
-    gwClient = new MiniGatewayClient(url);
-    await gwClient.connect();
-    const profile = await createAcpProfile(gwClient, "E2E CLI ACP Profile", workspaceDir);
 
-    const commonArgs = ["--url", url, "--profile", profile.id, "--cwd", workspaceDir, "--timeout", "15000"];
+    const commonArgs = ["--url", url, "--agent", FAKE_ACP, "--cwd", workspaceDir, "--timeout", "15000"];
 
     // ---- 案例 6:run "hello" -------------------------------------------
     const runHello = runCli([...commonArgs, "run", "hello"], { timeoutMs: 30_000 });
@@ -548,13 +461,11 @@ async function testMainCoreCases() {
         `實際的錯誤行=${JSON.stringify(failErrorLines)}`,
     );
 
-    gwClient.close();
     await killProcessTreeHard(core);
     core = null;
   } catch (err) {
     record("案例 5/6/7/8/9/10/11/12(共用主 core)執行過程發生未預期錯誤", false, String(err));
   } finally {
-    gwClient?.close();
     if (core) await killProcessTreeHard(core);
   }
 

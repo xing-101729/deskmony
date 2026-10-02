@@ -15,6 +15,14 @@ export type NexusDb = BetterSQLite3Database<typeof schema>;
  * `team_members`/`team_messages`/`tasks`/`workspaces` 五張表的建表語句與
  * `ensure*` 補欄位遷移已移除——**但不 DROP 任何資料表、不寫任何刪資料的遷移**:
  * 既有使用者 DB 裡的這幾張表(與資料)原封不動留在檔案裡,只是沒有程式碼再碰它。
+ *
+ * 2026-10-02(P2:移除 profile,見 docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md
+ * §P2.3):同樣**不 DROP `agent_profiles`、不修改它的任何資料**。全新安裝不再建立這張表;
+ * 既有 DB 裡的表原封不動留著,唯一還會讀它的是 `backfillLegacySessionsProvider()`
+ * (啟動時一次、冪等、**只 SELECT**),把舊 session 補上自帶的 provider/launch 欄位。
+ * `agent_profiles` 的補欄位遷移(`ensureAgentProfiles*Column`)與
+ * `migrateAutoAcceptAllPermissionLevel()`(對 profile 的 permission_level 做 UPDATE)
+ * 都已移除——沒有程式碼再讀那些欄位,也不該再改動這張變成唯讀歷史資料的表。
  */
 export function createDb(dbFilePath: string): NexusDb {
   const dir = path.dirname(dbFilePath);
@@ -46,7 +54,12 @@ export function createDb(dbFilePath: string): NexusDb {
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL DEFAULT '新對話',
+      -- 舊欄位(2026-10-02 起不再是 profile id):SQLite 不能直接改 NOT NULL 約束,
+      -- 所以保留欄位,新 session 寫入 provider id 當值。見 schema.ts 的 legacyAgentProfileId。
       agent_profile_id TEXT NOT NULL,
+      provider_id TEXT,
+      launch_command TEXT,
+      launch_args TEXT,
       adapter_type TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'idle',
       working_dir TEXT NOT NULL,
@@ -71,26 +84,6 @@ export function createDb(dbFilePath: string): NexusDb {
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
-
-    CREATE TABLE IF NOT EXISTS agent_profiles (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'Coder',
-      software TEXT NOT NULL,
-      provider_id TEXT,
-      model TEXT,
-      effort TEXT,
-      system_prompt TEXT,
-      mcp_config TEXT,
-      permission_level TEXT NOT NULL DEFAULT 'always-ask',
-      working_dir TEXT NOT NULL,
-      env TEXT,
-      acp_config TEXT,
-      pty_config TEXT,
-      opencode_config TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -128,10 +121,8 @@ export function createDb(dbFilePath: string): NexusDb {
   ensureSessionsRecoveryColumns(sqlite);
   ensureSessionsParentColumn(sqlite);
   ensureMessagesAttachmentsColumn(sqlite);
-  ensureAgentProfilesOpencodeConfigColumn(sqlite);
-  ensureAgentProfilesProviderColumns(sqlite);
-  ensureAgentProfilesEffortColumn(sqlite);
-  migrateAutoAcceptAllPermissionLevel(sqlite);
+  ensureSessionsLaunchColumns(sqlite);
+  backfillLegacySessionsProvider(sqlite);
 
   return drizzle(sqlite, { schema });
 }
@@ -185,8 +176,8 @@ function ensureSessionsEffortColumn(sqlite: Database.Database): void {
  * S6(crash-recovery):對「已存在的舊 DB 檔案」補上 `sessions.interrupted_at` /
  * `sessions.last_seen_at` / `sessions.backend_session_id` 三個欄位——理由與
  * 作法完全比照 `ensureSessionsModelColumn()`(`CREATE TABLE IF NOT EXISTS`
- * 對已存在的表不會補欄位)。三個欄位一起檢查/補上,理由同
- * `ensureAgentProfilesProviderColumns()`:同一輪新增、彼此沒有先後依賴。
+ * 對已存在的表不會補欄位)。三個欄位一起檢查/補上,理由:同一輪新增、彼此沒有
+ * 先後依賴,合併成一次 PRAGMA 查詢即可。
  */
 function ensureSessionsRecoveryColumns(sqlite: Database.Database): void {
   const columns = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
@@ -205,12 +196,6 @@ function ensureSessionsRecoveryColumns(sqlite: Database.Database): void {
   }
 }
 
-/**
- * 這輪新增:對「已存在的舊 DB 檔案」補上 `agent_profiles.opencode_config`
- * 欄位——理由與作法完全比照上面的 `ensureSessionsModelColumn()`(`CREATE
- * TABLE IF NOT EXISTS` 對已存在的表不會補欄位,需要另外用
- * `PRAGMA table_info` 檢查後視情況 `ALTER TABLE`)。
- */
 /**
  * S9(session-subagent):對「已存在的舊 DB 檔案」補上 `sessions.parent_session_id`
  * 欄位——理由與作法完全比照 `ensureSessionsModelColumn()`(`CREATE TABLE
@@ -248,94 +233,121 @@ function ensureMessagesAttachmentsColumn(sqlite: Database.Database): void {
   }
 }
 
-function ensureAgentProfilesOpencodeConfigColumn(sqlite: Database.Database): void {
-  const columns = sqlite.prepare("PRAGMA table_info(agent_profiles)").all() as { name: string }[];
-  const hasColumn = columns.some((col) => col.name === "opencode_config");
-  if (hasColumn) return;
-  try {
-    sqlite.exec("ALTER TABLE agent_profiles ADD COLUMN opencode_config TEXT");
-  } catch {
-    // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
-  }
-}
-
 /**
- * 這輪新增(provider 目錄重構):對「已存在的舊 DB 檔案」補上
- * `agent_profiles.provider_id`/`agent_profiles.env` 這兩個欄位——理由與作法
- * 完全比照上面的 `ensureAgentProfilesOpencodeConfigColumn()`。兩個欄位一起
- * 檢查/補上(而不是分成兩個函式),因為它們是同一輪新增、沒有先後依賴關係,
- * 合併成一次 PRAGMA 查詢即可。
+ * 2026-10-02(P2:移除 profile):對「已存在的舊 DB 檔案」補上 `sessions.provider_id` /
+ * `launch_command` / `launch_args` 三個欄位——session 自帶啟動資訊,續接時不再讀
+ * `agent_profiles`(見 SessionManager.continueSession())。理由與作法比照
+ * `ensureSessionsRecoveryColumns()`(三個欄位同一輪新增、沒有先後依賴,一次 PRAGMA 查詢)。
+ * 欄位全部 nullable:舊 session 的值由下面的 `backfillLegacySessionsProvider()` 回填。
  */
-function ensureAgentProfilesProviderColumns(sqlite: Database.Database): void {
-  const columns = sqlite.prepare("PRAGMA table_info(agent_profiles)").all() as { name: string }[];
+function ensureSessionsLaunchColumns(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
   const existing = new Set(columns.map((col) => col.name));
-  if (!existing.has("provider_id")) {
+  for (const column of ["provider_id", "launch_command", "launch_args"] as const) {
+    if (existing.has(column)) continue;
     try {
-      sqlite.exec("ALTER TABLE agent_profiles ADD COLUMN provider_id TEXT");
+      sqlite.exec(`ALTER TABLE sessions ADD COLUMN ${column} TEXT`);
     } catch {
       // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
     }
   }
-  if (!existing.has("env")) {
-    try {
-      sqlite.exec("ALTER TABLE agent_profiles ADD COLUMN env TEXT");
-    } catch {
-      // 同上。
-    }
-  }
 }
 
-/**
- * 這輪新增(思考程度):對「已存在的舊 DB 檔案」補上 `agent_profiles.effort`
- * 欄位——理由與作法完全比照上面的 `ensureSessionsModelColumn()`。
- */
-function ensureAgentProfilesEffortColumn(sqlite: Database.Database): void {
-  const columns = sqlite.prepare("PRAGMA table_info(agent_profiles)").all() as { name: string }[];
-  const hasColumn = columns.some((col) => col.name === "effort");
-  if (hasColumn) return;
+/** `backfillLegacySessionsProvider()` 從 `agent_profiles` 讀到的、有用的那幾欄(其餘一律不碰)。 */
+interface LegacyProfileRow {
+  software?: string;
+  provider_id?: string | null;
+  acp_config?: string | null;
+  pty_config?: string | null;
+  opencode_config?: string | null;
+}
+
+/** 從 `acp_config`/`pty_config`/`opencode_config` 的 JSON 取出 command/args;解析失敗或沒有 command 就當沒有。 */
+function parseLaunchConfig(raw: string | null | undefined): { command: string; args: string[] | undefined } | undefined {
+  if (!raw) return undefined;
   try {
-    sqlite.exec("ALTER TABLE agent_profiles ADD COLUMN effort TEXT");
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const { command, args } = parsed as { command?: unknown; args?: unknown };
+    if (typeof command !== "string" || command.length === 0) return undefined;
+    const argList = Array.isArray(args) && args.every((a) => typeof a === "string") ? (args as string[]) : undefined;
+    return { command, args: argList };
   } catch {
-    // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
+    return undefined;
   }
 }
 
 /**
- * S7(auto-mode-and-yolo)L4 §1.1:**破壞性 schema 收窄**——
- * `PermissionLevelSchema`(packages/shared/src/agent-profile.ts)移除了
- * `"auto-accept-all"`,YOLO 現在只能是 session 暫態,不可持久化到 profile
- * (見該檔案頂端註解)。這裡對「已存在、還存著舊值的 DB 檔案」做一次性降級
- * 遷移(不是加欄位,是改資料值,比照既有 `ensure*Column()` 系列的冪等作風,
- * 但用 `UPDATE` 取代 `ALTER TABLE`):
+ * 2026-10-02(P2:移除 profile,見 simplify-agents-sessions_detail.md §P2.3):**舊資料回填遷移**——
+ * 對 `provider_id IS NULL` 的 session 列,用 raw SQL 讀 `agent_profiles` 對應列,回填
+ * `provider_id` / `launch_command` / `launch_args`,讓這些舊 session 從此自帶啟動資訊、
+ * 續接時不必再讀 profile(profile 功能已整個移除)。
  *
- *   UPDATE agent_profiles SET permission_level = 'auto-accept-edits'
- *     WHERE permission_level = 'auto-accept-all';
+ * 回填規則:
+ *   - 找得到對應 profile **且 `profile.software === session.adapter_type`**:
+ *       providerId = profile.provider_id;沒有的話 software 為 claude-agent-sdk →
+ *       `"claude-agent-sdk"`,其餘 → `"legacy-<software>"`。launch 取自對應 software 的
+ *       `acp_config`/`pty_config`/`opencode_config` JSON(command → `launch_command`,
+ *       args → `launch_args` 的 JSON 字串)。
+ *   - 找得到 profile 但 software **對不上** session 的 `adapter_type`(舊設計下用
+ *     `agentOverride` 換過 agent 的 session——profile 描述的是 base agent,不是這個
+ *     session 實際跑的那個):不採用 profile 的 providerId/launch(那會讓續接換回錯的
+ *     agent,正是舊設計的既有 bug),providerId = `"claude-agent-sdk"`(adapter 本身是
+ *     claude-agent-sdk)或 `"legacy-<adapter_type>"`,不填 launch。
+ *   - 找不到 profile(或 `agent_profiles` 表不存在——全新安裝直接略過 SELECT):
+ *       providerId = `"legacy-unknown"`,不填 launch,續接時由 SessionManager 明確報錯
+ *       (claude-agent-sdk 的 session 不需要 command,續接仍然可行)。
  *
- * **不可靜默**——這是使用者曾經明確設定過的東西,被強制降級卻毫無提示會讓
- * 人以為「怎麼原本設定的全自動突然失效」。執行時逐筆 `console.warn` 列出被
- * 降級的 profile(id + name),讓使用者至少在啟動 log 看得到。
+ * **只讀 `agent_profiles`,絕不刪改它**(表與資料原封不動留著,見檔頭說明)。用
+ * `SELECT *` 而不是列舉欄位:很舊的 DB 裡這張表可能缺 `provider_id`/`opencode_config`
+ * 等後來才加的欄位(我們已不再替它補欄位),`SELECT *` 只拿得到實際存在的,缺的當作沒有。
  *
- * 冪等:每次 `createDb()` 都會呼叫,已經沒有 `auto-accept-all` 資料列時
- * `rows.length === 0`,直接 return,不會重複印警告或重複執行 UPDATE。
+ * 冪等:只處理 `provider_id IS NULL` 的列,回填後一律非 NULL,下一次啟動沒有東西可做。
+ * 整批包在單一 transaction 裡——中途失敗就整批不生效,下次啟動重來。
  */
-function migrateAutoAcceptAllPermissionLevel(sqlite: Database.Database): void {
-  const rows = sqlite
-    .prepare("SELECT id, name FROM agent_profiles WHERE permission_level = 'auto-accept-all'")
-    .all() as { id: string; name: string }[];
-  if (rows.length === 0) return;
+function backfillLegacySessionsProvider(sqlite: Database.Database): void {
+  const pending = sqlite
+    .prepare("SELECT id, agent_profile_id, adapter_type FROM sessions WHERE provider_id IS NULL")
+    .all() as { id: string; agent_profile_id: string; adapter_type: string }[];
+  if (pending.length === 0) return;
 
-  console.warn(
-    `[db] 偵測到 ${rows.length} 個 agent profile 使用已移除的 permissionLevel="auto-accept-all"` +
-      `(YOLO 現在只能是 session 暫態、不可持久化,見 docs/LAYER-4-detail-design/auto-mode-and-yolo_detail.md §1.1),` +
-      `已自動降級為 "auto-accept-edits":`,
-  );
-  for (const row of rows) {
-    console.warn(`[db]   - profile ${row.id}("${row.name}"): auto-accept-all → auto-accept-edits`);
-  }
+  const hasProfilesTable =
+    sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_profiles'").get() !== undefined;
+  const selectProfile = hasProfilesTable ? sqlite.prepare("SELECT * FROM agent_profiles WHERE id = ?") : undefined;
+  const update = sqlite.prepare("UPDATE sessions SET provider_id = ?, launch_command = ?, launch_args = ? WHERE id = ?");
 
+  const run = sqlite.transaction(() => {
+    for (const row of pending) {
+      const profile = selectProfile?.get(row.agent_profile_id) as LegacyProfileRow | undefined;
+      let providerId: string;
+      let launch: { command: string; args: string[] | undefined } | undefined;
+      if (!profile) {
+        providerId = "legacy-unknown";
+      } else if (profile.software !== row.adapter_type) {
+        providerId = row.adapter_type === "claude-agent-sdk" ? "claude-agent-sdk" : `legacy-${row.adapter_type}`;
+      } else {
+        providerId =
+          profile.provider_id || (profile.software === "claude-agent-sdk" ? "claude-agent-sdk" : `legacy-${profile.software}`);
+        launch = parseLaunchConfig(
+          profile.software === "acp"
+            ? profile.acp_config
+            : profile.software === "pty"
+              ? profile.pty_config
+              : profile.software === "opencode"
+                ? profile.opencode_config
+                : undefined,
+        );
+      }
+      update.run(providerId, launch?.command ?? null, launch?.args ? JSON.stringify(launch.args) : null, row.id);
+    }
+  });
   try {
-    sqlite.exec("UPDATE agent_profiles SET permission_level = 'auto-accept-edits' WHERE permission_level = 'auto-accept-all'");
+    run();
+    console.warn(
+      `[db] 舊 session 回填:${pending.length} 個 session 沒有自帶的 provider 資訊(建立於 profile 移除之前),` +
+        "已依它們的 agent profile 回填 provider_id/launch_command/launch_args(agent_profiles 表本身未被改動)。",
+    );
   } catch (err) {
-    console.error(`[db] 降級 permission_level 失敗(啟動流程仍繼續,但這些 profile 仍是無效值): ${String(err)}`);
+    console.error(`[db] 舊 session 回填失敗(啟動流程仍繼續;這些 session 的續接可能報錯,下次啟動會再嘗試): ${String(err)}`);
   }
 }

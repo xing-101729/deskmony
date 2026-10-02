@@ -35,7 +35,7 @@ export const ErrorCodes = {
   SESSION_NOT_RUNNING: "session.notRunning", // params: {sessionId}
   ADAPTER_UNSUPPORTED_OPERATION: "adapter.unsupportedOperation", // params: {software, operation}
   ADAPTER_UNKNOWN_HANDLE: "adapter.unknownHandle", // params: {handleId}
-  ADAPTER_MISSING_CONFIG: "adapter.missingConfig", // params: {profileId, software, configField}
+  ADAPTER_MISSING_CONFIG: "adapter.missingConfig", // params: {providerId, software, configField}
   AUTH_NOT_YET_AUTHENTICATED: "auth.notYetAuthenticated",
   AUTH_INVALID_TOKEN: "auth.invalidToken",
   AUTH_RATE_LIMITED: "auth.rateLimited",

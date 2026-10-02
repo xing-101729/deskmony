@@ -2,18 +2,12 @@ import { z } from "zod";
 import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema, SpawnChildSessionInputSchema } from "./session.js";
 import { PromptInputSchema } from "./prompt.js";
 import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema, SlashCommandInfoSchema } from "./events.js";
-import {
-  AgentProfileSchema,
-  AgentSoftwareSchema,
-  CreateAgentProfileInputSchema,
-  EffortLevelSchema,
-  SessionPermissionModeSchema,
-} from "./agent-profile.js";
+import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-launch.js";
 import { AdapterCapabilitiesSchema } from "./adapter-capabilities.js";
 import { AgentDetectionEntrySchema } from "./detect.js";
 import { MaskedProviderPrefsSchema, ProviderPrefsPatchInputSchema } from "./provider-catalog.js";
 import { ConfigSetFilePatchSchema, EffectiveCoreConfigSchema, PolicyAddRuleInputSchema, PolicyRuleSchema } from "./core-config.js";
-import { SubagentChildSummarySchema, SubagentProfileSummarySchema } from "./subagent.js";
+import { SubagentAgentSummarySchema, SubagentChildSummarySchema } from "./subagent.js";
 import { RecoveryListResultSchema } from "./recovery.js";
 
 /**
@@ -52,8 +46,8 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   z.object({ ...baseRequest, method: z.literal("auth"), params: z.object({ token: z.string() }) }),
   /**
    * S7(auto-mode-and-yolo)L4 §5.3 新增:握手能力集,消除 UI/Gateway 對「這個
-   * 連線是不是本機」的認知漂移——UI 純依此渲染(遠端隱藏 auto/YOLO/policy/
-   * profile 管理控制項),**安全仍由每次呼叫時的 `LOCAL_ONLY_METHODS` 檢查
+   * 連線是不是本機」的認知漂移——UI 純依此渲染(遠端隱藏 auto/YOLO/policy
+   * 控制項),**安全仍由每次呼叫時的 `LOCAL_ONLY_METHODS` 檢查
    * 保證**(見 apps/core/src/gateway/ws-gateway.ts),這個方法只是讓 UI 顯示
    * 正確,不是安全邊界本身。`params` 刻意是空物件——`isLocal` 只能由 Core
    * 依連線本身判定(見 `GatewayCapabilitiesSchema` 註解),不接受任何呼叫端
@@ -63,19 +57,24 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * 這裡多開一個不依賴認證流程的獨立入口。
    */
   z.object({ ...baseRequest, method: z.literal("gateway.capabilities"), params: z.object({}).default({}) }),
-  z.object({ ...baseRequest, method: z.literal("profile.list"), params: z.object({}).default({}) }),
-  z.object({ ...baseRequest, method: z.literal("profile.create"), params: CreateAgentProfileInputSchema }),
-  z.object({ ...baseRequest, method: z.literal("profile.delete"), params: z.object({ id: z.string() }) }),
+  /**
+   * 2026-10-02(P2:移除 profile):`profile.list`/`profile.create`/`profile.delete` 已整個
+   * 移除——session 直接以偵測到的 agent(providerId)建立,見 `CreateSessionInputSchema`;
+   * 可用的 agent 清單來自 `env.detectAgents` + `settings.getProviderPrefs` 經
+   * `resolveProviders()` 合併。**gateway 刻意沒有任何能新增任意 command 的方法**:
+   * 唯一能把非偵測到的執行檔放進 `AgentCatalog` 的是 e2e 專用的環境變數
+   * `DESKMONY_E2E_EXTRA_PROVIDERS`(只有啟動 core 的人能設,見
+   * apps/core/src/agents/agent-catalog.ts)。
+   */
   /**
    * Phase 2(ACP scoped MCP bridge token)新增:`list_profiles` MCP 工具
    * (packages/adapters/src/subagent-mcp.ts / mcp-bridge-server.ts)對應的
-   * gateway 入口——**刻意不是**直接放行 `profile.list`:那個方法回傳完整
-   * `AgentProfile`(含 `env`/`mcpConfig`/`systemPrompt` 等可能夾帶密鑰或指令的
-   * 欄位,見 agent-profile.ts 對 `env` 欄位的說明),不該進到任何 agent 的對話
-   * context。這裡回傳的欄位與 `SubagentPort.listProfiles()` 的既有 in-process
-   * 實作(apps/core/src/index.ts)完全相同的最小揭露子集。
+   * gateway 入口。2026-10-02(P2):原名 `profile.listForSubagent`,現在回傳
+   * `AgentCatalog.listAvailable()` 的最小摘要(id/label/software/models/defaultModelId),
+   * 與 `SubagentPort.listProfiles()` 的 in-process 實作(apps/core/src/index.ts)用
+   * 同一份映射(`AgentCatalog.summarizeAvailable()`)——**不含**任何 command/args/env。
    */
-  z.object({ ...baseRequest, method: z.literal("profile.listForSubagent"), params: z.object({}).default({}) }),
+  z.object({ ...baseRequest, method: z.literal("agent.listForSubagent"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("session.list"), params: z.object({}).default({}) }),
   z.object({ ...baseRequest, method: z.literal("session.create"), params: CreateSessionInputSchema }),
   z.object({
@@ -262,7 +261,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   /**
    * S12(session-subagent):從一個既有的 parent session 建立 child subagent
    * session。params 為 SpawnChildSessionInputSchema(含 parentSessionId/
-   * agentProfileId/workingDir?/title?/prompt)。child session completed 時
+   * providerId?/model?/effort?/workingDir?/title?/prompt)。child session completed 時
    * 會自動透過 "child-result" push 回傳結果。
    */
   z.object({
@@ -274,13 +273,12 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * Phase 2(ACP scoped MCP bridge token)新增:`spawn_subagent` MCP 工具
    * (packages/adapters/src/subagent-mcp.ts / mcp-bridge-server.ts)對應的
    * gateway 入口。**刻意不是**直接放行 `session.spawnChild`(上面那個)——
-   * 那個方法的 `agentProfileId` 是必填(`SpawnChildSessionInputSchema`),而
-   * `spawn_subagent` 工具允許省略(省略時沿用父 session 自己的 profile,見
-   * `SubagentPort.spawnChild()` 的介面註解、apps/core/src/session/
-   * session-manager.ts 的 `spawnChildFromTool()`)——兩者语意不同,分開成獨立
-   * 方法比修改既有 `session.spawnChild` 的必填規則更精確,不影響既有呼叫端。
-   * `agentProfileId` 省略時,handler 呼叫 `SessionManager.spawnChildFromTool()`
-   * (而非 `spawnChild()`)解析預設值。
+   * 那個方法可以指定 `workingDir`/`effort`,而 `spawn_subagent` 工具的參數只有
+   * prompt/title/agent/model(`agent` 省略時沿用父 session 自己的 providerId/model,
+   * 見 `SubagentPort.spawnChild()` 的介面註解、apps/core/src/session/
+   * session-manager.ts 的 `spawnChildFromTool()`)——不讓 agent 經這條路徑指定
+   * 工作目錄。2026-10-02(P2):參數原本的 `agentProfileId` 改成 `agent`(providerId)+
+   * `model`。
    */
   z.object({
     ...baseRequest,
@@ -289,7 +287,8 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
       parentSessionId: z.string(),
       prompt: z.string().min(1),
       title: z.string().optional(),
-      agentProfileId: z.string().optional(),
+      agent: z.string().min(1).optional(),
+      model: z.string().optional(),
     }),
   }),
   /**
@@ -342,7 +341,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    *
    * 語意約定(務必與 SettingsGetEnabledModelsResultSchema 的註解保持一致):
    * **空陣列 = 全部啟用**。未曾呼叫過 `settings.setEnabledModels` 時,
-   * `getEnabledModels` 回傳空陣列,呼叫端(ProfileCreateDialog/ChatView)
+   * `getEnabledModels` 回傳空陣列,呼叫端(SessionList/ChatView)
    * 一律把「空陣列」解讀為「沒有限制,顯示偵測到的 model 全部」,而不是
    * 「一個都不啟用」——這樣預設值(尚未進過設定頁面)才會是「目前查得到的
    * model 都可以選」,符合使用者的直覺。
@@ -561,7 +560,7 @@ export type ServerMessage = z.infer<typeof ServerMessageSchema>;
  *
  * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`canToggleAuto`/`canEnableYolo`/
  * `canEditPolicy` 三項**不再等於 `isLocal`**,改成恆為 `true`(使用者明確決定
- * 遠端與本機同等)。`canManageProfiles` 維持 `isLocal`(未變動)。這裡的欄位
+ * 遠端與本機同等)。這裡的欄位
  * **仍然只是 UI 顯示用**,不是安全邊界本身——真正的把關在每次呼叫時 Gateway
  * 的伺服器端檢查(`LOCAL_ONLY_METHODS`、`session.setTrueUnrestricted` 的
  * mode 前置條件),即使這裡回傳的值被竄改,後端也不會因此放行。
@@ -573,8 +572,6 @@ export const GatewayCapabilitiesSchema = z.object({
   canEnableYolo: z.boolean(),
   /** 能否編輯 policy 允許清單(`policy.addRule`/`removeRule`)。恆 `true`,見上方 2026-08-25 修訂說明。 */
   canEditPolicy: z.boolean(),
-  /** 能否管理 agent profile(`profile.create`,之後的 `profile.update`/`delete`)。維持 `isLocal`,未變動。 */
-  canManageProfiles: z.boolean(),
   /**
    * 2026-08-25 新增:能否啟用「真.無限制」層(`session.setTrueUnrestricted`)。
    * 目前恆為 `true`——這個能力沒有連線類型層面的門檻,真正的把關是每次呼叫時
@@ -603,12 +600,9 @@ export const GatewayCapabilitiesResultSchema = z.object({ capabilities: GatewayC
  *  `auth`),`gateway.capabilities` 是保證一定能拿到的獨立入口(見該 case 註解)。 */
 export const AuthResultSchema = z.object({ ok: z.literal(true), capabilities: GatewayCapabilitiesSchema });
 
-export const ProfileListResultSchema = z.object({ profiles: z.array(AgentProfileSchema) });
-export const ProfileCreateResultSchema = z.object({ profile: AgentProfileSchema });
-export const ProfileDeleteResultSchema = z.object({ ok: z.literal(true) });
-/** Phase 2:`profile.listForSubagent` 的回應——見 `ClientRequestSchema` 對應
- *  case 的完整說明(最小揭露子集,不含 env/mcpConfig/systemPrompt)。 */
-export const ProfileListForSubagentResultSchema = z.object({ profiles: z.array(SubagentProfileSummarySchema) });
+/** Phase 2:`agent.listForSubagent` 的回應——見 `ClientRequestSchema` 對應
+ *  case 的完整說明(最小揭露子集,不含 command/args/env)。 */
+export const AgentListForSubagentResultSchema = z.object({ agents: z.array(SubagentAgentSummarySchema) });
 export const SessionListResultSchema = z.object({ sessions: z.array(SessionSchema) });
 export const SessionCreateResultSchema = z.object({ session: SessionSchema });
 export const SessionHistoryResultSchema = z.object({ messages: z.array(MessageRecordSchema) });
@@ -654,7 +648,7 @@ export const PolicyRemoveRuleResultSchema = z.object({ removed: z.boolean(), rul
 export const PolicyListRulesResultSchema = z.object({ rules: z.array(PolicyRuleSchema) });
 /**
  * `adapter.capabilities` 的回應(M2 Round B):讓 UI 在建立 session 前
- * (依 `AgentProfile.software`)或拿到 session 之後(依 `Session.adapterType`)
+ * (依 provider 的 `software`)或拿到 session 之後(依 `Session.adapterType`)
  * 查詢對應 adapter 的能力,決定要渲染聊天串流視圖還是 xterm 終端視圖
  * (ARCHITECTURE.md 3.4 節「能力探測 + 優雅降級」)。
  */

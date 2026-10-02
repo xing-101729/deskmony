@@ -1,0 +1,19 @@
+{
+  "agentAriaLabel": "Elegir agent",
+  "agentLabel": "Agent",
+  "redetect": "Volver a detectar",
+  "modelAriaLabel": "Elegir model",
+  "modelLabel": "Model",
+  "defaultModelOption": "(model predeterminado)",
+  "effortAriaLabel": "Elegir nivel de razonamiento",
+  "effortLabel": "Nivel de razonamiento",
+  "defaultEffortOption": "(nivel predeterminado)",
+  "workingDirLabel": "Carpeta de trabajo",
+  "workingDirPlaceholder": "Predeterminada: {{dir}}",
+  "workingDirPlaceholderNoDefault": "Carpeta de trabajo (vacío = predeterminada)",
+  "browseButton": "Examinar…",
+  "noAgent": {
+    "title": "No se detectó ningún agent utilizable",
+    "description": "No se encontró en este equipo ningún software de agent capaz de iniciar una conversación, o todos están desactivados en Ajustes. Instálelo y pulse \"Volver a detectar\", o revise la lista de agents en Ajustes."
+  }
+}

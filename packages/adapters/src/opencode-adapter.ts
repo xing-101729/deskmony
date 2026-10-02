@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import path from "node:path";
-import type { AgentEvent, AgentProfile, DialogAnswer, PromptInput, SlashCommandInfo } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, PromptInput, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
@@ -22,8 +22,8 @@ import { waitForChildExit } from "./child-process.js";
  *    `--hostname 127.0.0.1`),啟動後會在 **stdout** 印出一行
  *    `opencode server listening on http://<host>:<port>`——這裡 spawn 子
  *    程序時固定帶 `serve --port 0 --hostname 127.0.0.1`(除非
- *    `profile.opencodeConfig.args` 有指定,見 `packages/shared/src/
- *    agent-profile.ts` 的 `OpencodeAgentConfigSchema` 註解:那是給
+ *    `launch.opencodeConfig.args` 有指定,見 `packages/shared/src/
+ *    agent-launch.ts` 的 `OpencodeAgentConfigSchema` 註解:那是給
  *    `scripts/fake-opencode-server.mjs` 用的逃生閥,一般情況下不需要填),
  *    再解析這行 stdout 取得實際綁定的 base URL。
  *  - 伺服器提供 `GET /doc` 的 OpenAPI 3.1 文件與 `GET /global/health`
@@ -205,13 +205,14 @@ export class OpenCodeAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
-    const config = profile.opencodeConfig;
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+    const config = launch.opencodeConfig;
+    const agentLabel = launch.providerId ?? "opencode";
     if (!config) {
       throw new DeskmonyError(
         ErrorCodes.ADAPTER_MISSING_CONFIG,
-        { profileId: profile.id, software: "opencode", configField: "command" },
-        `AgentProfile "${profile.id}" 的 software="opencode" 缺少 opencodeConfig(command)`,
+        { providerId: agentLabel, software: "opencode", configField: "command" },
+        `agent "${agentLabel}" 的 software="opencode" 缺少 opencodeConfig(command)`,
       );
     }
 
@@ -219,11 +220,11 @@ export class OpenCodeAdapter implements AgentAdapter {
     const rawArgs = config.args && config.args.length > 0 ? config.args : defaultServeArgs;
     const { command, args, useShell } = resolveWindowsSpawnCommand(config.command, rawArgs);
 
-    // 這輪新增:profile.env 疊在 process.env 之上,config.env(既有欄位)
+    // launch.env(provider 層級 env)疊在 process.env 之上,config.env(既有欄位)
     // 最優先——同 acp-adapter.ts 的合併順序說明。
     const child: OpencodeChildProcess = spawn(command, args, {
       cwd: workspace.path,
-      env: { ...process.env, ...profile.env, ...config.env },
+      env: { ...process.env, ...launch.env, ...config.env },
       stdio: ["ignore", "pipe", "pipe"],
       shell: useShell,
     });
@@ -246,7 +247,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      console.error(`[opencode-adapter] ${profile.name} stderr: ${chunk.toString().trimEnd()}`);
+      console.error(`[opencode-adapter] ${agentLabel} stderr: ${chunk.toString().trimEnd()}`);
     });
 
     let baseUrl: string;
@@ -318,7 +319,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       availableCommandsFetched = true;
     } catch (err) {
       console.error(
-        `[opencode-adapter] ${profile.name} GET /command 失敗(不影響對話,只影響 "/" 指令與選單): ${err instanceof Error ? err.message : String(err)}`,
+        `[opencode-adapter] ${agentLabel} GET /command 失敗(不影響對話,只影響 "/" 指令與選單): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
@@ -332,7 +333,7 @@ export class OpenCodeAdapter implements AgentAdapter {
             "否則 completed 事件永遠進不來,session 會卡在 busy。",
         ),
     });
-    const handle: AgentHandle = { id: randomUUID(), profile, workspace };
+    const handle: AgentHandle = { id: randomUUID(), launch, workspace };
     const sseController = new AbortController();
 
     const internal: InternalSession = {
@@ -423,14 +424,14 @@ export class OpenCodeAdapter implements AgentAdapter {
     }
 
     // model 解析優先序:`internal.modelOverride`(透過 setModel() 對話中途
-    // 設定,見該方法)> `handle.profile.model`(profile 建立時挑選的
-    // "providerID/modelID" 組合字串,見 ProfileCreateDialog.tsx 的送出邏輯)。
+    // 設定,見該方法)> `handle.launch.model`(建立 session 時挑選的
+    // "providerID/modelID" 組合字串,來自 `opencode models` 偵測清單)。
     // 兩者都用同一個 parseModelString() 從第一個 "/" 拆成 opencode 要求的
     // {providerID, modelID} 兩個欄位,隨 POST /session/{id}/message 一起送
     // 出——setModel() 本身只是把覆寫記在記憶體裡,並不會呼叫任何 opencode
     // API(沒有對應的端點),真正「生效」永遠是靠這裡讀到覆寫值的下一次
     // sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
-    const modelField = internal.modelOverride ?? parseModelString(handle.profile.model);
+    const modelField = internal.modelOverride ?? parseModelString(handle.launch.model);
     void postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/message`, {
       parts: [{ type: "text", text: prompt.text }],
       ...(modelField ? { model: modelField } : {}),
@@ -563,14 +564,14 @@ export class OpenCodeAdapter implements AgentAdapter {
    * 符合 `AgentAdapter.setModel()` 介面註解「不可靜默忽略成功」的要求。
    *
    * 唯一會拋錯的情況是 `model` 本身不是合法的 "providerID/modelID" 形狀,
-   * 無法解析(與 `parseModelString()` 判斷 `profile.model` 是否合法的規則
+   * 無法解析(與 `parseModelString()` 判斷 `launch.model` 是否合法的規則
    * 完全一致)。刻意不做的部分:呼叫 `/config/providers`(或 `/provider`)
    * 驗證這組 providerID/modelID 是否真的存在——本檔案的對接策略一貫要求
    * 「以實際觀察到的 opencode 行為為準,不臆測」,這輪沒有機會對這兩個端點
    * 做本機驗證。若使用者傳入語法正確但實際不存在的 model,opencode 會在
    * 下一次 `POST /session/{id}/message` 時自行判定失敗,經由既有的
    * `message.updated` 錯誤事件轉發路徑浮現(見 `handleEvent()`)——與
-   * 「`profile.model` 打錯字」的既有行為完全一致,不需要另外處理。
+   * 「`launch.model` 打錯字」的既有行為完全一致,不需要另外處理。
    */
   async setModel(handle: AgentHandle, model: string): Promise<void> {
     const internal = this.mustGet(handle);
@@ -1027,7 +1028,7 @@ interface InternalSession {
   turnErrored: boolean;
   idleWaiters: Array<() => void>;
   sseController: AbortController;
-  /** setModel() 設定的覆寫值,優先於 handle.profile.model——見 setModel()/sendPrompt() 方法註解。 */
+  /** setModel() 設定的覆寫值,優先於 handle.launch.model——見 setModel()/sendPrompt() 方法註解。 */
   modelOverride?: { providerID: string; modelID: string };
   /**
    * 這輪(slash command)新增:spawn() 時 `GET /command` 查到的指令清單,key
@@ -1088,7 +1089,7 @@ function waitForIdle(internal: InternalSession, timeoutMs: number): Promise<void
 /**
  * 把一個扁平字串拆成 opencode `POST /session/{id}/message` body 要求的
  * `{providerID, modelID}` 兩個欄位。兩種呼叫來源共用這個函式：
- *   - `AgentProfile.model`(建立 profile 時，`ProfileCreateDialog` 從
+ *   - `AgentLaunchSpec.model`(建立 session 時，SessionList 從
  *     `opencode models` 偵測結果挑出的 "providerID/modelID" 組合，見
  *     provider-catalog.ts/resolve-providers.ts 的模型偵測流程)。
  *   - `setModel()` 收到的、對話中途要換的 model 字串(來源同上——UI 選單的

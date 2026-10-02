@@ -23,10 +23,9 @@ import {
 } from "@deskmony/shared";
 import { applyConfigFilePatch } from "../config/config-file-writer.js";
 import type { SessionManager } from "../session/session-manager.js";
-import type { ProfileStore } from "../profiles.js";
+import type { AgentCatalog } from "../agents/agent-catalog.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
 import type { RecoveryService } from "../recovery/recovery-service.js";
-import { detectAllAgents } from "../detect/agent-detector.js";
 import {
   getEnabledClaudeModelIds,
   getProviderPrefsMap,
@@ -126,7 +125,7 @@ interface ScopedTokenGrant {
  *   spawn_subagent    → session.spawnChildForSubagent
  *   send_to_subagent  → session.sendToChild
  *   list_subagents    → session.listChildren
- *   list_profiles     → profile.listForSubagent
+ *   list_profiles     → agent.listForSubagent(2026-10-02 P2:原 profile.listForSubagent)
  */
 function computeAllowedMethods(scope: McpBridgeTokenScope): ReadonlySet<ClientRequestMethod> {
   const methods = new Set<ClientRequestMethod>();
@@ -134,7 +133,7 @@ function computeAllowedMethods(scope: McpBridgeTokenScope): ReadonlySet<ClientRe
     methods.add("session.spawnChildForSubagent");
     methods.add("session.sendToChild");
     methods.add("session.listChildren");
-    methods.add("profile.listForSubagent");
+    methods.add("agent.listForSubagent");
   }
   return methods;
 }
@@ -184,21 +183,18 @@ function resolveMcpBridgeConnectHost(bindHost: string): string {
 /**
  * S7 L4 §5.1:唯一的安全保證——即使某個 client 想繞過 UI 直接送出這些
  * method 的 raw request,一律在 dispatch 之前被擋下(不是靠 UI 隱藏按鈕)。
- * 之後 S3b 的預算設定 method 也要加進這個清單。`profile.update` 目前尚未
- * 實作(見 packages/shared/src/gateway.ts),等實作後也要加進來。
+ * 之後 S3b 的預算設定 method 也要加進這個清單。
  *
  * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`session.setPermissionMode`
  * 已移除——使用者明確翻案原 F3/C6「遠端不可切 auto/YOLO」的限制,本機與遠端
  * 現在同等對待。新增的 `session.setTrueUnrestricted`/`policy.addRule`/
  * `policy.removeRule`/`policy.listRules` 四個方法**刻意不加進這個清單**
  * (同一次翻案的一部分)。`config.setFile`(daemon/workspace/features/log 這類
- * 一般設定,不含 policy)、`profile.create`、`profile.delete` 三項使用者沒有
- * 要求開放,維持 local-only。
+ * 一般設定,不含 policy)使用者沒有要求開放,維持 local-only。
+ * (2026-10-02 P2:原本同批的 `profile.create`/`profile.delete` 已隨 profile 一併移除。)
  */
 const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
   "config.setFile", // 一般設定(daemon/workspace/features/log,不含 policy)
-  "profile.create",
-  "profile.delete",
   /**
    * 2026-09-04(稽核修補)新增——理由與上面那批「使用者沒有要求開放」
    * 不同,這項是**結構性繞過安全罩**的路徑,與 §G 翻案開放的那些
@@ -210,12 +206,12 @@ const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
    *
    *   - `settings.setProviderPrefs`:`ProviderPrefsSchema.env` 是
    *     `z.record(z.string(), z.string())`(無 key 白名單),而這份 env 經
-   *     `getProviderEnv()` → `SessionManager.prepareSpawnProfile()` 併進
+   *     `getProviderEnv()` → `SessionManager.prepareSpawnSpec()` 併進
    *     **每一個 agent 子程序**的環境變數(三個 adapter 都是
-   *     `env: { ...process.env, ...profile.env }`)。設一個 `NODE_OPTIONS`
+   *     `env: { ...process.env, ...launch.env }`)。設一個 `NODE_OPTIONS`
    *     就能在任何工具呼叫發生**之前**取得執行權。
    *
-   * 它同時也與既有的 `config.setFile`/`profile.create` 同類:都是「改變 core
+   * 它同時也與既有的 `config.setFile` 同類:都是「改變 core
    * 自己或子程序怎麼被啟動」的設定面操作,本來就該留在本機。
    *
    * (2026-10-02:原本同批的 `task.setAcceptance`/`task.runAcceptance`
@@ -469,7 +465,9 @@ export class WsGateway {
 
   constructor(
     private readonly sessionManager: SessionManager,
-    private readonly profiles: ProfileStore,
+    /** 2026-10-02(P2:移除 profile):取代原本的 `ProfileStore`——`env.detectAgents`(重新偵測)與
+     *  `agent.listForSubagent`(可用 agent 摘要)的資料來源。 */
+    private readonly catalog: AgentCatalog,
     private readonly settingsStore: SettingsStore,
     /** S3b(CostGovernor)新增:`cost.getSummary` 的資料來源,見該 case 註解。 */
     private readonly costGovernor: CostGovernor,
@@ -628,8 +626,7 @@ export class WsGateway {
    *
    * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`canToggleAuto`/
    * `canEnableYolo`/`canEditPolicy` 不再等於 `isLocal`,改成恆 `true`——使用者
-   * 明確翻案,遠端與本機同權。`canManageProfiles` 維持 `isLocal`,未變動
-   * (使用者這輪沒有要求開放 profile 管理)。新增 `canEnableTrueUnrestricted`
+   * 明確翻案,遠端與本機同權。(2026-10-02 P2:原本的 `canManageProfiles` 已隨 profile 移除。)新增 `canEnableTrueUnrestricted`
    * (恆 `true`,真正的把關是每次呼叫時的 session-mode 前置條件,不是連線
    * 類型)與 `isRemoteConnection`(純顯示用,見 `GatewayCapabilitiesSchema` 的
    * 完整說明)。
@@ -639,7 +636,6 @@ export class WsGateway {
       canToggleAuto: true,
       canEnableYolo: true,
       canEditPolicy: true,
-      canManageProfiles: isLocal,
       canEnableTrueUnrestricted: true,
       isRemoteConnection: !isLocal,
     };
@@ -785,7 +781,7 @@ export class WsGateway {
           return { allowed: false, reason: "parentSessionId 與此 token 綁定的 session 不符" };
         }
         return { allowed: true };
-      case "profile.listForSubagent":
+      case "agent.listForSubagent":
         if (!current.subagent) return { allowed: false, reason: "此 token 未授權 subagent 相關方法" };
         return { allowed: true };
       default:
@@ -1061,24 +1057,16 @@ export class WsGateway {
        */
       case "gateway.capabilities":
         return { capabilities: this.buildCapabilities(isLocal) };
-      case "profile.list":
-        return { profiles: await this.profiles.list() };
-      case "profile.create":
-        return { profile: await this.profiles.create(request.params) };
-      case "profile.delete":
-        await this.profiles.delete(request.params.id);
-        return { ok: true };
       /**
        * Phase 2(ACP scoped MCP bridge token):`list_profiles` MCP 工具對應的
        * gateway 入口,見 packages/shared/src/gateway.ts 對應 case 的完整說明
-       * ——只回傳決策需要的最小欄位,與 apps/core/src/index.ts 注入給
-       * `ClaudeAgentSdkAdapter.setSubagentPort()` 的 `listProfiles` 回呼用
-       * 同一份映射邏輯(維持兩個 adapter 看到的 `list_profiles` 結果一致)。
+       * ——只回傳決策需要的最小欄位。與 apps/core/src/index.ts 注入給
+       * `ClaudeAgentSdkAdapter.setSubagentPort()` 的 `listProfiles` 回呼共用
+       * `AgentCatalog.summarizeAvailable()`(結構上保證兩個 adapter 看到的結果一致)。
+       * 2026-10-02(P2):原名 `profile.listForSubagent`。
        */
-      case "profile.listForSubagent": {
-        const list = await this.profiles.list();
-        return { profiles: list.map((p) => ({ id: p.id, name: p.name, software: p.software, model: p.model, role: p.role })) };
-      }
+      case "agent.listForSubagent":
+        return { agents: await this.catalog.summarizeAvailable() };
       case "session.list":
         return { sessions: await this.sessionManager.listSessions() };
       case "session.create":
@@ -1168,10 +1156,10 @@ export class WsGateway {
       /**
        * Phase 2(ACP scoped MCP bridge token):`spawn_subagent` MCP 工具對應的
        * gateway 入口——見 packages/shared/src/gateway.ts 對應 case 的完整說明
-       * (為何不是直接放行上面的 `session.spawnChild`:`agentProfileId` 語意
-       * 不同)。呼叫 `spawnChildFromTool()`(而非 `spawnChild()`)取得「省略
-       * agentProfileId 時沿用父 session 自己的 profile」這個既有的預設值解析
-       * 邏輯,與 in-process 的 `subagent-mcp.ts` 走同一份實作。
+       * (為何不是直接放行上面的 `session.spawnChild`:可指定的參數不同)。呼叫
+       * `spawnChildFromTool()`(而非 `spawnChild()`)取得「省略 agent 時沿用父 session
+       * 自己的 agent 與 model」這個既有的預設值解析邏輯,與 in-process 的
+       * `subagent-mcp.ts` 走同一份實作。
        */
       case "session.spawnChildForSubagent":
         return await this.sessionManager.spawnChildFromTool(request.params);
@@ -1194,7 +1182,8 @@ export class WsGateway {
         // M5 Round D:不吃任何呼叫端參數(見 packages/shared/src/gateway.ts
         // 對應 schema 的註解、apps/core/src/detect/agent-detector.ts 的安全
         // 設計說明)——`detectAllAgents()` 只探測寫死在該檔案內的 allowlist。
-        return { agents: await detectAllAgents() };
+        // 2026-10-02(P2):改成「重新偵測 + 更新 `AgentCatalog` 的偵測快取 + 回傳」。
+        return { agents: await this.catalog.detectAgents() };
       /**
        * M5 Round E:「設定」介面的「啟用哪些偵測到的 model」偏好,見
        * apps/core/src/settings/settings-store.ts 的完整語意說明(空陣列 =

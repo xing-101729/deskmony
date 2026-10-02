@@ -54,12 +54,12 @@ import {
   manyToolCallInput,
 } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_OPENCODE } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_SERVER_PATH = path.join(REPO_ROOT, "scripts", "fake-opencode-server.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const PORT = 4390;
 /** 刻意設小:C 送剛好這麼多個工具、D 多送一個,見檔頭。 */
@@ -224,6 +224,8 @@ function startCore({ dataDir, homeDir, workspaceDir }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
   let stdoutBuffer = "";
@@ -455,17 +457,11 @@ async function main() {
     client = new TimelineClient(`ws://127.0.0.1:${PORT}`);
     await client.connect();
 
-    const { profile } = await client.rpc("profile.create", {
-      name: "E2E OpenCode tool input",
-      software: "opencode",
-      workingDir: workspaceDir,
-      opencodeConfig: { command: process.execPath, args: [FAKE_SERVER_PATH] },
-      // bash 的 permission-request 要真的升級給人(進 waiting),A' 才有東西可驗。
-      permissionLevel: "always-ask",
-    });
+    // bash 的 permission-request 要真的升級給人(進 waiting),A' 才有東西可驗——新 session 一律從
+    // always-ask 開始(2026-10-02 P2:不再有 profile.permissionLevel)。
     ({ session: { id: sessionId } } = await client.rpc(
       "session.create",
-      { agentProfileId: profile.id, workingDir: workspaceDir, title: "e2e-opencode-tool-input" },
+      { providerId: FAKE_OPENCODE, workingDir: workspaceDir, title: "e2e-opencode-tool-input" },
       30_000,
     ));
 

@@ -8,7 +8,7 @@
   "adapter": {
     "unsupportedOperation": "{{software}} はこの操作に対応していません: {{operation}}",
     "unknownHandle": "実行中のセッションが見つかりません: {{handleId}}",
-    "missingConfig": "プロファイル「{{profileId}}」に {{software}} が必要とする設定がありません: {{configField}}"
+    "missingConfig": "agent「{{providerId}}」に {{software}} が必要とする設定がありません: {{configField}}"
   },
   "auth": {
     "notYetAuthenticated": "認証がまだ完了していません。最初のメッセージは正しいトークンを含む auth リクエストである必要があります",

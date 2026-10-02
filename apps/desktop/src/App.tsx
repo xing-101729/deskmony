@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import type { AgentOverride } from "@deskmony/shared";
-import { client, useSessionStore } from "./stores/session-store.js";
+import { client, providerLabelOf, selectAvailableProviders, useSessionStore } from "./stores/session-store.js";
 import { useRecoveryStore } from "./stores/recovery-store.js";
 import { SessionList } from "./views/SessionList.js";
 import { SessionView } from "./views/SessionView.js";
@@ -19,6 +18,13 @@ import { useTheme } from "./ui/theme.js";
 import { useFontScale } from "./ui/font-scale.js";
 import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 import { shortenPath } from "./lib/workspaces.js";
+import { translateError } from "./lib/error-i18n.js";
+import {
+  loadNewSessionSelection,
+  reconcileSelection,
+  saveNewSessionSelection,
+  type NewSessionSelection,
+} from "./lib/new-session-selection.js";
 
 /**
  * M5 Round B(任務2):Electron renderer 由 preload.ts 透過 `contextBridge`
@@ -55,7 +61,9 @@ export default function App(): JSX.Element {
   const connect = useSessionStore((s) => s.connect);
   const status = useSessionStore((s) => s.status);
   const sessions = useSessionStore((s) => s.sessions);
-  const profiles = useSessionStore((s) => s.profiles);
+  const detectedAgents = useSessionStore((s) => s.detectedAgents);
+  const providerPrefs = useSessionStore((s) => s.providerPrefs);
+  const effectiveConfig = useSessionStore((s) => s.effectiveConfig);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const selectSession = useSessionStore((s) => s.selectSession);
   const createSession = useSessionStore((s) => s.createSession);
@@ -74,15 +82,15 @@ export default function App(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   /**
-   * 建立 session 用的 profile 選擇 —— 改版時從 SessionList 提升到這一層,因為
-   * 現在有**兩個**入口會用到它(側欄的「新對話」按鈕、命令面板的「新對話」
-   * 指令),兩者必須共用同一個「目前選了哪個 profile」,否則⌘N 建出來的 session
-   * 會與側欄下拉顯示的不一致。
+   * 2026-10-02(P2:移除 profile):建立 session 用的 agent/model/effort/資料夾選擇——取代原本的
+   * 「選哪個 profile」。改版時從 SessionList 提升到這一層,因為有**三個**入口會用到它(側欄的
+   * 「新對話」按鈕、`⌘N`、命令面板的「新對話」指令),必須共用同一份選擇,否則⌘N 建出來的 session
+   * 會與側欄下拉顯示的不一致。上次的選擇存 localStorage(見 lib/new-session-selection.ts),下次開 app 還原。
    */
-  const [selectedProfileId, setSelectedProfileId] = useState<string>("");
+  const [selection, setSelection] = useState<NewSessionSelection>(loadNewSessionSelection);
   const [creatingSession, setCreatingSession] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!hasElectronBridge) return; // 瀏覽器場景:等 ConnectScreen 驗證成功才連線
@@ -103,33 +111,53 @@ export default function App(): JSX.Element {
     return unsubscribe;
   }, []);
 
-  // profiles 是非同步載入的;第一次拿到清單、或目前選取的 profile 不再存在時,
-  // 自動選第一筆(邏輯與改版前 SessionList 內的同名 effect 相同)。
-  useEffect(() => {
-    if (profiles.length === 0) return;
-    if (!selectedProfileId || !profiles.some((p) => p.id === selectedProfileId)) {
-      setSelectedProfileId(profiles[0].id);
-    }
-  }, [profiles, selectedProfileId]);
-
-  const selectedProfile = profiles.find((p) => p.id === selectedProfileId);
-
-  /** agentOverride 選填——⌘N/命令面板呼叫時省略(維持既有「一鍵用目前 profile
-   *  建立」的快速路徑不變);SessionList 的「進階」揭露區展開並選了覆寫時,由
-   *  按鈕點擊那條路徑帶入,見該檔案 onCreateSession 的呼叫處。 */
-  const handleCreateSession = useCallback(
-    async (agentOverride?: AgentOverride): Promise<void> => {
-      const profile = selectedProfile ?? profiles[0];
-      if (!profile) return;
-      setCreatingSession(true);
-      try {
-        await createSession(profile.id, profile.workingDir, t("app:sessionDefaultTitle", { n: sessions.length + 1 }), agentOverride);
-      } finally {
-        setCreatingSession(false);
-      }
-    },
-    [createSession, profiles, selectedProfile, sessions.length, t],
+  // 偵測結果是非同步載入的;把(可能過時的)選擇對齊到「現在真的可用」的 agent 清單——被停用/移除的 agent
+  // 會自動退回第一個可用的(邏輯等同改版前「profile 不再存在時自動選第一筆」)。
+  const availableProviders = useMemo(
+    () => selectAvailableProviders(detectedAgents, providerPrefs),
+    [detectedAgents, providerPrefs],
   );
+  const effectiveSelection = useMemo(
+    () => reconcileSelection(selection, availableProviders),
+    [selection, availableProviders],
+  );
+  const handleChangeSelection = useCallback((next: NewSessionSelection): void => {
+    setSelection(next);
+    saveNewSessionSelection(next);
+  }, []);
+
+  /** 新對話預設的工作資料夾:使用者在選單裡指定的 > core 的 `workspace.defaultWorkingDir` > 目前 session 的資料夾。 */
+  const defaultWorkingDir = effectiveConfig?.workspace.defaultWorkingDir.value ?? "";
+  const resolveWorkingDir = useCallback(
+    (): string =>
+      effectiveSelection.workingDir.trim() ||
+      defaultWorkingDir ||
+      sessions.find((x) => x.id === currentSessionId)?.workingDir ||
+      "",
+    [currentSessionId, defaultWorkingDir, effectiveSelection.workingDir, sessions],
+  );
+
+  const handleCreateSession = useCallback(async (): Promise<void> => {
+    const providerId = availableProviders.find((p) => p.id === effectiveSelection.providerId)?.id;
+    const workingDir = resolveWorkingDir();
+    if (!providerId || !workingDir) return;
+    setCreatingSession(true);
+    setCreateError(null);
+    try {
+      await createSession({
+        providerId,
+        workingDir,
+        title: t("app:sessionDefaultTitle", { n: sessions.length + 1 }),
+        model: effectiveSelection.model || undefined,
+        effort: effectiveSelection.effort || undefined,
+      });
+    } catch (err) {
+      // agent 沒裝/被停用/啟動失敗等:顯示在側欄「新對話」按鈕下方,不要讓 promise 無聲地 reject。
+      setCreateError(translateError(err, t));
+    } finally {
+      setCreatingSession(false);
+    }
+  }, [availableProviders, createSession, effectiveSelection, resolveWorkingDir, sessions.length, t]);
 
   const handleConnected = (url: string, token: string): void => {
     client.configure(url, token);
@@ -189,21 +217,15 @@ export default function App(): JSX.Element {
         id: "action:new-session",
         group: t("app:commands.groupActions"),
         title: t("app:commands.newSession.title"),
-        subtitle: selectedProfile
-          ? t("app:commands.newSession.subtitleWithProfile", { name: selectedProfile.name })
-          : t("app:commands.newSession.subtitleNoProfile"),
+        subtitle: availableProviders.some((p) => p.id === effectiveSelection.providerId)
+          ? t("app:commands.newSession.subtitleWithAgent", {
+              name: providerLabelOf(effectiveSelection.providerId, detectedAgents, providerPrefs),
+            })
+          : t("app:commands.newSession.subtitleNoAgent"),
         icon: "plus",
         hint: `${MOD_LABEL}N`,
         keywords: t("app:commands.newSession.keywords"),
         run: () => void handleCreateSession(),
-      },
-      {
-        id: "action:new-profile",
-        group: t("app:commands.groupActions"),
-        title: t("app:commands.newProfile.title"),
-        icon: "sparkle",
-        keywords: t("app:commands.newProfile.keywords"),
-        run: () => setProfileDialogOpen(true),
       },
       {
         id: "action:settings",
@@ -308,7 +330,10 @@ export default function App(): JSX.Element {
     resetFontScale,
     resolvedTheme,
     selectSession,
-    selectedProfile,
+    availableProviders,
+    detectedAgents,
+    effectiveSelection.providerId,
+    providerPrefs,
     sessions,
     sidebarCollapsed,
     toggleTheme,
@@ -377,12 +402,13 @@ export default function App(): JSX.Element {
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
           connectionStatus={status}
-          selectedProfileId={selectedProfileId}
-          onSelectProfile={setSelectedProfileId}
-          onCreateSession={(override) => void handleCreateSession(override)}
+          selection={selection}
+          onChangeSelection={handleChangeSelection}
+          defaultWorkingDir={defaultWorkingDir}
+          onCreateSession={() => void handleCreateSession()}
           creatingSession={creatingSession}
-          profileDialogOpen={profileDialogOpen}
-          onSetProfileDialogOpen={setProfileDialogOpen}
+          createError={createError}
+          onDismissCreateError={() => setCreateError(null)}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
           themePreference={themePreference}

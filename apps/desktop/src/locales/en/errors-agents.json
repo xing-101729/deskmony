@@ -1,0 +1,8 @@
+{
+  "agent": {
+    "notFound": "Agent \"{{providerId}}\" was not found — check the agent list for the available ids",
+    "disabled": "Agent \"{{label}}\" is disabled in Settings",
+    "notInstalled": "Agent \"{{label}}\" was not detected on this computer — install it, then re-detect in Settings",
+    "launchInfoMissing": "This session's agent \"{{providerId}}\" is no longer in the detected list, and the session kept no launch information (it was created by an older version), so it cannot be restarted — please use a new session"
+  }
+}

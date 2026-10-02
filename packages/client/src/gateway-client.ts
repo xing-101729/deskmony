@@ -245,11 +245,11 @@ export class GatewayClient {
 
   /**
    * `session-store.ts` 的 `connect()` 呼叫 `client.connect()` 後,同一個 tick
-   * 內就緊接著呼叫 `refreshProfiles()`/`refreshSessions()` 等——這時
+   * 內就緊接著呼叫 `refreshSessions()`/`detectAgents()` 等——這時
    * `WebSocket` 才剛 `new` 出來,規範保證 `readyState` 還是 `CONNECTING`
    * (`open` 事件一定是之後的 tick 才會觸發)。過去這裡看到還沒 `OPEN` 就直接
    * `reject`,導致這些呼叫每次都在連線真正建立前就失敗,而呼叫端是 `void`
-   * fire-and-forget、沒有重試,`profiles`/`sessions` 就此永遠停在初始空陣列
+   * fire-and-forget、沒有重試,`sessions` 就此永遠停在初始空陣列
    * ——現在改成:還沒 ready 時把請求排進 `sendQueue`,等 `markReady()`(WS
    * 開啟、且完成認證)才依序真正送出,呼叫端完全不用改。
    */

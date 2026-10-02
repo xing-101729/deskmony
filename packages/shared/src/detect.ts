@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgentSoftwareSchema } from "./agent-profile.js";
+import { AgentSoftwareSchema } from "./agent-launch.js";
 
 /**
  * detect.ts(M5 Round D 新增):「設定」介面偵測本機已裝 agent 軟體用的共用
@@ -30,9 +30,10 @@ export type DetectedModel = z.infer<typeof DetectedModelSchema>;
 /**
  * 單一 agent 軟體(或內嵌 SDK)的偵測結果。
  *
- * `software` 對應 `AgentSoftwareSchema`(見 agent-profile.ts)—— 這輪偵測只
- * 回報「屬於哪個大類」,不是「建立 profile 要填哪個 command」這麼細,UI 這輪
- * 只用它做顯示與接回 model 選單,尚未接回 ProfileCreateDialog 的表單欄位。
+ * `software` 對應 `AgentSoftwareSchema`(見 agent-launch.ts)—— 這輪偵測只
+ * 回報「屬於哪個大類」,不是「建立 session 要填哪個 command」這麼細;實際的啟動
+ * 規格由 provider 目錄(`BUILTIN_PROVIDERS`)+ 這份偵測結果經 `resolveProviders()`
+ * 合併後,由 core 的 `AgentCatalog.buildLaunchSpec()` 組出。
  */
 export const AgentDetectionEntrySchema = z.object({
   /** 穩定識別碼(例如 "claude-agent-sdk"、"claude-code-cli"),UI list key 用,不會隨語言/顯示文字改變。 */

@@ -1,0 +1,19 @@
+{
+  "agentAriaLabel": "agent を選択",
+  "agentLabel": "Agent",
+  "redetect": "再検出",
+  "modelAriaLabel": "model を選択",
+  "modelLabel": "Model",
+  "defaultModelOption": "(既定の model)",
+  "effortAriaLabel": "思考レベルを選択",
+  "effortLabel": "思考レベル",
+  "defaultEffortOption": "(既定の思考レベル)",
+  "workingDirLabel": "作業フォルダ",
+  "workingDirPlaceholder": "既定:{{dir}}",
+  "workingDirPlaceholderNoDefault": "作業フォルダ(空欄で既定を使用)",
+  "browseButton": "参照…",
+  "noAgent": {
+    "title": "利用できる agent が検出されませんでした",
+    "description": "会話を開始できる agent ソフトウェアがこのコンピューターに見つからないか、すべて設定で無効になっています。インストール後に「再検出」を押すか、設定で agent の一覧を確認してください。"
+  }
+}

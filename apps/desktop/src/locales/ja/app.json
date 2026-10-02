@@ -13,13 +13,9 @@
     "groupSessions": "会話",
     "newSession": {
       "title": "新規会話",
-      "subtitleWithProfile": "使用する profile:{{name}}",
-      "subtitleNoProfile": "利用できる Agent Profile がありません",
+      "subtitleWithAgent": "使用する agent:{{name}}",
+      "subtitleNoAgent": "利用できる agent がありません",
       "keywords": "new session create 新規 セッション 会話"
-    },
-    "newProfile": {
-      "title": "Agent Profile を作成",
-      "keywords": "profile agent provider 作成"
     },
     "settings": {
       "title": "設定",

@@ -287,7 +287,7 @@ function stopCore(): void {
  *
  * 只在 Electron 場景存在——純瀏覽器 client 沒有這個 IPC channel 可用,
  * `window.deskmony?.pickDirectory` 在瀏覽器一律是 undefined,呼叫端
- * (ProfileCreateDialog.tsx)已對此優雅降級(隱藏「瀏覽…」按鈕、維持手動
+ * (AgentPicker.tsx)已對此優雅降級(隱藏「瀏覽…」按鈕、維持手動
  * 輸入)。
  */
 /**

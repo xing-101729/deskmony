@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, PromptInput } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, PromptInput } from "@deskmony/shared";
 import type { AdapterCapabilities } from "@deskmony/shared";
 
 /**
@@ -22,7 +22,8 @@ export interface Workspace {
  */
 export interface AgentHandle {
   id: string;
-  profile: AgentProfile;
+  /** 2026-10-02(P2:移除 profile):原本的 `profile: AgentProfile`。只在記憶體裡傳遞,不持久化。 */
+  launch: AgentLaunchSpec;
   workspace: Workspace;
 }
 
@@ -42,7 +43,7 @@ export interface ResumeOptions {
 
 export interface AgentAdapter {
   capabilities(): AdapterCapabilities;
-  spawn(profile: AgentProfile, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle>;
+  spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle>;
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void;
   /** AgentEvent = 訊息增量 | 工具呼叫 | 權限請求 | 完成 | 錯誤 */
   events(handle: AgentHandle): AsyncIterable<AgentEvent>;

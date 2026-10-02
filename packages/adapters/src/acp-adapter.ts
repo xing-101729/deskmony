@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
-import type { AgentEvent, AgentProfile, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SlashCommandInfo, SubagentPort } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SlashCommandInfo, SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
@@ -149,13 +149,14 @@ export class AcpAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
-    const acpConfig = profile.acpConfig;
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+    const acpConfig = launch.acpConfig;
+    const agentLabel = launch.providerId ?? "acp";
     if (!acpConfig) {
       throw new DeskmonyError(
         ErrorCodes.ADAPTER_MISSING_CONFIG,
-        { profileId: profile.id, software: "acp", configField: "command" },
-        `AgentProfile "${profile.id}" 的 software="acp" 缺少 acpConfig(command)`,
+        { providerId: agentLabel, software: "acp", configField: "command" },
+        `agent "${agentLabel}" 的 software="acp" 缺少 acpConfig(command)`,
       );
     }
 
@@ -169,14 +170,12 @@ export class AcpAdapter implements AgentAdapter {
     const handleId = randomUUID();
 
     const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
-    // 這輪新增:`profile.env`(provider 層級預設 + profile 自己的覆寫,已由
-    // SessionManager.createSession() 合併好,見該檔案內的說明)疊在
-    // process.env 之上,`acpConfig.env`(既有欄位,呼叫端在 profile 建立時
-    // 針對這個 adapter 特別設定的值)最優先——維持這個既有欄位一直以來的
-    // "最終覆寫" 語意不變,只是多了 profile.env 這一個中間層。
+    // `launch.env`(provider 層級 env,由 SessionManager.prepareSpawnSpec() 從
+    // settings 讀出併好)疊在 process.env 之上,`acpConfig.env`(既有欄位)最優先
+    // ——維持這個既有欄位一直以來的「最終覆寫」語意不變。
     const child = spawn(command, args, {
       cwd: workspace.path,
-      env: { ...process.env, ...profile.env, ...acpConfig.env },
+      env: { ...process.env, ...launch.env, ...acpConfig.env },
       stdio: ["pipe", "pipe", "pipe"],
       shell: useShell,
     });
@@ -203,7 +202,7 @@ export class AcpAdapter implements AgentAdapter {
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      console.error(`[acp-adapter] ${profile.name} stderr: ${chunk.toString().trimEnd()}`);
+      console.error(`[acp-adapter] ${agentLabel} stderr: ${chunk.toString().trimEnd()}`);
     });
 
     const outputQueue = new AsyncQueue<AgentEvent>({
@@ -274,7 +273,7 @@ export class AcpAdapter implements AgentAdapter {
       // (查詢要 1 秒多)。見 child-registry.ts 的 registerChildDescendants()。
       void registerChildDescendants(child.pid);
 
-      const handle: AgentHandle = { id: handleId, profile, workspace };
+      const handle: AgentHandle = { id: handleId, launch, workspace };
       const internal: InternalSession = {
         handle,
         child,
@@ -1018,7 +1017,7 @@ function resolveWindowsSpawnCommand(
  * command/args 使用(Node 在 shell 模式不會自動處理這件事,見上方函式註解)。
  * 只處理「含空白字元或雙引號時才加引號」與「內部雙引號用兩個雙引號跳脫」
  * 這兩條 `cmd.exe` 的基本規則,不是完整的 `cmd.exe` metacharacter 跳脫
- * (例如 `&`/`|`/`^` 等),ACP profile 的 command/args 屬於使用者自行設定的
+ * (例如 `&`/`|`/`^` 等),ACP agent 的 command/args 屬於使用者自行設定的
  * 受信任本機設定,不是任意外部輸入。
  */
 function quoteWindowsShellArg(value: string): string {

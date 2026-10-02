@@ -143,14 +143,41 @@ export const PolicyRuleWhenSchema = z
   .strict();
 export type PolicyRuleWhen = z.infer<typeof PolicyRuleWhenSchema>;
 
-/** 限定某個 agent profile / role 才適用這條規則(Phase 1 不做繼承,只做精確比對)。 */
+/**
+ * 限定某個 agent(providerId)才適用這條規則(不做繼承,只做精確比對)。
+ *
+ * ⚠️ 2026-10-02(P2:移除 profile,見 docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md
+ * §P2.8,**安全項目**):原本的 `profileId`/`role` 兩個範圍欄位**仍保留解析**——這個 schema
+ * 是 `.strict()`,直接拿掉會讓使用者既有 `~/.deskmony/config.json` 裡帶這兩個欄位的規則
+ * 解析失敗、core 起不來。profile 已不存在,所以這兩個欄位從此是**舊欄位**,
+ * `PolicyEngine.ruleMatches()` 對「帶舊範圍」的規則這樣處理(兩個方向都往安全側偏):
+ *   - `effect: "allow"` → 一律不匹配(原本放行的改成升級給人);
+ *   - `effect: "deny"`  → 忽略舊範圍、對所有 session 匹配(原本只擋某 profile 的,現在全擋)。
+ * 不能讓 deny 規則因為舊範圍永遠對不上而靜默失效:在 auto 模式下那個操作會落入「未分類
+ * 中間地帶自動放行」,等於 fail-open。core 啟動時會對每一條帶舊範圍的規則 console.warn。
+ * 新規則請用 `providerId`。
+ */
 export const PolicyRuleScopeSchema = z
   .object({
+    /** 2026-10-02 起為舊欄位,見上方說明。 */
     profileId: z.string().optional(),
+    /** 2026-10-02 起為舊欄位,見上方說明。 */
     role: z.string().optional(),
+    /** 只對用這個 provider 建立的 session 生效(`Session.providerId`,精確比對)。 */
+    providerId: z.string().optional(),
   })
   .strict();
 export type PolicyRuleScope = z.infer<typeof PolicyRuleScopeSchema>;
+
+/**
+ * **新規則**可用的範圍:只剩 `providerId`(`policy.addRule` gateway 方法的輸入,見下方
+ * `PolicyAddRuleInputSchema`)。舊的 `profileId`/`role` 只能存在於「使用者既有 config.json 裡的舊規則」
+ * (`PolicyRuleScopeSchema` 為了解析它們而保留)——不讓 client 再新增帶舊範圍的規則,否則一條
+ * `{effect:"deny", scope:{profileId:"x"}}` 會因為 deny 的舊範圍行為而變成「擋所有 session」,
+ * 與寫它的人的本意不符。
+ */
+export const PolicyNewRuleScopeSchema = z.object({ providerId: z.string().optional() }).strict();
+export type PolicyNewRuleScope = z.infer<typeof PolicyNewRuleScopeSchema>;
 
 export const PolicyRuleSchema = z
   .object({
@@ -184,7 +211,10 @@ export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
  * 若讓 client 自訂就失去稽核意義(client 可以偽稱是很久以前加的、或偽稱是
  * `"user"` 手動加的)。
  */
-export const PolicyAddRuleInputSchema = PolicyRuleSchema.omit({ id: true, addedBy: true, addedAt: true });
+export const PolicyAddRuleInputSchema = PolicyRuleSchema.omit({ id: true, addedBy: true, addedAt: true, scope: true }).extend({
+  /** 2026-10-02(P2.8):新規則只能用 `providerId` 範圍,見 `PolicyNewRuleScopeSchema`。 */
+  scope: PolicyNewRuleScopeSchema.optional(),
+});
 export type PolicyAddRuleInput = z.infer<typeof PolicyAddRuleInputSchema>;
 
 export const PolicyConfigSchema = z

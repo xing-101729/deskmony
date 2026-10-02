@@ -544,7 +544,7 @@ function NotificationConfigSection({ config }: { config: EffectiveCoreConfig }):
 
 /**
  * 「設定」對話框(「Provider 管理」)。資料來源:`detectedAgents` +
- * `providerPrefs` 透過 `selectResolvedProviders()` 合併——與 ProfileCreateDialog/
+ * `providerPrefs` 透過 `selectResolvedProviders()` 合併——與 AgentPicker/
  * ChatView 共用同一份計算結果,不會漂移。
  */
 export function SettingsDialog({ onClose }: SettingsDialogProps): JSX.Element {

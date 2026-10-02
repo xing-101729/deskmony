@@ -3,13 +3,13 @@ import type { ProviderCatalogEntry, ProviderModel, ProviderPrefs, RegisteredAgen
 
 /**
  * resolve-providers.ts(這輪新增):`resolveProviders()` 是「內建 provider 目錄
- * + 本機偵測結果 + 使用者偏好」三者合併成「一份可以直接拿來建立 profile 的
+ * + 本機偵測結果 + 使用者偏好」三者合併成「一份可以直接拿來建立 session 的
  * provider 清單」的**純函式**——不吃任何 I/O(不呼叫 gateway、不讀 DB),方便
  * `scripts/e2e-gateway.mjs` 直接 import 編譯產物、用 fixture 決定性地測試合併
  * 邏輯本身(比照 packages/shared/src/agent-target.ts 既有的
  * `deriveDefaultAgentTarget()` 測法,見 e2e 步驟22 系列)。
  *
- * 呼叫端(apps/desktop 的 ProfileCreateDialog/SettingsDialog)負責準備好三個
+ * 呼叫端(core 的 `AgentCatalog`、apps/desktop 的 SessionList/SettingsDialog)負責準備好三個
  * 輸入:`BUILTIN_PROVIDERS`(靜態常數)、`env.detectAgents` 的偵測結果、
  * `settings.getProviderPrefs` 的偏好(注意:gateway 回傳的是**遮罩過**的
  * `env`,見 provider-catalog.ts 的 `MaskedProviderPrefsSchema`——這個函式本身
@@ -23,20 +23,20 @@ export interface ResolvedProvider {
   description?: string;
   order: number;
   /** 使用者是否啟用這個 provider(預設 true)。停用不代表從清單移除——見
-   *  ProfileCreateDialog(只顯示 enabled 的)與 SettingsDialog(顯示全部,
-   *  含已停用的,才能重新啟用)兩處對這個欄位不同的處理方式。 */
+   *  `AgentCatalog.listAvailable()`/SessionList(只顯示 enabled 且已安裝的)與
+   *  SettingsDialog(顯示全部,含已停用的,才能重新啟用)兩處對這個欄位不同的處理方式。 */
   enabled: boolean;
   /** 一定是 AdapterRegistry 實際註冊過的四種之一(由
    *  ProviderCatalogEntry.software 保證,見 provider-catalog.ts 的
    *  RegisteredAgentSoftwareSchema),絕不會是 "codex" 這種建不起來的值。 */
   software: RegisteredAgentSoftware;
-  /** claude-agent-sdk 不需要;其餘 provider 若偵測到路徑就帶入,
-   *  custom-pty(無 detectKey)一律 undefined,需要使用者手動輸入。 */
+  /** claude-agent-sdk 不需要;其餘 provider 若偵測到路徑就帶入;沒有 detectKey 的項目
+   *  (只有 e2e 注入的測試 provider,見 AgentCatalog)一律 undefined。 */
   command?: string;
   defaultArgs?: string[];
   /** 這個 provider 目前是否「已安裝/可用」——claude-agent-sdk 恆為 true;
-   *  有 detectKey 的項目依偵測結果的 installed;無 detectKey(自訂項)恆為
-   *  true(代表「一律可選,但需要手動輸入 command」,不是「已偵測到可用」)。 */
+   *  有 detectKey 的項目依偵測結果的 installed;無 detectKey 的項目恆為 true
+   *  (e2e 注入的測試 provider 自帶 command,視為已安裝)。 */
   installed: boolean;
   detectedVersion?: string;
   detectKey?: string;
@@ -81,9 +81,8 @@ export function resolveProviders(
     const detected = entry.detectKey ? detectionByKey.get(entry.detectKey) : undefined;
 
     // claude-agent-sdk 是內嵌的,永遠已安裝、不需要 command;有 detectKey 的
-    // 外部 CLI 依偵測結果;沒有 detectKey 的自訂項(custom-pty)一律視為
-    // 「可選,但需要使用者手動輸入 command」,installed 恆為 true(見上方
-    // ResolvedProvider.installed 欄位註解)。
+    // 外部 CLI 依偵測結果;沒有 detectKey 的項目(目前只有 e2e 注入的測試
+    // provider)installed 恆為 true(見上方 ResolvedProvider.installed 欄位註解)。
     const installed = entry.software === "claude-agent-sdk" ? true : entry.detectKey ? Boolean(detected?.installed) : true;
     const command = entry.software === "claude-agent-sdk" ? undefined : entry.detectKey ? detected?.path : undefined;
 
@@ -130,9 +129,8 @@ export function resolveProviders(
   return resolved.sort((a, b) => a.order - b.order);
 }
 
-/** ProfileCreateDialog 用:只顯示「使用者啟用」的 provider(停用的不出現在
- *  建立 profile 的下拉選單裡,但仍會出現在 resolveProviders() 的完整回傳值
- *  中,供 SettingsDialog 顯示/重新啟用)。 */
+/** 只顯示「使用者啟用」的 provider(停用的不出現在建立 session 的下拉選單裡,
+ *  但仍會出現在 resolveProviders() 的完整回傳值中,供 SettingsDialog 顯示/重新啟用)。 */
 export function selectSelectableProviders(resolved: ResolvedProvider[]): ResolvedProvider[] {
   return resolved.filter((p) => p.enabled);
 }

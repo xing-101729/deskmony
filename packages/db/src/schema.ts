@@ -2,8 +2,11 @@ import { sqliteTable, text, integer, real, primaryKey } from "drizzle-orm/sqlite
 
 /**
  * M1 資料表:sessions 與 messages(ARCHITECTURE.md 3.5 節、第 6 節 ERD 的 M1 子集)。
- * M3 Round A:新增 agent_profiles(AgentProfile 落地成資料表,取代 M1 的
- * 純記憶體 ProfileStore)。
+ *
+ * 2026-10-02(P2:移除 profile,見 docs/DECISIONS.md §H):原本的 `agent_profiles` 表定義
+ * 已移除。**這張表沒有被 DROP**——使用者既有 SQLite 檔案裡的表與資料原封不動留著,
+ * 只有 `packages/db/src/client.ts` 的 `backfillLegacySessionsProvider()` 會用 raw SQL
+ * 唯讀地讀它一次,把舊 session 補上自帶的 `provider_id`/`launch_*` 欄位。全新安裝不再建立它。
  *
  * 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):原本的 `teams`/
  * `team_members`/`team_messages`/`tasks`/`workspaces` 五張表定義已移除。**這些表
@@ -14,7 +17,29 @@ import { sqliteTable, text, integer, real, primaryKey } from "drizzle-orm/sqlite
 export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
   title: text("title").notNull().default("新對話"),
-  agentProfileId: text("agent_profile_id").notNull(),
+  /**
+   * 舊欄位(2026-10-02 P2 起不再是 profile id,原名 `agentProfileId`):`agent_profile_id` 在
+   * 既有 DB 裡是 `NOT NULL`,SQLite 不能直接改約束,所以欄位保留——**新 session 寫入
+   * `providerId` 當值**(只為滿足約束,沒有任何程式碼讀它);舊 session 這欄仍是當年的
+   * profile id,僅供 `backfillLegacySessionsProvider()` 回填時對照。
+   */
+  legacyAgentProfileId: text("agent_profile_id").notNull(),
+  /**
+   * 2026-10-02(P2):這個 session 是用哪個 provider 目錄項目建立的(見
+   * packages/shared/src/session.ts 的 `SessionSchema.providerId`)。nullable 只是為了讓
+   * `ALTER TABLE ADD COLUMN` 補欄位時對舊列合法——啟動時的回填遷移之後一律非 NULL。
+   * 既有 DB 靠 client.ts 的 `ensureSessionsLaunchColumns()` 冪等補欄位。
+   */
+  providerId: text("provider_id"),
+  /**
+   * 2026-10-02(P2):session 自帶的啟動資訊(`AgentLaunchSpec` 中 acp/pty/opencode 的
+   * `command`/`args`;claude-agent-sdk 兩者皆 NULL,`launch_args` 是 JSON 字串陣列)。
+   * 續接時先走 `AgentCatalog.buildLaunchSpec(providerId)`,provider 已不存在/未安裝時才
+   * 退回 `adapterType + launch_command + launch_args`。**不存 env**(可能含 API key,
+   * 每次 spawn 重新從 settings 讀)。
+   */
+  launchCommand: text("launch_command"),
+  launchArgs: text("launch_args"),
   adapterType: text("adapter_type").notNull(),
   status: text("status").notNull().default("idle"),
   workingDir: text("working_dir").notNull(),
@@ -78,47 +103,12 @@ export type MessageRow = typeof messages.$inferSelect;
 export type NewMessageRow = typeof messages.$inferInsert;
 
 /**
- * agent_profiles(M3 Round A):AgentProfile 落地成資料表,取代 M1 的純記憶體
- * ProfileStore(README 已知限制:「profile 僅記憶體,core 重啟後消失」)。
- * mcpConfig/acpConfig/ptyConfig 是巢狀物件,以 JSON 字串存放(比照
- * drizzle-orm 對 SQLite 沒有原生 JSON 欄位型別時的常見作法)。
- */
-export const agentProfiles = sqliteTable("agent_profiles", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  role: text("role").notNull().default("Coder"),
-  software: text("software").notNull(),
-  /** 這輪新增(provider 目錄重構):`ProviderCatalogEntry.id`,見
-   *  packages/shared/src/agent-profile.ts 的 `AgentProfileObjectSchema.providerId`
-   *  註解。既有的舊 DB 檔案靠 `packages/db/src/client.ts` 的
-   *  `ensureAgentProfilesProviderColumnsColumn()` 冪等 `ALTER TABLE` 補上。 */
-  providerId: text("provider_id"),
-  model: text("model"),
-  effort: text("effort"),
-  systemPrompt: text("system_prompt"),
-  mcpConfig: text("mcp_config"),
-  permissionLevel: text("permission_level").notNull().default("always-ask"),
-  workingDir: text("working_dir").notNull(),
-  /** 這輪新增:profile 層級的 env 覆寫(JSON 字串),見
-   *  packages/shared/src/agent-profile.ts 的 `AgentProfileObjectSchema.env` 註解。 */
-  env: text("env"),
-  acpConfig: text("acp_config"),
-  ptyConfig: text("pty_config"),
-  /** software="opencode" 時的子程序啟動設定(這輪新增,見 OpencodeAgentConfigSchema)。 */
-  opencodeConfig: text("opencode_config"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-});
-export type AgentProfileRow = typeof agentProfiles.$inferSelect;
-export type NewAgentProfileRow = typeof agentProfiles.$inferInsert;
-
-/**
  * settings(M5 Round E:「設定」介面的持久化 key/value store)。目前唯一的
  * 使用者是 apps/core/src/settings/settings-store.ts 的 `SettingsStore`
  * (啟用哪些偵測到的 Claude model,見該檔案 `ENABLED_CLAUDE_MODELS_KEY`),但
  * 刻意設計成通用的 `key TEXT PRIMARY KEY, value TEXT`(value 存 JSON 字串)
  * ——不是「一列存所有設定欄位」那種寬表,未來要新增其他偏好只需要多一個
- * key,不需要再一次 schema 遷移。比照 sessions/agent_profiles 既有的
+ * key,不需要再一次 schema 遷移。比照 sessions 既有的
  * "CREATE TABLE IF NOT EXISTS" 自我修復策略(見 packages/db/src/client.ts),
  * 這是全新的表、不含需要對舊 DB 補欄位的既有資料,所以不需要
  * `ensureXxxColumn()` 那種 ALTER TABLE 遷移。
@@ -141,8 +131,7 @@ export type NewSettingsRow = typeof settings.$inferInsert;
  * 欄位設計:`sessionId`/`requestId`/`toolName`/`effect`/`reason` 是最常被查詢
  * 的欄位,獨立拉出來(nullable——`trip` 事件沒有 sessionId/requestId/toolName/
  * effect,只有 reason);`payload` 存完整事件的 JSON 字串(含上述欄位重複一份
- * 也沒關係,單純圖查詢方便,不是 normalize 的資料庫設計),比照
- * agent_profiles 的 mcpConfig 等既有慣例。
+ * 也沒關係,單純圖查詢方便,不是 normalize 的資料庫設計)。
  */
 export const enforcementAudit = sqliteTable("enforcement_audit", {
   id: text("id").primaryKey(),

@@ -2,12 +2,9 @@ import { create } from "zustand";
 import {
   type AdapterCapabilities,
   type AgentDetectionEntry,
-  type AgentOverride,
-  type AgentProfile,
   type AgentSoftware,
   type CapabilitySupport,
   type ConfigSetFilePatchInput,
-  type CreateAgentProfileInput,
   type DialogAnswer,
   type EffectiveCoreConfig,
   type EffortLevel,
@@ -46,8 +43,6 @@ import {
   PolicyAddRuleResultSchema,
   PolicyListRulesResultSchema,
   PolicyRemoveRuleResultSchema,
-  ProfileCreateResultSchema,
-  ProfileListResultSchema,
   resolveCapabilitySupport,
   resolveProviders,
   SessionCreateResultSchema,
@@ -160,9 +155,17 @@ export interface SessionUsage {
   contextSeen?: boolean;
 }
 
+/** `session.create` 的輸入(2026-10-02 P2:取代原本的 `agentProfileId` + `agentOverride`)。 */
+export interface NewSessionRequest {
+  providerId: string;
+  workingDir: string;
+  title?: string;
+  model?: string;
+  effort?: EffortLevel;
+}
+
 interface SessionStoreState {
   status: "connecting" | "open" | "closed";
-  profiles: AgentProfile[];
   sessions: Session[];
   currentSessionId: string | null;
   itemsBySession: Record<string, ChatItem[]>;
@@ -190,7 +193,7 @@ interface SessionStoreState {
    * 全部啟用**(未曾設定過,或已連線但尚未載入完成時的初始值)——讀取端
    * 一律透過下方 `selectEnabledClaudeModels()` 這個共用 selector 取得「實際
    * 要顯示的清單」,不要直接讀這個欄位就判斷要不要顯示某個 model,避免
-   * ProfileCreateDialog 與 ChatView 各自複寫一份判斷邏輯而漂移。
+   * SessionList 與 ChatView 各自複寫一份判斷邏輯而漂移。
    */
   enabledModelIds: string[];
   /**
@@ -199,7 +202,7 @@ interface SessionStoreState {
    * settings-store.ts)。**注意:這裡的 `env` 一律是遮罩過的**(值固定是
    * `"***"`,只有 key 名稱是真的)——UI 只能拿它顯示「已設定哪些 key」,
    * 絕不能把這裡讀到的值當作真正的 env 拿去做任何事(見
-   * ProfileCreateDialog/SettingsDialog 的 env 編輯器實作說明)。初始為空
+   * SettingsDialog 的 env 編輯器實作說明)。初始為空
    * 物件(尚未載入 = 全部 provider 皆維持 BUILTIN_PROVIDERS 目錄預設值)。
    */
   providerPrefs: Record<string, ProviderPrefs>;
@@ -238,8 +241,8 @@ interface SessionStoreState {
    * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`canToggleAuto`/
    * `canEnableYolo`/`canEditPolicy`/`canEnableTrueUnrestricted` 現在**恆為
    * `true`**(本機遠端同權,使用者明確翻案)——這幾個欄位不再用來決定要不要
-   * 隱藏對應的控制項,只有 `canManageProfiles` 仍然是真正的顯示門檻。
-   * `isRemoteConnection` 純顯示用,給危險操作的警告文案多加一句「這是遠端
+   * 隱藏對應的控制項。(2026-10-02 P2:原本唯一仍有門檻作用的 `canManageProfiles` 已隨
+   * profile 移除。)`isRemoteConnection` 純顯示用,給危險操作的警告文案多加一句「這是遠端
    * 連線」提醒,不是任何門檻。
    */
   gatewayCapabilities: GatewayCapabilities;
@@ -254,19 +257,10 @@ interface SessionStoreState {
   policyRules: PolicyRule[];
 
   connect: () => void;
-  refreshProfiles: () => Promise<void>;
   refreshSessions: () => Promise<void>;
-  /** 這輪新增最後一個選填參數 `agentOverride`——不落地新 profile,就這一次
-   *  建立臨時覆寫要用的 agent software/model(見 packages/shared/src/
-   *  session.ts 的 `AgentOverrideSchema` 註解)。 */
-  createSession: (
-    agentProfileId: string,
-    workingDir: string,
-    title?: string,
-    agentOverride?: AgentOverride,
-  ) => Promise<void>;
-  createProfile: (input: CreateAgentProfileInput) => Promise<AgentProfile>;
-  deleteProfile: (id: string) => Promise<void>;
+  /** 2026-10-02(P2:移除 profile):session 直接以偵測到的 agent(`providerId`)+ 選填
+   *  model/effort 建立(見 packages/shared/src/session.ts 的 `CreateSessionInputSchema`)。 */
+  createSession: (input: NewSessionRequest) => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
   /**
    * 刪除一個對話(功能2)。呼叫 `session.delete` 後從本地 `sessions`/
@@ -285,16 +279,14 @@ interface SessionStoreState {
    * 打架或造成畫面閃爍。
    */
   deleteSession: (sessionId: string) => Promise<void>;
-  /** S12 Phase2 R3:從一個既有 session 開子 agent —— agentProfileId 由呼叫端
-   *  (SpawnChildDialog)指定,預設值是父 session 自己的 profile,但使用者可以
-   *  改選別的(這輪新增,不再寫死繼承)。呼叫既有 `session.spawnChild` RPC。
-   *  `agentOverride` 選填,語意同 `createSession()`。 */
+  /** S12 Phase2 R3:從一個既有 session 開子 agent —— agent/model/effort 由呼叫端
+   *  (SpawnChildDialog,與側欄「新對話」同一組選單)指定。呼叫既有 `session.spawnChild` RPC。
+   *  2026-10-02(P2):原本的 `agentProfileId`/`agentOverride` 改成 `providerId`/`model`/`effort`。 */
   spawnChild: (
     parentSessionId: string,
     prompt: string,
-    agentProfileId: string,
+    agent: { providerId: string; model?: string; effort?: EffortLevel },
     title?: string,
-    agentOverride?: AgentOverride,
   ) => Promise<void>;
   /** Phase 6:`attachments` 選填——composer 沒有待送附件時省略/傳空陣列皆可,
    *  action 內部一律正規化成「非空才附加」,樂觀回顯與 wire payload 兩處共用
@@ -398,7 +390,7 @@ interface SessionStoreState {
   /**
    * M5 Round E(需求4):載入目前啟用的 model 偏好(`settings.getEnabledModels`)。
    * `connect()` 會呼叫一次;SettingsDialog 儲存成功後也會呼叫(見
-   * `setEnabledModels()`)以確保同一份 store 狀態,ProfileCreateDialog/
+   * `setEnabledModels()`)以確保同一份 store 狀態,SessionList/
    * ChatView 兩個 model picker 共用、不會漂移。失敗時安靜保留舊值(通常是
    * 初始的空陣列 = 全部啟用),不阻塞畫面。
    */
@@ -411,7 +403,7 @@ interface SessionStoreState {
   setEnabledModels: (enabledModelIds: string[]) => Promise<void>;
   /** 載入目前所有已顯式覆寫過的 per-provider 偏好(`settings.getProviderPrefs`)。
    *  `connect()` 會呼叫一次;`setProviderPrefs()` 成功後也會重新整份設定,
-   *  確保 ProfileCreateDialog/SettingsDialog/ChatView 共用同一份 store 狀態。
+   *  確保 SessionList/SettingsDialog/ChatView 共用同一份 store 狀態。
    *  失敗時安靜保留舊值(通常是初始空物件 = 全部維持目錄預設)。 */
   loadProviderPrefs: () => Promise<void>;
   /** 對單一 provider 的偏好送出**部分欄位 patch**(見 apps/core/src/settings/
@@ -542,7 +534,7 @@ function appendTerminalData(sessionId: string, data: string): void {
 
 /**
  * M5 Round E(需求4):「目前實際要顯示的已啟用 Claude model 清單」的唯一
- * 資料流入口——ProfileCreateDialog(選 model 建 profile)與 ChatView 的
+ * 資料流入口——SessionList(選 model 建 session)與 ChatView 的
  * `ModelControl`(對話中切換 model)都必須呼叫這個 selector,不要各自實作
  * 一份判斷邏輯,否則兩處對「設定改了之後該顯示哪些 model」的認知會漂移。
  *
@@ -576,7 +568,7 @@ export function selectEnabledClaudeModels(detectedAgents: AgentDetectionEntry[],
 
 /**
  * 這輪新增(provider 目錄重構):「目前的 provider 目錄解析結果」的唯一入口
- * ——ProfileCreateDialog(選 provider 建 profile)與 SettingsDialog(provider
+ * ——SessionList(選 agent 建 session)與 SettingsDialog(provider
  * 管理)都必須呼叫這個 selector,不要各自重新呼叫 `resolveProviders()`,避免
  * 兩處對「合併偵測結果 + 使用者偏好」的認知漂移(呼應 `selectEnabledClaudeModels()`
  * 既有的單一資料流原則)。
@@ -595,27 +587,47 @@ export function selectResolvedProviders(
 }
 
 /**
- * 「這個 profile 應該顯示哪些可選 model」的唯一入口——同時涵蓋:
- *   - 這輪之後建立、帶 `providerId` 的新 profile:讀該 provider 目前已啟用的
- *     模型清單(`resolveProviders()` 已經套用 `enabledModelIds` 過濾)。
- *   - 這輪之前建立、沒有 `providerId` 的舊 profile:退回舊行為——
- *     `software==="claude-agent-sdk"` 用 `selectEnabledClaudeModels()`,其餘
- *     一律回傳空陣列(與過去 ChatView/ProfileCreateDialog 只支援 Claude
- *     model 選單的既有行為一致,不改變舊 profile 的既有觀感)。
+ * 2026-10-02(P2:移除 profile)新增:「現在真的能用來開 session 的 agent」清單——對應 core 端
+ * `AgentCatalog.listAvailable()`(`enabled && installed`),但在 UI 端用同一份偵測結果 + 偏好
+ * 自己算(UI 已經有這兩份資料,不需要多一個 RPC)。內嵌的 claude-agent-sdk 不需要偵測,只要沒被停用就一定在。
+ * SessionList 的 agent 下拉、`⌘N`、「開子 agent」對話框都走這個 selector,不要各自過濾。
+ */
+export function selectAvailableProviders(
+  detectedAgents: AgentDetectionEntry[],
+  providerPrefs: Record<string, ProviderPrefs>,
+): ResolvedProvider[] {
+  return selectResolvedProviders(detectedAgents, providerPrefs).filter(
+    (p) => p.enabled && (p.software === "claude-agent-sdk" || p.installed),
+  );
+}
+
+/** session 的 agent 顯示名稱:providerId → provider label;provider 已不在目錄裡(舊 session 的
+ *  `legacy-*`、被移除的 agent)時退回 providerId 本身,不騙使用者。 */
+export function providerLabelOf(
+  providerId: string | undefined,
+  detectedAgents: AgentDetectionEntry[],
+  providerPrefs: Record<string, ProviderPrefs>,
+): string {
+  if (!providerId) return "?";
+  return selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === providerId)?.label ?? providerId;
+}
+
+/**
+ * 「這個 session 的 agent 應該顯示哪些可選 model」的唯一入口——讀該 provider 目前已啟用的模型清單
+ * (`resolveProviders()` 已經套用 `enabledModelIds` 過濾)。provider 不在目錄裡(舊 session 的
+ * `legacy-*`)時,`adapterType==="claude-agent-sdk"` 退回 `selectEnabledClaudeModels()`,其餘一律回傳
+ * 空陣列(與過去 ChatView 只支援 Claude model 選單的既有行為一致)。
  */
 export function selectProviderModels(
-  profile: Pick<AgentProfile, "providerId" | "software"> | undefined,
+  session: Pick<Session, "providerId" | "adapterType"> | undefined,
   detectedAgents: AgentDetectionEntry[],
   providerPrefs: Record<string, ProviderPrefs>,
   enabledModelIds: string[],
 ): ProviderModel[] {
-  if (!profile) return [];
-  if (profile.providerId) {
-    const resolved = selectResolvedProviders(detectedAgents, providerPrefs);
-    const provider = resolved.find((p) => p.id === profile.providerId);
-    if (provider) return provider.models;
-  }
-  if (profile.software === "claude-agent-sdk") return selectEnabledClaudeModels(detectedAgents, enabledModelIds);
+  if (!session) return [];
+  const provider = selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === session.providerId);
+  if (provider) return provider.models;
+  if (session.adapterType === "claude-agent-sdk") return selectEnabledClaudeModels(detectedAgents, enabledModelIds);
   return [];
 }
 
@@ -765,7 +777,6 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
 
 export const useSessionStore = create<SessionStoreState>((set, get) => ({
   status: "connecting",
-  profiles: [],
   sessions: [],
   currentSessionId: null,
   itemsBySession: {},
@@ -784,7 +795,6 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     canToggleAuto: false,
     canEnableYolo: false,
     canEditPolicy: false,
-    canManageProfiles: false,
     canEnableTrueUnrestricted: false,
     isRemoteConnection: false,
   },
@@ -838,7 +848,6 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
      */
     client.onReconnected(() => {
       console.info("[gateway] 重新連上,重新同步狀態(斷線期間的推播事件已遺失)");
-      void get().refreshProfiles();
       void get().refreshSessions();
       void get().loadEnabledModels();
       void get().loadProviderPrefs();
@@ -850,7 +859,6 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     });
 
     client.connect();
-    void get().refreshProfiles();
     void get().refreshSessions();
     void get().detectAgents();
     void get().loadEnabledModels();
@@ -860,22 +868,16 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void get().loadPolicyRules();
   },
 
-  refreshProfiles: async () => {
-    const raw = await client.call("profile.list", {});
-    const { profiles } = ProfileListResultSchema.parse(raw);
-    set({ profiles });
-    // 預先把目前所有 profile 用到的 software 能力都查一遍、快取起來,
-    // SessionView 才能在使用者選到某個 session 的當下就同步讀到快取,不用
-    // 每次切換 session 都先等一次 RPC 往返才知道要渲染哪種視圖。
-    for (const software of new Set(profiles.map((p) => p.software))) {
-      void get().fetchCapabilities(software);
-    }
-  },
-
   refreshSessions: async () => {
     const raw = await client.call("session.list", {});
     const { sessions } = SessionListResultSchema.parse(raw);
     set({ sessions });
+    // 預先把目前所有 session 用到的 software 能力都查一遍、快取起來(2026-10-02 P2:原本由
+    // `refreshProfiles()` 依 profile 的 software 預先查詢),SessionView 才能在使用者選到某個
+    // session 的當下就同步讀到快取,不用每次切換 session 都先等一次 RPC 往返才知道要渲染哪種視圖。
+    for (const software of new Set(sessions.map((s) => s.adapterType))) {
+      void get().fetchCapabilities(software);
+    }
   },
 
   fetchCapabilities: async (software) => {
@@ -910,8 +912,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     }
   },
 
-  createSession: async (agentProfileId, workingDir, title, agentOverride) => {
-    const raw = await client.call("session.create", { agentProfileId, workingDir, title, agentOverride });
+  createSession: async (input) => {
+    const raw = await client.call("session.create", input);
     const { session } = SessionCreateResultSchema.parse(raw);
     set((state) => ({
       sessions: [...state.sessions, session],
@@ -921,15 +923,16 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void get().fetchCapabilities(session.adapterType);
   },
 
-  spawnChild: async (parentSessionId, prompt, agentProfileId, title, agentOverride) => {
+  spawnChild: async (parentSessionId, prompt, agent, title) => {
     const parent = get().sessions.find((s) => s.id === parentSessionId);
     if (!parent) return;
     const raw = await client.call("session.spawnChild", {
       parentSessionId,
-      agentProfileId,
+      providerId: agent.providerId,
+      model: agent.model,
+      effort: agent.effort,
       prompt,
       title,
-      agentOverride,
     });
     const { session } = SessionCreateResultSchema.parse(raw);
     set((state) => ({
@@ -937,19 +940,6 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       itemsBySession: { ...state.itemsBySession, [session.id]: [] },
     }));
     void get().fetchCapabilities(session.adapterType);
-  },
-
-  createProfile: async (input) => {
-    const raw = await client.call("profile.create", input);
-    const { profile } = ProfileCreateResultSchema.parse(raw);
-    set((state) => ({ profiles: [...state.profiles, profile] }));
-    void get().fetchCapabilities(profile.software);
-    return profile;
-  },
-
-  deleteProfile: async (id) => {
-    await client.call("profile.delete", { id });
-    set((state) => ({ profiles: state.profiles.filter((p) => p.id !== id) }));
   },
 
   selectSession: async (sessionId) => {

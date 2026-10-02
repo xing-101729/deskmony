@@ -33,6 +33,7 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -41,7 +42,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 
 const results = [];
@@ -171,6 +171,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -232,17 +234,6 @@ function rmDirs(dirs) {
 }
 
 
-async function createAcpProfile(client, name, workingDir, acpConfigOverride) {
-  const { profile } = await client.rpc("profile.create", {
-    name,
-    software: "acp",
-    workingDir,
-    acpConfig: acpConfigOverride ?? { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    permissionLevel: "always-ask",
-  });
-  return profile;
-}
-
 // =======================================================================
 // A + B:§3.1 外部記憶(檔案層)——`.deskmony/notes/` 自動建立,且不覆蓋既有內容。
 // =======================================================================
@@ -260,13 +251,11 @@ async function testNotesDir() {
     client = new MiniGatewayClient("ws://127.0.0.1:4700");
     await client.connect();
 
-    const profile = await createAcpProfile(client, "E2E Notes Profile", workspaceDir);
-
     // ---- A ---------------------------------------------------------------
     const notesPathA = path.join(projectA, ".deskmony", "notes", "team.md");
     const existedBefore = existsSync(notesPathA);
     const { session: sessionA } = await client.rpc("session.create", {
-      agentProfileId: profile.id,
+      providerId: FAKE_ACP,
       workingDir: projectA,
       title: "notes-A",
     });
@@ -286,7 +275,7 @@ async function testNotesDir() {
     const notesPathB = path.join(notesDirB, "team.md");
     const customContent = "# 我自己寫的筆記\n\n不要被覆蓋。\n";
     writeFileSync(notesPathB, customContent, "utf8");
-    await client.rpc("session.create", { agentProfileId: profile.id, workingDir: projectB, title: "notes-B" });
+    await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: projectB, title: "notes-B" });
     const afterB = readFileSync(notesPathB, "utf8");
     record(
       "B(§3.1 只指路、不碰內容): team.md 已存在且有內容時,再開 session 不會覆蓋它",

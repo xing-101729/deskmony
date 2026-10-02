@@ -230,7 +230,7 @@ interface AllowlistEntry {
   displayName: string;
   /** 寫死的命令名稱(不含路徑,由 PATH 解析)——絕不可來自外部輸入。 */
   command: string;
-  /** 對應 Deskmony 的 AgentSoftware 分類(見 packages/shared/src/agent-profile.ts)。 */
+  /** 對應 Deskmony 的 AgentSoftware 分類(見 packages/shared/src/agent-launch.ts)。 */
   software: AgentSoftware;
   modelsNote: string;
   /**
@@ -359,7 +359,7 @@ async function detectClaudeModelsFromApi(apiKey: string): Promise<DetectedModel[
  * 的舊清單,比完全不顯示更危險)——只有 `ANTHROPIC_API_KEY` 存在且
  * `detectClaudeModelsFromApi()` 真的查得到資料時,`models` 才非空;其餘情況
  * (沒有金鑰、查詢失敗/逾時)一律回空陣列 + `modelsNote` 如實說明原因,UI 端
- * 因為 `models.length > 0` 才顯示選單的既有條件(見 ProfileCreateDialog.tsx)
+ * 因為 `models.length > 0` 才顯示選單的既有條件(見 SessionList.tsx 的 agent/model 選單)
  * 會自然隱藏 model 選單,不會顯示任何過時資訊。刻意**不**在只有 `claude
  * login`(無 API 金鑰、僅本機 CLI 登入)的情況下嘗試呼叫 Models API——沒有
  * 金鑰可傳,呼叫只會確定失敗。

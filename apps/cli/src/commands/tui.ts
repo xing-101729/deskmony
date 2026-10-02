@@ -14,7 +14,7 @@ import { CliExitError } from "../connect.js";
  * `bin.ts` 的 module graph 就會在**每一個**指令啟動時載入這一整包,即使
  * 使用者只是想跑 `deskmony run --help`。動態 import 保證這包東西只在真的
  * 執行 `tui` 這個子指令時才會被解析/執行,`run`/`serve`/`session`/
- * `profile`/`doctor`/`config` 的啟動時間完全不受影響(驗收方式見
+ * `doctor`/`config` 的啟動時間完全不受影響(驗收方式見
  * scripts 底下這輪新增的一次性計時腳本,把結果貼進 PR/交接紀錄,不是
  * 進 CI 的常態斷言)。
  */

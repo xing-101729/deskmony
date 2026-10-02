@@ -81,12 +81,12 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const CLI_ENTRY = path.join(REPO_ROOT, "apps", "cli", "dist", "bin.js");
 const NODE_PTY_ENTRY = path.join(REPO_ROOT, "node_modules", "node-pty", "lib", "index.js");
@@ -207,6 +207,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
@@ -264,17 +266,6 @@ function rmDirs(dirs) {
       // ignore
     }
   }
-}
-
-async function createAcpProfile(client, name, workingDir) {
-  const { profile } = await client.rpc("profile.create", {
-    name,
-    software: "acp",
-    workingDir,
-    acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    permissionLevel: "always-ask",
-  });
-  return profile;
 }
 
 // =======================================================================
@@ -467,8 +458,8 @@ async function testPureFunctions() {
     const model = m.createModel();
     const now = Date.now();
     m.replaceSessions(model, [
-      { id: "s0", title: "焦點", agentProfileId: "p", adapterType: "acp", status: "idle", workingDir: "/tmp", createdAt: now, updatedAt: now },
-      { id: "s1", title: "背景", agentProfileId: "p", adapterType: "acp", status: "busy", workingDir: "/tmp", createdAt: now, updatedAt: now },
+      { id: "s0", title: "焦點", providerId: "p", adapterType: "acp", status: "idle", workingDir: "/tmp", createdAt: now, updatedAt: now },
+      { id: "s1", title: "背景", providerId: "p", adapterType: "acp", status: "busy", workingDir: "/tmp", createdAt: now, updatedAt: now },
     ]);
     model.selectedSessionId = "s0";
     model.dirty = false;
@@ -523,7 +514,7 @@ async function testPureFunctions() {
     const mkSession = (id, title) => ({
       id,
       title,
-      agentProfileId: "p",
+      providerId: "p",
       adapterType: "acp",
       status: "busy",
       workingDir: "/tmp",
@@ -760,12 +751,11 @@ async function testTuiAgainstCore() {
     client = new MiniGatewayClient(URL_TUI);
     await client.connect();
 
-    const profile = await createAcpProfile(client, "tui-e2e", workspaceDir);
     // §10.1 陷阱:**一定要兩個以上的 session** 才測得了方向鍵導航 ——
     // 只有零個或一個時,ink 差異比對後不送任何位元組,那是正確行為,
     // 但天真的測試會把它讀成「方向鍵壞掉」。
-    const sessionA = (await client.rpc("session.create", { agentProfileId: profile.id, workingDir: workspaceDir, title: "TUI-AAA" })).session;
-    const sessionB = (await client.rpc("session.create", { agentProfileId: profile.id, workingDir: workspaceDir, title: "TUI-BBB" })).session;
+    const sessionA = (await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title: "TUI-AAA" })).session;
+    const sessionB = (await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title: "TUI-BBB" })).session;
 
     const pty = await loadNodePty();
     tui = new TuiDriver(pty, { url: URL_TUI, cwd: workspaceDir, env: cleanCliEnv() });

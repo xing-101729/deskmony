@@ -5,8 +5,6 @@
     "closed": "Disconnected"
   },
   "confirmDeleteSession": "Delete the conversation \"{{title}}\"? This cannot be undone.",
-  "confirmDeleteProfile": "Delete Agent Profile \"{{name}}\"? This cannot be undone.{{usageNote}}",
-  "confirmDeleteProfileUsageNote": "\n\nThere are currently {{count}} existing conversation(s) created with this profile. Deleting it won't affect those conversations, but you won't be able to create new conversations with this profile afterward.",
   "contextUsageTitle": "Context window usage (S3a usage-metering)",
   "spawnChildAriaLabel": "Start child agent",
   "spawnChildTitle": "Start a child agent to run a subtask",
@@ -16,13 +14,8 @@
   "collapseSidebarAriaLabel": "Collapse sidebar",
   "closeSidebarAriaLabel": "Close sidebar",
   "paletteTriggerLabel": "Search or run a command…",
-  "selectProfileAriaLabel": "Select Agent Profile",
-  "noProfileOption": "(No profile yet)",
-  "advancedToggle": "Advanced (choose agent/model)",
   "newSessionButton": "New conversation",
   "creating": "Creating…",
-  "createProfileAriaLabel": "Create Agent Profile",
-  "deleteProfileAriaLabel": "Delete Agent Profile",
   "emptyTitle": "No conversations yet",
   "emptyDescription": "Click \"New conversation\" above to start interacting with an agent.",
   "waitingForAuthTitle": "A session is waiting for authorization",
@@ -51,20 +44,11 @@
   "unnamedWorkspace": "(No directory specified)",
   "spawnChildDialog": {
     "title": "Start a child agent under \"{{title}}\"",
-    "description": "Give the child agent a task prompt, and choose which agent profile to create it with (defaults to this session's profile, but you can pick a different one) — you can also further override the agent software/model.",
-    "profileSelectAriaLabel": "Select a profile for the child agent",
+    "description": "Give the child agent a task prompt and choose which agent and model to create it with (defaults to this session's agent). The child session uses this session's working folder.",
     "promptLabel": "Task prompt",
     "promptPlaceholder": "Describe the task this child agent should carry out…",
     "titleFieldLabel": "Title (optional)",
     "titlePlaceholder": "e.g., Rerun the acceptance check for this UI slice",
     "submit": "Start child agent"
-  },
-  "overrideFields": {
-    "softwareLabel": "Agent software (optional, defaults to Profile)",
-    "useProfileDefault": "(Use Profile's settings)",
-    "modelLabel": "Model (optional)",
-    "useDefaultPlain": "(Use default)",
-    "useDefaultProfile": "(Use Profile's default)",
-    "effortLabel": "Thinking effort (optional)"
   }
 }

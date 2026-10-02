@@ -89,7 +89,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { SubagentChildSummary, SubagentProfileSummary } from "@deskmony/shared";
+import type { SubagentAgentSummary, SubagentChildSummary } from "@deskmony/shared";
 
 const MCP_BRIDGE_SERVER_NAME = "deskmony-mcp-bridge";
 
@@ -230,12 +230,14 @@ function registerSubagentTools(server: McpServer, client: BridgeGatewayClient, p
   server.registerTool(
     "list_profiles",
     {
-      description: "查詢目前可用的 agent profile(id/name/software/model/role),決定 spawn_subagent 要用哪一個。",
+      description:
+        "查詢目前可用的 agent(id/label/software/models/defaultModelId),決定 spawn_subagent 要用哪一個。" +
+        "id 就是 spawn_subagent 的 agent 參數。",
       inputSchema: {},
     },
     async () => {
-      const { profiles } = await client.call<{ profiles: SubagentProfileSummary[] }>("profile.listForSubagent", {});
-      return textResult(JSON.stringify(profiles, null, 2));
+      const { agents } = await client.call<{ agents: SubagentAgentSummary[] }>("agent.listForSubagent", {});
+      return textResult(JSON.stringify(agents, null, 2));
     },
   );
 
@@ -262,16 +264,21 @@ function registerSubagentTools(server: McpServer, client: BridgeGatewayClient, p
     {
       description:
         "開一個子 agent 去執行一段子任務。prompt 是給子 agent 的完整任務描述;" +
-        "title 選填,只是顯示名稱;profileId 選填,指定要用哪個 agent profile 建立" +
-        "子 agent(呼叫 list_profiles 查詢可用選項)。省略 profileId 時沿用你自己的" +
-        "profile。回傳子 session id;子完成後結果會自動注入你的對話。",
+        "title 選填,只是顯示名稱;agent 選填,指定要用哪個 agent 建立子 agent(填" +
+        "list_profiles 回傳的 id);model 選填,指定該 agent 的 model(從 list_profiles" +
+        "回傳的 models 挑)。省略 agent 時沿用你自己的 agent 與 model。" +
+        "回傳子 session id;子完成後結果會自動注入你的對話。",
       inputSchema: {
         prompt: z.string().min(1).describe("給子 agent 的完整任務描述(它看不到你的對話歷史,要寫清楚)"),
         title: z.string().optional().describe("選填:子 agent 的顯示名稱"),
-        profileId: z
+        agent: z
           .string()
           .optional()
-          .describe("選填:子 agent 要使用的 agent profile id(呼叫 list_profiles 查詢)。省略時沿用你自己的 profile。"),
+          .describe("選填:子 agent 要使用的 agent id(list_profiles 回傳的 id)。省略時沿用你自己的 agent 與 model。"),
+        model: z
+          .string()
+          .optional()
+          .describe("選填:子 agent 要使用的 model id(list_profiles 回傳的 models 之一)。只在有指定 agent 時有意義。"),
       },
     },
     async (args) => {
@@ -279,7 +286,8 @@ function registerSubagentTools(server: McpServer, client: BridgeGatewayClient, p
         parentSessionId,
         prompt: args.prompt,
         title: args.title,
-        agentProfileId: args.profileId,
+        agent: args.agent,
+        model: args.model,
       });
       return textResult(`已建立子 agent(session ${childSessionId})。它跑完後結果會自動出現在這裡。`);
     },

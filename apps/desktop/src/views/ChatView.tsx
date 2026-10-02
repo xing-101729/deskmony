@@ -1,9 +1,10 @@
 import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentProfile, EffortLevel, Session, SlashCommandInfo } from "@deskmony/shared";
+import type { EffortLevel, Session, SlashCommandInfo } from "@deskmony/shared";
 import { PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
 import {
   useSessionStore,
+  providerLabelOf,
   selectProviderModels,
   selectUsageReporting,
   type ChatItem,
@@ -45,7 +46,7 @@ const EMPTY_ITEMS: readonly ChatItem[] = [];
  * 註解。acp/pty/codex 的 model 由外部 agent/CLI 自行管理,這裡只顯示唯讀
  * 資訊,不提供切換控制。
  */
-function ModelControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element {
+function ModelControl({ session }: { session: Session }): JSX.Element {
   const { t } = useTranslation(["chat"]);
   const setSessionModel = useSessionStore((s) => s.setSessionModel);
   const enabledModelIds = useSessionStore((s) => s.enabledModelIds);
@@ -54,17 +55,17 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 注意:`selectProviderModels()` 本身是通用邏輯(依 profile.providerId 查
-  // resolveProviders() 的結果),不是 Claude 專屬——opencode profile 只要是
-  // 透過 ProfileCreateDialog 目前的流程建立(帶 providerId="opencode"),這裡
-  // 就能拿到 `opencode models` 偵測到的清單,變數名稱維持通用命名。
+  // 注意:`selectProviderModels()` 本身是通用邏輯(依 session.providerId 查
+  // resolveProviders() 的結果),不是 Claude 專屬——opencode session 只要是
+  // 用 providerId="opencode" 建立,這裡就能拿到 `opencode models` 偵測到的清單,
+  // 變數名稱維持通用命名。
   const availableModels = useMemo(
-    () => selectProviderModels(profile, detectedAgents, providerPrefs, enabledModelIds),
-    [profile, detectedAgents, providerPrefs, enabledModelIds],
+    () => selectProviderModels(session, detectedAgents, providerPrefs, enabledModelIds),
+    [session, detectedAgents, providerPrefs, enabledModelIds],
   );
 
   const supportsModelSwitch = session.adapterType === "claude-agent-sdk" || session.adapterType === "opencode";
-  const currentModel = session.model ?? profile?.model ?? "";
+  const currentModel = session.model ?? "";
 
   const handleChange = async (model: string): Promise<void> => {
     if (!model || model === currentModel) return;
@@ -120,13 +121,13 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
 
 /**
  * 比照上面的 `ModelControl`,但更簡單:思考程度固定 5 個等級,不需要 provider
- * 偵測清單(見 packages/shared/src/agent-profile.ts 的 `EffortLevelSchema`
+ * 偵測清單(見 packages/shared/src/agent-launch.ts 的 `EffortLevelSchema`
  * 註解)。只有 `claude-agent-sdk` 驗證支援這個能力——
  * `session.adapterType !== "claude-agent-sdk"` 時直接 `return null`,不像
  * `ModelControl` 對 acp/pty 顯示唯讀 badge:「思考程度」對那些 adapter 根本
  * 不是一個存在的概念,不需要顯示任何東西。
  */
-function EffortControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element | null {
+function EffortControl({ session }: { session: Session }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
   const setSessionEffort = useSessionStore((s) => s.setSessionEffort);
   const [switching, setSwitching] = useState(false);
@@ -134,7 +135,7 @@ function EffortControl({ session, profile }: { session: Session; profile: AgentP
 
   if (session.adapterType !== "claude-agent-sdk") return null;
 
-  const currentEffort = session.effort ?? profile?.effort ?? "";
+  const currentEffort = session.effort ?? "";
 
   const handleChange = async (effort: EffortLevel | ""): Promise<void> => {
     if (!effort || effort === currentEffort) return;
@@ -612,7 +613,8 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const { t } = useTranslation(["chat"]);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const sessions = useSessionStore((s) => s.sessions);
-  const profiles = useSessionStore((s) => s.profiles);
+  const detectedAgentsForLabel = useSessionStore((s) => s.detectedAgents);
+  const providerPrefsForLabel = useSessionStore((s) => s.providerPrefs);
   /**
    * 2026-09-04(稽核修補):這裡原本是 `useSessionStore((s) => s.itemsBySession)`
    * ——訂閱**整個** map。而 store 對「任何一條 session 的任何一個事件」都會產生
@@ -805,7 +807,8 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   }
 
   const busy = session.status === "busy" || session.status === "waiting";
-  const profile = profiles.find((p) => p.id === session.agentProfileId);
+  // 2026-10-02(P2:移除 profile):顯示 agent 名稱改看 `session.providerId` → provider label。
+  const agentLabel = providerLabelOf(session.providerId, detectedAgentsForLabel, providerPrefsForLabel);
   /**
    * async-scribbling-llama.md Phase 6:目前只有 claude-agent-sdk 的
    * sendPrompt() 有明確路徑把圖片/文件內容送給模型(見 claude-sdk-adapter.ts)。
@@ -840,16 +843,16 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
         <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
-          <p className="truncate text-2xs text-fg-faint" title={session.workingDir}>
-            {shortenPath(session.workingDir)}
+          <p className="truncate text-2xs text-fg-faint" title={`${agentLabel} · ${session.workingDir}`}>
+            <span className="text-fg-subtle">{agentLabel}</span> · {shortenPath(session.workingDir)}
           </p>
         </div>
         <div className="flex flex-shrink-0 flex-wrap items-center gap-1.5">
           <UsageBadge session={session} />
           <CostBudgetBadge session={session} />
           <AutoModeControl session={session} />
-          <ModelControl session={session} profile={profile} />
-          <EffortControl session={session} profile={profile} />
+          <ModelControl session={session} />
+          <EffortControl session={session} />
           {busy && (
             <IconButton
               icon="pause"

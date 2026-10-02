@@ -23,7 +23,7 @@
     "disableLabel": "停用 {{name}}",
     "collapseModelsEnv": "收合(模型 / 環境變數)",
     "expandModelsEnv": "展開(模型 / 環境變數)",
-    "modelsHint": "啟用的 model(未勾選的不會出現在「建立 Profile」或對話中「切換 model」的下拉選單)",
+    "modelsHint": "啟用的 model(未勾選的不會出現在新對話或對話中「切換 model」的下拉選單)",
     "addUpdate": "新增/更新",
     "envHint": "環境變數(例如 ANTHROPIC_API_KEY)——值一律加密顯示為 ***,這裡看到的清單只是「已設定哪些 key」,無法讀回明文。",
     "envKeyPlaceholder": "KEY",
@@ -86,13 +86,16 @@
     "whenKindCommandMatches": "指令符合正規表達式",
     "whenKindPathUnder": "路徑位於此前綴之下",
     "whenValueLabel": "條件值",
-    "scopeProfileLabel": "限定 Profile ID(選填)",
-    "scopeRoleLabel": "限定角色(選填)",
-    "scopeProfile": "profile:{{id}}",
-    "scopeRole": "角色:{{role}}",
     "addedByUser": "手動新增",
     "addedByRemember": "來自「永遠允許」",
     "toolRequired": "請填寫工具名稱(輸入 * 代表任意工具)",
-    "addRuleButton": "新增規則"
+    "addRuleButton": "新增規則",
+    "scopeProvider": "agent:{{id}}",
+    "legacyScopeAllow": "舊 profile 範圍(allow 已停用)",
+    "legacyScopeDeny": "舊 profile 範圍(deny 已套用全部)",
+    "legacyScopeTitle": "這條規則帶有已移除的 profile 範圍。profile 已不存在:allow 規則不再生效(原本放行的會改為升級給你確認),deny 規則改為對所有 session 生效。建議刪除後改用「agent」範圍重建。",
+    "scopeAgentLabel": "限定 agent(選填)",
+    "scopeAgentHint": "只對用這個 agent 開的對話生效;留空 = 全部。",
+    "scopeAgentAll": "(全部 agent)"
   }
 }

@@ -1,5 +1,5 @@
 import type { GatewayClient } from "@deskmony/client";
-import type { AgentOverride, Session, SessionEventEnvelope } from "@deskmony/shared";
+import type { Session, SessionEventEnvelope } from "@deskmony/shared";
 import type { GlobalOptions } from "../args.js";
 import { CliExitError, closeGateway, connectGateway } from "../connect.js";
 import {
@@ -181,23 +181,16 @@ export async function runCommand(options: GlobalOptions, promptArg: string): Pro
 
   const client = await connectGateway({ url: options.url, token: options.token });
   try {
-    // HLD §4.2/session.ts 的 AgentOverrideSchema 註解:「只給 model(省略
-    // software):software/command/args 全部沿用 profile 原本的設定」——
-    // --model/--effort 都沒給時整個 agentOverride 留 undefined,不送一個
-    // 空物件(避免 core 端把「使用者明確要求覆寫但兩個欄位都留空」與
-    // 「使用者根本沒有要覆寫」混為一談,雖然目前 core 的實作對空物件與
-    // undefined 應該同義,但語意上這樣寫比較誠實)。
-    const agentOverride: AgentOverride | undefined =
-      options.model !== undefined || options.effort !== undefined
-        ? { model: options.model, effort: options.effort }
-        : undefined;
-
+    // 2026-10-02(P2:移除 profile):`--agent`(providerId,預設 claude-agent-sdk)+ 選填
+    // `--model`/`--effort` 直接帶進 session.create;沒給 model/effort 時 core 端用 provider
+    // 的預設(沒有就由 agent 自己決定)。
     let session: Session;
     try {
       const result = (await client.call("session.create", {
-        agentProfileId: options.profile,
+        providerId: options.agent,
+        model: options.model,
+        effort: options.effort,
         workingDir: options.cwd,
-        agentOverride,
       })) as SessionCreateResult;
       session = result.session;
     } catch (err) {

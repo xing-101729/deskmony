@@ -54,7 +54,7 @@ import { appendPolicyRule, removePolicyRule as removePolicyRuleFile } from "../c
 export const DEFAULT_YOLO_DURATION_MS = 30 * 60_000;
 
 /** S7:一個 session 目前的暫態權限模式(auto/YOLO)——只存在記憶體,不落地
- *  DB(見 packages/shared/src/agent-profile.ts 的 `SessionPermissionModeSchema`
+ *  DB(見 packages/shared/src/agent-launch.ts 的 `SessionPermissionModeSchema`
  *  註解)。`yoloExpiresAt` 只有 `mode === "auto-accept-all"` 時有值。
  *  `trueUnrestricted`(2026-08-25 新增,見 docs/DECISIONS.md §G)只有
  *  `mode === "auto-accept-all"` 時可能為 `true`——`setMode()` 與
@@ -90,13 +90,13 @@ export interface SessionPermissionCoordinatorDeps {
 
 export class SessionPermissionCoordinator {
   /** S7:每個 session 的暫態權限模式(auto/YOLO)——**刻意不落地 DB**
-   *  (HLD §2:崩潰/重啟不復活,回落 `profile.permissionLevel`)。
+   *  (HLD §2:崩潰/重啟不復活,回落 `"always-ask"`)。
    *  session 刪除時由 `clear()` 一併清除,避免無限增長。 */
   private readonly permissionState = new Map<string, SessionPermissionState>();
 
   constructor(private readonly deps: SessionPermissionCoordinatorDeps) {}
 
-  /** session 建立/續接/checkpoint 重啟時,把暫態模式重設為 profile 的預設值。 */
+  /** session 建立/續接時,把暫態模式重設為初值(一律 `"always-ask"`)。 */
   initialize(sessionId: string, mode: SessionPermissionMode): void {
     this.permissionState.set(sessionId, { mode });
   }

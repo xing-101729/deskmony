@@ -9,13 +9,16 @@ import { z } from "zod";
 export interface SubagentPort {
   /** spawn 一個子 session,並立刻送出 prompt。parentSessionId 由 adapter 端以
    *  自己的 handle.id 帶入(agent 不可指定,防止它冒名別的 session 當父)。
-   *  agentProfileId 選填:agent 可先呼叫 `list_profiles` 查詢可用選項,自行決定
-   *  要用哪個 profile 建立子 agent;省略時沿用父 session 自己的 profile。 */
+   *  agent/model 選填(2026-10-02 P2:取代 `agentProfileId`):agent 可先呼叫
+   *  `list_profiles`(現在回傳的是 `AgentCatalog.listAvailable()` 摘要)查詢可用的
+   *  agent,自行決定要用哪一個(`agent` = providerId);省略 `agent` 時沿用父 session
+   *  自己的 providerId/model。 */
   spawnChild(input: {
     parentSessionId: string;
     prompt: string;
     title?: string;
-    agentProfileId?: string;
+    agent?: string;
+    model?: string;
   }): Promise<{ childSessionId: string }>;
 
   /** S12 Phase2 R4:給 `send_to_subagent` MCP 工具用——對一個「已經是這個
@@ -36,31 +39,35 @@ export interface SubagentPort {
    *  spawn_subagent,對話裡不會有任何 tool-result 提到它)。 */
   listChildren(input: { parentSessionId: string }): Promise<SubagentChildSummary[]>;
 
-  /** 給 `list_profiles` MCP 工具用:回傳目前可用的 agent profile 摘要,讓 agent
-   *  能自行決定 spawn_subagent 要用哪一個。刻意只回傳決策需要的最小欄位——
-   *  不含 env/mcpConfig/systemPrompt 等可能夾帶密鑰或指令的欄位(那些欄位
-   *  「本來就是給使用者自己的 UI 讀」的資料,見 agent-profile.ts 對 `env`
-   *  欄位的說明,不該進到 agent 的對話 context 裡)。 */
-  listProfiles(): Promise<SubagentProfileSummary[]>;
+  /** 給 `list_profiles` MCP 工具用:回傳目前可用的 agent 清單(2026-10-02 P2:資料來源
+   *  是 `AgentCatalog.listAvailable()`,不再有 profile),讓 agent 能自行決定
+   *  spawn_subagent 要用哪一個。刻意只回傳決策需要的最小欄位——不含 env/command/args
+   *  等可能夾帶密鑰或本機路徑的欄位,那些欄位不該進到 agent 的對話 context 裡。
+   *  工具名稱 `list_profiles` 沿用(P3 會整組換成 `list_agents`)。 */
+  listProfiles(): Promise<SubagentAgentSummary[]>;
 }
 
 /**
  * Phase 2(ACP scoped MCP bridge token)新增:改成 zod schema(而非純 TS
  * interface):這兩個型別原本只在 core 內部使用(in-process MCP 工具的回傳值,不需要跨行程序列化
- * 驗證),這輪新增 gateway 方法 `profile.listForSubagent`/`session.listChildren`
+ * 驗證),這輪新增 gateway 方法 `agent.listForSubagent`/`session.listChildren`
  * 把同一份資料曝露給 `packages/adapters/src/mcp-bridge-server.ts`(獨立子行程,
  * 經 WS RPC 取得),需要 zod 在 runtime 解析/驗證回應。`z.infer` 產生的型別與
  * 原本的 TS interface 結構相同,不影響既有呼叫端(apps/core/src/session/
  * session-manager.ts 的 `listChildrenFromTool()` 等)。
+ *
+ * 2026-10-02(P2:移除 profile):`SubagentProfileSummarySchema` 改成
+ * `SubagentAgentSummarySchema`,內容是 `AgentCatalog.listAvailable()` 的摘要。
  */
-export const SubagentProfileSummarySchema = z.object({
+export const SubagentAgentSummarySchema = z.object({
+  /** providerId——`spawn_subagent` 的 `agent` 參數就是填這個值。 */
   id: z.string(),
-  name: z.string(),
+  label: z.string(),
   software: z.string(),
-  model: z.string().optional(),
-  role: z.string(),
+  models: z.array(z.object({ id: z.string(), label: z.string() })),
+  defaultModelId: z.string().optional(),
 });
-export type SubagentProfileSummary = z.infer<typeof SubagentProfileSummarySchema>;
+export type SubagentAgentSummary = z.infer<typeof SubagentAgentSummarySchema>;
 
 export const SubagentChildSummarySchema = z.object({
   id: z.string(),

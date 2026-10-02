@@ -15,7 +15,9 @@ import { z } from "zod";
 export const RecoverySessionInfoSchema = z.object({
   sessionId: z.string(),
   sessionTitle: z.string(),
-  profileName: z.string().optional(),
+  /** 2026-10-02(P2:移除 profile):原本的 `profileName`,現在是 session 的 agent 顯示名
+   *  (provider label;provider 已不在目錄裡時退回 session 存的 providerId)。 */
+  agentLabel: z.string().optional(),
   status: z.literal("interrupted"),
   interruptedAt: z.number().optional(),
   lastSeenAt: z.number().optional(),

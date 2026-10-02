@@ -441,7 +441,7 @@ export function renderErrorEvent(message: string, detail: string | undefined, co
   return detail ? `${head}\n${detail}\n` : `${head}\n`;
 }
 
-// ---- 純文字表格(session list / profile list 共用) -------------------------
+// ---- 純文字表格(session list 等共用) -------------------------
 
 /**
  * 沒有終端機寬度偵測、沒有斷詞換行——刻意簡單:每欄取這一欄所有值裡最長

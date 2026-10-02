@@ -12,7 +12,7 @@ import type {
   SlashCommand,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
 import type { SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
@@ -140,11 +140,12 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   }
 
   async spawn(
-    profile: AgentProfile,
+    launch: AgentLaunchSpec,
     workspace: Workspace,
     resume?: ResumeOptions,
   ): Promise<AgentHandle> {
-    const handle: AgentHandle = { id: randomUUID(), profile, workspace };
+    const handle: AgentHandle = { id: randomUUID(), launch, workspace };
+    const agentLabel = launch.providerId ?? "claude-agent-sdk";
 
     const inputQueue = new AsyncQueue<SDKUserMessage>();
     const outputQueue = new AsyncQueue<AgentEvent>({
@@ -188,8 +189,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
 
     const options: SdkOptions = {
       cwd: workspace.path,
-      model: profile.model,
-      effort: profile.effort,
+      model: launch.model,
+      effort: launch.effort,
       includePartialMessages: true,
       permissionMode: "default",
       spawnClaudeCodeProcess: (spawnOptions) => {
@@ -209,7 +210,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         // 子程序的錯誤輸出仍看得到)。
         spawned.stderr?.on("data", (chunk: Buffer) => {
           const text = chunk.toString().trimEnd();
-          if (text) console.error(`[claude-sdk-adapter] ${profile.name} stderr: ${text}`);
+          if (text) console.error(`[claude-sdk-adapter] ${agentLabel} stderr: ${text}`);
         });
         spawned.stderr?.on("error", () => {
           // 子程序已結束時讀取 stderr 可能報錯,忽略。
@@ -217,34 +218,33 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         child = spawned;
         return spawned;
       },
-      // 這輪新增(provider 目錄重構):`profile.env`(provider 層級預設 +
-      // profile 自己的覆寫,已由 SessionManager.createSession() 合併好)併入
+      // 這輪新增(provider 目錄重構):`launch.env`(provider 層級 env,已由
+      // SessionManager.prepareSpawnSpec() 從 settings 讀出併好)併入
       // SDK 子程序的環境變數(見 sdk.d.ts 對 `Options.env` 的官方註解——設定
       // 這個欄位會**整個取代**子程序環境,不會自動 merge process.env,故這裡
       // 手動 `...process.env` 展開,子程序仍會繼承 PATH/HOME 等既有變數)。
-      // 沒有任何 provider/profile env 時(最常見情況)刻意省略這個欄位,讓
-      // SDK 沿用「省略時繼承 process.env」的預設行為,不改變既有 profile 的
-      // spawn 結果。
-      ...(profile.env && Object.keys(profile.env).length > 0 ? { env: { ...process.env, ...profile.env } } : {}),
+      // 沒有任何 provider env 時(最常見情況)刻意省略這個欄位,讓
+      // SDK 沿用「省略時繼承 process.env」的預設行為。
+      ...(launch.env && Object.keys(launch.env).length > 0 ? { env: { ...process.env, ...launch.env } } : {}),
       // S6(crash-recovery)L4 §4.1:「繼續(保有記憶)」——見檔案頂端查證說明。
       ...(resume ? { resume: resume.backendSessionId } : {}),
-      // S8(agent-lifecycle)L4 §3.2 修正實作:`profile.systemPrompt` 在這輪之前
+      // S8(agent-lifecycle)L4 §3.2 修正實作:`systemPrompt` 在這輪之前
       // **從未被任何 adapter 轉發過**(查證:acp-adapter.ts/opencode-adapter.ts/
       // pty-adapter.ts 均無 systemPrompt 相關程式碼)——是一個存在於 schema/DB/
       // UI,但完全不會真的送到任何被 spawn 的 agent 的欄位。S8 的「筆記指路」
-      // (SessionManager.prepareSpawnProfile() 把 `.deskmony/notes/` 指路段落
-      // 附加在 `profile.systemPrompt` 尾端)若這裡不接上,整段機制就只是把文字
+      // (SessionManager.prepareSpawnSpec() 把 `.deskmony/notes/` 指路段落
+      // 設成 `launch.systemPrompt`)若這裡不接上,整段機制就只是把文字
       // 寫進一個沒人讀的欄位,等於沒有指路——這裡補上轉發,讓它至少對這個
       // (最主要、也是官方推薦給長命 agent 的)adapter 生效。
       //
       // 用 SDK 的 `{ type: 'preset', preset: 'claude_code', append }` 形式而
-      // **不是**直接 `systemPrompt: profile.systemPrompt`(純字串會整個取代
+      // **不是**直接 `systemPrompt: launch.systemPrompt`(純字串會整個取代
       // Claude Code 的預設系統提示,等於讓「順便設定過 systemPrompt」的既有
-      // profile 突然失去所有預設工具/行為指引,是遠超本輪範圍的行為變動)——
+      // agent 突然失去所有預設工具/行為指引,是遠超本輪範圍的行為變動)——
       // `append` 保留預設提示,只追加自訂內容,這才是這個欄位原本應有的語意
       // (使用者過去設定它從未生效,現在生效時,選最小驚訝的解讀:附加而非取代)。
-      ...(profile.systemPrompt
-        ? { systemPrompt: { type: "preset", preset: "claude_code", append: profile.systemPrompt } }
+      ...(launch.systemPrompt
+        ? { systemPrompt: { type: "preset", preset: "claude_code", append: launch.systemPrompt } }
         : {}),
       canUseTool: async (toolName, input, callOptions) => {
         const requestId = callOptions.requestId;
@@ -337,7 +337,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       })
       .catch((err: unknown) => {
         console.error(
-          `[claude-sdk-adapter] ${profile.name} supportedCommands() 失敗(不影響對話,只影響 "/" 選單): ${String(err)}`,
+          `[claude-sdk-adapter] ${agentLabel} supportedCommands() 失敗(不影響對話,只影響 "/" 選單): ${String(err)}`,
         );
       });
 

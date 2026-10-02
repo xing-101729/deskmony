@@ -14,8 +14,10 @@
  * 版本,讀取後確認欄位名稱與呼叫方式)。
  *
  * 啟動方式:透過 stdio 建立 ACP JSON-RPC 連線,不接受命令列參數 —— 由
- * AcpAdapter.spawn() 依 AgentProfile.acpConfig(command/args/env)啟動這支
- * 腳本本身(例如 command=process.execPath, args=[thisFilePath])。
+ * AcpAdapter.spawn() 依 AgentLaunchSpec.acpConfig(command/args/env)啟動這支
+ * 腳本本身(例如 command=process.execPath, args=[thisFilePath])。2026-10-02(P2:移除 profile)
+ * 起,e2e 經 core 的環境變數 `DESKMONY_E2E_EXTRA_PROVIDERS` 把這組 command/args 注入
+ * `AgentCatalog`(見 scripts/lib/e2e-providers.mjs),session 用 `providerId:"e2e-fake-acp"` 建立。
  *
  * 協定(僅供本腳本與 e2e-gateway.mjs 步驟 9 之間使用,非 ACP 標準的一部分):
  *   - 一般 prompt:固定回覆 FAKE_ACP_REPLY_CHUNKS 串接而成的文字,拆成多段

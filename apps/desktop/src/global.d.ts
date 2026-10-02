@@ -12,7 +12,7 @@ declare global {
       /** M5 Round E(需求1):開啟原生「選擇資料夾」對話框,回傳選到的完整
        *  路徑;使用者取消回傳 `null`。只在 Electron 場景存在——純瀏覽器
        *  client 讀到的 `window.deskmony` 整個是 `undefined`,呼叫端
-       *  (ProfileCreateDialog.tsx)需自行對 `window.deskmony?.pickDirectory`
+       *  (AgentPicker.tsx)需自行對 `window.deskmony?.pickDirectory`
        *  做存在性檢查,不存在時隱藏「瀏覽…」按鈕、維持手動文字輸入。 */
       pickDirectory?: () => Promise<string | null>;
       /** 見 electron/main.ts 的 `deskmony:focusWindow` IPC handler 註解:把

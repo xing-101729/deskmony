@@ -8,7 +8,7 @@
   "adapter": {
     "unsupportedOperation": "{{software}} no admite esta operación: {{operation}}",
     "unknownHandle": "No se encontró ninguna sesión en ejecución para: {{handleId}}",
-    "missingConfig": "Al perfil \"{{profileId}}\" le falta la configuración requerida por {{software}}: {{configField}}"
+    "missingConfig": "Al agent \"{{providerId}}\" le falta la configuración requerida por {{software}}: {{configField}}"
   },
   "auth": {
     "notYetAuthenticated": "Aún no se ha autenticado: el primer mensaje debe ser una solicitud auth con un token válido",

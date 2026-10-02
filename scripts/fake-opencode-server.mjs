@@ -12,10 +12,11 @@
  * 工具呼叫 + 權限請求 → interrupt → dispose 清理。
  *
  * 啟動方式:比照 fake-acp-agent.mjs / fake-pty-echo.mjs 的先例,被
- * `OpenCodeAdapter.spawn()` 當成 `profile.opencodeConfig.command=
+ * `OpenCodeAdapter.spawn()` 當成 `launch.opencodeConfig.command=
  * process.execPath, args=[thisFilePath]` 啟動(`OpencodeAgentConfigSchema.
  * args` 非空時會完全取代預設的 `serve --port 0 --hostname 127.0.0.1`,見
- * packages/shared/src/agent-profile.ts 的註解)——不接受任何命令列參數,
+ * packages/shared/src/agent-launch.ts 的註解;2026-10-02 P2 起經 core 的
+ * `DESKMONY_E2E_EXTRA_PROVIDERS` 注入,見 scripts/lib/e2e-providers.mjs)——不接受任何命令列參數,
  * 監聽 port 由 `net.Server.listen(0)` 隨機選定,啟動後在 stdout 印出與真實
  * opencode 相同格式的 `opencode server listening on http://127.0.0.1:<port>`
  * 這一行,讓 `OpenCodeAdapter` 的 port 探測邏輯不需要區分真假伺服器。
