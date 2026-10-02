@@ -1,5 +1,7 @@
 # S12 Phase 2 — Round 4：`send_to_subagent`(父對已存在的子 agent 追加訊息)
 
+> ⚠️ 2026-10-02 已由 session 網路取代,見 [simplify-agents-sessions_detail.md](./simplify-agents-sessions_detail.md)
+
 > 上層：S12 + [Phase 2 R1](./session-subagents-phase2_detail.md)（子完成回注父）+
 > [R2](./session-subagents-phase2-r2_detail.md)（`spawn_subagent` 工具）。
 > 階段：跨 package（shared / adapters / core）的加法，非破壞性。

@@ -1,5 +1,7 @@
 # S12 Detail Design：Session 子 agent（parent → child session）
 
+> ⚠️ 2026-10-02 已由 session 網路取代,見 [simplify-agents-sessions_detail.md](./simplify-agents-sessions_detail.md)
+
 > 上層依據：DECISIONS.md A1（混合協作：階層骨架）、A4（角色決定生命週期）。
 > 階段：**新增能力**，加法式、非破壞性。
 > L4 完成度標準：**另一個工程師照著寫，不用問你。**

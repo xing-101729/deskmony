@@ -1,5 +1,7 @@
 # S12 Phase 2 — Round 2：`spawn_subagent` MCP 工具（agent 自主 spawn）
 
+> ⚠️ 2026-10-02 已由 session 網路取代,見 [simplify-agents-sessions_detail.md](./simplify-agents-sessions_detail.md)
+
 > 上層：[`session-subagents_detail.md`](./session-subagents_detail.md)（S12）+
 > [`session-subagents-phase2_detail.md`](./session-subagents-phase2_detail.md)（R1 回注）。
 > 階段：跨 package（shared / adapters / core）的加法，非破壞性。
