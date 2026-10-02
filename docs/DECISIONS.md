@@ -160,3 +160,30 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 **為何 `trueUnrestricted` 不算打破 C2 的 default-deny 鐵則**:它不是新的「未分類自動放行」規則,而是**單一 session、需先已處於 YOLO、且要求額外顯式開啟**的例外閘門——沒有規則比對或 autoMode 能觸發它。`decide()` 把這個短路刻意放在函式最開頭(第 0 步,先於 hard-deny 判斷本身),不是埋在 hard-deny 分支裡——grep `trueUnrestricted` 找到的就是這個唯一入口,審查者不需要先看懂 hard-deny 邏輯才發現這裡有例外。
 
 **對應修訂**:**C6**「真 YOLO…遠端禁用」已改為本機遠端同權;**F3**「遠端不可:開 YOLO、切 auto mode、改 allowlist/政策」三項已移至「遠端可」;**F4**——三斷路器中只有**權限**這條新增遠端可達的鬆綁路徑,訊息(A5)、成本(E1–E3)不受影響。
+
+---
+
+## H. 2026-10-02 修訂:簡化——拿掉 profile 與 team/看板,改成全 session 互傳訊息
+
+> 使用者要求「功能簡單化」:從電腦找到各種 agent 軟體直接使用、不用每個都建 profile、每個 session
+> 知道有哪些 agent 可用並能建 session、session 之間能互傳對話。追問後四項定案由使用者親自選定。
+> 完整規格:[`LAYER-4-detail-design/simplify-agents-sessions_detail.md`](./LAYER-4-detail-design/simplify-agents-sessions_detail.md)。
+
+**撤銷 / 改寫的決策**:
+
+| 原決策 | 之後 |
+|---|---|
+| **A1** 混合協作(階層骨架 + peer)、**A4** 角色決定生命週期 | 撤銷。沒有 team、沒有角色;所有 session 平等、互相可見,誰建了誰只用來顯示巢狀與溯源。 |
+| **A2** LLM 提議、人/規則裁決(lead + dispose-gate) | 撤銷 lead/dispose-gate。收斂決策回到人類直接在各 session 裡下指示。 |
+| **A3** done = 機器驗收閘 | 撤銷(隨 task 一起移除)。 |
+| **A5** peer 訊息綁 task/review 脈絡 + 每 context 訊息預算 | **改寫**:不再要求脈絡(使用者要任意 session 互傳),改為「**每條訊息鏈**的訊息數預算」——人類輸入開新鏈,agent 轉發沿用觸發它那一輪的鏈,超過 `messageBudget.maxMessagesPerContext` 即熔斷並通知人。訊息斷路器仍是三條斷路器之一,遠端仍不可停用。 |
+| **D3** 任務永不自動續接 + 復原視圖列髒 worktree、**D4** Mailbox 持久化 | 任務部分撤銷;session 對帳(D2)保留。跨 session 訊息若目標忙碌,在記憶體佇列等待,core 重啟即遺失(不再有 Mailbox)。 |
+| **E2** 任務預算硬上限 | 撤銷(隨 task 一起移除)。E1 用量量測、E3 每日 kill-switch 保留。 |
+| **F3** 遠端不可建改 agent profile | profile 已不存在,此項自然失效。 |
+
+**新增**:
+
+- 回覆語意:**不做任何自動回送**。收到訊息的 agent 自己決定要不要回、回給誰(使用者原話:「畢竟不一定給 A」)。S12 的「子完成 → 結果注入父」一併移除。
+- 跨 session 工具 `create_session` / `send_to_session` 走既有權限流程(default-deny 不變);`list_agents` / `list_sessions` / `read_session` 純查詢,自動放行。
+
+**沒改什麼**:§C 權限斷路器全部規則、§E1/E3、§F 其餘項、§G。
