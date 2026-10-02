@@ -2,7 +2,7 @@
 
 # Deskmony
 
-**A desktop control room for teams of AI coding agents — built so they can run unattended for hours without going off the rails.**
+**A desktop control room for AI coding agents — built so they can run unattended for hours without going off the rails.**
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
@@ -18,29 +18,28 @@
 
 ---
 
-Deskmony lets you run a **team** of AI coding agents — not one chatbot in a sidebar. Each member gets a role, a backend (Claude Code, Codex, OpenCode, or any CLI you already have), and its own git worktree. They plan, code, review, and message each other through a built-in team bus, while you watch — or don't have to.
+Deskmony lets you run AI coding agents — not one chatbot in a sidebar — on a backend of your choice (Claude Code, Codex, OpenCode, or any CLI you already have), with a safety shield underneath so you can watch, or not have to.
+
+> **2026-10-02:** the team / task board / git-worktree-per-task layer was removed to simplify the product (see [`DECISIONS.md` §H](docs/DECISIONS.md)). Sessions can still spawn sub-agents; letting any session message any other session is the next phase and is **not built yet**.
 
 ## Why Deskmony
 
 Most multi-agent coding tools give you two options: approve every permission prompt yourself, or switch on full auto-approve and hope. Deskmony takes a third path.
 
-The thesis is simple: **letting agents run unattended isn't about trusting them more — it's about circuit breakers that don't care how much you trust them.** Three independent breakers sit underneath every agent, every message, and every dollar spent. Any one of them can halt a runaway on its own. The message and cost breakers cannot be switched off remotely; the permission breaker reached remote/local parity on 2026-08-25 — a deliberate, documented reversal (see [`DECISIONS.md` §G](docs/DECISIONS.md)), spelled out under "What remote can and cannot do" below.
+The thesis is simple: **letting agents run unattended isn't about trusting them more — it's about circuit breakers that don't care how much you trust them.** Three independent breakers sit underneath every agent, every message, and every dollar spent. Any one of them can halt a runaway on its own. The cost breaker cannot be switched off remotely; the permission breaker reached remote/local parity on 2026-08-25 — a deliberate, documented reversal (see [`DECISIONS.md` §G](docs/DECISIONS.md)), spelled out under "What remote can and cannot do" below. (The message breaker is currently unbuilt: it went away with the message bus on 2026-10-02 and returns with the session-to-session messaging phase — see Breaker 2.)
 
-The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **1,545 lines of actual code (blanks and comments excluded), 22% of the orchestration core**, before counting the decision plumbing inside the session manager and message bus.
+The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **1,322 lines of actual code (blanks and comments excluded), 29% of the orchestration core** (4,566 lines; it was 1,545 lines / 22% before the team and task layer was removed on 2026-10-02), before counting the decision plumbing inside the session manager.
 
-(That figure deliberately excludes comments. This codebase is 31% comments; counting them gives a nicer-looking 2,372 — but a comment has never blocked a tool call, so citing it as evidence of safety investment would be dishonest. **Line counts can't prove safety anyway**: what actually should convince you is the decision flow below, and the per-category assertions in `scripts/e2e-hard-deny.mjs`.)
+(That figure deliberately excludes comments. This codebase is roughly 30% comments; counting them gives a nicer-looking number — but a comment has never blocked a tool call, so citing it as evidence of safety investment would be dishonest. **Line counts can't prove safety anyway**: what actually should convince you is the decision flow below, and the per-category assertions in `scripts/e2e-hard-deny.mjs`.)
 
 ## ✨ Highlights
 
-- 🛡️ **Three independent circuit breakers** — permissions, messages, and cost. Default-deny throughout, with a hard-deny list that no auto-mode can bypass — the one deliberate exception is an explicit, typed-confirmation "true-unrestricted" tier, covered below.
-- 🤝 **Agent teams, not a single chatbot** — roles (PM / Architect / Coder / Reviewer / QA), each bound to a different backend and model.
-- 💬 **Agents message each other** — a built-in `team-bus` MCP server offers `send_message`, `broadcast`, `request_review`, `report_status`, and `list_teammates`. Humans watch the live team chat and can interject at any time. A persistent member with no session yet gets one spawned on delivery, and every injected message names the tool to reply with, so answers land back in the team chat instead of being stranded in the agent's own transcript. That hint also tells the agent whether the message was aimed at it or broadcast to the whole team, and says outright that sending nothing is a normal outcome — otherwise a broadcast to five members invites five replies, which is exactly the loop the message breaker exists to stop. The tools are mounted on the `claude-agent-sdk` and `acp` transports (the latter covers Codex, Gemini, and OpenCode via `opencode acp`); a `pty` passthrough has no tool channel at all, so members on it still *receive* messages but are told plainly that their reply cannot get back — never handed a tool that isn't there.
-- 🌱 **Agents can spawn sub-agents** — a second `subagent` MCP server lets a session delegate to children and collect their results. Spawning is deliberately *not* auto-approved.
+- 🛡️ **Independent circuit breakers** — permissions and cost today (the message breaker returns with session-to-session messaging). Default-deny throughout, with a hard-deny list that no auto-mode can bypass — the one deliberate exception is an explicit, typed-confirmation "true-unrestricted" tier, covered below.
+- 🌱 **Agents can spawn sub-agents** — a `subagent` MCP server lets a session delegate to children and collect their results. The tools are mounted on the `claude-agent-sdk` and `acp` transports (the latter covers Codex, Gemini, and OpenCode via `opencode acp`). Spawning is deliberately *not* auto-approved.
 - 🖥️ **A real desktop IDE** — streaming markdown, inline diffs, an embedded terminal, todo tracking, image tool output, and interactive question prompts.
-- 🗂️ **Git-worktree isolation** — every task gets its own worktree; merging back to the trunk always takes a human click.
 - 🔌 **Four adapters, one interface** — embedded Claude Agent SDK, ACP, OpenCode HTTP/SSE, and a raw PTY fallback for anything else.
 - 🔄 **Crash recovery that doesn't guess** — orphaned sessions are reconciled on startup and triaged by a human. Nothing auto-resumes, by design.
-- 🌐 **Remote-capable, with a clear line on what stays local** — connect from a browser or phone over token auth; remote now shares session control and policy edits with local (2026-08-25), but never profile management, network binding, or budget caps.
+- 🌐 **Remote-capable, with a clear line on what stays local** — connect from a browser or phone over token auth; remote now shares session control and policy edits with local (2026-08-25), but never profile management or network binding.
 - 🌍 **Localized** — English, Traditional Chinese, Japanese, Spanish.
 
 ## 🛡️ The safety shield
@@ -65,7 +64,7 @@ flowchart TB
     Auto -- no --> Esc["4 · ESCALATE<br/>default-deny"]
 ```
 
-**Four hard-deny categories, not overridable by config:** writes or deletes outside the worktree · reading secret paths (`~/.ssh`, `~/.aws`, `~/.deskmony`, `**/.env*`, `**/id_rsa*`, `**/credentials`) · dangerous git (`push --force`, deleting remote branches, `branch -D`) · network calls to non-allowlisted hosts.
+**Four hard-deny categories, not overridable by config:** writes or deletes outside the session's working directory · reading secret paths (`~/.ssh`, `~/.aws`, `~/.deskmony`, `**/.env*`, `**/id_rsa*`, `**/credentials`) · dangerous git (`push --force`, deleting remote branches, `branch -D`) · network calls to non-allowlisted hosts.
 
 A few properties worth stating plainly:
 
@@ -75,24 +74,18 @@ A few properties worth stating plainly:
 - **"Always allow" has three rules**: write the narrowest possible rule (`commandEquals` / `pathUnder`); write it to both the config file and memory so behaviour is identical before and after a restart; and hard-deny escalations are **never** eligible — the core strips `rememberRule` even if a client sends one.
 - **One explicit, audited exception can cross the hard-deny floor**: a session-scoped "true-unrestricted" tier, layered on top of YOLO, gated behind a typed confirmation phrase, available locally *and* remotely since 2026-08-25 (see [`DECISIONS.md` §G](docs/DECISIONS.md)). It's the only path through `decide()` that skips hard-deny — it only arms per session, only once that session is already in YOLO, and only after a human types the confirmation phrase; enabling it fires a desktop notification and an audit-log entry.
 
-### Breaker 2 — Messages
+### Breaker 2 — Messages (removed 2026-10-02, to be rebuilt)
 
-Two gates in front of the existing delivery strategy:
-
-1. **The context id is derived by the core, never supplied by the agent.** It comes from whichever task the sender is currently bound to — and when the sender has no live task, from `member:<memberId>`, a per-member bucket the core derives exactly the same way. Letting the thing being rate-limited declare its own bucket means it can reset the budget by renaming it. *(Until 2026-08-28 a message with no derivable task was refused outright. That also silenced a member with no task in hand answering a human or a teammate — a case with a human's own speed limit on it — so the no-task path now gets its own metered bucket instead of a wall. It is still metered by the same per-context ceiling, and members stay isolated from each other.)*
-2. **Per-context message budget.** Blow through it and the breaker trips, refusing further `send_message` / `broadcast` / `request_review` for that context.
-
-**It severs lateral chatter, not vertical progress** — `report_status` and `list_teammates` keep working, so a tripped context can still report where it got to.
+The original message budget (a core-derived context id plus a per-context message ceiling) lived in the message bus, which was removed together with teams and the task board — see [`DECISIONS.md` §H](docs/DECISIONS.md). The `messageBudget` config key is kept: the next phase rebuilds this breaker as a **per-message-chain budget** (a human prompt starts a chain; agent-to-agent messages inherit the chain of the turn that triggered them; going over the ceiling trips the breaker and notifies a human) on top of that same key. Until then agents have no sideways messaging channel, so there is no message loop to break.
 
 ### Breaker 3 — Cost
 
 | Component | Signal | Trips on | What it halts |
 |---|---|---|---|
 | **TurnLimiter** | `tool-call` events + wall clock — **no usage data needed** | 30 min or 200 tool calls in one turn | Interrupts immediately |
-| **CostGovernor** (task budget) | `usage` events | Task spend over budget | Blocks further prompts; doesn't cut a finished turn |
-| **CostGovernor** (daily kill-switch) | `usage` events | Team spend for the day | Interrupts every session |
+| **CostGovernor** (daily kill-switch) | `usage` events | Spend for the day | Interrupts every session, blocks further prompts |
 | **WaitingWatchdog** T1 | Time in `waiting` | 6 hours | Notifies only — no halt |
-| **WaitingWatchdog** T2 | Time in `waiting` | 72 hours | Disposes the process; task stays blocked, worktree preserved |
+| **WaitingWatchdog** T2 | Time in `waiting` | 72 hours | Disposes the process; the conversation history is preserved |
 
 > **TurnLimiter matters most.** Measured against real Claude Code over ACP: the bridge reports **zero** usage — not a config problem, a structural gap. For that backend, every usage-based budget is inert, and the turn hard-cap is the only protection left.
 
@@ -100,7 +93,7 @@ Two gates in front of the existing delivery strategy:
 
 `isLocal` is decided by the core from the connection's own address and is **never taken from the client's word for it**. Tunnelled connections (Tailscale, WireGuard) are not loopback and count as **remote** — a tunnel secures transport, it doesn't put an operator in the room.
 
-Remote clients **can** watch, send prompts, approve or deny escalations, switch a session to auto/YOLO, edit the policy allowlist, and attach an "always allow" rule to an approval — parity with local as of 2026-08-25, a deliberate, documented reversal of the earlier remote restriction (see [`DECISIONS.md` §G](docs/DECISIONS.md)). Remote can even arm the "true-unrestricted" tier described above, through the same typed-confirmation gate as local. What remote still **cannot** do: manage agent profiles, change the network bind address, or raise budget caps. That's enforced at the dispatch layer, not by hiding buttons in the UI — a raw request bypassing the UI gets rejected the same way.
+Remote clients **can** watch, send prompts, approve or deny escalations, switch a session to auto/YOLO, edit the policy allowlist, and attach an "always allow" rule to an approval — parity with local as of 2026-08-25, a deliberate, documented reversal of the earlier remote restriction (see [`DECISIONS.md` §G](docs/DECISIONS.md)). Remote can even arm the "true-unrestricted" tier described above, through the same typed-confirmation gate as local. What remote still **cannot** do: manage agent profiles or change the network bind address. That's enforced at the dispatch layer, not by hiding buttons in the UI — a raw request bypassing the UI gets rejected the same way.
 
 Binding to a non-loopback address without `DESKMONY_AUTH_TOKEN` **refuses to start**. The token is deliberately not a config-file field, so editing config can't widen exposure — it comes only from the env var, or (desktop shell only) a value the Settings "remote access" panel keeps encrypted at rest via Electron's `safeStorage`, letting you copy a stable token to hand to a browser or phone.
 
@@ -114,21 +107,17 @@ Three tiers. The desktop shell is deliberately just one client of the core — t
 flowchart TB
     subgraph SHELL["apps/desktop — Electron 44 + React 18"]
         direction LR
-        Views["views/ chat · team chat · task board · recovery"]
-        Stores["stores/ zustand × 4"]
+        Views["views/ chat · recovery"]
+        Stores["stores/ zustand × 2"]
     end
 
     subgraph CORE["apps/core — headless orchestration server"]
-        GW["gateway/ — 68 RPC methods + 11 push channels"]
+        GW["gateway/ — 41 RPC methods + 8 push channels"]
         subgraph DOMAIN["domain"]
             direction LR
             Sess["session/"]
-            Bus["bus/"]
-            Task["tasks/"]
-            Team["team/"]
-            Work["workspace/"]
         end
-        subgraph SHIELD["safety shield · 22% of core"]
+        subgraph SHIELD["safety shield · 29% of core"]
             direction LR
             Perm["permissions/"]
             Cost["cost/"]
@@ -139,9 +128,9 @@ flowchart TB
 
     subgraph PKG["packages/"]
         direction LR
-        Adapters["adapters/ — 4 adapters + 2 MCP servers"]
+        Adapters["adapters/ — 4 adapters + 1 MCP server"]
         Shared["shared/ — zod, single source of truth"]
-        Db["db/ — 11 tables"]
+        Db["db/ — 6 tables"]
     end
 
     SHELL -- "WebSocket + token auth" --> GW
@@ -152,11 +141,11 @@ flowchart TB
     CORE --> Db
 ```
 
-**Dependency rule:** `packages/*` must never import `apps/*`. Cross-boundary needs are declared as interfaces in `packages/shared` (`TeamBusPort`, `SubagentPort`, `ClientPresencePort`, `SessionControlPort`) and injected at construction time.
+**Dependency rule:** `packages/*` must never import `apps/*`. Cross-boundary needs are declared as interfaces in `packages/shared` (`SubagentPort`, `ClientPresencePort`, `SessionControlPort`) and injected at construction time.
 
 ### Adapters
 
-Four adapters are registered. Every one implements the same interface, so permissions, the message bus, and the task board never need to know which CLI is on the other end.
+Four adapters are registered. Every one implements the same interface, so permissions and the session manager never need to know which CLI is on the other end.
 
 | Adapter | Transport | Backends today | Capability tier |
 |---|---|---|---|
@@ -165,43 +154,21 @@ Four adapters are registered. Every one implements the same interface, so permis
 | `OpenCodeAdapter` | OpenCode's HTTP + SSE server | OpenCode | Native server, works remotely |
 | `GenericPtyAdapter` | Raw `node-pty` passthrough | Claude Code CLI, Aider, any interactive CLI | **Fallback — no permission events** |
 
-The user-facing layer is a **provider catalog** of eight entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `opencode-acp` → ACP (OpenCode driven through `opencode acp`, which is what gives it the team-bus tools), `codex` → ACP (via the `@agentclientprotocol/codex-acp` bridge, not a locally installed codex CLI), `aider` → PTY, `custom-pty`.
+The user-facing layer is a **provider catalog** of eight entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `opencode-acp` → ACP (OpenCode driven through `opencode acp`, which is what gives it the sub-agent tools), `codex` → ACP (via the `@agentclientprotocol/codex-acp` bridge, not a locally installed codex CLI), `aider` → PTY, `custom-pty`.
 
 **The PTY tier's missing permission events are a security boundary, not a to-do item.** It's raw stdin passthrough — structurally unmanageable by the policy engine. Until a real execution sandbox exists, PTY agents stay read-only with no unattended autonomy. Deskmony deliberately does **not** try to intercept shell commands: `bash -c`, `$()`, and base64 defeat that in seconds, and shipping it would be security theater.
 
 **Capability reporting is honest about what it doesn't know.** Usage and context reporting are tri-state — `supported` / `unsupported` / `unknown` — because whether a connection reports usage is decided by the agent that got spawned, not the adapter. The same `AcpAdapter` forwards usage faithfully for one agent and never sees a single event from another. A static boolean would mean lying to the UI in one direction or the other, so consumers must converge on the truth from what a session actually observed.
 
-## 📋 Task flow, and the three human gates
+## 📋 Task flow — removed 2026-10-02
 
-```mermaid
-stateDiagram-v2
-    [*] --> backlog
-    backlog --> assigned: worktree created
-    assigned --> in_progress
-    in_progress --> review: acceptance gate passed, or human approval
-    review --> in_progress: changes requested
-    review --> merging
-    merging --> done: human clicks approve
-    done --> [*]
-    in_progress --> blocked
-    blocked --> in_progress: returns to whatever it was
-```
-
-1. **Machine acceptance gate** — a task can carry acceptance commands (test / build / typecheck). `report_status(done)` has to pass them before the task can reach review.
-2. **Human review gate** — with no acceptance conditions, or after repeated failures, the task holds at `in-progress` flagged `awaitingHumanReview` until a person approves.
-3. **Human merge** — `task.merge` is the **only** path in the entire system that runs `git merge`, and it only fires from the task board button.
-
-**No agent has any tool that can mark its own work done.** `report_status` and `request_review` can push a task as far as `review` or `merging`; the aliases that map to `done` are explicitly rejected at the apply step.
-
-Merges refuse to leave half-finished state: a conflicting `git merge --no-ff` collects the conflicted paths, runs `git merge --abort` to restore the base, and throws — the task stays at `merging`. The trunk branch is detected dynamically (`origin/HEAD`, then local `main`, then `master`, then a hard error). Never guessed, never hardcoded.
+The task board (backlog → assigned → in-progress → review → merging → done), the per-task git worktree, the machine acceptance gate, the human review gate and the human-approved merge were removed together with teams — see [`DECISIONS.md` §H](docs/DECISIONS.md). Existing `tasks` / `workspaces` tables in your SQLite file are left untouched; nothing reads them any more.
 
 ## 🔄 Crash recovery
 
 The expensive thing — an agent's accumulated reasoning and context — lives in the backend process, not the database. Replaying an event log rebuilds your ledger, not the agent's mind. So recovery here is **reconciliation plus human triage**, not replay.
 
-On startup, before the gateway accepts a single connection, sessions that weren't closed cleanly are marked `interrupted` and written to the audit log. Then a human decides, per session: **continue** (only where the backend genuinely persists sessions to disk — re-verified by the core, never trusted from a stale client snapshot), **take over** (restart from a summary), **rerun** (refuses to run on a dirty worktree), or **abandon** (worktree and task both preserved — reclaiming isn't discarding).
-
-Dirty worktrees get a forced decision first: keep the work on a WIP branch, or discard it — and discarding demands an explicit second confirmation. **Nothing is ever silently thrown away, and nothing auto-resumes.**
+On startup, before the gateway accepts a single connection, sessions that weren't closed cleanly are marked `interrupted` and written to the audit log. Then a human decides, per session: **continue** (only where the backend genuinely persists sessions to disk — re-verified by the core, never trusted from a stale client snapshot), **take over** (restart from a summary), or **abandon** (the session is closed but its history is preserved — reclaiming isn't discarding). **Nothing is ever silently thrown away, and nothing auto-resumes.**
 
 ## 🚀 Getting started
 
@@ -264,7 +231,7 @@ Outside a TTY, `run` never invents permission for itself: it denies, names the t
 deskmony tui
 ```
 
-`chat` and `run` show you one session. `tui` shows the whole team, and that difference is the reason it exists: **a permission request raised by a session you are not currently watching is invisible in a line-oriented REPL, and unattended requests never time out.** A second agent can sit blocked for hours while you read the first one's output. The TUI puts a cross-session pending count on screen no matter which session has focus, and `a` walks the queue one request at a time — showing the tool's actual arguments, not just its name, because the name alone ("Write file") tells you nothing you could judge.
+`chat` and `run` show you one session. `tui` shows every session, and that difference is the reason it exists: **a permission request raised by a session you are not currently watching is invisible in a line-oriented REPL, and unattended requests never time out.** A second agent can sit blocked for hours while you read the first one's output. The TUI puts a cross-session pending count on screen no matter which session has focus, and `a` walks the queue one request at a time — showing the tool's actual arguments, not just its name, because the name alone ("Write file") tells you nothing you could judge.
 
 Escalations that hit the hard-deny list look different and behave differently: no "always allow", and a typed `yes` rather than a keystroke.
 
@@ -299,7 +266,7 @@ The packaged core runs on Electron's bundled Node with `better-sqlite3` rebuilt 
 | Chat rendering | react-markdown + remark-gfm + react-syntax-highlighter + a custom diff-hunk viewer |
 | i18n | i18next / react-i18next — en, zh-Hant, ja, es |
 | Core | Node.js headless, WebSocket gateway (`ws`) |
-| Database | SQLite via better-sqlite3 + Drizzle ORM, 11 tables |
+| Database | SQLite via better-sqlite3 + Drizzle ORM, 6 tables |
 | Validation | zod schemas in `packages/shared` as the single source of truth for both sides |
 | Agent protocols | Claude Agent SDK, ACP, OpenCode HTTP/SSE, raw PTY |
 | Monorepo | pnpm workspaces |
@@ -310,32 +277,32 @@ The packaged core runs on Electron's bundled Node with `better-sqlite3` rebuilt 
 Deskmony/
 ├─ apps/
 │  ├─ desktop/          # Electron + React shell
-│  │  ├─ views/         # chat, team chat, task board, recovery, dialogs
-│  │  ├─ stores/        # zustand × 4
+│  │  ├─ views/         # chat, recovery, dialogs
+│  │  ├─ stores/        # zustand × 2
 │  │  ├─ ui/            # design system (incl. ErrorBoundary)
 │  │  └─ locales/       # en, zh-Hant, ja, es
 │  └─ core/             # headless orchestration server
-│     ├─ session/ bus/ tasks/ team/ workspace/     # domain
+│     ├─ session/                                  # domain
 │     ├─ permissions/ cost/ enforcement/ recovery/ # safety shield
 │     ├─ gateway/ http/ config/ detect/ settings/  # plumbing
 ├─ packages/
-│  ├─ adapters/         # 4 adapters + team-bus & subagent MCP servers
+│  ├─ adapters/         # 4 adapters + the subagent MCP server
 │  ├─ db/               # Drizzle schema, idempotent migrations
 │  └─ shared/           # types, gateway protocol, zod schemas
-├─ scripts/             # 11 e2e suites, the runner, the build-freshness guard, fake backends, packaging
-├─ .github/workflows/   # CI (typecheck → build → the 10 deterministic suites)
+├─ scripts/             # 14 e2e suites, the runner, the build-freshness guard, fake backends, packaging
+├─ .github/workflows/   # CI (typecheck → build → the 13 deterministic suites)
 └─ docs/                # architecture, decisions, layered design, dev log
 ```
 
 ## 🧪 Testing
 
 ```bash
-pnpm test          # typecheck + build + the 10 deterministic suites (~8 min)
+pnpm test          # typecheck + build + the 13 deterministic suites (~7 min)
 pnpm test:e2e      # just the suites (requires a current pnpm build)
 pnpm test:e2e:live # e2e-gateway.mjs — needs real Claude Code credentials, spends real tokens
 ```
 
-**Eleven end-to-end suites.** Ten of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those ten are what `pnpm test` and CI run: **138 assertions, all of which must pass.**
+**Fourteen end-to-end suites.** Thirteen of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those thirteen are what `pnpm test` and CI run: **180 assertions, all of which must pass.** (The count dropped from 221 on 2026-10-02 when the team, task and message-bus suites were removed along with the features.)
 
 `e2e-gateway.mjs` is excluded from the default run on purpose. It needs real Claude Code credentials, costs real money, and carries a *model-behavior* group whose assertions depend on what a model chose to say that run — the file marks those as known-flaky. A CI that goes red because a model rephrased itself is a CI people learn to ignore.
 
@@ -358,14 +325,13 @@ Two guards keep the suite honest:
 
 ## 🗺️ Status
 
-Built, and guarded by end-to-end tests that CI runs on every push and PR (see Testing above): team and profile management, cross-agent messaging, the desktop IDE, git-worktree isolation, browser/remote access with token auth, the full three-breaker safety shield, crash recovery, desktop and webhook notifications, the machine acceptance gate, session sub-agents, a self-service policy allowlist UI, and the true-unrestricted bypass tier.
+Built, and guarded by end-to-end tests that CI runs on every push and PR (see Testing above): profile management, the desktop IDE, browser/remote access with token auth, the permission and cost breakers of the safety shield, crash recovery, desktop and webhook notifications, session sub-agents, a self-service policy allowlist UI, and the true-unrestricted bypass tier. Removed on 2026-10-02 (see [`DECISIONS.md` §H](docs/DECISIONS.md)): teams, the task board, git-worktree-per-task isolation, the acceptance gate, and the message bus with its breaker.
 
 Open by design, and worth knowing before you rely on it:
 
 - **No execution sandbox for the PTY tier.** Until there is one, PTY agents stay read-only — that's the honest consequence, not an oversight.
-- **No LLM lead.** Task decomposition is manual; `TaskService` is fully deterministic.
 - **No mid-turn cost cutoff.** The only adapter that emits usage does so as a turn ends, so there is no observable "usage arrived mid-turn" case to build against. Branching on it would be inventing behaviour.
-- **Only Claude SDK and ACP sessions can *initiate* messages.** ACP agents (Codex, Gemini CLI) reach the same two MCP servers through a bridge subprocess holding a scoped, per-session token; the `opencode` provider (bespoke HTTP/SSE) and PTY don't mount them — but the `opencode-acp` provider does, since it runs OpenCode through ACP. *Receiving* injected messages works across every backend.
+- **Only Claude SDK and ACP sessions can spawn sub-agents.** ACP agents (Codex, Gemini CLI) reach the `subagent` MCP server through a bridge subprocess holding a scoped, per-session token; the `opencode` provider (bespoke HTTP/SSE) and PTY don't mount it — but the `opencode-acp` provider does, since it runs OpenCode through ACP. *Receiving* injected prompts works across every backend.
 - **Provider secrets are masked over the wire but stored in plaintext locally**, the same trade-off Paseo makes with its config file.
 - **Orphaned agent processes are only reclaimed on the next start.** If core is SIGKILLed, force-quit, or loses power, the graceful shutdown path never runs and spawned agents — plus the MCP grandchildren they started — keep running. Their pids are now recorded in `<dataDir>/child-pids.json` and reaped at the next start after matching the process creation time (**no match, no kill** — pid reuse must never cost you an unrelated process). Reclaiming them at the moment of death needs a Windows Job Object, which means a native dependency; this project deliberately does not require an MSVC toolchain on the packaging machine.
 - **SQLite migrations can only add columns.** `packages/db/src/client.ts` is a dozen hand-rolled "check `PRAGMA table_info` → `ALTER TABLE ADD COLUMN`" functions with no version table. Type changes, renames, drops and new constraints are all out of reach; a destructive migration would need a real migration mechanism first.

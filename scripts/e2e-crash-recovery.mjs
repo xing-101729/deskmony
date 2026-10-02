@@ -19,20 +19,21 @@
  *      影響(§3)。
  *   B. §4.1:ACP 後端 canContinue=false,`recovery.continue` 明確拒絕(不靜默
  *      退化)。
- *   C. §5.2「放棄」:標記 closed,worktree/任務保留(回收 ≠ 丟棄)。
- *   D. §4.2「接手」:新 session + 注入摘要(只讀 DB/git,內容含關鍵欄位),
+ *   C. §5.2「放棄」:標記 closed,對話紀錄保留(回收 ≠ 丟棄)。
+ *   D. §4.2「接手」:新 session + 注入摘要(只讀 DB,內容含關鍵欄位),
  *      舊 session 收尾成 closed。
- *   E. §5.2「重跑」對髒 worktree 的強制流程:髒 worktree 擋重跑 → 查看
- *      diff/status → 保留(wip 分支)或丟棄(需二次確認)→ 乾淨後才能重跑。
- *   F. §5.3:`merging` 中崩潰 → `recovery.gitStatus` 查的是 baseDir(而非
- *      worktree),特別標示但不提供自動修復。
+ *
+ * 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):原本的 E(髒
+ * worktree 對「重跑」的強制流程)與 F(`merging` 中崩潰)是任務 git worktree
+ * 專用機制,隨 task 一併移除;`recovery.rerun`/`recovery.gitStatus`/
+ * `recovery.resolveDirtyWorktree` 三個方法也已不存在。
  *
  * 前置需求:`pnpm build` 已跑過。
  * 用法:node scripts/e2e-crash-recovery.mjs
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
@@ -63,9 +64,6 @@ function record(name, ok, detail) {
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-function runGitSync(args, cwd) {
-  return spawnSync("git", args, { cwd, encoding: "utf8" });
 }
 
 // =======================================================================
@@ -281,7 +279,7 @@ async function createAcpSession(client, workspaceDir, title, extra = {}) {
   });
   const { session } = await client.rpc(
     "session.create",
-    { agentProfileId: profile.id, workingDir: workspaceDir, title, teamMemberId: extra.teamMemberId },
+    { agentProfileId: profile.id, workingDir: workspaceDir, title },
     30_000,
   );
   return { profileId: profile.id, sessionId: session.id };
@@ -294,46 +292,6 @@ function rmDirs(dirs) {
     } catch {
       // ignore
     }
-  }
-}
-
-/**
- * 清掉這個測試自己建立的任務 worktree。
- *
- * task.assign 建立的 worktree **不在** repoDir 底下,而是
- * `<repoDir 的上層>/.deskmony-worktrees/<repoDir 名稱>-task-<8 碼>`(見
- * apps/core/src/workspace/workspace-manager.ts 的 `createWorkspaceForTask()`),
- * 所以 `rmDirs([dataDir, homeDir, repoDir])` 掃不到它們,每跑一次就在系統暫存
- * 目錄留下殘留。這幾個測試刻意用 kill 的方式結束 core(驗證崩潰復原),收尾時
- * gateway 已經不在,沒辦法走 `task.delete` 那條正規路徑 —— 直接用檔案系統清理,
- * 與這裡既有的 `rmDirs()` 同一個層級。
- *
- * ⚠️ `.deskmony-worktrees` 這個根目錄是**所有** e2e 共用的(都在 os.tmpdir()
- * 底下),絕不能整個刪掉:可能有另一支 e2e 正在跑。這裡只刪前綴對得上這個
- * repoDir 的項目,根目錄則只在「刪完之後恰好是空的」時才順手移除。
- */
-function rmTaskWorktrees(repoDir) {
-  const root = path.join(path.dirname(repoDir), ".deskmony-worktrees");
-  if (!existsSync(root)) return;
-  const prefix = `${path.basename(repoDir)}-task-`;
-  let entries;
-  try {
-    entries = readdirSync(root);
-  } catch {
-    return;
-  }
-  for (const name of entries) {
-    if (!name.startsWith(prefix)) continue;
-    try {
-      rmSync(path.join(root, name), { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
-  }
-  try {
-    if (readdirSync(root).length === 0) rmdirSync(root);
-  } catch {
-    // 還有別的測試的 worktree 在裡面(或剛好有人在用),留著即可。
   }
 }
 
@@ -587,8 +545,8 @@ async function testContinueAbandonTakeover() {
       `continueRejected=${continueRejected}, err=${continueErr}`,
     );
 
-    // ---- C: §5.2 放棄——標記 closed,worktree/任務保留(這裡沒有任務,驗證
-    // session 本身的收尾語意 + 訊息歷史保留) ----
+    // ---- C: §5.2 放棄——標記 closed,對話紀錄保留(驗證 session 本身的收尾
+    // 語意 + 訊息歷史保留) ----
     await clientB.rpc("recovery.abandon", { sessionId: sessionForAbandon });
     const { sessions: afterAbandon } = await clientB.rpc("session.list", {});
     const abandonedStatus = afterAbandon.find((s) => s.id === sessionForAbandon)?.status;
@@ -639,261 +597,6 @@ async function testContinueAbandonTakeover() {
 }
 
 // =======================================================================
-// E:§5.2「重跑」對髒 worktree 的強制流程——髒擋重跑 → 查看 diff/status →
-// 保留(wip 分支)或丟棄(需二次確認)→ 乾淨後才能重跑。
-// =======================================================================
-async function testDirtyWorktreeRerun() {
-  const gitVersion = runGitSync(["--version"], process.cwd());
-  if (gitVersion.status !== 0) {
-    record("E: 重跑/髒 worktree(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
-    return;
-  }
-
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-recov-e-data-"));
-  const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-recov-e-home-"));
-  const repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-recov-e-repo-"));
-
-  let coreA, coreB, client;
-  try {
-    runGitSync(["init"], repoDir);
-    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-    writeFileSync(path.join(repoDir, "README.md"), "# e2e crash-recovery dirty worktree repo\n", "utf8");
-    runGitSync(["add", "."], repoDir);
-    runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-    coreA = startCore({ port: 4386, dataDir, homeDir, workspaceDir: repoDir });
-    await waitForPort("ws://127.0.0.1:4386", 20_000);
-    client = new MiniGatewayClient("ws://127.0.0.1:4386");
-    await client.connect();
-
-    const team = await client.rpc("team.create", { name: "E2E Recovery Team", workingDir: repoDir });
-    const { profile } = await client.rpc("profile.create", {
-      name: "E2E Recovery Member Profile",
-      software: "acp",
-      workingDir: repoDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    });
-    const { member } = await client.rpc("team.addMember", {
-      teamId: team.team.id,
-      agentProfileId: profile.id,
-      name: "Coder",
-      role: "Coder",
-      canInterrupt: false,
-    });
-    const { task } = await client.rpc("task.create", { teamId: team.team.id, title: "E2E Recovery Task" });
-    const assigned = await client.rpc("task.assign", { taskId: task.id, memberId: member.id });
-    const worktreePath = assigned.workspace.worktreePath;
-    const taskBranch = assigned.workspace.branch;
-
-    const { session } = await client.rpc(
-      "session.create",
-      { agentProfileId: profile.id, workingDir: worktreePath, title: "E-dirty-rerun", teamMemberId: member.id },
-      30_000,
-    );
-    const sessionId = session.id;
-    const idx = client.events.length;
-    await client.rpc("session.sendPrompt", { sessionId, prompt: { text: "hello" } });
-    await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "completed", 15_000, idx);
-    await sleep(200);
-
-    // 模擬「agent 崩潰前改到一半的檔案」:直接寫一個未 commit 的檔案進 worktree
-    // (比照 scripts/e2e-gateway.mjs 既有的做法,見該檔案 writeFileSync(path.join(worktreePath, ...))的先例)。
-    writeFileSync(path.join(worktreePath, "half-done.txt"), "uncommitted work in progress\n", "utf8");
-
-    client.close();
-    await killProcessTreeHard(coreA);
-    coreA = null;
-
-    coreB = startCore({ port: 4387, dataDir, homeDir, workspaceDir: repoDir });
-    await waitForPort("ws://127.0.0.1:4387", 20_000);
-    const clientB = new MiniGatewayClient("ws://127.0.0.1:4387");
-    await clientB.connect();
-
-    const { sessions: recoverySessions } = await clientB.rpc("recovery.list", {});
-    const entry = recoverySessions.find((s) => s.sessionId === sessionId);
-    const listedDirty = entry?.workspace?.hadUncommittedChanges === true && entry?.workspace?.missing === false;
-    record(
-      "E1(§5.1 復原視圖資料): recovery.list 正確回報這個 session 綁定的 worktree hadUncommittedChanges=true、missing=false",
-      listedDirty,
-      `workspace=${JSON.stringify(entry?.workspace)}`,
-    );
-
-    // ---- 重跑必須先被髒 worktree 擋下 -----------------------------------
-    let rerunBlocked = false;
-    try {
-      await clientB.rpc("recovery.rerun", { sessionId });
-    } catch {
-      rerunBlocked = true;
-    }
-    record(
-      "E2(§5.2「絕不默默在髒 worktree 上重跑」): 髒 worktree 時 recovery.rerun 直接拒絕",
-      rerunBlocked,
-      `rerunBlocked=${rerunBlocked}`,
-    );
-
-    // ---- 查看 diff/status -------------------------------------------------
-    const gitStatus = await clientB.rpc("recovery.gitStatus", { sessionId });
-    const statusShowsNewFile = gitStatus.target === "worktree" && gitStatus.status.includes("half-done.txt");
-    record(
-      "E3(§5.2「先顯示 diff」): recovery.gitStatus 查的是 worktree,status 輸出包含未提交的新檔案",
-      statusShowsNewFile,
-      `target=${gitStatus.target}, status=${JSON.stringify(gitStatus.status)}`,
-    );
-
-    // ---- 丟棄需要二次確認,沒帶 confirmDiscard 要被拒絕 --------------------
-    let discardWithoutConfirmRejected = false;
-    try {
-      await clientB.rpc("recovery.resolveDirtyWorktree", { sessionId, action: "discard" });
-    } catch {
-      discardWithoutConfirmRejected = true;
-    }
-    record(
-      "E4(§5.2「丟棄需明確二次確認」): 不帶 confirmDiscard 呼叫 resolveDirtyWorktree(discard)被拒絕",
-      discardWithoutConfirmRejected,
-      `discardWithoutConfirmRejected=${discardWithoutConfirmRejected}`,
-    );
-
-    // ---- 保留:建 wip 分支並 commit ----------------------------------------
-    const keepResult = await clientB.rpc("recovery.resolveDirtyWorktree", { sessionId, action: "keep" });
-    const wipBranchNamedRight = keepResult.wipBranch?.startsWith(`wip/recovery-${task.id}-`);
-    const statusAfterKeep = runGitSync(["status", "--porcelain"], worktreePath);
-    const cleanAfterKeep = statusAfterKeep.stdout.trim().length === 0;
-    const branchList = runGitSync(["branch", "--list", keepResult.wipBranch], worktreePath);
-    const wipBranchExists = branchList.stdout.includes(keepResult.wipBranch ?? "");
-    const currentBranch = runGitSync(["rev-parse", "--abbrev-ref", "HEAD"], worktreePath);
-    const switchedBackToTaskBranch = currentBranch.stdout.trim() === taskBranch;
-
-    record(
-      "E5(§5.2「保留」= 建 wip 分支並 commit,worktree 切回乾淨的任務分支): wip 分支命名符合 wip/recovery-<taskId>-<時間戳>,worktree 目前乾淨且切回原任務分支",
-      wipBranchNamedRight && cleanAfterKeep && wipBranchExists && switchedBackToTaskBranch,
-      `wipBranch=${keepResult.wipBranch}, cleanAfterKeep=${cleanAfterKeep}, wipBranchExists=${wipBranchExists}, currentBranch=${currentBranch.stdout.trim()}(應=${taskBranch})`,
-    );
-
-    // ---- 乾淨後重跑應該成功 ------------------------------------------------
-    const { session: rerunSession } = await clientB.rpc("recovery.rerun", { sessionId });
-    const rerunTitleOk = rerunSession.title.includes("重跑");
-    const { sessions: recoveryAfterRerun } = await clientB.rpc("recovery.list", {});
-    const oldGoneFromRecovery = !recoveryAfterRerun.some((s) => s.sessionId === sessionId);
-
-    record(
-      "E6(§5.2「乾淨後才能重跑」): worktree 乾淨後 recovery.rerun 成功建立新 session(標題含「重跑」),舊 session 離開復原視圖",
-      rerunTitleOk && oldGoneFromRecovery,
-      `rerunTitle=${rerunSession.title}, oldGoneFromRecovery=${oldGoneFromRecovery}`,
-    );
-
-    clientB.close();
-    await killProcessTreeHard(coreB);
-    coreB = null;
-  } catch (err) {
-    record("E 執行過程發生未預期錯誤", false, String(err));
-  } finally {
-    client?.close();
-    if (coreA) await killProcessTreeHard(coreA);
-    if (coreB) await killProcessTreeHard(coreB);
-  }
-
-  rmTaskWorktrees(repoDir); // 見該函式註解:worktree 不在 repoDir 底下
-  rmDirs([dataDir, homeDir, repoDir]);
-}
-
-// =======================================================================
-// F:§5.3 `merging` 中崩潰——recovery.gitStatus 查的是 baseDir,不是 worktree。
-// =======================================================================
-async function testMergingCrash() {
-  const gitVersion = runGitSync(["--version"], process.cwd());
-  if (gitVersion.status !== 0) {
-    record("F: merging 崩潰(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
-    return;
-  }
-
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-recov-f-data-"));
-  const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-recov-f-home-"));
-  const repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-recov-f-repo-"));
-
-  let coreA, coreB, client;
-  try {
-    runGitSync(["init"], repoDir);
-    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-    writeFileSync(path.join(repoDir, "README.md"), "# e2e crash-recovery merging repo\n", "utf8");
-    runGitSync(["add", "."], repoDir);
-    runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-    coreA = startCore({ port: 4388, dataDir, homeDir, workspaceDir: repoDir });
-    await waitForPort("ws://127.0.0.1:4388", 20_000);
-    client = new MiniGatewayClient("ws://127.0.0.1:4388");
-    await client.connect();
-
-    const team = await client.rpc("team.create", { name: "E2E Merging Team", workingDir: repoDir });
-    const { profile } = await client.rpc("profile.create", {
-      name: "E2E Merging Member Profile",
-      software: "acp",
-      workingDir: repoDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    });
-    const { member } = await client.rpc("team.addMember", {
-      teamId: team.team.id,
-      agentProfileId: profile.id,
-      name: "Coder",
-      role: "Coder",
-      canInterrupt: false,
-    });
-    const { task } = await client.rpc("task.create", { teamId: team.team.id, title: "E2E Merging Task" });
-    const assigned = await client.rpc("task.assign", { taskId: task.id, memberId: member.id });
-    const worktreePath = assigned.workspace.worktreePath;
-
-    const { session } = await client.rpc(
-      "session.create",
-      { agentProfileId: profile.id, workingDir: worktreePath, title: "F-merging", teamMemberId: member.id },
-      30_000,
-    );
-    const sessionId = session.id;
-
-    // 走到 merging(assigned → in-progress → review → merging),不呼叫
-    // task.merge(不真的合併,單純模擬「合併途中崩潰」的狀態)。
-    await client.rpc("task.updateStatus", { taskId: task.id, status: "in-progress" });
-    await client.rpc("task.updateStatus", { taskId: task.id, status: "review" });
-    await client.rpc("task.updateStatus", { taskId: task.id, status: "merging" });
-
-    client.close();
-    await killProcessTreeHard(coreA);
-    coreA = null;
-
-    coreB = startCore({ port: 4389, dataDir, homeDir, workspaceDir: repoDir });
-    await waitForPort("ws://127.0.0.1:4389", 20_000);
-    const clientB = new MiniGatewayClient("ws://127.0.0.1:4389");
-    await clientB.connect();
-
-    const { sessions: recoverySessions } = await clientB.rpc("recovery.list", {});
-    const entry = recoverySessions.find((s) => s.sessionId === sessionId);
-    const flaggedMerging = entry?.task?.status === "merging";
-
-    const gitStatus = await clientB.rpc("recovery.gitStatus", { sessionId });
-    const queriedBaseDir = gitStatus.target === "baseDir";
-
-    record(
-      "F(§5.3「merging 中崩潰」): recovery.list 回報 task.status=merging,recovery.gitStatus 查的是 baseDir(不是 worktree)——只提供檢查 git 狀態,不做任何自動修復",
-      flaggedMerging && queriedBaseDir,
-      `task.status=${entry?.task?.status}, gitStatus.target=${gitStatus.target}`,
-    );
-
-    clientB.close();
-    await killProcessTreeHard(coreB);
-    coreB = null;
-  } catch (err) {
-    record("F 執行過程發生未預期錯誤", false, String(err));
-  } finally {
-    client?.close();
-    if (coreA) await killProcessTreeHard(coreA);
-    if (coreB) await killProcessTreeHard(coreB);
-  }
-
-  rmTaskWorktrees(repoDir); // 見該函式註解:worktree 不在 repoDir 底下
-  rmDirs([dataDir, homeDir, repoDir]);
-}
-
-// =======================================================================
 async function main() {
   if (!existsSync(CORE_ENTRY)) {
     console.error(`找不到 ${CORE_ENTRY} —— 請先執行 pnpm build`);
@@ -908,12 +611,6 @@ async function main() {
 
   console.log("\n=== S6 e2e:B + C + D(continue 拒絕 / 放棄 / 接手)===");
   await testContinueAbandonTakeover();
-
-  console.log("\n=== S6 e2e:E(髒 worktree 對「重跑」的強制流程)===");
-  await testDirtyWorktreeRerun();
-
-  console.log("\n=== S6 e2e:F(merging 中崩潰)===");
-  await testMergingCrash();
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n\n========== 總結:${results.length - failed.length}/${results.length} 通過 ==========`);

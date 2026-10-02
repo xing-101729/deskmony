@@ -263,7 +263,6 @@ interface SessionStoreState {
     agentProfileId: string,
     workingDir: string,
     title?: string,
-    teamMemberId?: string,
     agentOverride?: AgentOverride,
   ) => Promise<void>;
   createProfile: (input: CreateAgentProfileInput) => Promise<AgentProfile>;
@@ -460,9 +459,9 @@ interface SessionStoreState {
 }
 
 /**
- * M3 Round B:匯出這個模組層級的 singleton,讓 team-store.ts 共用同一條 WS
- * 連線(而不是另開一條連線)—— gateway 本身允許多個 client 連線,但 renderer
- * 端沒有理由開兩條,徒增重連/事件去重的複雜度。team-store.ts 只讀
+ * M3 Round B:匯出這個模組層級的 singleton,讓其他 store(例如 recovery-store.ts)
+ * 共用同一條 WS 連線(而不是另開一條連線)—— gateway 本身允許多個 client 連線,
+ * 但 renderer 端沒有理由開兩條,徒增重連/事件去重的複雜度。其他 store 只讀
  * `client.call()`/`client.onPush()`,不會改動這裡的連線生命週期管理
  * (`connect()`/`disconnect()` 仍只由 App.tsx 透過 session-store 呼叫一次)。
  *
@@ -911,8 +910,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     }
   },
 
-  createSession: async (agentProfileId, workingDir, title, teamMemberId, agentOverride) => {
-    const raw = await client.call("session.create", { agentProfileId, workingDir, title, teamMemberId, agentOverride });
+  createSession: async (agentProfileId, workingDir, title, agentOverride) => {
+    const raw = await client.call("session.create", { agentProfileId, workingDir, title, agentOverride });
     const { session } = SessionCreateResultSchema.parse(raw);
     set((state) => ({
       sessions: [...state.sessions, session],

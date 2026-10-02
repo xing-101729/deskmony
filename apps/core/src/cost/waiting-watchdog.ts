@@ -13,7 +13,7 @@ import type { Notifier } from "../enforcement/notifier.js";
  *     `ReminderEnforcementEventSchema` 註解——不可借用 `trip` 的「已熔斷」
  *     措辭)。
  *   T2 資源回收(waiting 超過 72 小時) → **真 trip**:dispose 該 session 的
- *     子程序、釋放資源。**回收 ≠ 丟棄**——任務留 blocked、worktree 保留,人
+ *     子程序、釋放資源。**回收 ≠ 丟棄**——對話紀錄保留,人
  *     回來可續/棄(同 S6 復原視圖)。這裡的 halt 動作是 `dispose()`,不是
  *     `interrupt()`(掛起的 session 沒有正在跑的回合可以中斷,見 HLD §4「回收
  *     的是記憶體與子程序,不是金錢」)——不透過 `enforcement/trip.ts` 的
@@ -29,7 +29,7 @@ export interface WaitingSessionPort {
    *  (epoch ms)。 */
   listWaitingSessions(): Array<{ sessionId: string; waitingSince: number }>;
   /** T2:真正回收子程序/資源(dispose adapter handle),但**保留** DB 裡的
-   *  session/messages 記錄與任務/worktree(見上方檔案頂端「回收 ≠ 丟棄」)。 */
+   *  session/messages 記錄(見上方檔案頂端「回收 ≠ 丟棄」)。 */
   reclaimSession(sessionId: string): Promise<void>;
 }
 

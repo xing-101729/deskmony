@@ -74,7 +74,7 @@ export class ConsoleNotifier implements Notifier {
  * `sessionNames`)。用最小介面注入,避免直接依賴 `SessionManager` 型別、
  * 製造循環 import(`SessionManager` 建構子本身就需要 `Notifier`)——
  * `apps/core/src/index.ts` 在 `SessionManager` 建好之後用 `setSessionInfo()`
- * 事後注入,比照既有 `setTeamBus()`/`setClientPresence()` 的解耦手法(見
+ * 事後注入,比照既有 `setClientPresence()` 的解耦手法(見
  * session-manager.ts 對應方法註解)。
  */
 export interface SessionInfoPort {
@@ -209,20 +209,6 @@ export class RealNotifier extends EventEmitter implements Notifier {
       this.sendNow(payload);
       return;
     }
-    if (event.kind === "task-review") {
-      // S5(dispose-gate)新增:任務完成判定等待人類核可(見
-      // packages/shared/src/enforcement.ts 的 `TaskReviewEnforcementEventSchema`
-      // 頂端註解)。比照 trip/reminder:必送、不進批次佇列——同一個任務同時
-      // 只會卡在這裡一次(task-service.ts 的 `awaitingHumanReview` 是單一
-      // boolean,重複觸發會被 applyHumanReviewGate() 擋下,不會出現「短時間
-      // 大量升級」需要批次彙總的洪水問題),批次化只會拖慢人類發現的時間。
-      // 對外沿用既有的 "escalation" payload kind(語意上就是等待核可),不
-      // 擴充 `EnforcementNotificationPushSchema`——用任務標題頂替 session
-      // 顯示名(`sessionNames`),`toolNames` 借來放一句簡短的原因描述。
-      const payload = await this.buildTaskReviewPayload(event);
-      this.sendNow(payload);
-      return;
-    }
     if (event.kind === "reminder") {
       // S3b(cost-governor):比照 trip 必送、不節流、不受靜音限制——不論是
       // T1「防遺忘」或預算軟警告,都是「讓你即時知道」的提醒,若被靜音時段
@@ -250,9 +236,9 @@ export class RealNotifier extends EventEmitter implements Notifier {
    * 吃掉或延遲到批次視窗才送,會讓警告本身失去意義。
    *
    * 對外沿用既有的 `kind:"escalation"` payload(不擴充
-   * `EnforcementNotificationPushSchema` 的封閉 `kind` enum,比照
-   * `buildTaskReviewPayload()` 的既有先例——那裡也是把一個不是「工具權限請求」
-   * 的警示塞進同一個 kind),`toolNames` 借來放一句描述,而不是真正的工具名。
+   * `EnforcementNotificationPushSchema` 的封閉 `kind` enum——把一個不是
+   * 「工具權限請求」的警示塞進同一個 kind),`toolNames` 借來放一句描述,
+   * 而不是真正的工具名。
    */
   async deliverTrueUnrestrictedEnabled(detail: TrueUnrestrictedEnabledDetail): Promise<void> {
     const [name] = await this.resolveSessionNames([detail.sessionId]);
@@ -358,27 +344,6 @@ export class RealNotifier extends EventEmitter implements Notifier {
           ? `${this.linkBase}/#/`
           : "",
       sessionId: singleSessionId,
-    };
-  }
-
-  /**
-   * S5(dispose-gate)新增:見上方 `deliver()` 內 "task-review" 分支的說明——
-   * 獨立於 `buildPayload()` 之外,因為這裡沒有 session 可查(不呼叫
-   * `resolveSessionNames()`),直接用呼叫端給的 `taskTitle` 當顯示名。
-   */
-  private async buildTaskReviewPayload(event: {
-    taskId: string;
-    taskTitle: string;
-    reason: "no-acceptance" | "acceptance-failure-streak";
-    ts: number;
-  }): Promise<EnforcementNotificationPush> {
-    return {
-      kind: "escalation",
-      count: 1,
-      sessionNames: [event.taskTitle],
-      toolNames: [event.reason === "acceptance-failure-streak" ? "驗收連續失敗" : "任務驗收核可"],
-      ts: event.ts,
-      link: this.linkBase ? `${this.linkBase}/#/` : "",
     };
   }
 

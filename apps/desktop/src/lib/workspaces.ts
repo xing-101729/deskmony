@@ -3,9 +3,9 @@ import type { Session } from "@deskmony/shared";
 /**
  * 「工作區(Workspace)」——**純前端的分組視角**,不是新的資料結構。
  *
- * 重要:core 端已經有一個叫 `Workspace` 的概念(任務用的 git worktree,見
- * apps/core/src/workspace/),那是**後端資料模型**;這裡說的工作區是**側欄的
- * 資訊架構**:把 session 依 `session.workingDir`(既有欄位)分組,讓「同一個
+ * 重要:core 端曾經有一個叫 `Workspace` 的概念(任務用的 git worktree,
+ * 2026-10-02 已隨 task 移除,見 docs/DECISIONS.md §H),那是**後端資料模型**;
+ * 這裡說的工作區是**側欄的資訊架構**:把 session 依 `session.workingDir`(既有欄位)分組,讓「同一個
  * 專案底下的對話」聚在一起。
  *
  * 為什麼要這樣做:改版前側欄是一條扁平的 session 清單,同時開三個專案(這正是

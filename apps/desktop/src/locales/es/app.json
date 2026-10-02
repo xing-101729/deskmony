@@ -4,26 +4,13 @@
     "disconnected": "Se perdió la conexión con Deskmony Core; reintentando automáticamente…"
   },
   "interruptedBanner": {
-    "message": "La última vez no se cerró correctamente: <strong>{{count}}</strong> session(es) necesitan clasificación manual (continuar / retomar / volver a ejecutar / abandonar)",
+    "message": "La última vez no se cerró correctamente: <strong>{{count}}</strong> session(es) necesitan clasificación manual (continuar / retomar / abandonar)",
     "action": "Iniciar clasificación"
   },
   "sessionDefaultTitle": "Conversación {{n}}",
   "commands": {
-    "groupGoto": "Ir a",
     "groupActions": "Acciones",
     "groupSessions": "Conversaciones",
-    "viewSession": {
-      "title": "Vista de session",
-      "keywords": "session chat sesión conversación"
-    },
-    "viewTeamChat": {
-      "title": "Chat del team",
-      "keywords": "team chat equipo grupo mensaje"
-    },
-    "viewTaskBoard": {
-      "title": "Tablero de tareas",
-      "keywords": "task board kanban tarea tablero"
-    },
     "newSession": {
       "title": "Nueva conversación",
       "subtitleWithProfile": "Usando el profile: {{name}}",

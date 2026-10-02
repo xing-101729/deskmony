@@ -1,9 +1,4 @@
 {
-  "nav": {
-    "session": "Session",
-    "teamChat": "team チャット",
-    "taskBoard": "タスクボード"
-  },
   "connection": {
     "open": "接続済み",
     "connecting": "接続中…",

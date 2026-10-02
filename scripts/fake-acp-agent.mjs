@@ -34,13 +34,13 @@
  *          (status: "completed"),再送一句完成訊息,以 end_turn 結束。
  *       4. 選了 "deny"(或 outcome 為 cancelled):不寫檔、不送
  *          `tool_call_update`,直接以 end_turn 結束這一輪。
- *   - 若 prompt 文字內含 DELAY_ECHO_MARKER 樣式(M3 Round A,e2e 步驟 12
- *     MessageBus 測試用,見 scripts/e2e-gateway.mjs):延遲指定毫秒數後,
+ *   - 若 prompt 文字內含 DELAY_ECHO_MARKER 樣式:延遲指定毫秒數後,
  *     把「完整收到的 prompt 文字」原封不動回顯(前綴 "ECHO:")。用來驗證
- *     MessageBus 注入的 prompt 確實送達目標 session(用 substring 搜尋,不是
- *     startsWith——MessageBus 會在原始內容外包一層「來自 @X(角色)的訊息:」
- *     的格式化文字,marker 仍會保留在包裹後的字串中間),以及用可控制的
- *     延遲時間製造「session 目前 busy」的測試窗口。
+ *     注入的 prompt 確實送達目標 session(用 substring 搜尋,不是
+ *     startsWith——注入時可能在原始內容外包一層格式化文字,marker 仍會保留在
+ *     包裹後的字串中間),以及用可控制的延遲時間製造「session 目前 busy」的
+ *     測試窗口。(原本的使用者是 2026-10-02 已移除的團隊訊息 e2e;P3 的 session
+ *     互傳訊息 e2e 預期會再用到。)
  *   - 若 prompt 文字以 USAGE_UPDATE_PREFIX("ACP_USAGE_UPDATE ")開頭,其後接
  *     一段 JSON `{"used": number, "size": number, "cost"?: {"amount": number,
  *     "currency": string}}`(S3a usage-metering,e2e 步驟 29 用,見
@@ -100,10 +100,10 @@
  *     client。這是**決定性**的(完全由這支腳本的程式碼決定要不要呼叫、呼叫
  *     哪個工具,不依賴任何真實模型的自由選擇),但走的是完整的真實管線:
  *     AcpAdapter 核發的 scoped token → 真的透過 WS 打回 gateway → 真的觸發
- *     TeamBusPort/SubagentPort 對應的方法——見
+ *     SubagentPort 對應的方法——見
  *     packages/adapters/src/mcp-bridge-server.ts 的完整安全/協定說明。
  *     `mcpServers` 陣列為空(這個 session 沒有掛任何 MCP server,例如沒有
- *     team/subagentPort 的一般 ACP session)時,回覆一則固定的錯誤文字
+ *     subagentPort 的一般 ACP session)時,回覆一則固定的錯誤文字
  *     `"BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured"`,不嘗試 spawn
  *     任何東西。
  *   - 若 prompt 文字等於 UPSERT_TOOL_CALLS_PREFIX("ACP_UPSERT_TOOL_CALLS",
@@ -235,7 +235,7 @@ class FakeAcpAgent {
     // 帶的 `mcpServers`(AcpAdapter.spawn() 透過 `SessionBuilder.
     // withMcpServer()` 掛上的設定,見檔頭註解)存起來,供
     // `handleCallBridgeTool()` 之後真的拿去 spawn 成子行程。沒有掛任何
-    // server 時(這個 session 沒有 team/subagentPort)是空陣列,不是
+    // server 時(這個 session 沒有 subagentPort)是空陣列,不是
     // undefined(見 NewSessionRequest.mcpServers 的型別——必填欄位)。
     this.sessions.set(sessionId, { abort: null, mcpServers: params?.mcpServers ?? [] });
     return { sessionId };

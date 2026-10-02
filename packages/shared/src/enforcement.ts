@@ -102,44 +102,10 @@ export const ReminderEnforcementEventSchema = z
   .strict();
 export type ReminderEnforcementEvent = z.infer<typeof ReminderEnforcementEventSchema>;
 
-/**
- * S5(dispose-gate)新增:任務的「完成判定」升級給人類核可(見
- * docs/LAYER-4-detail-design/dispose-gate-and-lead_detail.md §1.2/§3)。
- *
- * **為何不能沿用既有的 `escalation`**:`EscalationEnforcementEventSchema` 的形狀
- * 綁死在「一次工具權限請求」的語意上(`requestId`/`toolName`/`strong` 都是
- * PermissionGateway 那條路徑才有的概念)——這裡的升級對象是「一個任務」,不是
- * 一次工具呼叫,沒有 requestId/toolName 可填,硬塞會產生一堆假欄位。理由與
- * `ReminderEnforcementEventSchema` 頂端註解完全相同:形狀不合硬塞,不如獨立
- * 開一個 kind。
- *
- * 兩種觸發原因(`reason`):
- *   - `"no-acceptance"`:任務沒有機器驗收條件,完成判定只能由人類判(HLD §2.2)。
- *   - `"acceptance-failure-streak"`:同一任務連續驗收失敗達上限(L4 §3),
- *     停止自動重跑、改為需要人類介入。
- *
- * `RealNotifier.deliver()`(apps/core/src/enforcement/notifier.ts)收到這個
- * kind 時,直接送出(不進批次佇列——理由見該檔案內的說明),對外仍然沿用
- * `EnforcementNotificationPushSchema` 既有的 "escalation" kind(不擴充對外
- * payload 形狀),只是用 `taskTitle` 取代 session 顯示名。
- */
-export const TaskReviewEnforcementEventSchema = z
-  .object({
-    kind: z.literal("task-review"),
-    taskId: z.string(),
-    teamId: z.string(),
-    taskTitle: z.string(),
-    reason: z.enum(["no-acceptance", "acceptance-failure-streak"]),
-    ts: z.number(),
-  })
-  .strict();
-export type TaskReviewEnforcementEvent = z.infer<typeof TaskReviewEnforcementEventSchema>;
-
 export const EnforcementEventSchema = z.discriminatedUnion("kind", [
   DecisionEnforcementEventSchema,
   EscalationEnforcementEventSchema,
   TripEnforcementEventSchema,
   ReminderEnforcementEventSchema,
-  TaskReviewEnforcementEventSchema,
 ]);
 export type EnforcementEvent = z.infer<typeof EnforcementEventSchema>;

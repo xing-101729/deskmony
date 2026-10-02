@@ -19,17 +19,11 @@ import {
   type ServerPush,
   type Session,
   type SessionEventEnvelope,
-  type Task,
-  type TeamMessage,
   type UserDialogResolvedPush,
 } from "@deskmony/shared";
 import { applyConfigFilePatch } from "../config/config-file-writer.js";
 import type { SessionManager } from "../session/session-manager.js";
 import type { ProfileStore } from "../profiles.js";
-import type { TeamManager } from "../team/team-manager.js";
-import type { MessageBus } from "../bus/message-bus.js";
-import type { TaskService } from "../tasks/task-service.js";
-import type { WorkspaceManager } from "../workspace/workspace-manager.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
 import type { RecoveryService } from "../recovery/recovery-service.js";
 import { detectAllAgents } from "../detect/agent-detector.js";
@@ -70,7 +64,7 @@ interface ConnectionState {
    * token(而非 master `DESKMONY_AUTH_TOKEN`,也不是「未設定 authToken」的
    * 免認證模式)通過認證,這裡是它綁定的授權範圍——`handleMessage()` 在
    * dispatch 之前用 `checkScopedGrantAccess()` 依此做方法白名單 + 綁定
-   * session/team 的檢查。`undefined` 代表這是一般連線(master token 或無認證
+   * session 的檢查。`undefined` 代表這是一般連線(master token 或無認證
    * 模式),完全不受這層額外限制,行為與這輪之前完全相同。
    */
   scopedGrant?: ScopedTokenGrant;
@@ -106,7 +100,7 @@ const MCP_BRIDGE_TOKEN_PREFIX = "dmbt_";
 const DEFAULT_MCP_BRIDGE_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
 /**
- * 一個已核發、尚未失效的 scoped bridge token 的完整狀態。`sessionId`/`team`/
+ * 一個已核發、尚未失效的 scoped bridge token 的完整狀態。`sessionId`/
  * `subagent` 直接對應 `McpBridgeTokenScope`(核發時呼叫端提供的綁定範圍),
  * `allowedMethods` 是依這個範圍算出的方法白名單(見 `computeAllowedMethods()`)
  * ——連 `allowedMethods` 本身也一併存進 grant,而不是每次請求都重新計算,
@@ -115,7 +109,6 @@ const DEFAULT_MCP_BRIDGE_TOKEN_TTL_MS = 24 * 60 * 60_000;
 interface ScopedTokenGrant {
   token: string;
   sessionId: string;
-  team?: { teamId: string; memberId: string };
   subagent: boolean;
   allowedMethods: ReadonlySet<ClientRequestMethod>;
   expiresAt: number;
@@ -123,18 +116,13 @@ interface ScopedTokenGrant {
 
 /**
  * 依 `McpBridgeTokenScope` 算出允許呼叫的 gateway 方法白名單——**精確**列出
- * 每個 team-bus/subagent MCP 工具對應的既有(或這輪新增的)gateway 方法,
- * 刻意不用任何前綴比對或範圍歸類的方式圖方便(例如「所有 `message.*` 方法」
- * 或「所有 `session.*` 方法」都不精確,`session.setPermissionMode`/
- * `message.getContextBudget` 等完全不相干的方法會被誤放行)。
+ * 每個 subagent MCP 工具對應的 gateway 方法,
+ * 刻意不用任何前綴比對或範圍歸類的方式圖方便(例如「所有 `session.*` 方法」
+ * 都不精確,`session.setPermissionMode` 等完全不相干的方法會被誤放行)。
+ * (2026-10-02:team-bus 那五個方法已隨 team 一併移除,見 docs/DECISIONS.md §H。)
  *
- * 對照表(MCP 工具 → gateway 方法,見 packages/adapters/src/team-bus-mcp.ts /
+ * 對照表(MCP 工具 → gateway 方法,見 packages/adapters/src/
  * subagent-mcp.ts / mcp-bridge-server.ts):
- *   send_message      → message.sendMessage
- *   broadcast         → message.broadcast
- *   list_teammates    → team.teammates
- *   report_status     → message.reportStatus
- *   request_review    → message.requestReview
  *   spawn_subagent    → session.spawnChildForSubagent
  *   send_to_subagent  → session.sendToChild
  *   list_subagents    → session.listChildren
@@ -142,13 +130,6 @@ interface ScopedTokenGrant {
  */
 function computeAllowedMethods(scope: McpBridgeTokenScope): ReadonlySet<ClientRequestMethod> {
   const methods = new Set<ClientRequestMethod>();
-  if (scope.team) {
-    methods.add("message.sendMessage");
-    methods.add("message.broadcast");
-    methods.add("team.teammates");
-    methods.add("message.reportStatus");
-    methods.add("message.requestReview");
-  }
   if (scope.subagent) {
     methods.add("session.spawnChildForSubagent");
     methods.add("session.sendToChild");
@@ -219,19 +200,14 @@ const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
   "profile.create",
   "profile.delete",
   /**
-   * 2026-09-04(稽核修補)新增的三項——理由與上面那批「使用者沒有要求開放」
-   * 不同,這三項是**結構性繞過安全罩**的路徑,與 §G 翻案開放的那些
+   * 2026-09-04(稽核修補)新增——理由與上面那批「使用者沒有要求開放」
+   * 不同,這項是**結構性繞過安全罩**的路徑,與 §G 翻案開放的那些
    * (切 auto/YOLO、編 allowlist)有本質差別:
    *
    * §G 開放的是「對 agent 的工具呼叫放寬到什麼程度」——那些操作再寬,
    * 每一次執行仍然要經過 `PolicyEngine.decide()`,仍然留在稽核紀錄裡。
-   * 下面這三項則是**完全不經過工具呼叫、也就完全不經過政策引擎**的執行路徑:
+   * 下面這項則是**完全不經過工具呼叫、也就完全不經過政策引擎**的執行路徑:
    *
-   *   - `task.setAcceptance` / `task.runAcceptance`:驗收指令最終走
-   *     `apps/core/src/tasks/acceptance-runner.ts` 的
-   *     `spawn(command, { shell: true, env: {...process.env} })`,而
-   *     `TaskAcceptanceSchema.commands` 是不受限的 `z.array(z.string())`。
-   *     `acceptance-runner.ts` 全檔沒有任何 `checkHardDeny()`/`decide()` 呼叫。
    *   - `settings.setProviderPrefs`:`ProviderPrefsSchema.env` 是
    *     `z.record(z.string(), z.string())`(無 key 白名單),而這份 env 經
    *     `getProviderEnv()` → `SessionManager.prepareSpawnProfile()` 併進
@@ -242,32 +218,12 @@ const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
    * 它同時也與既有的 `config.setFile`/`profile.create` 同類:都是「改變 core
    * 自己或子程序怎麼被啟動」的設定面操作,本來就該留在本機。
    *
-   * ⚠️ `task.create` 刻意**不**放進這個清單——見 `findRemoteForbiddenField()`。
+   * (2026-10-02:原本同批的 `task.setAcceptance`/`task.runAcceptance`
+   * 與欄位層級閘門 `findRemoteForbiddenField()`——擋 `task.create` 挾帶驗收
+   * 指令——已隨 task 一併移除,見 docs/DECISIONS.md §H。)
    */
-  "task.setAcceptance",
-  "task.runAcceptance",
   "settings.setProviderPrefs",
 ]);
-
-/**
- * 2026-09-04(稽核修補):欄位層級的 local-only 閘門,補 `LOCAL_ONLY_METHODS`
- * 的粒度不足之處。
- *
- * `CreateTaskInputSchema`(packages/shared/src/task.ts)的 `acceptance` 是
- * optional 欄位,也就是說**`task.create` 本身就能挾帶驗收指令**——只擋
- * `task.setAcceptance` 等於沒擋。但把整個 `task.create` 設成 local-only 會連
- * 「遠端建立一則普通任務」這種完全無害、且 README 從未宣稱受限的操作一起擋掉,
- * 超出實際風險範圍。所以這裡只擋那一個危險欄位:遠端仍可建立/指派/管理任務,
- * 只是不能自己定義要 spawn 什麼 shell。
- *
- * 回傳被擋下的欄位名(用於錯誤訊息),沒有問題時回 `undefined`。
- */
-function findRemoteForbiddenField(request: ClientRequest): string | undefined {
-  if (request.method === "task.create" && request.params.acceptance !== undefined) {
-    return "acceptance";
-  }
-  return undefined;
-}
 
 /**
  * 2026-09-04(稽核修補):WebSocket 升級的 Origin 同源檢查 —— 防的是
@@ -475,9 +431,9 @@ class AuthRateLimiter {
  * client 一樣可以直接連上來(M5 Round B 落地,見 apps/core/src/http/
  * static-server.ts)。
  *
- * M3 Round A:新增 TeamManager(team.*)與 MessageBus(team.messages /
- * message.send)的 dispatch case,並訂閱 MessageBus 的 "team-message" 事件
- * 推播給所有 client。
+ * (2026-10-02:原本的 team.* / message.* / task.* / workspace.* dispatch case
+ * 與 "team-message"/"task-updated"/"task-deleted" 推播已隨 team/看板一併移除,
+ * 見 docs/DECISIONS.md §H。)
  *
  * M5 Round A(任務2,認證):可選建構子參數 `authToken`。設定時,每個新連線
  * 預設「未認證」,必須把 `auth`(帶正確 token)當作可處理的第一則訊息送出
@@ -514,10 +470,6 @@ export class WsGateway {
   constructor(
     private readonly sessionManager: SessionManager,
     private readonly profiles: ProfileStore,
-    private readonly teamManager: TeamManager,
-    private readonly messageBus: MessageBus,
-    private readonly taskService: TaskService,
-    private readonly workspaceManager: WorkspaceManager,
     private readonly settingsStore: SettingsStore,
     /** S3b(CostGovernor)新增:`cost.getSummary` 的資料來源,見該 case 註解。 */
     private readonly costGovernor: CostGovernor,
@@ -575,15 +527,6 @@ export class WsGateway {
     // 也能即時看到允許清單變化(比照上面幾個 broadcast 的既有模式)。
     this.sessionManager.on("policy-updated", (payload: PolicyUpdatedPush) => {
       this.broadcast({ kind: "event", channel: "policy-updated", payload });
-    });
-    this.messageBus.on("team-message", (message: TeamMessage) => {
-      this.broadcast({ kind: "event", channel: "team-message", payload: message });
-    });
-    this.taskService.on("task-updated", (task: Task) => {
-      this.broadcast({ kind: "event", channel: "task-updated", payload: task });
-    });
-    this.taskService.on("task-deleted", (payload: { id: string; teamId: string }) => {
-      this.broadcast({ kind: "event", channel: "task-deleted", payload });
     });
     // S11(Notification):headless core 沒有 client 連線時,這個事件沒有任何
     // 監聽者送達也無所謂——`broadcast()` 本身在沒有已認證連線時就是 no-op
@@ -725,7 +668,6 @@ export class WsGateway {
     const grant: ScopedTokenGrant = {
       token,
       sessionId: scope.sessionId,
-      team: scope.team,
       subagent: scope.subagent,
       allowedMethods: computeAllowedMethods(scope),
       expiresAt,
@@ -824,10 +766,10 @@ export class WsGateway {
    *      (已撤銷)」與「已過期」兩種情況,不需要在這裡重複一份 TTL 判斷,後續
    *      判斷一律用這次查到的、當下真正有效的 grant。
    *   2. 方法本身是否在這個 grant 的 `allowedMethods` 白名單內。
-   *   3. 白名單內的方法,參數是否真的操作它被核發時綁定的那個 session/team
-   *      ——**不能只信任 request.params 帶的 teamId/fromMemberId/
-   *      parentSessionId**(這條連線背後的子行程理論上可能被動過手腳,送出
-   *      跟自己 env 不一致的參數),一律拿 grant 記錄的值重新比對。
+   *   3. 白名單內的方法,參數是否真的操作它被核發時綁定的那個 session
+   *      ——**不能只信任 request.params 帶的 parentSessionId**(這條連線背後的
+   *      子行程理論上可能被動過手腳,送出跟自己 env 不一致的參數),一律拿
+   *      grant 記錄的值重新比對。
    */
   private checkScopedGrantAccess(grant: ScopedTokenGrant, request: ClientRequest): { allowed: boolean; reason?: string } {
     const current = this.matchScopedToken(grant.token);
@@ -836,19 +778,6 @@ export class WsGateway {
       return { allowed: false, reason: "不在此 token 的授權方法白名單內" };
     }
     switch (request.method) {
-      case "message.sendMessage":
-      case "message.broadcast":
-      case "message.reportStatus":
-      case "message.requestReview":
-        if (!current.team || request.params.teamId !== current.team.teamId || request.params.fromMemberId !== current.team.memberId) {
-          return { allowed: false, reason: "teamId/fromMemberId 與此 token 綁定的團隊/成員不符" };
-        }
-        return { allowed: true };
-      case "team.teammates":
-        if (!current.team || request.params.teamId !== current.team.teamId) {
-          return { allowed: false, reason: "teamId 與此 token 綁定的團隊不符" };
-        }
-        return { allowed: true };
       case "session.spawnChildForSubagent":
       case "session.sendToChild":
       case "session.listChildren":
@@ -1099,27 +1028,6 @@ export class WsGateway {
       return;
     }
 
-    // 2026-09-04(稽核修補):同一道閘門的欄位層級版本,見
-    // `findRemoteForbiddenField()`。刻意放在 dispatch 之前、與上面那段同一個
-    // 位置,維持「所有授權判斷都在同一處、不散到各個 case 裡」的既有紀律。
-    if (!connState?.isLocal) {
-      const forbiddenField = findRemoteForbiddenField(parsed);
-      if (forbiddenField) {
-        console.warn(
-          `[gateway][security] 拒絕遠端連線(${connState?.remoteAddress ?? "unknown"})在 "${parsed.method}" 帶入 local-only 欄位 "${forbiddenField}"`,
-        );
-        this.send(socket, {
-          kind: "response",
-          id: parsed.id,
-          ok: false,
-          error: `此操作的「${forbiddenField}」欄位僅限本機連線提供:${parsed.method}`,
-          errorCode: ErrorCodes.GATEWAY_LOCAL_ONLY_FIELD,
-          errorParams: { method: parsed.method, field: forbiddenField },
-        });
-        return;
-      }
-    }
-
     // ---- 2026-08-25 移除(見 docs/DECISIONS.md §G):原本這裡有一道獨立於
     // LOCAL_ONLY_METHODS 的擋——`permission.resolve` 帶 rememberRule 時遠端一律
     // 拒絕,當初是 S7 自行判斷選的保守方向。使用者這輪明確翻案「遠端可編輯
@@ -1343,97 +1251,6 @@ export class WsGateway {
         const result = applyConfigFilePatch(this.configPath, request.params);
         return { ok: true, changedFields: result.changedFields, requiresRestart: true };
       }
-      case "team.create":
-        return { team: await this.teamManager.createTeam(request.params) };
-      case "team.list":
-        return { teams: await this.teamManager.listTeams() };
-      case "team.addMember":
-        return { member: await this.teamManager.addMember(request.params) };
-      case "team.removeMember":
-        await this.teamManager.removeMember(request.params.teamId, request.params.memberId);
-        return { ok: true };
-      case "team.delete":
-        return await this.teamManager.deleteTeam(request.params.teamId);
-      case "team.messages":
-        return { messages: await this.messageBus.getMessages(request.params.teamId, request.params.limit) };
-      case "team.teammates":
-        // requestingMemberId 純粹是介面欄位(見 packages/shared/src/team-bus.ts
-        // 的 TeamBusPort.listTeammates()),listTeammates() 實作本身不依賴它做
-        // 任何過濾,UI(非 agent)呼叫時給空字串即可。
-        return { teammates: await this.messageBus.listTeammates({ teamId: request.params.teamId, requestingMemberId: "" }) };
-      case "message.send":
-        return await this.messageBus.sendHumanMessage(request.params);
-      case "message.reportStatus":
-        return { message: await this.messageBus.reportStatus(request.params) };
-      case "message.requestReview":
-        return await this.messageBus.requestReview(request.params);
-      /**
-       * S2(message-budget)新增:比照 `message.reportStatus`/`message.requestReview`
-       * 的既有先例——非 agent 呼叫端(UI、e2e 決定性測試)也能呼叫與 team-bus
-       * MCP 工具完全相同的 `MessageBus.sendMessage()`/`broadcast()`,含這輪
-       * 新增的 contextId 推導與訊息預算閘(見 packages/shared/src/gateway.ts
-       * 對應 schema 的完整說明)。
-       */
-      case "message.sendMessage":
-        return await this.messageBus.sendMessage(request.params);
-      case "message.broadcast":
-        return await this.messageBus.broadcast(request.params);
-      case "message.getContextBudget":
-        return await this.messageBus.getContextBudgetStatus(request.params.contextId);
-      case "task.create":
-        return { task: await this.taskService.createTask(request.params) };
-      case "task.list":
-        return { tasks: await this.taskService.listTasks(request.params.teamId) };
-      case "task.get": {
-        const task = await this.taskService.getTask(request.params.taskId);
-        if (!task) {
-          throw new DeskmonyError(
-            ErrorCodes.ENTITY_NOT_FOUND,
-            { entityType: "task", id: request.params.taskId },
-            `找不到任務: ${request.params.taskId}`,
-          );
-        }
-        return { task };
-      }
-      case "task.assign":
-        return await this.taskService.assignTask(request.params);
-      case "task.updateStatus":
-        return { task: await this.taskService.updateStatus(request.params.taskId, request.params.status) };
-      case "task.merge":
-        return { task: await this.taskService.mergeAndComplete(request.params.taskId) };
-      case "task.delete": {
-        const result = await this.taskService.deleteTask(request.params.taskId);
-        return { ok: true, hadUncommittedChanges: result.hadUncommittedChanges };
-      }
-      case "workspace.get": {
-        const workspace = await this.workspaceManager.getWorkspace(request.params.workspaceId);
-        if (!workspace) {
-          throw new DeskmonyError(
-            ErrorCodes.ENTITY_NOT_FOUND,
-            { entityType: "workspace", id: request.params.workspaceId },
-            `找不到 workspace: ${request.params.workspaceId}`,
-          );
-        }
-        return { workspace };
-      }
-      /**
-       * S4(機器驗收閘)新增,見 packages/shared/src/gateway.ts 對應 case 的
-       * 完整說明——`setAcceptance()`/`runAcceptance()` 都只是薄薄一層委派給
-       * `TaskService`,實際邏輯全在該檔案(不碰 `updateStatus()`)。
-       */
-      case "task.setAcceptance":
-        return { task: await this.taskService.setAcceptance(request.params.taskId, request.params.acceptance) };
-      case "task.runAcceptance":
-        return { result: await this.taskService.runAcceptance(request.params.taskId) };
-      /**
-       * S5(dispose-gate)新增:見 packages/shared/src/gateway.ts 對應 case 的
-       * 完整說明——薄薄一層委派給 `TaskService.approveReview()`。刻意**不**
-       * 加進上方的 `LOCAL_ONLY_METHODS`:核可「等待人類核可」的任務是日常
-       * 操作,不是安全罩設定,本機/遠端使用者都該能做(同一般 escalate 請求
-       * 的既有先例,見 `LOCAL_ONLY_METHODS` 上方註解)。
-       */
-      case "task.approveReview":
-        return { task: await this.taskService.approveReview(request.params.taskId) };
       /**
        * S3b(CostGovernor)新增:見 packages/shared/src/gateway.ts 對應 case 的
        * 完整說明——薄薄一層委派給 `CostGovernor.getSummary()`。
@@ -1451,12 +1268,6 @@ export class WsGateway {
         return { session: await this.recoveryService.continueSession(request.params.sessionId) };
       case "recovery.takeover":
         return { session: await this.recoveryService.takeover(request.params.sessionId) };
-      case "recovery.gitStatus":
-        return await this.recoveryService.gitStatus(request.params.sessionId);
-      case "recovery.resolveDirtyWorktree":
-        return await this.recoveryService.resolveDirtyWorktree(request.params);
-      case "recovery.rerun":
-        return { session: await this.recoveryService.rerun(request.params.sessionId) };
       case "recovery.abandon":
         await this.recoveryService.abandon(request.params.sessionId);
         return { ok: true };
@@ -1475,7 +1286,7 @@ export class WsGateway {
   private broadcast(message: ServerPush): void {
     const payload = JSON.stringify(message);
     // M5 Round A:只推播給已認證的連線(未認證的連線在 auth 通過前不應該
-    // 收到任何 agent 輸出/團隊訊息等潛在敏感內容)。未設定 authToken 時
+    // 收到任何 agent 輸出等潛在敏感內容)。未設定 authToken 時
     // 所有連線一律 authenticated=true,行為與過去完全相同。
     for (const [client, state] of this.clients) {
       if (client.readyState === WebSocket.OPEN && state.authenticated) client.send(payload);

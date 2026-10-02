@@ -114,8 +114,8 @@ const defaultWebSocketFactory: WebSocketFactory = (url) =>
  * 才知道要連哪裡——因此 `url`/`authToken` 這輪改成可變欄位,新增
  * `configure()` 讓連線畫面在使用者送出表單、且已用 `probeGatewayConnection()`
  * 驗證過連線/認證都成功之後,才真的設定進這個「長駐」的 client 實例
- * (session-store.ts 匯出的模組層級 singleton,team-store/task-store 共用同
- * 一條連線)。`connect()` 在 `url` 為空字串時直接視為關閉狀態、不嘗試建立
+ * (session-store.ts 匯出的模組層級 singleton,recovery-store 等其他 store
+ * 共用同一條連線)。`connect()` 在 `url` 為空字串時直接視為關閉狀態、不嘗試建立
  * WebSocket(瀏覽器場景下,使用者送出連線畫面表單前不應該有任何連線嘗試)。
  *
  * **2026-09-09(CLI 拆分,見 docs/LAYER-3-hld/cli_hld.md §4.1)**:從
@@ -222,7 +222,7 @@ export class GatewayClient {
    * 在此之前,`scheduleReconnect()` 只是 2 秒後再 `connect()` 一次,而四個
    * store 都只在啟動時 `init()` 一次、只訂閱一次 push —— 狀態變回 `"open"`
    * 時沒有任何程式碼重新拉取資料。斷線期間 core 推播的每一個
-   * `session-event`/`session-updated`/`team-message`/`task-updated` 都是
+   * `session-event`/`session-updated` 等 push 都是
    * **確定性遺失**,而 UI 上只是頂部提示條消失、看起來一切正常。
    *
    * 這在手機/瀏覽器遠端連線(本產品明確支援、也最容易斷線的情境)下特別要命:

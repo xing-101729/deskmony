@@ -500,8 +500,8 @@ export class OpenCodeAdapter implements AgentAdapter {
      *
      * 為什麼要等:「送出終止指令」不等於「子程序已經死掉」。在 Windows 上
      * 行程要再過一小段時間才釋放它對 cwd(= 任務 worktree)的佔用,而呼叫端
-     * (`TaskService.deleteTask` → `WorkspaceManager.removeWorkspace`)緊接著就會
-     * `git worktree remove`,撞上 `EBUSY`/`Permission denied`。`WorkspaceManager`
+     * (原任務刪除流程(2026-10-02 已移除,見 docs/DECISIONS.md §H))緊接著就會
+     * `git worktree remove`,撞上 `EBUSY`/`Permission denied`。呼叫端當時
      * 有約 1.8 秒的重試窗口可以補救,但那比這裡主動等的 3 秒短 —— 在子程序退出
      * 較慢的機器上,opencode/pty 因此比另外兩個 adapter 更容易真的觸發
      * `workspace.cleanupFailed`。

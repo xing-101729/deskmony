@@ -15,7 +15,6 @@ import { IconButton } from "../ui/Button.js";
 import { Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
-import { Meter } from "../ui/Feedback.js";
 import { shortenPath } from "../lib/workspaces.js";
 import { resolveSystemEventText } from "../lib/system-events.js";
 // 2026-09-04(稽核修補):ModelControl/EffortControl 的錯誤訊息原本繞過了
@@ -293,28 +292,14 @@ function UsageBadge({ session }: { session: Session }): JSX.Element | null {
   );
 }
 
-/** 依「$ 為主、token 兜底」規則(HLD §3.2)算出目前用了幾成。 */
-function budgetPercentForDisplay(
-  rollup: { costAmount: number; costCurrency?: string; inputTokens: number; outputTokens: number },
-  limits: { maxCostUsd?: number; maxTokens?: number },
-): number | undefined {
-  if (limits.maxCostUsd !== undefined && rollup.costCurrency !== undefined) {
-    return (rollup.costAmount / limits.maxCostUsd) * 100;
-  }
-  if (limits.maxTokens !== undefined) {
-    return ((rollup.inputTokens + rollup.outputTokens) / limits.maxTokens) * 100;
-  }
-  return undefined;
-}
-
 /**
- * S3b(CostGovernor)§7:標頭顯示累計與預算餘量。只有 `task`(綁定任務有設
- * 預算)與 `dailyTripped`(今日 kill-switch 已觸發)兩種情況會渲染。
+ * S3b(CostGovernor)§7:標頭顯示預算狀態。只有 `dailyTripped`(今日 kill-switch
+ * 已觸發)會渲染。(2026-10-02:原本還有 `task`——綁定任務的預算餘量與 trip,
+ * 任務預算已隨 task 移除,見 docs/DECISIONS.md §H。)
  */
 function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
   const summary = useSessionStore((s) => s.costSummaryBySession[session.id]);
-  const effectiveConfig = useSessionStore((s) => s.effectiveConfig);
   const fetchCostSummary = useSessionStore((s) => s.fetchCostSummary);
 
   useEffect(() => {
@@ -322,42 +307,13 @@ function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
 
-  if (!summary || !effectiveConfig) return null;
-  const budget = effectiveConfig.budget;
-
-  const parts: Array<{ label: string; tripped: boolean; percent?: number }> = [];
-  if (summary.task) {
-    if (summary.task.tripped) {
-      parts.push({ label: t("chat:cost.taskTrippedLabel", { title: summary.task.title }), tripped: true });
-    } else {
-      const percent = budgetPercentForDisplay(summary.task.rollup, {
-        maxCostUsd: budget.task.maxCostUsd.value,
-        maxTokens: budget.task.maxTokens.value,
-      });
-      if (percent !== undefined) {
-        parts.push({ label: t("chat:cost.taskBudgetPercentLabel", { percent: Math.min(100, Math.round(percent)) }), tripped: false, percent });
-      }
-    }
-  }
-  if (summary.dailyTripped) {
-    parts.push({ label: t("chat:cost.dailyTrippedLabel"), tripped: true });
-  }
-
-  if (parts.length === 0) return null;
+  if (!summary?.dailyTripped) return null;
 
   return (
     <div className="flex items-center gap-1.5">
-      {parts.map((part) => (
-        <div key={part.label} className="flex items-center gap-1.5">
-          {part.percent !== undefined && <Meter percent={part.percent} className="w-10" />}
-          <Badge
-            tone={part.tripped ? "danger" : "neutral"}
-            title={part.tripped ? t("chat:cost.trippedTitle") : t("chat:cost.percentTitle")}
-          >
-            {part.label}
-          </Badge>
-        </div>
-      ))}
+      <Badge tone="danger" title={t("chat:cost.trippedTitle")}>
+        {t("chat:cost.dailyTrippedLabel")}
+      </Badge>
     </div>
   );
 }

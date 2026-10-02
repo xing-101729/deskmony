@@ -1,9 +1,10 @@
 /**
- * Phase 2(ACP 掛載 team-bus/subagent MCP 工具)新增。
+ * Phase 2(ACP 掛載 subagent MCP 工具)新增。(2026-10-02:原本還有 team-bus
+ * 那一組,team 已移除,見 docs/DECISIONS.md §H。)
  *
  * 背景:`ClaudeAgentSdkAdapter` 用 in-process 的 `createSdkMcpServer()`
- * (packages/adapters/src/team-bus-mcp.ts / subagent-mcp.ts)掛載 team-bus/
- * subagent 工具——工具 handler 直接閉包捕捉 `TeamBusPort`/`SubagentPort` 實例,
+ * (packages/adapters/src/subagent-mcp.ts)掛載 subagent 工具——工具 handler
+ * 直接閉包捕捉 `SubagentPort` 實例,
  * 同一個 process 內呼叫,不需要任何認證機制。但 `@agentclientprotocol/sdk` 的
  * `McpServer` 型別只接受 stdio/HTTP/SSE 這種「外部行程/端點」形式(見
  * packages/adapters/src/acp-adapter.ts 的查證註解),不支援閉包捕捉——
@@ -15,14 +16,14 @@
  * LLM 控制的 codex-acp/gemini 行程**間接**（透過 ACP 的
  * `session/new`→`mcpServers`設定）spawn 出來的孫行程,env/args 有被檢視的
  * 可能。這個介面讓 `packages/adapters` 能請求核發一個**限定範圍、有時效、
- * 綁定單一 session(以及選填的 team/member)** 的 scoped token,又不需要
+ * 綁定單一 session** 的 scoped token,又不需要
  * import `apps/core`(依賴方向規則:packages/* 不得 import apps/*)——比照
- * `TeamBusPort`/`SubagentPort` 既有的「介面定義在 packages/shared,實例由
+ * `SubagentPort` 既有的「介面定義在 packages/shared,實例由
  * apps/core 注入」模式。核發/驗證/失效的實際邏輯在
  * apps/core/src/gateway/ws-gateway.ts(`WsGateway.mintMcpBridgeToken()` /
  * `revokeMcpBridgeTokensForSession()`),`apps/core/src/index.ts` 建構完
  * `WsGateway` 後,用一個實作了這個介面的物件呼叫
- * `AcpAdapter.setTokenMinter()`(事後注入,理由同 `setTeamBus()`/
+ * `AcpAdapter.setTokenMinter()`(事後注入,理由同
  * `setSubagentPort()`——adapter 建構當下 `WsGateway` 還不存在)。
  */
 
@@ -31,19 +32,12 @@
  * `AgentHandle.id`(見 `AcpAdapter.spawn()`)——也是 subagent 系列方法的
  * `parentSessionId`,只有這個 session id 允許被操作。
  *
- * `team`/`subagent` 各自獨立:只提供 `team` 時,核發的 token 只能呼叫
- * team-bus 對應的方法;只提供 `subagent: true` 時,只能呼叫 subagent 對應
- * 的方法;兩者都提供時,白名單是兩者的聯集(比照
- * `ClaudeAgentSdkAdapter.spawn()` 既有的「team 跟 subagent 各自獨立判斷、
- * 兩者皆有時同時掛上」累加模式)。
+ * `subagent: true` 時,核發的 token 能呼叫 subagent 對應的方法;`false` 時
+ * 白名單為空(token 什麼都不能做)。
  */
 export interface McpBridgeTokenScope {
   /** 這個 token 綁定的 session id(= `AgentHandle.id`)。 */
   sessionId: string;
-  /** 提供時,授權 team-bus 系列方法(send_message/broadcast/list_teammates/
-   *  report_status/request_review 對應的 gateway 方法),且只能操作這個
-   *  teamId/memberId。 */
-  team?: { teamId: string; memberId: string };
   /** true 時,授權 subagent 系列方法(spawn_subagent/send_to_subagent/
    *  list_subagents/list_profiles 對應的 gateway 方法)。 */
   subagent: boolean;
@@ -62,7 +56,7 @@ export interface McpBridgeTokenGrant {
 
 export interface McpBridgeTokenPort {
   /** 核發一個新的 scoped token。每次 `AcpAdapter.spawn()` 需要掛載
-   *  team-bus/subagent MCP 工具時呼叫一次。 */
+   *  subagent MCP 工具時呼叫一次。 */
   mint(scope: McpBridgeTokenScope): McpBridgeTokenGrant;
   /** 讓某個 session 核發過的所有 token 立即失效——`AcpAdapter.dispose()`
    *  必須呼叫,避免子行程持有的 token 在 session 結束後變成孤兒憑證。 */

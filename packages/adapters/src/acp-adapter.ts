@@ -9,7 +9,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
 import type { AgentEvent, AgentProfile, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SlashCommandInfo, SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, TeamSpawnContext, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
@@ -76,16 +76,16 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
 export class AcpAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
 
-  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`subagentPort` 完全比照
+  // Phase 2(ACP 掛載 subagent MCP 工具):`subagentPort` 完全比照
   // `ClaudeAgentSdkAdapter` 既有的 `setSubagentPort()` 模式——apps/core 的
   // SessionManager 在啟動時用 setter 事後注入(adapter 建構當下 core 的
   // SessionManager 還沒好,打破建構循環,見 claude-sdk-adapter.ts 同名欄位的
   // 註解)。`tokenMinter` 是這輪新增的第二個事後注入依賴——見
   // packages/shared/src/mcp-bridge-auth.ts 的 `McpBridgeTokenPort` 完整背景
   // 說明,實例由 apps/core 的 WsGateway 提供。兩者都是 **可選**:`spawn()`
-  // 只在 `team`(呼叫端傳入)或 `subagentPort`(已注入)至少一者存在、且
-  // `tokenMinter` 也已注入時,才會核發 token、掛載 mcp-bridge-server.ts——
-  // 三者缺一,行為與這輪之前完全相同(不核發 token、不多一個子行程)。
+  // 只在 `subagentPort` 已注入、且 `tokenMinter` 也已注入時,才會核發 token、
+  // 掛載 mcp-bridge-server.ts——兩者缺一,行為與這輪之前完全相同(不核發 token、
+  // 不多一個子行程)。
   private subagentPort?: SubagentPort;
   setSubagentPort(port: SubagentPort): void {
     this.subagentPort = port;
@@ -149,7 +149,7 @@ export class AcpAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace, team?: TeamSpawnContext): Promise<AgentHandle> {
+  async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
     const acpConfig = profile.acpConfig;
     if (!acpConfig) {
       throw new DeskmonyError(
@@ -159,7 +159,7 @@ export class AcpAdapter implements AgentAdapter {
       );
     }
 
-    // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`AgentHandle.id` 提前在
+    // Phase 2(ACP 掛載 subagent MCP 工具):`AgentHandle.id` 提前在
     // 這裡生成(這輪之前是等 ACP handshake 成功後才在下面產生)——scoped
     // token 需要綁定「這一個 session」,但核發時機必須在
     // `buildSession().withMcpServer()` 之前(掛進 `session/new` 請求的
@@ -241,17 +241,12 @@ export class AcpAdapter implements AgentAdapter {
 
     const connection = clientApp.connect(stream);
 
-    // Phase 2:team(呼叫端傳入)或 this.subagentPort(已注入)任一存在時,
-    // 核發 scoped token 並算出要掛載的 mcp-bridge-server.ts 設定——比照
-    // ClaudeAgentSdkAdapter.spawn() 既有的「team 跟 subagent 各自獨立判斷、
-    // 兩者皆有時同時掛上」累加模式,唯一差異是 ACP 只有一個統一的 bridge
-    // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是兩個
-    // 各自獨立的 in-process MCP server,所以這裡是「核發一個範圍涵蓋兩者聯集
-    // 的 token、掛一個 server」而不是「核發兩個 token、掛兩個 server」。
-    // 兩者皆無時 `buildMcpBridgeServer()` 直接回傳 undefined,不核發任何
-    // token、不掛任何 MCP server——這輪之前唯一在跑的 ACP 情境(沒有 team 的
-    // Gemini 個人單機使用)行為與這輪之前完全相同。
-    const bridgeMcpServer = this.buildMcpBridgeServer(handleId, team);
+    // Phase 2:this.subagentPort(已注入)存在時,核發 scoped token 並算出
+    // 要掛載的 mcp-bridge-server.ts 設定——ACP 只有一個統一的 bridge
+    // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是
+    // in-process 的 MCP server。沒有 subagentPort 時 `buildMcpBridgeServer()`
+    // 直接回傳 undefined,不核發任何 token、不掛任何 MCP server。
+    const bridgeMcpServer = this.buildMcpBridgeServer(handleId);
 
     try {
       await Promise.race([
@@ -330,17 +325,17 @@ export class AcpAdapter implements AgentAdapter {
   /**
    * Phase 2:算出這個 session 要不要掛載 mcp-bridge-server.ts,以及要掛的話
    * 需要的完整 `McpServerStdio` 設定(含核發好的 scoped token)。回傳
-   * `undefined` 代表不掛載(`team`/`subagentPort` 皆無,或缺少
+   * `undefined` 代表不掛載(沒有 `subagentPort`,或缺少
    * `tokenMinter`/找不到已編譯的 bridge server 進入點這兩種**優雅降級**的
    * 情況——後兩者理論上不該發生,但寧可略過掛載、印警告,也不要讓整個
-   * session 建立失敗:team-bus/subagent 工具是加分項,不是這個 session 能不
+   * session 建立失敗:subagent 工具是加分項,不是這個 session 能不
    * 能建立的前提)。
    */
-  private buildMcpBridgeServer(sessionId: string, team: TeamSpawnContext | undefined): acp.McpServer | undefined {
-    if (!team && !this.subagentPort) return undefined;
+  private buildMcpBridgeServer(sessionId: string): acp.McpServer | undefined {
+    if (!this.subagentPort) return undefined;
     if (!this.tokenMinter) {
       console.warn(
-        `[acp-adapter] session ${sessionId}: team/subagentPort 存在但尚未注入 tokenMinter,略過掛載 team-bus/subagent MCP 工具`,
+        `[acp-adapter] session ${sessionId}: subagentPort 存在但尚未注入 tokenMinter,略過掛載 subagent MCP 工具`,
       );
       return undefined;
     }
@@ -348,14 +343,13 @@ export class AcpAdapter implements AgentAdapter {
     if (!entryPath || !existsSync(entryPath)) {
       console.warn(
         `[acp-adapter] session ${sessionId}: 找不到 mcp-bridge-server.js(${entryPath ?? "無法解析路徑"}),` +
-          "略過掛載 team-bus/subagent MCP 工具——請確認 packages/adapters 已執行過 pnpm build。",
+          "略過掛載 subagent MCP 工具——請確認 packages/adapters 已執行過 pnpm build。",
       );
       return undefined;
     }
 
     const grant: McpBridgeTokenGrant = this.tokenMinter.mint({
       sessionId,
-      team: team ? { teamId: team.teamId, memberId: team.memberId } : undefined,
       subagent: Boolean(this.subagentPort),
     });
 
@@ -367,10 +361,6 @@ export class AcpAdapter implements AgentAdapter {
       { name: "DESKMONY_MCP_BRIDGE_GATEWAY_URL", value: grant.gatewayUrl },
       { name: "DESKMONY_MCP_BRIDGE_SESSION_ID", value: sessionId },
     ];
-    if (team) {
-      env.push({ name: "DESKMONY_MCP_BRIDGE_TEAM_ID", value: team.teamId });
-      env.push({ name: "DESKMONY_MCP_BRIDGE_MEMBER_ID", value: team.memberId });
-    }
     if (this.subagentPort) {
       env.push({ name: "DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED", value: "1" });
     }
@@ -443,11 +433,10 @@ export class AcpAdapter implements AgentAdapter {
     this.killChild(internal.child);
     // S8 迴歸修正:`killChild()` 只是「送出終止指令」,不保證子程序已經真的死掉。
     // 在 Windows 上,行程要再過數十毫秒才會釋放它對 cwd(= 任務 worktree)的
-    // 佔用 —— 若 dispose() 在此之前就 resolve,呼叫端(TaskService.deleteTask →
-    // WorkspaceManager.removeWorkspace)會立刻 `git worktree remove`,撞上
-    // `Permission denied` / `EBUSY: resource busy or locked`。
-    // S8 讓 assignTask() 自動 spawn session 之後,worktree 首次會被子程序佔住,
-    // 這個既有的時序漏洞才被 e2e-gateway 步驟 15e 暴露出來。
+    // 佔用 —— 若 dispose() 在此之前就 resolve,呼叫端(原任務刪除流程,
+    // 2026-10-02 已移除,見 docs/DECISIONS.md §H)會立刻 `git worktree remove`,撞上
+    // `Permission denied` / `EBUSY: resource busy or locked`。這個時序漏洞當時是
+    // 由 e2e-gateway 步驟 15e 暴露出來的,修正本身(等子程序真正退出)仍然有效。
     // 這裡等子程序真正 exit(上限 3 秒;逾時就放棄等待,讓呼叫端既有的重試機制
     // 接手,絕不因為等不到而卡住 dispose)。
     await waitForChildExit(internal.child, 3_000);
@@ -572,7 +561,7 @@ export class AcpAdapter implements AgentAdapter {
         // 的查證註解——只有「kind === "edit" 且有 locations」時才值得預先讀檔。
         // `pendingFileSnapshots` 是 InternalSession 上的**選填**欄位(故意不放進
         // spawn() 建立 internal 物件時的初始化清單,這輪不動 spawn() 的簽章或
-        // 內容,避免跟同時進行的 team-bus/subagent MCP 掛載那個 Phase 衝突),
+        // 內容,避免跟同時進行的 subagent MCP 掛載那個 Phase 衝突),
         // 這裡用 `??=` 在第一次真的需要時才 lazily 建立。
         const snapshotPath = resolveEditSnapshotPath(update.kind, update.locations, internal.handle.workspace.path);
         if (snapshotPath) {
@@ -760,7 +749,7 @@ interface InternalSession {
    *
    * **選填、預設不存在**(而不是比照 `toolTitles` 在 `spawn()` 建構
    * `InternalSession` 時就初始化成空 Map)——這輪明確不動 `spawn()` 的簽章或
-   * 內容(避免跟同時進行的「ACP 掛載 team-bus/subagent MCP」那個 Phase 的
+   * 內容(避免跟同時進行的「ACP 掛載 subagent MCP」那個 Phase 的
    * 改動衝突),改成在 `handleSessionUpdate()` 第一次真的需要寫入時用
    * `??=` lazily 建立,行為上與「一開始就是空 Map」完全等價。
    */

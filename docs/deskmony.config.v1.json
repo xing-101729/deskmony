@@ -55,10 +55,6 @@
         "defaultWorkingDir": {
           "type": "string",
           "minLength": 1
-        },
-        "worktreesRoot": {
-          "type": "string",
-          "minLength": 1
         }
       },
       "additionalProperties": false
@@ -105,6 +101,9 @@
           "items": {
             "type": "object",
             "properties": {
+              "id": {
+                "type": "string"
+              },
               "tool": {
                 "type": "string"
               },
@@ -253,6 +252,104 @@
           "minSeverity": "escalate"
         },
         "batchIntervalMinutes": 20
+      }
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "daily": {
+          "type": "object",
+          "properties": {
+            "maxCostUsd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "maxTokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "turn": {
+          "type": "object",
+          "properties": {
+            "maxDurationMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "maxToolCalls": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "maxDurationMs",
+            "maxToolCalls"
+          ],
+          "additionalProperties": false
+        },
+        "warnAtPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "modelPricing": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "inputPerMTokUsd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "outputPerMTokUsd": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "inputPerMTokUsd",
+              "outputPerMTokUsd"
+            ],
+            "additionalProperties": false
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "turn",
+        "warnAtPercent"
+      ],
+      "additionalProperties": false,
+      "default": {
+        "daily": {},
+        "turn": {
+          "maxDurationMs": 1800000,
+          "maxToolCalls": 200
+        },
+        "warnAtPercent": 80,
+        "modelPricing": {}
+      }
+    },
+    "messageBudget": {
+      "type": "object",
+      "properties": {
+        "maxMessagesPerContext": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 50
+        },
+        "warnAtPercent": {
+          "type": "number",
+          "default": 80
+        }
+      },
+      "additionalProperties": false,
+      "default": {
+        "maxMessagesPerContext": 50,
+        "warnAtPercent": 80
       }
     }
   },

@@ -1,5 +1,7 @@
 # S6 Detail Design:崩潰復原(對帳 + 人工分流)
 
+> ⚠️ 2026-10-02:本文件中與 team / 任務 / 任務 worktree 相關的部分已移除,見 [DECISIONS §H](../DECISIONS.md)(其餘部分仍有效)
+
 > 上層:[S6 HLD](../LAYER-3-hld/crash-recovery_hld.md)｜階段:**Phase 1 最後一份**
 > 前置:[S3b L4 §4](./cost-governor_detail.md)(T2 資源回收已實作,語意需對齊)、[S7 L4](./auto-mode-and-yolo_detail.md)(暫態不復活)
 > L4 完成度標準:**另一個工程師照著寫,不用問你**。

@@ -1,5 +1,7 @@
 # S6 HLD:崩潰復原(對帳 + 人工分流)
 
+> ⚠️ 2026-10-02:本文件中與 team / 任務 / 任務 worktree 相關的部分已移除,見 [DECISIONS §H](../DECISIONS.md)(其餘部分仍有效)
+
 > 階段:**Phase 1**(最後一份)｜對應 L1:**D1–D4**｜上層:[L2 §3](../LAYER-2-design-spec.md)、[DECISIONS §D](../DECISIONS.md)
 > 前置:[S3b](./cost-governor_hld.md)(資源回收/blocked 語意)、[S7](./auto-mode-and-yolo_hld.md)(暫態消失)、[S11](./notification_hld.md)(掛起狀態)
 > **核心立場(D1)**:崩潰復原的本質是「**對帳你的帳本 + 人工分流在途工作**」,**不是 replay**——最貴的東西(agent 累積的推理/context)活在**後端 agent 行程**裡,不在你的 DB。你 replay 自己的事件,重建的是帳本,不是 agent 的腦。

@@ -349,7 +349,7 @@ async function unitTests() {
     notifier.setSessionInfo(fakeSessionInfo({ s1: "Coder-1" }));
 
     const start = Date.now();
-    await notifier.deliver({ kind: "trip", source: "cost", reason: "task-budget", targetIds: ["s1"], ts: Date.now() });
+    await notifier.deliver({ kind: "trip", source: "cost", reason: "daily-limit", targetIds: ["s1"], ts: Date.now() });
     const deliverElapsedMs = Date.now() - start;
 
     // 等 3 次嘗試(0/1s/2s 間隔)都跑完。

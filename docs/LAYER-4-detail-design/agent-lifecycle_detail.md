@@ -1,5 +1,7 @@
 # S8 Detail Design:Agent 生命週期 + 外部記憶(檔案層)
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 上層:[S8 HLD](../LAYER-3-hld/agent-lifecycle_hld.md)｜階段:**Phase 2**
 > 前置:[S6 L4](./crash-recovery_detail.md)(「接手」機制已實作,§2.2 直接複用)、[S2 L4](./message-budget_detail.md)(contextId 推導依賴 member↔task 綁定)、[S3a L4](./usage-metering_detail.md)(`context-usage` 事件)
 > L4 完成度標準:**另一個工程師照著寫,不用問你**。

@@ -16,11 +16,10 @@ import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, SlashCommandI
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
 import type { SubagentPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, TeamSpawnContext, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
-import { TEAM_BUS_MCP_SERVER_NAME, TEAM_BUS_TOOL_NAMES, createTeamBusMcpServer } from "./team-bus-mcp.js";
 import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMcpServer } from "./subagent-mcp.js";
 
 /**
@@ -104,7 +103,7 @@ import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMc
 export class ClaudeAgentSdkAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
   // S12 Phase2 R2:spawn_subagent 的注入 port(apps/core 的 SessionManager 在
-  // 啟動時用 setSubagentPort() 事後注入,比照 setTeamBus() 的「先建構、後注入」
+  // 啟動時用 setSubagentPort() 事後注入,「先建構、後注入」
   // 手法打破建構循環——adapter 建立時 core 的 SessionManager 還沒好)。
   private subagentPort?: SubagentPort;
   setSubagentPort(port: SubagentPort): void {
@@ -143,7 +142,6 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   async spawn(
     profile: AgentProfile,
     workspace: Workspace,
-    team?: TeamSpawnContext,
     resume?: ResumeOptions,
   ): Promise<AgentHandle> {
     const handle: AgentHandle = { id: randomUUID(), profile, workspace };
@@ -278,20 +276,12 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       },
     };
 
-    // M3 Round A:session 屬於某個 team 成員時,掛載內建的 team-bus MCP
-    // server(見 packages/adapters/src/team-bus-mcp.ts),讓這個 agent 拿到
-    // send_message/broadcast/list_teammates/report_status 四個工具。這幾個
-    // 工具只是傳訊/查詢,不涉及檔案/指令執行,額外放進 allowedTools 讓它們
-    // 略過 canUseTool 的權限彈窗(ARCHITECTURE.md 4.1 節「內建 team-bus MCP
-    // server」—— 純粹的平台內部管線,不需要每次都要人類核可)。
-    // S12 Phase2 R2:改成累積式掛載——team 與 subagent 各自獨立判斷,兩者皆
-    // 有時同時掛上(各自獨立,不互相影響)。
+    // S12 Phase2 R2:掛載內建的 subagent MCP server(見
+    // packages/adapters/src/subagent-mcp.ts)。純查詢的工具額外放進
+    // allowedTools 略過 canUseTool 的權限彈窗(純粹的平台內部管線)。
+    // (2026-10-02:原本還有一組團隊訊息工具,隨 team 一併移除,見 docs/DECISIONS.md §H。)
     const mcpServers: Record<string, McpServerConfig> = {};
     const allowedTools: string[] = [];
-    if (team) {
-      mcpServers[TEAM_BUS_MCP_SERVER_NAME] = createTeamBusMcpServer(team);
-      allowedTools.push(...TEAM_BUS_TOOL_NAMES);
-    }
     if (this.subagentPort) {
       // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生(line 101),
       // 這裡閉包捕捉當作 parentSessionId,agent 無法覆寫。
@@ -422,7 +412,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
    * (`node_modules` 內 `sdk.d.ts` 明載)回傳的 `Promise` 在「查詢確實停止
    * 處理、控制權交還呼叫端」時才 resolve,不是單純送出中斷請求就算數 ——
    * 修正前這裡是 `void internal.sdkQuery.interrupt()`(fire-and-forget),
-   * 呼叫端(MessageBus)緊接著就 await 注入新 prompt,可能與尚未真正停下的
+   * 呼叫端緊接著就 await 注入新 prompt,可能與尚未真正停下的
    * 回合競爭。這裡改成 `await`,把「中斷確實生效」這個保證往外傳遞。
    */
   async interrupt(handle: AgentHandle): Promise<void> {
@@ -446,10 +436,10 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
    * cwd = 任務 worktree**,而 SDK 從頭到尾只碰得到直接子程序。實測:`close()`
    * 之後 `claude.exe` 約 1 秒內結束,但整個 worktree 目錄要到約 3 秒才真正
    * 可刪 —— 撐著不放的是那些比父程序晚死的孫程序。呼叫端
-   * (TaskService.deleteTask → WorkspaceManager.removeWorkspace)的重試窗口
+   * (原任務刪除流程(2026-10-02 已移除,見 docs/DECISIONS.md §H))的重試窗口
    * 只有 1.8 秒,於是 `git worktree remove` 撞上 `Permission denied` /
    * `EBUSY: resource busy or locked`。這在 S8 之前不會發生 —— S8 讓
-   * `assignTask()` 自動 spawn session,worktree 才第一次被子程序當成 cwd 佔住,
+   * 任務指派自動 spawn session,worktree 才第一次被子程序當成 cwd 佔住,
    * 把這個既有的外洩暴露出來。
    *
    * 修正後的順序(順序本身就是修正的一部分):

@@ -16,10 +16,6 @@ import { CostGovernor } from "./cost/cost-governor.js";
 import { WaitingWatchdog } from "./cost/waiting-watchdog.js";
 import { RecoveryService } from "./recovery/recovery-service.js";
 import { WsGateway } from "./gateway/ws-gateway.js";
-import { TeamManager } from "./team/team-manager.js";
-import { MessageBus } from "./bus/message-bus.js";
-import { WorkspaceManager } from "./workspace/workspace-manager.js";
-import { TaskService } from "./tasks/task-service.js";
 import { createStaticRequestHandler } from "./http/static-server.js";
 import { SettingsStore, migrateLegacyEnabledModelIds } from "./settings/settings-store.js";
 import { applyConsoleLogLevel, loadConfig } from "./config/load-config.js";
@@ -37,23 +33,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * 這輪(修復 opencode 只是 PTY 直通的問題):補上一直是 TODO 的
  * OpenCodeAdapter(software="opencode",HTTP + SSE 對接 opencode 的 headless
  * server,見 packages/adapters/src/opencode-adapter.ts 頂端對接策略註解)。
- * M3 Round A:新增 TeamManager + MessageBus(ARCHITECTURE.md 第 4 節)。
- * 建構順序刻意如下(見 SessionManager/MessageBus 內的註解):
- *   1. ProfileStore / TeamManager 先建好(TeamManager 依賴 ProfileStore)。
- *   2. SessionManager 建構子需要 TeamManager(建立 team 成員的 session 時
- *      要查 member 資訊),但這時還沒有 MessageBus 實例。
- *   3. MessageBus 建構子需要 SessionManager(查詢 session 狀態、注入
- *      prompt)—— 兩者互相依賴,用 `sessionManager.setTeamBus(messageBus)`
- *      事後注入 TeamBusPort 打破循環。
- * M4 Round A:新增 TaskService + WorkspaceManager(ARCHITECTURE.md 3.3 節、
- * 第 5 節任務協作流程狀態機、第 6 節 TASK/WORKSPACE ERD)。WorkspaceManager
- * 不依賴任何其他 core 模組(只需要 db),TaskService 依賴 TeamManager(查
- * team.workingDir/team member)與 WorkspaceManager(指派任務時建立 git
- * worktree);MessageBus 額外注入 TaskService(選填的第五個建構子參數),
- * 讓 report_status 帶 taskId 時可以嘗試同步任務狀態(見
- * apps/core/src/bus/message-bus.ts 的 reportStatus() 註解)—— 這條依賴是
- * 單向的(TaskService 不依賴 MessageBus),不影響既有的 SessionManager/
- * MessageBus 循環依賴打破方式。
+ * 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):原本的
+ * team 管理、團隊訊息匯流、任務、任務 worktree 四個服務與它們之間的建構
+ * 順序/事後注入手法已全部移除。現在的建構順序:ProfileStore → SessionManager
+ * (需要 CostGovernor/TurnLimiter,它們又回頭需要 SessionManager,用
+ * `setSessionControl()` 事後注入打破循環)→ RecoveryService → WsGateway。
  * 尚不含 Scheduler(見 README 已知限制,規劃於 M4+)。
  *
  * M5 Round A:apps/core 正式化為可獨立部署(headless)——`pnpm start:core`
@@ -150,9 +134,6 @@ async function main(): Promise<void> {
   // M3 Round A:profile 落地成資料表後,預設 profile 改用冪等 seed(core
   // 重啟多次不會重複插入,也不會覆蓋使用者已修改過的版本)。
   await profiles.ensureSeed(createDefaultProfile(config.workspace.defaultWorkingDir));
-  const teamManager = new TeamManager(db, profiles);
-  const workspaceManager = new WorkspaceManager(db, config.workspace.worktreesRoot);
-  const taskService = new TaskService(db, teamManager, workspaceManager);
   // M5 Round E:「設定」介面的持久化偏好(目前只有「啟用哪些偵測到的 Claude
   // model」,見 apps/core/src/settings/settings-store.ts)。不依賴任何其他
   // core 模組,只需要 db。
@@ -168,7 +149,7 @@ async function main(): Promise<void> {
   // 給它(見下方 sessionManager 建好後的注入行),adapter 建立時 SessionManager
   // 還不存在,沿用既有的「先建構、事後注入」手法。
   const claudeAdapter = new ClaudeAgentSdkAdapter();
-  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):保留具名參考——`WsGateway`
+  // Phase 2(ACP 掛載 subagent MCP 工具):保留具名參考——`WsGateway`
   // 建好後要用 `setTokenMinter()` 把 scoped token 的核發/撤銷實作(委派給
   // `WsGateway.mintMcpBridgeToken()`/`revokeMcpBridgeTokensForSession()`)注入
   // 給它,理由同 `claudeAdapter` 的既有先例(見下方注入處的完整說明)。
@@ -214,13 +195,6 @@ async function main(): Promise<void> {
         : undefined,
     linkBase: `http://${bindHost}:${port}`,
   });
-  // S5(dispose-gate):TaskService 需要 Notifier 才能在「無 acceptance / 連續
-  // 驗收失敗」時 escalate 給人類(見 task-service.ts 的 applyHumanReviewGate()/
-  // applyAcceptanceRunGate())——同樣的「先建構、事後用 setter 注入」手法,
-  // taskService 在 notifier 之前建構(見上方 M4 Round A 建構順序註解),不需要
-  // 等 SessionManager 就緒(這條路徑完全不查 sessionId,見 RealNotifier 的
-  // "task-review" 分支),所以直接在這裡注入即可。
-  taskService.setNotifier(notifier);
   // S7(auto-mode-and-yolo):`DESKMONY_YOLO_DURATION_MS` 純粹是 e2e 測試用的
   // 覆寫(見 session-manager.ts 的 `DEFAULT_YOLO_DURATION_MS` 頂端說明)——與
   // `DESKMONY_AUTH_TOKEN` 一樣刻意留在這個檔案之外的「唯一例外」之列,不經過
@@ -239,9 +213,9 @@ async function main(): Promise<void> {
   // ——`TurnLimiter`/`CostGovernor`/`WaitingWatchdog` 都需要在 trip 時回頭呼叫
   // `SessionManager.interrupt()`/查詢 session 狀態,但 `SessionManager` 的
   // 建構子又需要拿到這三者(接 `usage`/`tool-call` 事件、`sendPrompt()` 前的
-  // 預算檢查)——與既有的 `setTeamBus()`/`setClientPresence()` 同一個「先建構、
+  // 預算檢查)——與既有的 `setClientPresence()` 同一個「先建構、
   // 事後用 setter 打破循環」手法(見這三個類別各自的 `setSessionControl()`
-  // 註解)。`CostGovernor` 需要 `taskService`(已在上面建好,無循環)。
+  // 註解)。
   //
   // §0.1:`TurnLimiter` 不依賴 usage,是「Claude Code 經 ACP」這類完全拿不到
   // 用量的後端唯一的保護,`config.budget.turn` 預設寬鬆(30 分鐘/200 次工具
@@ -259,7 +233,7 @@ async function main(): Promise<void> {
       ? turnLimiterCheckIntervalMsOverride
       : undefined,
   );
-  const costGovernor = new CostGovernor(db, taskService, config.budget, auditLog, notifier);
+  const costGovernor = new CostGovernor(db, config.budget, auditLog, notifier);
   // S3b §4:T1/T2 的預設值(6h/72h)與掃描間隔(10 分鐘)同樣開放 e2e 覆寫,
   // 理由同上。
   const waitingT1MsOverride = process.env.DESKMONY_WAITING_T1_MS ? Number(process.env.DESKMONY_WAITING_T1_MS) : undefined;
@@ -279,7 +253,6 @@ async function main(): Promise<void> {
     db,
     profiles,
     permissionGateway,
-    teamManager,
     settingsStore,
     policyEngine,
     auditLog,
@@ -289,27 +262,11 @@ async function main(): Promise<void> {
     costGovernor,
     yoloDurationMsOverride && Number.isFinite(yoloDurationMsOverride) ? yoloDurationMsOverride : undefined,
   );
-  // 見上方建構順序說明:SessionManager 建好後才能回頭注入(同 setTeamBus()/
+  // 見上方建構順序說明:SessionManager 建好後才能回頭注入(同
   // setClientPresence() 的既有手法)。
   turnLimiter.setSessionControl(sessionManager);
   costGovernor.setSessionControl(sessionManager);
   waitingWatchdog.setSessionControl(sessionManager);
-  // S8(agent-lifecycle):TaskService 需要 SessionManager 才能對 ephemeral
-  // member 自動 spawn/dispose session(§2.1/§2.2)——同樣的「先建構、事後用
-  // setter 打破循環」手法(taskService 建構時 sessionManager 還不存在,見上方
-  // M4 Round A 註解的建構順序說明)。
-  taskService.setSessionControl(sessionManager);
-  // team.delete:TeamManager 需要「刪任務(連同 worktree)」與「dispose 成員
-  // session」兩件事,但 TaskService 的建構子本來就依賴 TeamManager,反向直接
-  // 依賴會形成循環——同一個 setter 注入手法(見 team-manager.ts 的
-  // `TeamCascadePort`,刻意只宣告用得到的四個方法,不是整個 TaskService/
-  // SessionManager)。
-  teamManager.setCascade({
-    listTasks: async (teamId) => (await taskService.listTasks(teamId)).map((t) => ({ id: t.id, title: t.title })),
-    deleteTask: (taskId) => taskService.deleteTask(taskId),
-    getSessionIdForMember: (memberId) => sessionManager.getSessionIdForMember(memberId),
-    disposeSessionForMember: (memberId) => sessionManager.disposeSessionForMember(memberId),
-  });
   // S3b §6「崩潰重啟」:從 DB 還原 rollup 快取與目前是否已超標,必須在任何
   // session 建立/usage 事件抵達之前完成,否則重啟後的空窗期會讓
   // `checkSendPromptAllowed()` 誤判為「未超標」而放行(見 cost-governor.ts 的
@@ -317,39 +274,32 @@ async function main(): Promise<void> {
   await costGovernor.initialize();
   // S11:`RealNotifier` 需要把 sessionId 換成人類可讀的顯示名(§4 的
   // `sessionNames`),但建構時 `SessionManager` 還不存在(`SessionManager` 的
-  // 建構子本身就需要 `notifier`)——與 `setTeamBus()`/`setClientPresence()` 同一
+  // 建構子本身就需要 `notifier`)——與 `setClientPresence()` 同一
   // 個事後注入手法(見 enforcement/notifier.ts 的 `SessionInfoPort` 註解)。
   notifier.setSessionInfo({
     getSessionTitle: async (sessionId) => (await sessionManager.getSession(sessionId))?.title,
   });
-  // S2(message-budget):與 costGovernor 同樣的建構順序考量——MessageBus 需要
-  // 已建好的 sessionManager(查詢 session 狀態、呼叫 sendPrompt/interrupt),
-  // 所以放在 sessionManager 之後;`config.messageBudget`/`auditLog`/`notifier`
-  // 都已在上面建好,無循環依賴。
-  const messageBus = new MessageBus(db, teamManager, sessionManager, profiles, taskService, config.messageBudget, auditLog, notifier);
-  sessionManager.setTeamBus(messageBus);
   // S12 Phase2 R2+R4+R5:注入 `spawn_subagent`/`send_to_subagent`/
   // `list_subagents` 的 SubagentPort——子 session 預設沿用父 session 自己的
   // profile,agent 也可以呼叫 list_profiles 查完可用選項後自行指定別的
   // profile(見 session-manager.ts 的 spawnChildFromTool());`send_to_subagent`
   // (R4)讓 agent 對已經開好的子 session 追加訊息(見 sendToChildFromTool());
   // `list_subagents`(R5)讓 agent 查自己名下有哪些子——包含使用者透過 UI
-  // 手動開、agent 完全不知情的那些(見 listChildrenFromTool())。與
-  // setTeamBus() 同一位置群組:SessionManager 已建好,正是能回頭注入的時機。
+  // 手動開、agent 完全不知情的那些(見 listChildrenFromTool())。
+  // SessionManager 已建好,正是能回頭注入的時機。
   //
-  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):抽成具名變數,**同一個
+  // Phase 2(ACP 掛載 subagent MCP 工具):抽成具名變數,**同一個
   // 實例**同時注入給 `claudeAdapter` 與 `acpAdapter`——兩個 adapter 對
   // `spawn_subagent`/`send_to_subagent`/`list_subagents`/`list_profiles` 的
   // 行為(誰能對誰做什麼、看到哪些欄位)必須完全一致,共用同一個物件參考從
   // 結構上保證不會漂移,比各自組一份重複的物件字面量更不容易之後兩邊不同步。
   // **這是刻意的取捨**:讓 `AcpAdapter` 也拿到 subagentPort,代表**所有**
-  // ACP session(不只是 team 成員,含目前唯一在測的 Gemini 個人單機情境)都
+  // ACP session(含目前唯一在測的 Gemini 個人單機情境)都
   // 會在 spawn 時核發一個 scoped token、掛載 mcp-bridge-server.ts(見
   // `AcpAdapter.spawn()`/`buildMcpBridgeServer()`)——多一個子行程與一條
-  // (惰性建立,只在 agent 真的呼叫工具時才連線)WS 連線。選擇補齊這一步(而
-  // 非只掛 team-bus)的理由:(a) 這輪的目標本來就是讓 ACP 也具備與
-  // ClaudeAgentSdkAdapter 對等的 team-bus **與** subagent 兩種能力,只掛一半
-  // 是不完整的功能;(b) 唯有這樣接,`session.spawnChildForSubagent`/
+  // (惰性建立,只在 agent 真的呼叫工具時才連線)WS 連線。選擇這樣接的理由:
+  // (a) 讓 ACP 也具備與 ClaudeAgentSdkAdapter 對等的 subagent 能力;
+  // (b) 唯有這樣接,`session.spawnChildForSubagent`/
   // `session.sendToChild`/`session.listChildren`/`profile.listForSubagent`
   // 這四個這輪新增的 gateway 方法才能透過標準的 `apps/core/dist/index.js`
   // 產物被 e2e 決定性測試真正走過一次完整管線(見
@@ -371,25 +321,14 @@ async function main(): Promise<void> {
   };
   claudeAdapter.setSubagentPort(subagentPort);
   acpAdapter.setSubagentPort(subagentPort);
-  // L4 §2「已知限制」的對稱補洞:core 啟動時重新計算每個 context 目前的訊息數,
-  // 還原 trippedContexts——否則崩潰重啟會讓「這個 context 已經 trip」這個
-  // 記憶體旗標消失,變相多放行一則訊息(見 message-bus.ts 的 `initialize()`
-  // 完整說明)。必須在 gateway 開始接受連線(進而可能有 agent 呼叫 send_message)
-  // 之前完成。
-  await messageBus.initialize();
 
   // S6(crash-recovery):純組合層,不擁有任何狀態,見 recovery-service.ts 頂端
-  // 說明。放在這裡是因為它需要 sessionManager/profiles/teamManager/
-  // taskService/workspaceManager 全部建構完成——這幾個都已經在上面建好了。
-  const recoveryService = new RecoveryService(sessionManager, profiles, teamManager, taskService, workspaceManager);
+  // 說明。放在這裡是因為它需要 sessionManager/profiles 建構完成。
+  const recoveryService = new RecoveryService(sessionManager, profiles);
 
   const gateway = new WsGateway(
     sessionManager,
     profiles,
-    teamManager,
-    messageBus,
-    taskService,
-    workspaceManager,
     settingsStore,
     costGovernor,
     recoveryService,
@@ -403,13 +342,13 @@ async function main(): Promise<void> {
   );
   // S7 L4 §2.1:`ExecContext` 的 `attended`/`local` 是**環境事實**(現在有沒有
   // 人看得到彈窗、有沒有遠端 client 連線中),只有 Gateway 知道。與上面
-  // `setTeamBus()` 同一個解耦手法:Gateway 的建構子需要 SessionManager,所以
+  // `setSubagentPort()` 同一個解耦手法:Gateway 的建構子需要 SessionManager,所以
   // 反向依賴只能在 Gateway 建好之後用 setter 注入(見 session-manager.ts 的
   // `ClientPresencePort`)。**務必在 `gateway.listen()` 之前注入**——不然第一
   // 個連上來的 client 有機會在注入完成前就觸發權限決策,那一筆會用退化預設值
   // (attended=false)決定逾時語意。
   sessionManager.setClientPresence(gateway);
-  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`AcpAdapter` 需要
+  // Phase 2(ACP 掛載 subagent MCP 工具):`AcpAdapter` 需要
   // `WsGateway` 才能核發/撤銷 scoped MCP bridge token(見
   // `apps/core/src/gateway/ws-gateway.ts` 的 `mintMcpBridgeToken()`/
   // `revokeMcpBridgeTokensForSession()`)——與上面 `setClientPresence()` 同一
@@ -531,8 +470,8 @@ async function main(): Promise<void> {
    * Node 15 起,未被捕捉的 promise rejection **預設直接終止 process**
    * (`--unhandled-rejections=throw`),而這個專案要求 Node ≥ 20。在補這道兜底
    * 之前,任何一條沒接 `.catch()` 的 fire-and-forget 路徑一旦拋錯,炸掉的不是
-   * 那一個 session,是整個 core ——連帶所有 team 的所有 session、所有正在跑的
-   * 任務,而且因為子程序沒有 OS 層級的連坐回收(見 `packages/adapters/src/
+   * 那一個 session,是整個 core ——連帶所有的 session、所有正在跑的
+   * agent,而且因為子程序沒有 OS 層級的連坐回收(見 `packages/adapters/src/
    * child-process.ts` 的註解),它們會全部變成孤兒繼續佔資源。
    *
    * 這道兜底**刻意只記錄、不退出**:對一個要無人值守跑數小時的 orchestrator

@@ -38,8 +38,6 @@
     "authRateLimitMaxLabel": "Umbral de fallos de autenticación (intentos)",
     "authRateLimitCooldownLabel": "Periodo de enfriamiento de autenticación (ms)",
     "defaultWorkingDirLabel": "Directorio de trabajo por defecto",
-    "taskWorktreesRootLabel": "Raíz de worktrees de tareas",
-    "taskWorktreesRootPlaceholder": "Omitir = mantener el cálculo por defecto (el .deskmony-worktrees propio de cada team, junto a él)",
     "staticDirLabel": "Directorio estático de la UI del navegador",
     "logLevelLabel": "Nivel de Log",
     "dataDirLabel": "Directorio de datos SQLite (solo lectura)",

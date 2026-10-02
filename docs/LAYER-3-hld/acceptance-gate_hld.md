@@ -1,5 +1,7 @@
 # S4 HLD:機器驗收閘(Acceptance Gate)
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 階段:**切片**(最小可選)｜對應 L1:**A3**｜上層:[L2 §3](../LAYER-2-design-spec.md)、[DECISIONS §A](../DECISIONS.md)
 > 定位:讓「done」不再只靠 LLM 自我宣告與人眼——提供一道**機器可驗證**的檢查。
 > **關鍵定性(S4 grill 定案)**:驗收閘是**快篩,不是正確性證明**——它抓明顯壞掉的東西,但可被 agent 從內部繞過(閹割測試,見 §5)。**真正的正確性靠山是人類 merge-review**(review→merging,DECISIONS 讓合併保持人核可正是為此)。

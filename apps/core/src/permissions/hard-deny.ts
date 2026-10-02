@@ -38,11 +38,11 @@ export interface HardDenyResult {
 export interface HardDenyCheckInput {
   toolName: string;
   input: unknown;
-  /** 這個 session 的 worktree 邊界——Phase 1 用 `Session.workingDir`(建立
+  /** 這個 session 的 worktree 邊界——用 `Session.workingDir`(建立
    *  session 時傳給 adapter.spawn() 的 cwd)近似 HLD 說的
    *  `workspace.worktreePath`(見 policy-engine.ts 的 `PermissionRequest.workingDir`
-   *  欄位註解:目前 codebase 的 session 不一定綁定 WorkspaceManager 建立的
-   *  git worktree,`workingDir` 是唯一在 session 層級一定拿得到的邊界)。 */
+   *  欄位註解:session 不綁定任何任務 git worktree——該機制已於 2026-10-02 移除——
+   *  `workingDir` 是 session 層級唯一的邊界)。 */
   workingDir: string;
   /** `policy.allowedHosts`(見 core-config.ts),預設空 = 全擋。 */
   allowedHosts: string[];

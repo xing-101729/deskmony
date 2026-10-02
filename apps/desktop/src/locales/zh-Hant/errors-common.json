@@ -10,9 +10,6 @@
     "unknownHandle": "找不到對應的執行中 session:{{handleId}}",
     "missingConfig": "Profile「{{profileId}}」缺少 {{software}} 需要的設定:{{configField}}"
   },
-  "task": {
-    "invalidTransition": "任務「{{taskId}}」無法從 {{from}} 轉換到 {{to}}"
-  },
   "auth": {
     "notYetAuthenticated": "尚未完成認證:第一則訊息必須是帶正確 token 的 auth 請求",
     "invalidToken": "認證失敗:token 不正確",
@@ -20,16 +17,10 @@
   },
   "gateway": {
     "localOnlyMethod": "此操作僅限本機連線呼叫:{{method}}",
-    "localOnlyField": "此操作的「{{field}}」欄位僅限本機連線提供:{{method}}",
     "invalidRequest": "無效的請求:{{detail}}"
   },
   "budget": {
-    "dailyLimitReached": "已達每日預算上限",
-    "taskLimitReached": "任務「{{taskTitle}}」已達預算上限"
-  },
-  "recovery": {
-    "discardConfirmRequired": "捨棄變更前需要二次確認",
-    "worktreeLost": "找不到 worktree:{{worktreePath}}"
+    "dailyLimitReached": "已達每日預算上限"
   },
   "internal": {
     "unexpected": "發生未預期的錯誤"

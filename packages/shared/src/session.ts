@@ -11,7 +11,7 @@ import { PromptAttachmentSchema } from "./prompt.js";
  *   - `closed`:優雅關閉時主動標記(見 apps/core/src/session/
  *     session-manager.ts 的 `shutdownAll()`)——啟動對帳據此判斷「這不是崩潰」。
  *   - `interrupted`:啟動對帳(`reconcileOnStartup()`)發現的孤兒——子程序已隨
- *     core 消失,等人在復原視圖分流(繼續/接手/重跑/放棄)。
+ *     core 消失,等人在復原視圖分流(繼續/接手/放棄)。
  */
 export const SessionStatusSchema = z.enum(["idle", "busy", "waiting", "error", "closed", "interrupted"]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
@@ -139,16 +139,8 @@ export const CreateSessionInputSchema = z.object({
   agentProfileId: z.string(),
   workingDir: z.string(),
   /**
-   * M3 Round A:若這個 session 屬於某個 team 的成員,傳入該 TeamMember.id ——
-   * `SessionManager.createSession()` 會依此向 TeamManager 查出 team/member
-   * 資訊,建立 session 時把 team context 傳給 adapter.spawn()(目前只有
-   * `ClaudeAgentSdkAdapter` 會據此掛載 team-bus MCP 工具,見
-   * packages/adapters/src/team-bus-mcp.ts),並讓 MessageBus 能把這個
-   * session 登記為該成員的投遞目標。
-   */
-  teamMemberId: z.string().optional(),
-  /**
    * S12(session-subagent):建立子 session 時帶入 parent session id。
+   * (2026-10-02:原本還有 `teamMemberId`——team 已移除,見 DECISIONS §H。)
    */
   parentSessionId: z.string().optional(),
   /** 見 `AgentOverrideSchema` 註解。 */
@@ -175,8 +167,8 @@ export const SpawnChildSessionInputSchema = z.object({
 export type SpawnChildSessionInput = z.infer<typeof SpawnChildSessionInputSchema>;
 
 /**
- * 訊息角色與持久化訊息紀錄(對應 ERD MESSAGE,M1 簡化為單一 session 內的
- * user/assistant/system 對話紀錄,不含跨 agent 傳訊 - 那是 M3 MessageBus 的範疇)。
+ * 訊息角色與持久化訊息紀錄(對應 ERD MESSAGE,單一 session 內的
+ * user/assistant/system/tool 對話紀錄)。
  */
 export const MessageRoleSchema = z.enum(["user", "assistant", "system", "tool"]);
 export type MessageRole = z.infer<typeof MessageRoleSchema>;

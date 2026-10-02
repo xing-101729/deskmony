@@ -53,7 +53,7 @@ export class TurnLimiter {
   }
 
   /** apps/core/src/index.ts 在 SessionManager 建好之後回頭注入(打破建構子
-   *  循環依賴,比照既有 `notifier.setSessionInfo()`/`sessionManager.setTeamBus()`
+   *  循環依賴,比照既有 `notifier.setSessionInfo()`/`sessionManager.setClientPresence()`
    *  的既有手法——`SessionManager` 的建構子需要 `TurnLimiter`,`TurnLimiter`
    *  觸發 trip 時又需要呼叫 `SessionManager.interrupt()`)。 */
   setSessionControl(port: SessionControlPort): void {

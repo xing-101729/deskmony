@@ -1,5 +1,7 @@
 # S3b Detail Design:CostGovernor(成本治理 / 第三條斷路器)
 
+> ⚠️ 2026-10-02:本文件中與 team / 任務 / 任務 worktree 相關的部分已移除,見 [DECISIONS §H](../DECISIONS.md)(其餘部分仍有效)
+
 > 上層:[S3b HLD](../LAYER-3-hld/cost-governor_hld.md)｜階段:**Phase 1**
 > 前置:[S3a L4](./usage-metering_detail.md)(量測;**§7 的實測結論改變了本 spec 的資料來源**)、[S1 L4 §5](./policy-engine_detail.md)(底座 `trip`/`AuditLog`)、[S11 L4](./notification_detail.md)(送達)
 > L4 完成度標準:**另一個工程師照著寫,不用問你**。

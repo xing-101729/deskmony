@@ -911,24 +911,21 @@ async function testRemoteRejection() {
     /**
      * ---- E-3b(2026-09-04 稽核修補的回歸測試)----------------------------
      *
-     * 這三條擋的是**繞過整個安全罩的任意程式碼執行路徑**,與 §G 刻意開放給遠端
+     * 這條擋的是**繞過整個安全罩的任意程式碼執行路徑**,與 §G 刻意開放給遠端
      * 的那些(切 auto/YOLO、編 allowlist)本質不同:那些放寬的是「工具呼叫要不要
-     * 放行」,每次執行仍走 `PolicyEngine.decide()`;下面這些完全不經過工具呼叫,
+     * 放行」,每次執行仍走 `PolicyEngine.decide()`;下面這個完全不經過工具呼叫,
      * 因此政策引擎、hard-deny、三個斷路器全都看不到。
      *
-     *   - `task.setAcceptance`/`task.runAcceptance` → `acceptance-runner.ts` 的
-     *     `spawn(command, { shell: true })`,指令字串不受任何限制。
      *   - `settings.setProviderPrefs` → `ProviderPrefs.env` 無 key 白名單,會被
      *     併進**每一個** agent 子程序的環境變數(例如 `NODE_OPTIONS`)。
-     *   - `task.create` 的 `acceptance` 欄位:方法本身遠端可用(建立普通任務無害),
-     *     但挾帶驗收指令等於繞過上面第一條,所以改用欄位層級的閘門擋
-     *     (`findRemoteForbiddenField()`)。
+     *
+     * 2026-10-02(P1:移除 team/task/看板):原本同組的 E-3b-1(`task.create` 挾帶
+     * `acceptance` 的欄位層級閘門)與 E-3b-2(`task.setAcceptance`/
+     * `task.runAcceptance`)隨 task 一併移除——那兩條擋的是驗收指令的 shell 執行路徑。
      *
      * 只斷言「遠端被拒」還不夠——那樣把方法名打錯也會通過(不存在的方法一樣會
-     * 拋錯)。所以每一條都同時驗證**本機仍然可用**,證明擋掉的是來源而不是功能。
+     * 拋錯)。所以同時驗證**本機仍然可用**,證明擋掉的是來源而不是功能。
      */
-    const gateTeam = await localClient.rpc("team.create", { name: "E-3b gate team", workingDir: workspaceDir });
-    const gateTeamId = gateTeam.team.id;
     // `err.code` 是 MiniGatewayClient 掛上去的 errorCode(見這個檔案上方
     // handleMessage 的 response 分支),不是 `err.errorCode`。
     const callBothWays = async (method, params) => {
@@ -950,53 +947,6 @@ async function testRemoteRejection() {
       }
       return { remoteRejected, remoteErrCode, localOk, localErr };
     };
-
-    // E-3b-1:task.create 挾帶 acceptance —— 欄位層級閘門。
-    const createWithAcceptance = await callBothWays("task.create", {
-      teamId: gateTeamId,
-      title: "E-3b acceptance gate",
-      acceptance: { commands: ["echo pwned"] },
-    });
-    // 對照組:同一個方法、拿掉 acceptance,遠端必須仍然可用(證明擋的是欄位不是方法)。
-    let remotePlainTaskOk = false;
-    try {
-      await remoteClient.rpc("task.create", { teamId: gateTeamId, title: "E-3b plain task" });
-      remotePlainTaskOk = true;
-    } catch {
-      remotePlainTaskOk = false;
-    }
-    record(
-      "【稽核修補】E-3b-1: task.create 挾帶 acceptance(= shell 指令)遠端被拒(gateway.localOnlyField),本機仍可建立;拿掉 acceptance 後遠端建立普通任務仍然成功——擋的是欄位不是整個方法",
-      createWithAcceptance.remoteRejected &&
-        createWithAcceptance.remoteErrCode === "gateway.localOnlyField" &&
-        createWithAcceptance.localOk &&
-        remotePlainTaskOk,
-      `remoteRejected=${createWithAcceptance.remoteRejected}(code=${createWithAcceptance.remoteErrCode}), localOk=${createWithAcceptance.localOk}(err=${createWithAcceptance.localErr}), remotePlainTaskOk=${remotePlainTaskOk}`,
-    );
-
-    // E-3b-2:task.setAcceptance / task.runAcceptance —— 方法層級閘門。
-    const gateTask = await localClient.rpc("task.create", { teamId: gateTeamId, title: "E-3b setAcceptance gate" });
-    const setAcceptance = await callBothWays("task.setAcceptance", {
-      taskId: gateTask.task.id,
-      acceptance: { commands: ["echo ok"] },
-    });
-    let runAcceptanceRemoteRejected = false;
-    let runAcceptanceRemoteErrCode = "";
-    try {
-      await remoteClient.rpc("task.runAcceptance", { taskId: gateTask.task.id });
-    } catch (err) {
-      runAcceptanceRemoteRejected = true;
-      runAcceptanceRemoteErrCode = err?.code ?? String(err?.message ?? err);
-    }
-    record(
-      "【稽核修補】E-3b-2: task.setAcceptance / task.runAcceptance 遠端皆被拒(gateway.localOnlyMethod),setAcceptance 本機仍可用——驗收指令是 shell:true 執行,不可由遠端定義或觸發",
-      setAcceptance.remoteRejected &&
-        setAcceptance.remoteErrCode === "gateway.localOnlyMethod" &&
-        setAcceptance.localOk &&
-        runAcceptanceRemoteRejected &&
-        runAcceptanceRemoteErrCode === "gateway.localOnlyMethod",
-      `setAcceptance: remoteRejected=${setAcceptance.remoteRejected}(code=${setAcceptance.remoteErrCode}), localOk=${setAcceptance.localOk}(err=${setAcceptance.localErr}); runAcceptance: remoteRejected=${runAcceptanceRemoteRejected}(code=${runAcceptanceRemoteErrCode})`,
-    );
 
     // E-3b-3:settings.setProviderPrefs —— 方法層級閘門(env 注入)。
     const setProviderPrefs = await callBothWays("settings.setProviderPrefs", {

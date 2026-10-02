@@ -38,18 +38,15 @@
     "customPlaceholder": "回答を自由に入力"
   },
   "usage": {
-    "cannotMeasureTitle": "このバックエンドは費用を計測できません(または報告されるかまだ未確認です)。このセッションにはタスク/1日ごとのコスト予算は適用されません。ターンの時間/ツール呼び出し回数の上限のみが引き続き保護します。",
+    "cannotMeasureTitle": "このバックエンドは費用を計測できません(または報告されるかまだ未確認です)。このセッションには1日ごとのコスト予算は適用されません。ターンの時間/ツール呼び出し回数の上限のみが引き続き保護します。",
     "unknownLabel": "費用不明",
     "cannotMeasureLabel": "費用を計測不可",
     "hasValueTitle": "累計費用(このバックエンドは cost を報告します、S3a usage-metering)",
     "noValueYetTitle": "このバックエンドは累計費用を報告しますが、このセッションはまだ最初の値を受信していません(ターン終了時に送信されます)"
   },
   "cost": {
-    "taskTrippedLabel": "タスク「{{title}}」の予算が上限に達したため、新しい prompt はブロックされました",
-    "taskBudgetPercentLabel": "タスク予算 {{percent}}%",
     "dailyTrippedLabel": "本日のコスト kill-switch が発動し、すべてのセッションが一時停止しました",
-    "trippedTitle": "この session/タスクはコストのサーキットブレーカーにより停止されました(worktree/タスクは保持されます。予算を調整して core を再起動すると続行できます)",
-    "percentTitle": "タスク単位の累計費用/token 使用量が予算に占める割合"
+    "trippedTitle": "本日のコスト kill-switch が発動し、新しい prompt はブロックされました(会話履歴は保持されます。予算を調整して core を再起動すると続行できます)"
   },
   "empty": {
     "selectOrCreateSession": "左側から会話を選択するか、新しく作成して始めてください",

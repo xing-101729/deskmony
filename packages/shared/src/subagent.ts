@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * SubagentPort：讓 packages/adapters 的 `spawn_subagent` MCP 工具能請 core 去
  * spawn 一個子 session,而不需要 import apps/core(依賴方向規則:packages/* 不得
- * import apps/*,比照 `TeamBusPort`)。實例由 apps/core 在啟動時注入
+ * import apps/*)。實例由 apps/core 在啟動時注入
  * (見 apps/core/src/index.ts)。
  */
 export interface SubagentPort {
@@ -46,8 +46,7 @@ export interface SubagentPort {
 
 /**
  * Phase 2(ACP scoped MCP bridge token)新增:改成 zod schema(而非純 TS
- * interface)——比照 `team-bus.ts` 的 `TeammateInfoSchema` 同一個理由:這兩個
- * 型別原本只在 core 內部使用(in-process MCP 工具的回傳值,不需要跨行程序列化
+ * interface):這兩個型別原本只在 core 內部使用(in-process MCP 工具的回傳值,不需要跨行程序列化
  * 驗證),這輪新增 gateway 方法 `profile.listForSubagent`/`session.listChildren`
  * 把同一份資料曝露給 `packages/adapters/src/mcp-bridge-server.ts`(獨立子行程,
  * 經 WS RPC 取得),需要 zod 在 runtime 解析/驗證回應。`z.infer` 產生的型別與

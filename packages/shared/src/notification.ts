@@ -48,7 +48,6 @@ import { z } from "zod";
  * 地方)。
  */
 export const NotificationTripReasonSchema = z.enum([
-  "task-budget",
   "daily-limit",
   "waiting-ttl",
   "message-budget",

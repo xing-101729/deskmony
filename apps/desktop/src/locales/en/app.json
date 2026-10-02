@@ -4,26 +4,13 @@
     "disconnected": "Connection to Deskmony Core was lost — retrying automatically…"
   },
   "interruptedBanner": {
-    "message": "The last session wasn't shut down cleanly — <strong>{{count}}</strong> session(s) need manual triage (continue / take over / rerun / abandon)",
+    "message": "The last session wasn't shut down cleanly — <strong>{{count}}</strong> session(s) need manual triage (continue / take over / abandon)",
     "action": "Start triage"
   },
   "sessionDefaultTitle": "Conversation {{n}}",
   "commands": {
-    "groupGoto": "Go to",
     "groupActions": "Actions",
     "groupSessions": "Conversations",
-    "viewSession": {
-      "title": "Session view",
-      "keywords": "session chat conversation"
-    },
-    "viewTeamChat": {
-      "title": "Team chat",
-      "keywords": "team chat group message"
-    },
-    "viewTaskBoard": {
-      "title": "Task board",
-      "keywords": "task board kanban"
-    },
     "newSession": {
       "title": "New conversation",
       "subtitleWithProfile": "Using profile: {{name}}",

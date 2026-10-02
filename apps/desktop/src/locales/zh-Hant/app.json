@@ -4,26 +4,13 @@
     "disconnected": "與 Deskmony Core 的連線已中斷,正在自動重試…"
   },
   "interruptedBanner": {
-    "message": "上次未被乾淨關閉,有 <strong>{{count}}</strong> 個 session 需要人工分流(繼續 / 接手 / 重跑 / 放棄)",
+    "message": "上次未被乾淨關閉,有 <strong>{{count}}</strong> 個 session 需要人工分流(繼續 / 接手 / 放棄)",
     "action": "開始分流"
   },
   "sessionDefaultTitle": "對話 {{n}}",
   "commands": {
-    "groupGoto": "前往",
     "groupActions": "動作",
     "groupSessions": "對話",
-    "viewSession": {
-      "title": "Session 視圖",
-      "keywords": "session chat 對話"
-    },
-    "viewTeamChat": {
-      "title": "團隊群聊",
-      "keywords": "team chat 群聊 訊息"
-    },
-    "viewTaskBoard": {
-      "title": "任務看板",
-      "keywords": "task board kanban 任務"
-    },
     "newSession": {
       "title": "新對話",
       "subtitleWithProfile": "使用 Profile:{{name}}",

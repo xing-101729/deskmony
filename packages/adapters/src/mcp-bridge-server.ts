@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * mcp-bridge-server.ts(ACP 掛載 team-bus/subagent MCP 工具,Phase 2)。
+ * mcp-bridge-server.ts(ACP 掛載 subagent MCP 工具,Phase 2)。
+ *
+ * (2026-10-02:原本還有一組團隊訊息工具——send_message/broadcast/list_teammates/
+ * report_status/request_review 五個——隨 team 一併移除,見 docs/DECISIONS.md §H;
+ * 現在只剩 subagent 那四個。)
  *
  * **獨立的 entry point,不是被 import 的 library 程式碼**——比照
  * `@agentclientprotocol/codex-acp` 那種「自己有進入點」的套件形狀(見
@@ -11,11 +15,11 @@
  * `acp-adapter.ts` 的 `resolveMcpBridgeServerEntry()`),因為這是本套件自己的
  * 檔案,不是外部套件,不需要 Node 模組解析機制。
  *
- * ## 為什麼需要這個檔案(而不是直接沿用 team-bus-mcp.ts/subagent-mcp.ts)
+ * ## 為什麼需要這個檔案(而不是直接沿用 subagent-mcp.ts)
  *
  * `ClaudeAgentSdkAdapter` 用 `@anthropic-ai/claude-agent-sdk` 的
- * `createSdkMcpServer()` 掛載 team-bus/subagent 工具——**in-process**:工具
- * handler 直接閉包捕捉 `TeamBusPort`/`SubagentPort` 實例,同一個 process 內
+ * `createSdkMcpServer()` 掛載 subagent 工具——**in-process**:工具
+ * handler 直接閉包捕捉 `SubagentPort` 實例,同一個 process 內
  * 呼叫,不需要任何認證機制。但 `@agentclientprotocol/sdk` 的 `SessionBuilder.
  * withMcpServer()` 只接受 `schema.McpServer`(stdio/http/sse/acp 四種「外部
  * 行程/端點」形式,見 `acp-adapter.ts` 查證註解),不支援閉包捕捉——ACP agent
@@ -38,7 +42,7 @@
  * 這個行程是由**外部、LLM 控制**的 codex-acp/gemini 行程**間接**(透過 ACP
  * 協議告知後,agent 自己決定何時、如何 spawn)拉起的孫行程——env/args 有被
  * 檢視的可能性。絕不能把 apps/core 完整存取權的 `DESKMONY_AUTH_TOKEN` 交給它。
- * 這裡改用一個**限定範圍(只能操作核發時綁定的那一個 session/team)、有時效
+ * 這裡改用一個**限定範圍(只能操作核發時綁定的那一個 session)、有時效
  * (見 `apps/core/src/gateway/ws-gateway.ts` 的
  * `DEFAULT_MCP_BRIDGE_TOKEN_TTL_MS`)**的 scoped token,透過**環境變數**
  * (不是 CLI args——args 在行程列表裡通常比 env 更容易被其他本機行程看到,
@@ -58,25 +62,21 @@
  *     `AgentHandle.id`——subagent 系列方法的 `parentSessionId` 由這裡帶入,
  *     **不是**工具參數,agent 無法覆寫(冒名防護,比照
  *     `subagent-mcp.ts` 既有的 `parentSessionId` 閉包捕捉手法)。
- *   - `DESKMONY_MCP_BRIDGE_TEAM_ID` / `DESKMONY_MCP_BRIDGE_MEMBER_ID`
- *     (選填,兩者要嘛都有要嘛都沒有):有值時才註冊 team-bus 系列工具
- *     (send_message/broadcast/list_teammates/report_status/request_review)。
  *   - `DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED`(選填,值為 `"1"` 時才生效):
  *     有值時才註冊 subagent 系列工具(spawn_subagent/send_to_subagent/
  *     list_subagents/list_profiles)。
  *
- * 兩組工具各自獨立、可以同時啟用(比照 `ClaudeAgentSdkAdapter.spawn()`
- * 既有的累加模式)——若兩者皆缺,這個 server 會啟動成一個**沒有任何工具**的
- * MCP server(理論上不會發生:`AcpAdapter.spawn()` 只在至少一者存在時才會
- * 掛載這個 server,見該檔案)。
+ * 若 `DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED` 不是 `"1"`,這個 server 會啟動成
+ * 一個**沒有任何工具**的 MCP server(理論上不會發生:`AcpAdapter.spawn()` 只在
+ * 有 `subagentPort` 時才會掛載這個 server,見該檔案)。
  *
- * ## 工具描述文字與 team-bus-mcp.ts/subagent-mcp.ts 的關係
+ * ## 工具描述文字與 subagent-mcp.ts 的關係
  *
- * 這裡的 9 個工具(名稱、參數 schema、`description` 文案)刻意與
- * `team-bus-mcp.ts`/`subagent-mcp.ts` 保持一致,避免使用者/模型對同一組工具
+ * 這裡的 4 個工具(名稱、參數 schema、`description` 文案)刻意與
+ * `subagent-mcp.ts` 保持一致,避免使用者/模型對同一組工具
  * 在不同 adapter 下看到不一致的說明。**刻意選擇複製文字而非抽出共用常數**
- * ——那兩個檔案 import `@anthropic-ai/claude-agent-sdk` 的 `createSdkMcpServer`/
- * `tool`,若這個檔案改成從那兩個檔案 import 純文字常數,仍會在模組載入時把
+ * ——那個檔案 import `@anthropic-ai/claude-agent-sdk` 的 `createSdkMcpServer`/
+ * `tool`,若這個檔案改成從那裡 import 純文字常數,仍會在模組載入時把
  * 整個 `@anthropic-ai/claude-agent-sdk`(以及它带的 `@modelcontextprotocol/sdk`
  * 另一份拷貝)一併載入這個原本應該輕量、快速啟動的橋接子行程,且會讓兩個
  * 「本來互相獨立、服務不同 adapter」的檔案產生不必要的耦合。維護時若調整了
@@ -89,13 +89,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type {
-  RequestReviewOutcome,
-  SubagentChildSummary,
-  SubagentProfileSummary,
-  TeamBusSendOutcome,
-  TeammateInfo,
-} from "@deskmony/shared";
+import type { SubagentChildSummary, SubagentProfileSummary } from "@deskmony/shared";
 
 const MCP_BRIDGE_SERVER_NAME = "deskmony-mcp-bridge";
 
@@ -229,144 +223,6 @@ function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], isError };
 }
 
-/** 比照 team-bus-mcp.ts 的 `summarizeOutcome()`,文字內容保持一致。 */
-function summarizeOutcome(outcome: TeamBusSendOutcome): string {
-  const deliveryLabel =
-    outcome.delivered === "immediate"
-      ? "已立即送達(對方目前 idle 或已 interrupt)"
-      : outcome.delivered === "queued"
-        ? "已排入對方 mailbox(對方目前忙碌,回合結束後會批次注入)"
-        : "對方目前沒有活躍 session,已留在 mailbox,等對方 session 建立後補投";
-  const downgradeLabel = outcome.downgraded ? "(注意:interrupt 權限不足,已自動降級為 normal)" : "";
-  return `訊息已送出(id=${outcome.message.id})。收件對象: ${outcome.message.to}。投遞狀態: ${deliveryLabel}${downgradeLabel}`;
-}
-
-/** 比照 team-bus-mcp.ts 的 `summarizeReviewOutcome()`,文字內容保持一致。 */
-function summarizeReviewOutcome(outcome: RequestReviewOutcome): string {
-  const taskLabel = outcome.taskUpdated
-    ? `任務狀態已同步: ${outcome.taskFromStatus} → ${outcome.taskToStatus}`
-    : `任務狀態未同步: ${outcome.taskSkippedReason ?? "(未帶 taskId)"}`;
-  return `${summarizeOutcome(outcome)}。${taskLabel}`;
-}
-
-interface TeamScope {
-  teamId: string;
-  memberId: string;
-}
-
-/** 註冊 team-bus 系列 5 個工具(send_message/broadcast/list_teammates/
- *  report_status/request_review)——`teamId`/`memberId` 由環境變數閉包捕捉,
- *  比照 team-bus-mcp.ts 的 `createTeamBusMcpServer()`:工具參數不含這兩者,
- *  agent 無法覆寫。 */
-function registerTeamBusTools(server: McpServer, client: BridgeGatewayClient, scope: TeamScope): void {
-  server.registerTool(
-    "send_message",
-    {
-      description:
-        '傳送一則訊息給指定隊友(依名稱,例如 "Reviewer")。priority 預設 normal;' +
-        "interrupt 只有被授權(canInterrupt)的成員才有效,否則會自動降級為 normal 並在紀錄中標註。",
-      inputSchema: {
-        to: z.string().min(1).describe("目標隊友的名稱(team member name)"),
-        content: z.string().min(1).describe("訊息內容"),
-        priority: z.enum(["normal", "interrupt"]).optional().describe('"normal"(預設)或 "interrupt"'),
-      },
-    },
-    async (args) => {
-      const outcome = await client.call<TeamBusSendOutcome>("message.sendMessage", {
-        teamId: scope.teamId,
-        fromMemberId: scope.memberId,
-        to: args.to,
-        content: args.content,
-        priority: args.priority,
-      });
-      return textResult(summarizeOutcome(outcome));
-    },
-  );
-
-  server.registerTool(
-    "broadcast",
-    {
-      description: "對整個 team 廣播一則訊息(自己以外的所有成員)。",
-      inputSchema: {
-        content: z.string().min(1).describe("廣播內容"),
-        priority: z.enum(["normal", "interrupt"]).optional(),
-      },
-    },
-    async (args) => {
-      const outcome = await client.call<TeamBusSendOutcome>("message.broadcast", {
-        teamId: scope.teamId,
-        fromMemberId: scope.memberId,
-        content: args.content,
-        priority: args.priority,
-      });
-      return textResult(summarizeOutcome(outcome));
-    },
-  );
-
-  server.registerTool(
-    "list_teammates",
-    {
-      description: "查詢目前 team 的隊友名單、角色、canInterrupt 權限、綁定的 agent 軟體與目前 session 狀態。",
-      inputSchema: {},
-    },
-    async () => {
-      const teammates = await client.call<TeammateInfo[]>("team.teammates", { teamId: scope.teamId });
-      return textResult(JSON.stringify(teammates, null, 2));
-    },
-  );
-
-  server.registerTool(
-    "report_status",
-    {
-      description:
-        "回報自己目前的任務狀態,寫入 team 訊息紀錄(團隊群聊視圖可見)。" +
-        "選填 taskId:若提供且你是該任務的指派人,status 會嘗試對映到任務狀態機" +
-        "(backlog/assigned/in-progress/review/merging/done/blocked 或常見同義詞," +
-        "例如 reviewing/completed)並同步更新任務狀態;對映不到或不是合法的狀態轉換時" +
-        "只會記錄這則訊息,不會更動任務狀態、也不會報錯。不會打斷隊友的 session。",
-      inputSchema: {
-        status: z.string().min(1).describe("狀態,例如 in-progress / reviewing / done / blocked"),
-        summary: z.string().optional().describe("簡短說明"),
-        taskId: z.string().optional().describe("選填:要同步更新狀態的任務 id(你必須是該任務的指派人)"),
-      },
-    },
-    async (args) => {
-      const message = await client.call<{ content: string }>("message.reportStatus", {
-        teamId: scope.teamId,
-        fromMemberId: scope.memberId,
-        status: args.status,
-        summary: args.summary,
-        taskId: args.taskId,
-      });
-      return textResult(`狀態已回報: ${message.content}`);
-    },
-  );
-
-  server.registerTool(
-    "request_review",
-    {
-      description:
-        "請求指定隊友(reviewer)審查你的工作。等同 report_status(status: \"review\") + send_message(reviewer, " +
-        '"請審查...") 的組合,但語意明確。選填 taskId:若提供且你是該任務的指派人,會嘗試把任務推進 review ' +
-        "狀態(規則與 report_status 相同,對映不到/不是指派人/非法轉換都只記錄訊息、不報錯);審查通過後的" +
-        "合併需要人類經任務看板批准(task.merge),你無法透過任何工具自己把任務標記完成。",
-      inputSchema: {
-        to: z.string().min(1).describe("審查者(reviewer)的隊友名稱"),
-        taskId: z.string().optional().describe("選填:要推進到 review 狀態的任務 id(你必須是該任務的指派人)"),
-      },
-    },
-    async (args) => {
-      const outcome = await client.call<RequestReviewOutcome>("message.requestReview", {
-        teamId: scope.teamId,
-        fromMemberId: scope.memberId,
-        to: args.to,
-        taskId: args.taskId,
-      });
-      return textResult(summarizeReviewOutcome(outcome));
-    },
-  );
-}
-
 /** 註冊 subagent 系列 4 個工具(list_profiles/list_subagents/spawn_subagent/
  *  send_to_subagent)——`parentSessionId` 由環境變數閉包捕捉,比照
  *  subagent-mcp.ts 的 `createSubagentMcpServer()`:agent 無法覆寫。 */
@@ -473,18 +329,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const teamId = process.env.DESKMONY_MCP_BRIDGE_TEAM_ID;
-  const memberId = process.env.DESKMONY_MCP_BRIDGE_MEMBER_ID;
   const subagentEnabled = process.env.DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED === "1";
 
   const client = new BridgeGatewayClient(gatewayUrl, token);
   const server = new McpServer({ name: MCP_BRIDGE_SERVER_NAME, version: "1.0.0" });
 
   let mountedAny = false;
-  if (teamId && memberId) {
-    registerTeamBusTools(server, client, { teamId, memberId });
-    mountedAny = true;
-  }
   if (subagentEnabled) {
     registerSubagentTools(server, client, sessionId);
     mountedAny = true;
@@ -494,7 +344,7 @@ async function main(): Promise<void> {
     // 工具的 server(agent 呼叫 `initialize`/`tools/list` 仍會成功,只是拿到
     // 空清單),也不要整個 process 直接 exit——那樣反而可能讓 agent 誤以為
     // 是連線失敗而重試,而不是「這次真的沒有工具可用」。
-    console.error("[mcp-bridge-server] 警告:沒有任何 team/subagent 範圍可掛載,啟動成一個沒有工具的 MCP server。");
+    console.error("[mcp-bridge-server] 警告:沒有任何 subagent 範圍可掛載,啟動成一個沒有工具的 MCP server。");
   }
 
   await server.connect(new StdioServerTransport());

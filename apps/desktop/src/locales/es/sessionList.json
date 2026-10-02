@@ -1,9 +1,4 @@
 {
-  "nav": {
-    "session": "Session",
-    "teamChat": "Chat del team",
-    "taskBoard": "Tablero de tareas"
-  },
   "connection": {
     "open": "Conectado",
     "connecting": "Conectando…",

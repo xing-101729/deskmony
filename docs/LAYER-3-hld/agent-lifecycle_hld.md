@@ -1,5 +1,7 @@
 # S8 HLD:Agent 生命週期(角色決定長命 / 短命)
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 階段:**Phase 2**｜對應 L1:**A4**｜上層:[L2 §3](../LAYER-2-design-spec.md)、[DECISIONS §A](../DECISIONS.md)
 > 前置:[S2](./message-budget_hld.md)(Mailbox 已持久化 → 「對方不在線」可安全處理)、[S6](./crash-recovery_hld.md)(恢復語意)
 > 定位:決定**誰一直活著、誰用完即棄**。這是 context 成本與協作可用性的權衡點。

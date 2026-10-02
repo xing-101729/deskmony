@@ -4,8 +4,7 @@ import type { TFunction } from "i18next";
 import type { AgentOverride, AgentProfile, EffortLevel, Session } from "@deskmony/shared";
 import { useSessionStore, selectContextReporting, selectResolvedProviders, selectProviderModels } from "../stores/session-store.js";
 import { ProfileCreateDialog } from "./ProfileCreateDialog.js";
-import type { ViewMode } from "../App.js";
-import { Icon, type IconName } from "../ui/icons.js";
+import { Icon } from "../ui/icons.js";
 import { Button, IconButton, Kbd } from "../ui/Button.js";
 import { Field, Input, Select, Textarea } from "../ui/Field.js";
 import { StatusDot, Meta } from "../ui/Badge.js";
@@ -31,22 +30,6 @@ function formatContextUsage(usage: { contextUsed?: number; contextSize?: number 
   return `${pct}%`;
 }
 
-interface NavItem {
-  mode: ViewMode;
-  /** i18n 專案新增:模組層級常數不能再直接放算好的中文字串(語言切換後不會
-   *  更新)——改存 i18next key 的字尾,渲染時由呼叫端組 `sessionList:nav.${labelKey}`
-   *  查表。比照下面 connectionMeta() 的作法。 */
-  labelKey: string;
-  icon: IconName;
-  hint: string;
-}
-
-const NAV_ITEMS: NavItem[] = [
-  { mode: "session", labelKey: "session", icon: "message", hint: `${MOD_LABEL}1` },
-  { mode: "team-chat", labelKey: "teamChat", icon: "users", hint: `${MOD_LABEL}2` },
-  { mode: "task-board", labelKey: "taskBoard", icon: "board", hint: `${MOD_LABEL}3` },
-];
-
 /** 非文字樣式——`label` 拆出去用 i18next 動態查,這裡只留圓點顏色。 */
 const CONNECTION_DOT: Record<string, string> = {
   open: "bg-ok",
@@ -70,8 +53,6 @@ interface SessionListProps {
   onCloseMobile: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  viewMode: ViewMode;
-  onChangeView: (mode: ViewMode) => void;
   connectionStatus: string;
   selectedProfileId: string;
   onSelectProfile: (id: string) => void;
@@ -98,9 +79,9 @@ interface SessionListProps {
  * 「支援多工作區」「Agent 狀態一眼可辨識」):
  *
  *   1. **導覽收斂到側欄**:原本在 App.tsx 頂列的三個視圖切換鈕搬進來,變成
- *      垂直的導覽項目(Linear「Issues / Projects / Views」式的階層,而不是
- *      水平分頁鈕)——這讓側欄從「只是 session 清單」升格成整個 app 的導覽
- *      骨幹,頂部因此完全空出來給內容用。
+ *      垂直的導覽項目——這讓側欄從「只是 session 清單」升格成整個 app 的導覽
+ *      骨幹,頂部因此完全空出來給內容用。(2026-10-02:團隊群聊與任務看板視圖
+ *      已移除,見 docs/DECISIONS.md §H,只剩 session 視圖,導覽項目整個拿掉。)
  *   2. **工作區分組**:`groupSessionsByWorkspace()`(lib/workspaces.ts)依
  *      `session.workingDir` 把 session 分堆,每組是一個可摺疊的區塊,標題列
  *      顯示工作區名稱 + 「有幾個在等你」的計數——這是「同時開多個專案」的
@@ -117,8 +98,6 @@ export function SessionList({
   onCloseMobile,
   collapsed,
   onToggleCollapsed,
-  viewMode,
-  onChangeView,
   connectionStatus,
   selectedProfileId,
   onSelectProfile,
@@ -218,7 +197,6 @@ export function SessionList({
         <button
           type="button"
           onClick={() => {
-            onChangeView("session");
             void selectSession(session.id);
             onCloseMobile();
           }}
@@ -275,22 +253,7 @@ export function SessionList({
     return (
       <aside className="hidden w-13 flex-shrink-0 flex-col items-center border-r border-line-subtle bg-panel py-2 sm:flex">
         <IconButton icon="sidebar" aria-label={t("sessionList:expandSidebarAriaLabel")} onClick={onToggleCollapsed} className="mb-2" />
-        <div className="flex flex-1 flex-col items-center gap-1">
-          {NAV_ITEMS.map((item) => {
-            const label = t(`sessionList:nav.${item.labelKey}`);
-            return (
-              <IconButton
-                key={item.mode}
-                icon={item.icon}
-                aria-label={`${label}(${item.hint})`}
-                title={`${label}(${item.hint})`}
-                active={viewMode === item.mode}
-                size="md"
-                onClick={() => onChangeView(item.mode)}
-              />
-            );
-          })}
-        </div>
+        <div className="flex flex-1 flex-col items-center gap-1" />
         <div className="flex flex-col items-center gap-1">
           <IconButton
             icon="search"
@@ -339,29 +302,6 @@ export function SessionList({
           <Kbd>{MOD_LABEL}K</Kbd>
         </button>
       </div>
-
-      {/* ---- 主導覽 ---- */}
-      <nav className="flex-shrink-0 space-y-0.5 px-2 pb-2">
-        {NAV_ITEMS.map((item) => (
-          <button
-            key={item.mode}
-            type="button"
-            onClick={() => {
-              onChangeView(item.mode);
-              onCloseMobile();
-            }}
-            className={`focus-ring flex h-7 w-full items-center gap-2 rounded-md px-2.5 text-xs font-medium transition ${
-              viewMode === item.mode ? "bg-accent/12 text-accent" : "text-fg-muted hover:bg-surface hover:text-fg"
-            }`}
-          >
-            <Icon name={item.icon} size={14} />
-            <span className="flex-1 text-left">{t(`sessionList:nav.${item.labelKey}`)}</span>
-            {item.mode === "session" && sessions.length > 0 && (
-              <span className="tabular text-2xs text-fg-faint">{sessions.length}</span>
-            )}
-          </button>
-        ))}
-      </nav>
 
       <div className="mx-3 mb-2 h-px flex-shrink-0 bg-line-subtle" />
 

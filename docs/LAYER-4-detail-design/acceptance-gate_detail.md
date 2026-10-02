@@ -1,5 +1,7 @@
 # S4 Detail Design:機器驗收閘
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 上層:[S4 HLD](../LAYER-3-hld/acceptance-gate_hld.md)｜階段:**切片(量測半,諮詢性)**
 > L4 完成度標準:**另一個工程師照著寫,不用問你**。
 

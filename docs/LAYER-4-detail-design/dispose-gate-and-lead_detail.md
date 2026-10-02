@@ -1,5 +1,7 @@
 # S5 Detail Design:Lead(AgentProfile)+ dispose-gate(收斂閘)
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 上層:[S5 HLD](../LAYER-3-hld/dispose-gate-and-lead_hld.md)｜階段:**Phase 2 最後一份**
 > 前置:[S4 L4](./acceptance-gate_detail.md)(Runner 已實作;**強制半原本就延到 Phase 2 = 本 spec**)、[S8 L4](./agent-lifecycle_detail.md)(Lead = persistent)、[S2 L4](./message-budget_detail.md)(Lead 發訊息受 context 預算)
 > L4 完成度標準:**另一個工程師照著寫,不用問你**。

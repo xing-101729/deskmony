@@ -1,6 +1,5 @@
 {
   "tripReason": {
-    "task-budget": "Límite de presupuesto de la tarea",
     "daily-limit": "Límite de coste diario",
     "waiting-ttl": "Límite de tiempo de espera",
     "message-budget": "Límite de número de mensajes",
@@ -18,7 +17,7 @@
     },
     "idle": {
       "title": "Deskmony: recordatorio de tarea inactiva",
-      "body": "{{who}}: lleva más de 6 horas esperando respuesta y no se ha interrumpido. El worktree/tarea sigue conservado — comprueba si necesita tu atención"
+      "body": "{{who}}: lleva más de 6 horas esperando respuesta y no se ha interrumpido. El historial de la conversación sigue conservado — comprueba si necesita tu atención"
     }
   },
   "escalation": {

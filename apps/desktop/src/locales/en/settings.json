@@ -38,8 +38,6 @@
     "authRateLimitMaxLabel": "Auth failure threshold (attempts)",
     "authRateLimitCooldownLabel": "Auth cooldown period (ms)",
     "defaultWorkingDirLabel": "Default working directory",
-    "taskWorktreesRootLabel": "Task worktree root",
-    "taskWorktreesRootPlaceholder": "Omit = keep the existing default (each team's own .deskmony-worktrees next to it)",
     "staticDirLabel": "Browser UI static directory",
     "logLevelLabel": "Log level",
     "dataDirLabel": "SQLite data directory (read-only)",

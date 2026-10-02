@@ -5,7 +5,8 @@
 > 功能都已落地並有對應的 e2e 測試,不包含規劃中或設計中的東西——那些見
 > [`ARCHITECTURE.md` §15「已知缺口」](./ARCHITECTURE.md#15-已知缺口誠實列出)。
 >
-> 內容截至 **2026-08-25**。與 [`DECISIONS.md`](./DECISIONS.md)(為什麼這樣設計)、
+> 內容截至 **2026-08-25**,2026-10-02 起移除 team / 任務 / 看板(見
+> [`DECISIONS.md` §H](./DECISIONS.md))。與 [`DECISIONS.md`](./DECISIONS.md)(為什麼這樣設計)、
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md)(程式碼目前長什麼樣)互補,三份文件
 > 衝突時以 `DECISIONS.md` 為準。
 
@@ -13,50 +14,28 @@
 
 ## 一句話
 
-Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊天視窗)在
-**無人值守**的情況下跑數小時而不失控——靠的是三個彼此獨立、遠端也動不了的
-安全斷路器,不是靠「相信 agent 不會亂來」。
+Deskmony 是一個桌面控制室,讓 AI coding agent(不是單一聊天視窗)在
+**無人值守**的情況下跑數小時而不失控——靠的是彼此獨立、遠端也動不了的
+安全斷路器(權限、成本;訊息斷路器待重建),不是靠「相信 agent 不會亂來」。
 
 ---
 
-## 1. 多 Agent 團隊協作
+## 1. Session 子 agent(原「多 Agent 團隊協作」)
 
-- **角色制團隊**:每個 team member 綁一個 Agent Profile(角色、後端、model、
-  effort、系統提示詞、環境變數),`lifecycle` 分 `persistent`(長命,例如熟悉
-  codebase 的 Reviewer)與 `ephemeral`(隨任務生滅的執行 worker)。
-- **刪除團隊**:「團隊管理」可刪除整個 team——會**連帶**中止所有成員正在跑的
-  session、刪除全部任務(含各自的 git worktree)與群聊紀錄。確認對話框逐條列出
-  代價、預設焦點在取消鈕;worktree 內有未提交變更不會中止刪除,而是刪完後明確
-  列出是哪些任務,讓人知道失去了什麼(e2e 步驟 35 守住「不留孤兒 session /
-  殘留 worktree」)。
-- **agent 互傳訊息**:內建 `team-bus` MCP server,agent 能呼叫
-  `send_message`、`broadcast`、`report_status`、`request_review`、
-  `list_teammates`。人類在「團隊群聊」視圖看即時對話,隨時能插話。
-  這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸(後者涵蓋 Codex、Gemini,
-  以及走 `opencode acp` 的 OpenCode);`pty` 直通沒有工具通道,該類成員收得到
-  訊息但回覆傳不回群聊——注入時會如實告知,不會叫它呼叫不存在的工具。
-  權威清單見 `packages/shared/src/team-bus.ts` 的 `SOFTWARE_WITH_TEAM_BUS`。
-- **不為了回覆而回覆**:注入的訊息會標明「這是專門發給你的」還是「發給全隊的
-  廣播」,並明講不回應也是正常選項(廣播另外提醒通常不需要每個人都回)。
-  team-bus 工具的說明也點出「每則訊息消耗任務的訊息額度、廣播一次消耗 N 則、
-  回報進度請用不佔額度的 `report_status`」。沒有這些訊號時,一則廣播給五個成員
-  就等於邀請五則回覆——正是訊息斷路器要防的迴圈。
-- **投遞策略**:目標 idle → 立即注入;busy → 排隊,回合結束後批次注入;
-  `priority=interrupt` 且對方允許被中斷 → 先確實中斷才注入;沒有活躍 session
-  的長命(persistent)成員 → **自動幫它開一條 session 再投遞**(「長命」的定義
-  就是在線可達;同一成員有雙重檢查鎖,不會被兩則同時到的訊息開出兩條);短命
-  (ephemeral)成員或自動上線失敗 → 落 Mailbox(DB 持久化,不是純記憶體),
-  session 建立後補投,群聊介面會提示「對方目前不在線」。
-- **注入的訊息會告訴 agent 怎麼回**:agent 不會知道「直接用文字回答」只留在自己
-  的 session,所以注入內容後面會點名該呼叫的工具——人類插話提示用 `broadcast`
-  (人類沒有對應的 team member 可以指名),隊友訊息提示 `send_message(to: …)`。
+> ⚠️ **2026-10-02 移除(見 [`DECISIONS.md` §H](./DECISIONS.md))**:角色制團隊
+> (team / team member / lifecycle)、刪除團隊、`team-bus` 傳訊(`send_message` /
+> `broadcast` / `report_status` / `request_review` / `list_teammates`)、團隊群聊、
+> 投遞策略與 Mailbox、任務看板——整套已經拿掉。session 之間互相傳訊的新設計
+> (P3)還沒實作,所以現在 agent 之間**沒有**橫向傳訊通道。
+
 - **Session 子 agent**:任一 session 可透過 `subagent` MCP server 呼叫
   `spawn_subagent`/`send_to_subagent`,把工作委派給子 session 並收集結果
   (完成後自動把結果當 prompt 注回父 session)。**刻意不自動放行**——會多跑
   一輪的操作一律走權限升級,不因為是「開子 agent」就特例。
-- 目前只有 `claude-agent-sdk` 與經 ACP 的 agent(Codex、Gemini CLI,透過
-  scoped MCP-bridge token)能**主動**呼叫傳訊/開子 agent 工具;OpenCode、PTY
-  尚未掛載——但**接收端跨後端都通**,注入 prompt 對任何 session 都有效。
+- 目前只有 `claude-agent-sdk` 與經 ACP 的 agent(Codex、Gemini CLI、走
+  `opencode acp` 的 OpenCode,透過 scoped MCP-bridge token)能**主動**呼叫開子
+  agent 工具;走 HTTP 的 OpenCode、PTY 尚未掛載——但**接收端跨後端都通**,
+  注入 prompt 對任何 session 都有效。
 
 ## 2. 多後端 Adapter,一套介面
 
@@ -80,7 +59,8 @@ Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊�
 
 ## 3. 無人值守安全罩——三個獨立斷路器
 
-這是整個專案的核心賣點:三條線各自獨立,任一條都能單獨叫停失控。
+這是整個專案的核心賣點:三條線各自獨立,任一條都能單獨叫停失控(其中訊息斷路器
+目前待 P3 重建,見 3.2)。
 
 ### 3.1 權限斷路器
 
@@ -107,48 +87,32 @@ Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊�
   daemon 綁定介面、改預算上限。這是連線本身(是否為 loopback)由 Core 判定,
   絕不採信 client 自稱;即使是繞過 UI 直接送 raw request,伺服器端一樣會擋。
 
-### 3.2 訊息斷路器
+### 3.2 訊息斷路器 — 已於 2026-10-02 移除(P3 重建)
 
-- 每個 context 自帶訊息數上限,燒完就對該 context 的
-  `send_message`/`broadcast`/`request_review` 一律拒收熔斷。
-- context id 由 Core 依當下綁定的任務推導,agent 不可自己指定——避免被管制
-  的一方能透過換 id 重置額度。
-- **手上沒有進行中任務時**(2026-08-28 修正):不再一律拒收,改落
-  `member:<memberId>` 這個同樣由 Core 推導、agent 一樣指定不了的專屬桶——每位
-  成員各自一桶、彼此隔離,而且照樣吃同一條訊息數上限。原本的「無任務即拒收」
-  連帶擋掉了沒有任務在身的成員回覆人類或隊友,那不是斷路器要防的失控形態。
-- 只斷橫向閒聊,不斷縱向進度回報:`report_status`/`list_teammates` 不受影響。
+原本的每 context 訊息數預算(context id 由 Core 推導、超額熔斷)隨 `MessageBus` 一併移除,
+見 [`DECISIONS.md` §H](./DECISIONS.md)(A5 改寫)。`messageBudget` 設定鍵保留,P3 的
+「每條訊息鏈」預算沿用它;在那之前 agent 之間沒有橫向傳訊通道,因此沒有可失控的
+訊息迴圈。
 
 ### 3.3 成本斷路器
 
 | 元件 | 依據 | 觸發條件 | halt 範圍 |
 |---|---|---|---|
 | TurnLimiter | 工具呼叫次數 + 時間,**不需要 usage 資料** | 單回合 30 分鐘或 200 次工具呼叫 | 立即中斷該回合 |
-| CostGovernor(任務預算) | usage 事件 | 任務累計花費超標 | 擋後續 prompt,不打斷已完成的回合 |
-| CostGovernor(每日 kill-switch) | usage 事件 | 當日團隊總花費超標 | 全部 session 中斷 |
+| CostGovernor(每日 kill-switch) | usage 事件 | 當日總花費超標 | 全部 session 中斷 |
 | WaitingWatchdog T1 | 掛起時長 | 超過 6 小時 | 只通知,不 halt |
-| WaitingWatchdog T2 | 掛起時長 | 超過 72 小時 | 回收子行程資源;任務保持 blocked,worktree 保留 |
+| WaitingWatchdog T2 | 掛起時長 | 超過 72 小時 | 回收子行程資源;對話紀錄保留 |
 
 TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經 ACP)完全不
 回報 usage,依賴 usage 的預算對這類後端完全不生效,回合硬上限是唯一還有效
 的保護。
 
-## 4. 任務協作與 Git Worktree 隔離
+## 4. 任務協作與 Git Worktree 隔離 — 已於 2026-10-02 移除
 
-- **任務看板**:backlog → assigned → in_progress → review → merging → done,
-  外加可從任何非終態進入的 blocked。
-- **每個任務一份獨立 git worktree**,指派時自動建立;`ephemeral` 成員被指派
-  時會自動 spawn 對應的 session。
-- **三道人類把關**,agent 沒有任何工具能讓任務自己變成 done:
-  1. 機器驗收閘——任務可帶測試/build/typecheck 等驗收指令,沒過就進不了 review。
-  2. 人類 review 閘——沒有驗收條件、或連續驗收失敗達上限時,任務卡在
-     `in-progress` 等人核可。
-  3. 人類合併——`task.merge` 是全系統唯一真正執行 `git merge` 的入口,只能
-     從任務看板按鈕觸發。
-- **合併衝突不留半殘狀態**:失敗就自動 `git merge --abort` 還原,任務維持
-  `merging`,不嘗試自動 stash 這種可能犧牲使用者資料的花招。
-- **worktree 不會在任務完成時自動清掉**——留給人事後檢視改了什麼;只有明確
-  刪除任務才會真的移除 worktree。
+任務看板、任務級 git worktree 隔離、機器驗收閘、人類 review 閘、人類批准合併、
+合併衝突自動 abort、ephemeral 成員自動 spawn——**整套已移除**,見
+[`DECISIONS.md` §H](./DECISIONS.md)。使用者資料庫裡既有的 `tasks` / `workspaces`
+等表沒有被刪除,只是不再有程式碼讀寫。
 
 ## 5. 崩潰復原
 
@@ -156,14 +120,12 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   復原的本質是「對帳 + 人工分流」,不是重放事件流。
 - Core 每次啟動,在接受任何連線之前先做對帳:上次沒乾淨關閉的 session 一律
   標記 `interrupted`。
-- 復原視圖提供四種動作,**全部要人主動點,沒有任何背景自動觸發**:
+- 復原視圖提供三種動作,**全部要人主動點,沒有任何背景自動觸發**:
   - **繼續**(保有記憶重啟,僅限真正支援磁碟持久化 session 的後端)
   - **接手**(讀摘要重啟,一律可用)
-  - **重跑**(要求 worktree 必須先乾淨,髒的話明確拒絕,絕不默默在髒
-    worktree 上重跑)
-  - **放棄**(session 標記關閉,worktree 與任務原封不動保留)
-- 髒 worktree 有強制前置流程:留著(建 WIP 分支 commit)或丟棄(需要二次
-  確認,絕不默默清空)。
+  - **放棄**(session 標記關閉,對話紀錄原封不動保留)
+- (2026-10-02 移除:原本的「重跑」與髒 worktree 強制前置流程是任務 worktree
+  專用,見 [`DECISIONS.md` §H](./DECISIONS.md)。)
 
 ## 6. 遠端存取
 
@@ -177,7 +139,7 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   `DESKMONY_AUTH_TOKEN` 環境變數,或(桌面殼專屬)Settings 的「遠端存取」
   區塊用 Electron `safeStorage` 加密保存在本機的值,兩者都不落入設定檔。
 - 遠端能力邊界見上方「3.1 權限斷路器」——這是 2026-08-25 這輪唯一被有意識
-  放寬的部分,其餘(訊息、成本兩條斷路器,以及 profile 管理/綁定介面/預算
+  放寬的部分,其餘(成本斷路器,以及 profile 管理/綁定介面/預算
   上限)遠端一律仍然動不了。
 
 ## 7. 桌面 IDE 體驗
@@ -229,8 +191,9 @@ worktree、session、profile 等技術詞)依詞彙表刻意保留原文,不強�
 
 ## 11. 稽核與資料持久化
 
-- SQLite(better-sqlite3 + Drizzle ORM),11 張表,冪等遷移(`CREATE TABLE
-  IF NOT EXISTS` + 逐欄位 `ensure` 函式,不需要版本化 migration 系統)。
+- SQLite(better-sqlite3 + Drizzle ORM),6 張表(2026-10-02 起 team / 任務相關
+  五張表的程式碼定義已移除,但既有資料庫裡的表與資料原封不動留著),冪等遷移
+  (`CREATE TABLE IF NOT EXISTS` + 逐欄位 `ensure` 函式,不需要版本化 migration 系統)。
 - `enforcement_audit` 是系統裡唯一 append-only 的表:只記權限決策(含自動
   放行)、三斷路器熔斷、啟動對帳、真.無限制切換、允許清單變更——供事後
   稽核與除錯,**不是** event sourcing,不記 agent 輸出,不能拿來重建狀態。
@@ -240,11 +203,9 @@ worktree、session、profile 等技術詞)依詞彙表刻意保留原文,不強�
 ## 尚未做的事(誠實列出)
 
 - **PTY 沒有執行沙箱**——這類後端因此結構上無法自主運作,一律唯讀。
-- **沒有 LLM lead/orchestrator**——任務拆解目前是純人工,`TaskService` 是
-  確定性狀態機。
 - **沒有 mid-turn 成本熔斷**——目前唯一會回報 usage 的後端都是在回合結束時
   才發送一次。
-- **OpenCode、PTY 尚未掛載傳訊/子 agent 的 MCP 工具**(接收端不受影響)。
+- **OpenCode(HTTP)、PTY 尚未掛載子 agent 的 MCP 工具**(接收端不受影響)。
 - **Provider 環境變數本機明文儲存**——對外一律遮罩,但本機 SQLite 檔案本身
   不加密(與多數同類工具的既有取捨一致)。
 - **只有 Windows 打包**——core 與 adapter 本身是純 Node/TypeScript,其餘平台

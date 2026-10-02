@@ -5,7 +5,7 @@ import path from "node:path";
 import { eq } from "drizzle-orm";
 import type { NexusDb } from "@deskmony/db";
 import { sessions as sessionsTable, messages as messagesTable } from "@deskmony/db";
-import type { AdapterRegistry, AgentAdapter, AgentHandle, TeamSpawnContext } from "@deskmony/adapters";
+import type { AdapterRegistry, AgentAdapter, AgentHandle } from "@deskmony/adapters";
 import {
   DeskmonyError,
   ErrorCodes,
@@ -30,12 +30,10 @@ import {
   type SlashCommandInfo,
   type SpawnChildSessionInput,
   type SubagentChildSummary,
-  type TeamBusPort,
   type UserDialogResolvedPush,
 } from "@deskmony/shared";
 import type { ProfileStore } from "../profiles.js";
 import type { PermissionGateway } from "../permissions/permission-gateway.js";
-import type { TeamManager } from "../team/team-manager.js";
 import { getProviderEnv, type SettingsStore } from "../settings/settings-store.js";
 import type { PolicyEngine, PermissionRequest, ExecContext } from "../permissions/policy-engine.js";
 import type { AuditLog } from "../enforcement/audit-log.js";
@@ -64,7 +62,7 @@ export type { SessionPermissionState } from "./session-permission-coordinator.js
  * loopback)。但 SessionManager 建構時 Gateway 還不存在(Gateway 的建構子
  * 需要 SessionManager),所以這裡只宣告一個**最小介面**,由
  * `apps/core/src/index.ts` 在 Gateway 建好之後用 `setClientPresence()` 事後
- * 注入——與既有的 `setTeamBus()` 完全同一個解耦手法(見該方法註解),不製造
+ * 注入——「先建構、事後用 setter 注入」的解耦手法,不製造
  * 建構子循環依賴,也讓 SessionManager 不需要 import `WsGateway`。
  *
  * 實作見 `apps/core/src/gateway/ws-gateway.ts` 的同名方法(含「不確定時倒向
@@ -90,20 +88,8 @@ export interface ClientPresencePort {
 const PTY_IDLE_TIMEOUT_MS = 800;
 
 /**
- * S8(agent-lifecycle)L4 §4.2:長命 agent 的 context 使用率達此比例時,觸發
- * 「寫筆記 + checkpoint 重啟」——留 15% 給「寫筆記」這輪本身用。訊號來源是
- * S3a 的 `context-usage` 事件(`used`/`size`),**只對 Claude SDK 這類真的會
- * 送這個事件的後端生效**——ACP 經 Claude Code bridge 結構上不會送(見
- * docs/LAYER-4-detail-design/usage-metering_detail.md §7),那類後端完全不會
- * 走到這裡,UI 端的誠實揭露見 apps/desktop/src/views/TeamManagementDialog.tsx。
- */
-const CONTEXT_CHECKPOINT_THRESHOLD = 0.85;
-
-/**
- * S8 L4 §3.1:團隊/個人筆記的約定位置——**相對於 session 的 workingDir**(對
- * persistent 的協調者是 team.workingDir 本身,對 ephemeral worker 是該任務的
- * worktree;worktree 若日後 merge 回主幹,筆記也隨之進入 review/diff 流程,見
- * agent-lifecycle_detail.md §3.1)。⚠️ 這與家目錄的 `~/.deskmony/`(S1 hard-deny
+ * S8 L4 §3.1:專案筆記的約定位置——**相對於 session 的 workingDir**(筆記隨專案
+ * 進 git,見 agent-lifecycle_detail.md §3.1)。⚠️ 這與家目錄的 `~/.deskmony/`(S1 hard-deny
  * 的政策/設定目錄)完全是兩回事,不可混淆——這裡一律是 workingDir 底下的相對
  * 路徑,不會、也不該指到家目錄。
  */
@@ -144,27 +130,6 @@ function withNotesPointer(existingSystemPrompt: string | undefined, displayName:
     : block;
 }
 
-/**
- * §4.2「接手」摘要文字的截斷規則——與 `RecoveryService`(apps/core/src/
- * recovery/recovery-service.ts)的 `buildSummaryText()` 是同一套規則(上限
- * 4000 字元,超過從最舊的對話開始截斷),這裡獨立一份小副本:
- * `RecoveryService` 依賴 `SessionManager`,這裡不能反向 import 造成循環依賴。
- */
-const CHECKPOINT_SUMMARY_CHAR_LIMIT = 4000;
-function buildCheckpointSummaryText(header: string, conversationLines: string[]): string {
-  let convo = [...conversationLines];
-  const render = (): string => [header, "最後對話(最多 3 輪):", ...(convo.length > 0 ? convo : ["(無)"])].join("\n");
-  let text = render();
-  while (text.length > CHECKPOINT_SUMMARY_CHAR_LIMIT && convo.length > 0) {
-    convo = convo.slice(1);
-    text = render();
-  }
-  if (text.length > CHECKPOINT_SUMMARY_CHAR_LIMIT) {
-    text = text.slice(0, CHECKPOINT_SUMMARY_CHAR_LIMIT);
-  }
-  return text;
-}
-
 interface RuntimeState {
   handle: AgentHandle;
   /** 這個 session 建立時依 profile.software 從 AdapterRegistry 選出的 adapter 實例。
@@ -175,14 +140,10 @@ interface RuntimeState {
   streamingText: string;
   /** 只有 terminal 能力的 adapter(pty)才會用到,見 PTY_IDLE_TIMEOUT_MS 說明。 */
   ptyIdleTimer?: ReturnType<typeof setTimeout>;
-  /** M3 Round A:若這個 session 是某個 team 成員建立的,記錄對應的 TeamMember.id
-   * (供 MessageBus 反查、session 刪除時清理 member↔session 對應)。 */
-  teamMemberId?: string;
   /** S1(PolicyEngine)新增:這個 session 建立時的 `AgentProfile.id`/`workingDir`,
    * 供 permission-request 事件到達時組裝 `PermissionRequest`(profileId/role 供
    * 規則 scope 精確比對、workingDir 當作 hard-deny 的 worktree 邊界)——直接存
-   * 在 RuntimeState 上,避免每次權限請求都多一次 DB 查詢 session 記錄(比照既有
-   * teamMemberId 的做法)。`ExecContext` 的三個欄位**不**來自這裡,見
+   * 在 RuntimeState 上,避免每次權限請求都多一次 DB 查詢 session 記錄。`ExecContext` 的三個欄位**不**來自這裡,見
    * `buildExecContext()`。 */
   agentProfileId: string;
   workingDir: string;
@@ -255,16 +216,13 @@ interface OpenToolCall {
  *    YOLO 惰性過期。對外只需要四個回呼(是非題與通知),介面夠窄。
  *    抽出後 e2e 斷言全數通過,行為零漂移。
  *
- * ---- 評估後「刻意不拆」------------------------------------------------------
+ * ---- 已移除 ----------------------------------------------------------------
  *
- * ❌ **context checkpoint 重啟**(`performContextCheckpointRestart()` 一帶)
- *    看起來像獨立職責,實際上它需要 runtime / teamManager / profiles /
- *    adapters / prepareSpawnProfile / setStatus / persistMessage / sendPrompt /
- *    getHistory / turnLimiter / consumeEvents / teamBus 十幾個東西 —— 因為它
- *    **本來就是**一個 session 生命週期操作(dispose 舊 handle + respawn + 重接
- *    事件迴圈)。抽出來只會產生一個要傳十幾個回呼的殼,是為拆而拆。
- *    真正該做的是先釐清「決定要不要 checkpoint」(策略)與「執行 respawn」
- *    (機制)的界線,那是設計問題,不是搬程式碼問題。
+ * 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):原本評估後
+ * 「刻意不拆」的 **context checkpoint 重啟**(`performContextCheckpointRestart()`
+ * 一帶)是 persistent team member 專屬機制——觸發條件是「session 綁定了
+ * lifecycle=persistent 的 team member」,team 移除後沒有任何 session 能觸發它,
+ * 整套(閾值判斷、寫筆記 prompt、respawn + 摘要)一併移除。
  *
  * ---- 剩餘的縫,依「介面寬度 ÷ 價值」排序 --------------------------------------
  *
@@ -278,8 +236,7 @@ interface OpenToolCall {
  *
  * 3. **SessionEventRouter**(`consumeEventsInner()` 的 240 行 switch)。
  *    這是最大的一塊,也是最誘人的一塊,但它是所有副作用的分派中樞 ——
- *    在 1 與「checkpoint 策略/機制分離」都做完之前動它,只會把耦合搬進
- *    一個新檔案。**建議最後做,不是最先做。**
+ *    在 1 做完之前動它,只會把耦合搬進一個新檔案。**建議最後做,不是最先做。**
  *
  * 每一步都應該比照這次:只搬不改、抽完立刻跑 `pnpm test:e2e` 確認全部斷言
  * 全綠。重構與修 bug 混在同一輪,會讓「測試掛了是搬壞的還是改壞的」無法區分。
@@ -296,9 +253,6 @@ interface OpenToolCall {
  */
 export class SessionManager extends EventEmitter {
   private runtime = new Map<string, RuntimeState>();
-  /** M3 Round A:TeamMember.id -> 目前綁定的 sessionId(反向 map 見 sessionMembers)。 */
-  private memberSessions = new Map<string, string>();
-  private sessionMembers = new Map<string, string>();
   /**
    * 2026-09-04(稽核修補,拆 God object 第一塊):權限/政策狀態機。
    *
@@ -308,12 +262,8 @@ export class SessionManager extends EventEmitter {
    * 都指回這個類別自己,由外部注入反而會製造循環。
    */
   private readonly permissions: SessionPermissionCoordinator;
-  /** 透過 setTeamBus() 事後注入(見 apps/core/src/index.ts 的建構順序說明:
-   * MessageBus 的建構子需要 SessionManager,SessionManager 也需要把
-   * TeamBusPort 傳給 adapter.spawn(),兩者互相依賴,用 setter 打破循環)。 */
-  private teamBus: TeamBusPort | undefined;
-  /** S7 L4 §2.1:透過 `setClientPresence()` 事後注入(理由同上方 teamBus:
-   *  Gateway 的建構子需要 SessionManager,不能反過來在建構子要求 Gateway)。
+  /** S7 L4 §2.1:透過 `setClientPresence()` 事後注入(Gateway 的建構子需要
+   *  SessionManager,不能反過來在建構子要求 Gateway)。
    *  見 `ClientPresencePort` 型別註解與 `buildExecContext()`。 */
   private clientPresence: ClientPresencePort | undefined;
   /**
@@ -327,23 +277,6 @@ export class SessionManager extends EventEmitter {
   private readonly waitingSince = new Map<string, number>();
 
   /**
-   * S8(agent-lifecycle)L4 §4.2:context checkpoint 重啟的暫態(全部只存在
-   * 記憶體,session 結束/重啟時清除,見 `clearContextCheckpointState()`)——
-   *   - `contextCheckpointTriggered`:這個 sessionId 這一輪成長週期是否已經
-   *     觸發過(§4.2「同一個 session 只觸發一次,避免重啟迴圈」);checkpoint
-   *     重啟成功後會刪掉,讓下一輪成長週期能再次觸發(「重啟後是新 session,
-   *     計數歸零」)。
-   *   - `contextCheckpointPendingNote`:threshold 命中當下這個 session 正忙
-   *     (busy/waiting),記下要送出的「寫筆記」prompt 文字,等目前這輪
-   *     `completed` 後才送出(不能在忙碌時插隊送出第二個 prompt)。
-   *   - `contextCheckpointAwaitingRestart`:「寫筆記」prompt 已送出,等它的
-   *     `completed` 事件抵達後才真正執行 checkpoint 重啟。
-   */
-  private readonly contextCheckpointTriggered = new Set<string>();
-  private readonly contextCheckpointPendingNote = new Map<string, string>();
-  private readonly contextCheckpointAwaitingRestart = new Set<string>();
-
-  /**
    * S12 Phase2 R1+R4:任一 session 正忙(busy/waiting)時,暫存要在它下一次
    * `completed` 空檔送達的訊息文字,等到那個空檔才真正送出(見
    * `deliverPromptWhenIdle()` 與 consumeEvents 的 completed case)——同一個
@@ -351,9 +284,8 @@ export class SessionManager extends EventEmitter {
    * 送訊息的目標 session」,不特別區分父/子,兩個方向共用同一套機制:
    *   - R1:子完成時把結果注入父(key = 父 sessionId)。
    *   - R4:`send_to_subagent` 工具把父的追加訊息送給子(key = 子 sessionId)。
-   * 比照 `contextCheckpointPendingNote` 的清理慣例:session 結束/重啟時清除
-   * (見 deleteSession/disposeSessionForMember/shutdownAll/reclaimSession),
-   * 避免無限增長。
+   * 清理慣例:session 結束/重啟時清除(見 deleteSession/shutdownAll/
+   * reclaimSession,經 `clearPerSessionState()`),避免無限增長。
    */
   private readonly pendingIdleInjection = new Map<string, string[]>();
 
@@ -362,7 +294,6 @@ export class SessionManager extends EventEmitter {
     private readonly db: NexusDb,
     private readonly profiles: ProfileStore,
     private readonly permissionGateway: PermissionGateway,
-    private readonly teamManager: TeamManager,
     /**
      * 這輪新增(provider 目錄重構):`createSession()` 依 `profile.providerId`
      * 查詢 provider 層級的預設 env(settings 的 per-provider 偏好),疊在
@@ -397,7 +328,7 @@ export class SessionManager extends EventEmitter {
      */
     private readonly turnLimiter: TurnLimiter,
     /**
-     * S3b(CostGovernor)新增:任務預算/每日 kill-switch(見
+     * S3b(CostGovernor)新增:每日 kill-switch(見
      * apps/core/src/cost/cost-governor.ts)。`sendPrompt()` 送出前先問
      * `checkSendPromptAllowed()`,`consumeEvents()` 收到 `usage` 事件時轉發給
      * `recordUsage()`。
@@ -428,25 +359,10 @@ export class SessionManager extends EventEmitter {
     });
   }
 
-  /** 見上方 teamBus 欄位註解:apps/core/src/index.ts 建立好 MessageBus 後回頭注入。 */
-  setTeamBus(bus: TeamBusPort): void {
-    this.teamBus = bus;
-  }
-
-  /** S7 L4 §2.1:apps/core/src/index.ts 建立好 WsGateway 後回頭注入(比照
-   *  `setTeamBus()`)。未注入時的行為見 `buildExecContext()`。 */
+  /** S7 L4 §2.1:apps/core/src/index.ts 建立好 WsGateway 後回頭注入。
+   *  未注入時的行為見 `buildExecContext()`。 */
   setClientPresence(presence: ClientPresencePort): void {
     this.clientPresence = presence;
-  }
-
-  /** 某個 team member 目前綁定的 sessionId(供 MessageBus 決定投遞策略)。 */
-  getSessionIdForMember(memberId: string): string | undefined {
-    return this.memberSessions.get(memberId);
-  }
-
-  /** 某個 sessionId 屬於哪個 team member(供 MessageBus 監聽 session-updated 時反查)。 */
-  getMemberIdForSession(sessionId: string): string | undefined {
-    return this.sessionMembers.get(sessionId);
   }
 
   async listSessions(): Promise<Session[]> {
@@ -462,7 +378,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * S6(crash-recovery)新增:「放棄」——標 `closed`(不是 `error`,因為這不是
-   * 執行失敗,是人類主動決定不處理這條中斷的 session),**worktree/任務一律
+   * 執行失敗,是人類主動決定不處理這條中斷的 session),**對話紀錄一律
    * 保留**(不自動刪,同 S3b T2「回收 ≠ 丟棄」的既有語意)。
    */
   async abandonInterruptedSession(sessionId: string): Promise<void> {
@@ -515,45 +431,17 @@ export class SessionManager extends EventEmitter {
       );
     }
 
-    // M3 Round A:若這個 session 屬於某個 team 成員,查出 member 資訊,建立
-    // team context 傳給 adapter.spawn()(目前只有 ClaudeAgentSdkAdapter 會
-    // 據此掛載 team-bus MCP 工具,見 packages/adapters/src/team-bus-mcp.ts;
-    // ACP/PTY 這輪不掛,單純忽略這個參數)。
-    let member: Awaited<ReturnType<TeamManager["getMember"]>> | undefined;
-    let teamContext: TeamSpawnContext | undefined;
-    if (input.teamMemberId) {
-      member = await this.teamManager.getMember(input.teamMemberId);
-      if (!member) {
-        throw new DeskmonyError(
-          ErrorCodes.ENTITY_NOT_FOUND,
-          { entityType: "teamMember", id: input.teamMemberId },
-          `找不到 team member: ${input.teamMemberId}`,
-        );
-      }
-      if (this.teamBus) {
-        teamContext = {
-          teamId: member.teamId,
-          memberId: member.id,
-          memberName: member.name,
-          memberRole: member.role,
-          bus: this.teamBus,
-        };
-      }
-    }
-
     // 這輪新增:agentOverride 有提供時,套用出一份「這次真正要拿去 spawn」的
     // profile 形狀(不寫回 DB,base profile 記錄本身不變),見
     // `applyAgentOverride()` 的完整說明。沒有 override 時原樣等於 profile。
     const overriddenProfile = this.applyAgentOverride(profile, input.agentOverride);
 
     // S8(agent-lifecycle)L4 §3.2:env 合併 + `.deskmony/notes/` 確保存在 +
-    // systemPrompt 附加「指路」段落,三件事都收斂到 `prepareSpawnProfile()`
-    // (`performContextCheckpointRestart()` 的 respawn 路徑共用同一份邏輯,
-    // 避免兩處各自维护一份而漂移)。
-    const effectiveProfile = await this.prepareSpawnProfile(overriddenProfile, input.workingDir, member?.name ?? profile.name);
+    // systemPrompt 附加「指路」段落,三件事都收斂到 `prepareSpawnProfile()`。
+    const effectiveProfile = await this.prepareSpawnProfile(overriddenProfile, input.workingDir, profile.name);
 
     const adapter = this.adapters.get(overriddenProfile.software);
-    const handle = await adapter.spawn(effectiveProfile, { path: input.workingDir }, teamContext);
+    const handle = await adapter.spawn(effectiveProfile, { path: input.workingDir });
 
     const now = Date.now();
     const session: Session = {
@@ -584,17 +472,12 @@ export class SessionManager extends EventEmitter {
       handle,
       adapter,
       streamingText: "",
-      teamMemberId: member?.id,
       agentProfileId: profile.id,
       workingDir: input.workingDir,
       parentSessionId: input.parentSessionId,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
     });
-    if (member) {
-      this.memberSessions.set(member.id, session.id);
-      this.sessionMembers.set(session.id, member.id);
-    }
     // S7:初值 = profile.permissionLevel(必為 "always-ask"/"auto-accept-edits"
     // 之一,見 PermissionLevelSchema 收窄後的定義,不可能是 YOLO)。
     this.permissions.initialize(session.id, profile.permissionLevel);
@@ -602,9 +485,6 @@ export class SessionManager extends EventEmitter {
     void this.consumeEvents(session.id);
 
     this.emit("session-list-updated");
-    if (member) {
-      this.emit("member-session-ready", { memberId: member.id, sessionId: session.id });
-    }
     return this.permissions.attachTo(session);
   }
 
@@ -614,14 +494,10 @@ export class SessionManager extends EventEmitter {
    * `sendPrompt()` 內部是「檢查預算 → await 持久化 → await 設狀態 → 起算回合
    * → 送給 adapter」,中間有多個 await 缺口,而三條路徑會併發打進來:
    * 使用者連點兩次送出、兩個 client 同時操作同一個 session、以及
-   * `MessageBus` 的訊息注入撞上手動輸入(`deliverPromptWhenIdle()` 本身就是
+   * 程式化的訊息注入撞上手動輸入(`deliverPromptWhenIdle()` 本身就是
    * 「先讀狀態、再送」的 check-then-act)。兩次呼叫都會通過各自的預算檢查、
    * 都 persist、都呼叫 `adapter.sendPrompt()`,底層收到兩個幾乎同時的 prompt,
-   * 行為未定義。
-   *
-   * `MessageBus.withMemberLock()` 早就用同一套 promise chain 手法處理過這個
-   * 問題,只是那把鎖只保護 MessageBus 自己的投遞路徑,沒有收斂到
-   * `sendPrompt()` 這個**唯一的共同入口**。這裡補上。
+   * 行為未定義。鎖收斂在 `sendPrompt()` 這個**唯一的共同入口**。
    */
   private readonly sendPromptLocks = new Map<string, Promise<unknown>>();
 
@@ -645,12 +521,12 @@ export class SessionManager extends EventEmitter {
       throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
     }
 
-    // S3b(CostGovernor)L4 §2/§3.3:任務預算/每日 kill-switch 越線後,只擋
+    // S3b(CostGovernor)L4 §2/§3.3:每日 kill-switch 越線後,只擋
     // 「後續 prompt」——這裡是唯一的送出前檢查點(gateway 的 `session.
-    // sendPrompt` 與 MessageBus 的訊息注入都走這個方法,見 cost-governor.ts
+    // sendPrompt` 與程式化的訊息注入都走這個方法,見 cost-governor.ts
     // 頂端「halt 粒度」說明)。**不擋已經在跑的回合**,故意不在這裡呼叫
     // `interrupt()`。
-    const budgetCheck = await this.costGovernor.checkSendPromptAllowed(sessionId);
+    const budgetCheck = await this.costGovernor.checkSendPromptAllowed();
     if (!budgetCheck.allowed) {
       // i18n 專案:`budgetCheck.reason` 是 CostGovernor(不在這個批次的改動範圍
       // 內)組好的完整中文句子,不是 code+params 結構——這裡先用一個一次性
@@ -658,7 +534,7 @@ export class SessionManager extends EventEmitter {
       // 本身),避免這裡替 CostGovernor 的錯誤文案瞎猜對應的 ErrorCodes.BUDGET_*
       // 分類。理想的後續修正是讓 CostGovernor.checkSendPromptAllowed() 改回傳
       // 結構化的 code/params(它產生的兩種情況剛好對應既有的
-      // ErrorCodes.BUDGET_DAILY_LIMIT / BUDGET_TASK_LIMIT),屆時這裡可以直接
+      // ErrorCodes.BUDGET_DAILY_LIMIT),屆時這裡可以直接
       // 原樣往外傳、不再需要這層包裝(這是一項已知待辦,說明見上方)。
       const reason = budgetCheck.reason ?? "此 session 已被成本斷路器擋下,無法送出新的 prompt";
       throw new DeskmonyError("sessionManager.promptBlockedByBudget", { reason }, reason);
@@ -733,9 +609,8 @@ export class SessionManager extends EventEmitter {
 
   /**
    * M3 Round B 修正(interrupt 時序 race):改成回傳 Promise 並 await
-   * adapter 的 `interrupt()`(見 packages/adapters/src/types.ts 的介面註解、
-   * apps/core/src/bus/message-bus.ts 的 `deliverToMember()`)——呼叫端(尤其
-   * 是 MessageBus 的 interrupt 投遞路徑)必須等這裡 resolve 才能安全地注入
+   * adapter 的 `interrupt()`(見 packages/adapters/src/types.ts 的介面註解)
+   * ——呼叫端必須等這裡 resolve 才能安全地注入
    * 下一個 prompt,否則會與尚未真正停下的回合競爭。
    */
   async interrupt(sessionId: string): Promise<void> {
@@ -1019,7 +894,7 @@ export class SessionManager extends EventEmitter {
    *      session,一律只認「直接子」這一層關係,同 `spawnChildFromTool()` 的
    *      冒名防護精神)。
    *   3. 通過授權檢查,但那個子 session 目前沒有在跑(`this.runtime` 沒有它
-   *      ——可能已被 S3b 的 72 小時資源回收站起,或已 `disposeSessionForMember`)
+   *      ——可能已被 S3b 的 72 小時資源回收站起)
    *      → 明確報錯,而不是讓 `deliverPromptWhenIdle()` 靜默丟棄訊息卻讓這個
    *      工具呼叫看起來像成功了(那樣 agent 會誤以為訊息真的送到了)。
    * 通過三層檢查後才真的呼叫 `deliverPromptWhenIdle()`——子忙碌中會排隊,
@@ -1075,43 +950,13 @@ export class SessionManager extends EventEmitter {
       if (runtime.ptyIdleTimer) clearTimeout(runtime.ptyIdleTimer);
       await runtime.adapter.dispose(runtime.handle);
       this.runtime.delete(sessionId);
-      if (runtime.teamMemberId) {
-        this.memberSessions.delete(runtime.teamMemberId);
-        this.sessionMembers.delete(sessionId);
-      }
     }
     await this.db.delete(messagesTable).where(eq(messagesTable.sessionId, sessionId)).run();
     await this.db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId)).run();
     this.permissions.clear(sessionId); // S7:避免 Map 隨 session 生命週期無限增長。
     this.waitingSince.delete(sessionId); // S3b:同上,避免無限增長。
-    this.clearContextCheckpointState(sessionId); // S8:同上,避免無限增長。
+    this.clearPerSessionState(sessionId); // 同上,避免無限增長。
     this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
-    this.emit("session-list-updated");
-  }
-
-  /**
-   * S8(agent-lifecycle)L4 §2.2:ephemeral member 的任務進入終態時,
-   * `TaskService` 呼叫這個方法自動 dispose——只釋放子程序、把 DB 狀態標
-   * `closed`,**保留** session/messages 記錄(與 `deleteSession()` 不同,那個
-   * 方法連 DB 記錄都刪)。找不到活躍 session 時視為冪等的「已經完成」,不拋錯
-   * ——`TaskService` 對這個方法的呼叫本身就是「盡力而為」(見該檔案
-   * `disposeEphemeralMemberSession()` 的說明)。
-   */
-  async disposeSessionForMember(memberId: string): Promise<void> {
-    const sessionId = this.memberSessions.get(memberId);
-    if (!sessionId) return;
-    const runtime = this.runtime.get(sessionId);
-    if (runtime) {
-      if (runtime.ptyIdleTimer) this.clearPtyIdleTimer(runtime);
-      await runtime.adapter.dispose(runtime.handle);
-      this.runtime.delete(sessionId);
-      this.turnLimiter.endTurn(sessionId);
-    }
-    this.memberSessions.delete(memberId);
-    this.sessionMembers.delete(sessionId);
-    this.clearContextCheckpointState(sessionId);
-    this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同 clearContextCheckpointState,避免無限增長。
-    await this.setStatus(sessionId, "closed");
     this.emit("session-list-updated");
   }
 
@@ -1131,7 +976,7 @@ export class SessionManager extends EventEmitter {
    * S3b(CostGovernor)T2(HLD §4「資源回收」):真正 dispose 這個 session 的
    * adapter 子程序、釋放資源,但**保留** DB 裡的 session/messages 記錄(與
    * `deleteSession()` 不同——那個方法連 DB 記錄都刪,這裡刻意只清 in-memory
-   * runtime,任務仍留 blocked、worktree 仍保留,人回來後可以看到完整歷史紀錄
+   * runtime,對話紀錄仍保留,人回來後可以看到完整歷史紀錄
    * 並決定續/棄,同 S6 復原視圖的既有 UX,見 cost-governor_detail.md §4「回收
    * ≠ 丟棄」)。
    *
@@ -1150,16 +995,12 @@ export class SessionManager extends EventEmitter {
     await runtime.adapter.dispose(runtime.handle);
     this.runtime.delete(sessionId);
     this.turnLimiter.endTurn(sessionId);
-    if (runtime.teamMemberId) {
-      this.memberSessions.delete(runtime.teamMemberId);
-      this.sessionMembers.delete(sessionId);
-    }
-    this.clearContextCheckpointState(sessionId); // S8:避免無限增長,理由同 disposeSessionForMember()。
+    this.clearPerSessionState(sessionId); // 避免無限增長。
     this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
     await this.setStatus(
       sessionId,
       "error",
-      "已閒置等待超過 72 小時,資源已自動回收(子程序已釋放);任務與 worktree 仍保留,可重新建立 session 續行或放棄此任務",
+      "已閒置等待超過 72 小時,資源已自動回收(子程序已釋放);對話紀錄仍保留,可重新建立 session 續行或放棄此 session",
     );
   }
 
@@ -1233,11 +1074,7 @@ export class SessionManager extends EventEmitter {
         }
         this.runtime.delete(id);
         this.turnLimiter.endTurn(id);
-        if (runtime.teamMemberId) {
-          this.memberSessions.delete(runtime.teamMemberId);
-          this.sessionMembers.delete(id);
-        }
-        this.clearContextCheckpointState(id); // S8:避免無限增長,理由同 disposeSessionForMember()。
+        this.clearPerSessionState(id); // 避免無限增長。
         this.pendingIdleInjection.delete(id); // S12 Phase2:同上,避免無限增長。
         try {
           await this.setStatus(id, "closed");
@@ -1291,7 +1128,7 @@ export class SessionManager extends EventEmitter {
     }
 
     const adapter = this.adapters.get(profile.software);
-    const handle = await adapter.spawn(profile, { path: session.workingDir }, undefined, {
+    const handle = await adapter.spawn(profile, { path: session.workingDir }, {
       backendSessionId: session.backendSessionId,
     });
 
@@ -1350,8 +1187,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * S8 L4 §3.2:任何一次真正 spawn 新 adapter handle 之前都要做的三件事——
-   * (1) provider 層級預設 env 疊上 profile 自己的 env(既有邏輯,這輪從
-   * `createSession()` 搬過來,供 checkpoint 重啟的 respawn 路徑共用);
+   * (1) provider 層級預設 env 疊上 profile 自己的 env;
    * (2) 確保 `.deskmony/notes/` 存在(§3.1,失敗不阻擋啟動,只記警告);
    * (3) 在 systemPrompt 尾端附加「指路」段落(§3.2,**不是**取代原本的
    * systemPrompt,也**不**讀取筆記內容塞進去)。
@@ -1418,7 +1254,7 @@ export class SessionManager extends EventEmitter {
    * 要跑到 session 結束的長命迴圈,呼叫端不能 await 它)。在補這道圍籬之前,
    * 迴圈內任何一次 `await this.persistMessage(...)`/DB 寫入/`profiles.get()`
    * 拋錯,都會變成 unhandled rejection —— 在 Node ≥ 20 底下**直接終止整個 core**,
-   * 連帶炸掉所有其他 team 的所有 session。`apps/core/src/index.ts` 那道全域兜底
+   * 連帶炸掉所有其他的 session。`apps/core/src/index.ts` 那道全域兜底
    * 是最後防線;這裡才是就地、能講清楚是哪一條 session 出事的正確位置。
    *
    * 刻意**不**在迴圈內逐事件 try/catch 之後繼續跑:一次未預期的例外之後,這條
@@ -1722,39 +1558,10 @@ export class SessionManager extends EventEmitter {
             await this.deliverPromptWhenIdle(parentId, injectText);
           }
 
-          // S8(agent-lifecycle)L4 §4.2:「等該回合結束(completed)」的落地
-          // 位置——若這一輪之前因為 context 閾值命中而被記下「等空檔送出寫
-          // 筆記 prompt」,現在就是那個空檔;若這一輪本身就是「寫筆記」那個
-          // prompt 的回合,現在才真正執行 checkpoint 重啟。兩者互斥(同一個
-          // session 不會同時有這兩筆記錄),用 if/else if 表達。
-          {
-            const pendingNote = this.contextCheckpointPendingNote.get(sessionId);
-            if (pendingNote !== undefined) {
-              this.contextCheckpointPendingNote.delete(sessionId);
-              this.contextCheckpointAwaitingRestart.add(sessionId);
-              this.sendPrompt(sessionId, { text: pendingNote }).catch((err) => {
-                this.contextCheckpointAwaitingRestart.delete(sessionId);
-                this.contextCheckpointTriggered.delete(sessionId);
-                console.error(
-                  `[agent-lifecycle] 回合結束後送出「寫筆記」prompt 失敗(session ${sessionId}),本輪 checkpoint 重啟放棄: ${String(err)}`,
-                );
-              });
-            } else if (this.contextCheckpointAwaitingRestart.has(sessionId)) {
-              this.contextCheckpointAwaitingRestart.delete(sessionId);
-              this.performContextCheckpointRestart(sessionId).catch((err) => {
-                console.error(
-                  `[agent-lifecycle] context checkpoint 重啟失敗(session ${sessionId}),session 維持原狀,` +
-                    `context 可能持續累積: ${err instanceof Error ? err.message : String(err)}`,
-                );
-              });
-            }
-          }
-
           // S12 Phase2 R1+R4:這個 session 自己這一輪結束(回到 idle),flush
           // 排在它身上待送的訊息(R1:子回報給父的注入;R4:send_to_subagent
           // 排隊等它有空的訊息)——一次只送一筆(其餘等下一輪 completed,避免
-          // 把多筆塞成一個回合)。與上方 checkpoint pending/awaiting-restart
-          // 邏輯**互不干擾**,刻意用獨立的 if,不塞進同一個 if/else if 鏈。
+          // 把多筆塞成一個回合)。
           {
             const pendingInjection = this.pendingIdleInjection.get(sessionId);
             if (pendingInjection && pendingInjection.length > 0) {
@@ -1812,18 +1619,6 @@ export class SessionManager extends EventEmitter {
           break;
         }
         /**
-         * S8(agent-lifecycle)L4 §4.2:context 窗口使用率 gauge(S3a 的
-         * `ContextUsageEvent`)。**刻意不 await**——理由同上方 "usage" case,
-         * 判斷/送出「寫筆記」prompt 是背景執行的 fire-and-forget,不阻塞這個
-         * 事件迴圈讀取後續事件。
-         */
-        case "context-usage": {
-          this.handleContextUsage(sessionId, runtime, event.used, event.size).catch((err) => {
-            console.error(`[agent-lifecycle] 處理 context-usage(${sessionId}) 失敗: ${err instanceof Error ? err.message : String(err)}`);
-          });
-          break;
-        }
-        /**
          * 這輪(slash command)新增:快取這個 session 目前的 "/" 指令清單
          * (`session.getSlashCommands` pull 方法讀的就是這裡,見該方法註解)。
          * **REPLACE 語意**——整份覆蓋 `runtime.slashCommands`,不累加,對齊
@@ -1840,161 +1635,19 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  /**
-   * S8 L4 §4.2:threshold 判斷 + 觸發「寫筆記」prompt(忙碌時先記下,等
-   * `completed` 才送出,見 consumeEvents() 的 "completed" case)。**只對
-   * lifecycle === "persistent" 的 team member session 生效**——ephemeral
-   * worker 靠任務終態 dispose(§2.2),不需要這條 mid-task 的 checkpoint 機制
-   * (這是 L4 沒有逐字寫死、但依 HLD §2.2 標題「長命 agent 的 context 閾值
-   * 重啟」推斷的判斷,實作當下的自行判斷,repo 外無紀錄)。
-   */
-  private async handleContextUsage(sessionId: string, runtime: RuntimeState, used: number, size: number): Promise<void> {
-    if (!(size > 0)) return; // 防禦:避免除以 0 或負值資料。
-    if (used / size < CONTEXT_CHECKPOINT_THRESHOLD) return;
-    if (!runtime.teamMemberId) return; // 沒有 team member 就沒有 lifecycle 概念可判斷,也沒有「你的名字」可指路。
-    if (this.contextCheckpointTriggered.has(sessionId)) return; // §4.2:同一個 session 只觸發一次。
-
-    const member = await this.teamManager.getMember(runtime.teamMemberId);
-    if (!member || member.lifecycle !== "persistent") return;
-
-    this.contextCheckpointTriggered.add(sessionId);
-    console.warn(
-      `[agent-lifecycle] session ${sessionId}(成員「${member.name}」)context 使用率達 ${((used / size) * 100).toFixed(1)}%` +
-        `(≥ ${(CONTEXT_CHECKPOINT_THRESHOLD * 100).toFixed(0)}%),已觸發 checkpoint 重啟前置:要求寫入筆記`,
-    );
-
-    const notePrompt =
-      "你的 context 即將用盡。請把本次工作中值得跨任務保留的結論寫進 " +
-      `.deskmony/notes/${member.name}.md,只回覆「已寫入」即可。`;
-
-    const session = await this.getSession(sessionId);
-    if (!session) {
-      this.contextCheckpointTriggered.delete(sessionId);
-      return;
-    }
-
-    if (session.status === "idle") {
-      this.contextCheckpointAwaitingRestart.add(sessionId);
-      try {
-        await this.sendPrompt(sessionId, { text: notePrompt });
-      } catch (err) {
-        this.contextCheckpointAwaitingRestart.delete(sessionId);
-        this.contextCheckpointTriggered.delete(sessionId);
-        console.error(
-          `[agent-lifecycle] 送出「寫筆記」prompt 失敗(session ${sessionId}),本輪 checkpoint 重啟放棄,context 持續累積: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    } else {
-      // 目前這輪還在跑(busy/waiting),不能插隊送出第二個 prompt——記下來,
-      // 等 consumeEvents() 的 "completed" case 偵測到才送出。
-      this.contextCheckpointPendingNote.set(sessionId, notePrompt);
-    }
-  }
-
-  /**
-   * S8 L4 §4.2:「呼叫 S6 既有的接手流程(新 session + 摘要),沿用同一個 DB
-   * session id」——與 `RecoveryService.takeover()` 的關鍵差異:那裡開一個
-   * **全新** sessionId(離開復原視圖的「舊 session」語意);這裡是長命 agent
-   * 的例行維護,**沿用既有 sessionId**,UI 上仍是同一張聊天/同一個成員,不需要
-   * 人切換分頁。做法比照 `continueSession()`:`this.runtime` 用既有的
-   * sessionId 當 key,但這裡沒有 backend resume 訊號可用(§4.1),一律是全新
-   * 的 adapter handle(不嘗試恢復對話記憶——知識已經寫進筆記檔案,重啟不損失
-   * 知識,只損失未寫下的隱性 context,見 agent-lifecycle_detail.md §2.2)。
-   */
-  private async performContextCheckpointRestart(sessionId: string): Promise<void> {
-    const session = await this.getSession(sessionId);
-    if (!session) return;
-    const runtime = this.runtime.get(sessionId);
-    if (!runtime || !runtime.teamMemberId) return;
-    const member = await this.teamManager.getMember(runtime.teamMemberId);
-    if (!member) return;
-    const profile = await this.profiles.get(runtime.agentProfileId);
-    if (!profile) {
-      console.error(`[agent-lifecycle] checkpoint 重啟失敗:找不到 profile ${runtime.agentProfileId}(session ${sessionId})`);
-      return;
-    }
-
-    // 只讀 DB,不呼叫 LLM(比照 RecoveryService.buildTakeoverSummary() 的既有原則)。
-    const summary = await this.buildContextCheckpointSummary(sessionId, member.name);
-
-    if (runtime.ptyIdleTimer) this.clearPtyIdleTimer(runtime);
-    try {
-      await runtime.adapter.dispose(runtime.handle);
-    } catch (err) {
-      console.error(`[agent-lifecycle] checkpoint 重啟:dispose 舊 handle 失敗(繼續重啟新 handle): ${err instanceof Error ? err.message : String(err)}`);
-    }
-    this.turnLimiter.endTurn(sessionId);
-
-    const teamContext: TeamSpawnContext | undefined = this.teamBus
-      ? { teamId: member.teamId, memberId: member.id, memberName: member.name, memberRole: member.role, bus: this.teamBus }
-      : undefined;
-    const finalProfile = await this.prepareSpawnProfile(profile, session.workingDir, member.name);
-    const adapter = this.adapters.get(profile.software);
-    const handle = await adapter.spawn(finalProfile, { path: session.workingDir }, teamContext);
-
-    this.runtime.set(sessionId, {
-      handle,
-      adapter,
-      streamingText: "",
-      teamMemberId: member.id,
-      agentProfileId: profile.id,
-      workingDir: session.workingDir,
-      slashCommandsObserved: false,
-      openToolCalls: new Map(),
-    });
-    // memberSessions/sessionMembers 的 key/value 不變(同一 member ↔ 同一
-    // sessionId),不需要更新。
-    this.permissions.initialize(sessionId, profile.permissionLevel);
-
-    // i18n 專案:改存 JSON 結構化事件,理由同 setSessionModel() 內的說明。
-    await this.persistMessage(
-      sessionId,
-      "system",
-      JSON.stringify({ event: "session.contextCheckpointRestarted" }),
-    );
-    await this.setStatus(sessionId, "idle");
-
-    void this.consumeEvents(sessionId);
-    this.emit("session-list-updated");
-
-    // §4.2「重啟後是新 session,計數歸零」——刪掉觸發旗標,讓下一輪 context
-    // 成長仍能再次觸發(不是永久只觸發一次,而是「這一輪成長週期只觸發一次」)。
-    this.contextCheckpointTriggered.delete(sessionId);
-
-    await this.sendPrompt(sessionId, { text: summary });
-  }
-
-  /** §4.2 摘要組裝——只讀 DB(對話歷史),不呼叫 LLM。與
-   *  `RecoveryService.buildTakeoverSummary()` 的差異:這裡不是崩潰復原,沒有
-   *  git diff 可讀(persistent 的協調者通常不綁定單一 workspace),只帶最近
-   *  對話 + 指回筆記檔案的提醒。 */
-  private async buildContextCheckpointSummary(sessionId: string, memberName: string): Promise<string> {
-    const header = [
-      "【Context Checkpoint 重啟】",
-      `你先前的 session 因為 context 使用率過高已自動重啟。知識已寫入 .deskmony/notes/${memberName}.md,` +
-        "請先讀取該筆記與 team.md 了解目前狀態,再繼續工作。",
-    ].join("\n");
-
-    const history = await this.getHistory(sessionId);
-    const conversational = history.filter((m) => m.role === "user" || m.role === "assistant");
-    const lastMessages = conversational.slice(-6);
-    const conversationLines = lastMessages.map((m) => `${m.role === "user" ? "使用者" : "assistant"}: ${m.content}`);
-
-    return buildCheckpointSummaryText(header, conversationLines);
-  }
-
   // S12: no disposeChildSession — child sessions remain idle after completed,
   // runtime stays alive for further conversation (Phase 2 may add dispose).
 
-  /** S8:session 結束/重啟時清除 checkpoint 暫態,避免三個 Map/Set 隨 session
-   *  生命週期無限增長(比照既有 `permissionState`/`waitingSince` 的清理慣例)。 */
-  private clearContextCheckpointState(sessionId: string): void {
-    this.contextCheckpointTriggered.delete(sessionId);
-    this.contextCheckpointPendingNote.delete(sessionId);
-    this.contextCheckpointAwaitingRestart.delete(sessionId);
-    // 2026-09-04(稽核修補):`sendPrompt()` 的 per-session 鎖鏈也在這裡清 ——
-    // 它與上面三個一樣是「跟著 session 生命週期存在」的 per-session 狀態,
-    // 由所有 dispose/delete/重啟路徑共用同一個清理點,不必各自記得。
+  /**
+   * session 結束/重啟時清除 per-session 暫態,避免 Map 隨 session 生命週期無限增長
+   * (比照既有 `permissionState`/`waitingSince` 的清理慣例)。
+   *
+   * 2026-09-04(稽核修補):`sendPrompt()` 的 per-session 鎖鏈在這裡清 ——
+   * 由所有 dispose/delete/重啟路徑共用同一個清理點,不必各自記得。
+   * (2026-10-02:原本同一個方法還清 context checkpoint 的三組暫態,
+   * 該機制已隨 team 一併移除。)
+   */
+  private clearPerSessionState(sessionId: string): void {
     this.sendPromptLocks.delete(sessionId);
   }
 
@@ -2067,7 +1720,7 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  /** 公開:MessageBus 需要查詢目標成員 session 的目前狀態(idle/busy/...)決定投遞策略。 */
+  /** 公開:查詢單一 session 的目前狀態(idle/busy/...),例如投遞訊息前決定要立即送還是排隊。 */
   async getSession(sessionId: string): Promise<Session | undefined> {
     const rows = await this.db.select().from(sessionsTable).where(eq(sessionsTable.id, sessionId)).all();
     return rows[0] ? this.permissions.attachTo(rowToSession(rows[0])) : undefined;

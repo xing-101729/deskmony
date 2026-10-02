@@ -13,33 +13,8 @@ import { AdapterCapabilitiesSchema } from "./adapter-capabilities.js";
 import { AgentDetectionEntrySchema } from "./detect.js";
 import { MaskedProviderPrefsSchema, ProviderPrefsPatchInputSchema } from "./provider-catalog.js";
 import { ConfigSetFilePatchSchema, EffectiveCoreConfigSchema, PolicyAddRuleInputSchema, PolicyRuleSchema } from "./core-config.js";
-import {
-  AddTeamMemberInputSchema,
-  CreateTeamInputSchema,
-  MessagePrioritySchema,
-  TeamMemberSchema,
-  TeamMessageSchema,
-  TeamSchema,
-  TeamWithMembersSchema,
-} from "./team.js";
-import { TeammateInfoSchema } from "./team-bus.js";
 import { SubagentChildSummarySchema, SubagentProfileSummarySchema } from "./subagent.js";
-import {
-  AcceptanceResultSchema,
-  AssignTaskInputSchema,
-  CreateTaskInputSchema,
-  SetTaskAcceptanceInputSchema,
-  TaskSchema,
-  TaskStatusSchema,
-  UpdateTaskStatusInputSchema,
-  WorkspaceSchema,
-} from "./task.js";
-import {
-  RecoveryGitStatusResultSchema,
-  RecoveryListResultSchema,
-  RecoveryResolveDirtyWorktreeInputSchema,
-  RecoveryResolveDirtyWorktreeResultSchema,
-} from "./recovery.js";
+import { RecoveryListResultSchema } from "./recovery.js";
 
 /**
  * Gateway WS 訊息協議(ARCHITECTURE.md 3.2 節):
@@ -431,187 +406,6 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * 生效」,呼叫端(SettingsDialog)需自行顯示「請重啟 core」的提示。
    */
   z.object({ ...baseRequest, method: z.literal("config.setFile"), params: ConfigSetFilePatchSchema }),
-  // ---- M3 Round A: TeamManager + MessageBus -----------------------------
-  z.object({ ...baseRequest, method: z.literal("team.create"), params: CreateTeamInputSchema }),
-  z.object({ ...baseRequest, method: z.literal("team.list"), params: z.object({}).default({}) }),
-  z.object({ ...baseRequest, method: z.literal("team.addMember"), params: AddTeamMemberInputSchema }),
-  z.object({
-    ...baseRequest,
-    method: z.literal("team.removeMember"),
-    params: z.object({ teamId: z.string(), memberId: z.string() }),
-  }),
-  /**
-   * 刪除整個 team(連同成員、群聊訊息、任務一併移除)。**這是破壞性操作**:
-   * 它會 dispose 該 team 所有成員目前活躍的 session(等於中止正在跑的 agent),
-   * 並對每個任務走既有的 `TaskService.deleteTask()`——那會一併移除任務的 git
-   * worktree。worktree 內有未提交變更時不會中止刪除,而是如實回報在
-   * `tasksWithUncommittedChanges`,讓 UI 有機會告訴使用者「有東西被丟掉了」
-   * (比照 `task.delete` 既有的 `hadUncommittedChanges` 語意)。
-   */
-  z.object({
-    ...baseRequest,
-    method: z.literal("team.delete"),
-    params: z.object({ teamId: z.string() }),
-  }),
-  z.object({
-    ...baseRequest,
-    method: z.literal("team.messages"),
-    params: z.object({ teamId: z.string(), limit: z.number().int().positive().optional() }),
-  }),
-  /**
-   * M3 Round B 新增:團隊管理 UI 顯示成員清單目前 session 狀態用。直接複用
-   * `MessageBus.listTeammates()`(原本只給 team-bus MCP 的 `list_teammates`
-   * 工具內部呼叫,見 apps/core/src/bus/message-bus.ts)——同一份邏輯、同一個
-   * 資料來源,這裡只是多開一個 gateway 入口給 UI(非 agent)呼叫,不重複實作。
-   */
-  z.object({
-    ...baseRequest,
-    method: z.literal("team.teammates"),
-    params: z.object({ teamId: z.string() }),
-  }),
-  /** 人類在團隊群聊視圖插話用。 */
-  z.object({
-    ...baseRequest,
-    method: z.literal("message.send"),
-    params: z.object({
-      teamId: z.string(),
-      to: z.string().min(1),
-      content: z.string().min(1),
-      priority: MessagePrioritySchema.optional(),
-      /** 顯示用的發送者名稱,預設 "Human"。若剛好與某個 TeamMember 同名,
-       *  priority="interrupt" 時仍會依該成員的 canInterrupt 決定是否降級
-       *  (見 apps/core/src/bus/message-bus.ts 的 resolvePriorityForSender)。 */
-      fromName: z.string().min(1).optional(),
-    }),
-  }),
-  /**
-   * M4 Round A 新增:比照 M3 Round B「team.teammates」的先例(多開一個 gateway
-   * 入口給非 agent 呼叫端使用同一份既有邏輯,不重複實作)—— `MessageBus.reportStatus()`
-   * 原本只給 team-bus 的 `report_status` MCP 工具呼叫(只有 software=
-   * "claude-agent-sdk" 的成員能呼叫工具),ACP/PTY 成員完全沒有回報狀態的
-   * 管道。這個方法讓任何呼叫端(UI、或這次 e2e 用來對 report_status↔task
-   * 整合做決定性測試)可以代表一個已知的 team member 回報狀態,走的是與
-   * MCP 工具完全相同的 `MessageBus.reportStatus()` 實作(含這輪新增的
-   * taskId → TaskService 整合),見 apps/core/src/bus/message-bus.ts。
-   */
-  z.object({
-    ...baseRequest,
-    method: z.literal("message.reportStatus"),
-    params: z.object({
-      teamId: z.string(),
-      fromMemberId: z.string(),
-      status: z.string().min(1),
-      summary: z.string().optional(),
-      taskId: z.string().optional(),
-    }),
-  }),
-  /**
-   * M4 Round B 新增:`request_review` MCP 工具(ARCHITECTURE.md 4.1 節列出、
-   * M3/M4 Round A 備註都明講「這輪先不做」的那個工具)的 gateway 對應入口 ——
-   * 比照 `message.reportStatus` 的先例,多開一個非 agent 呼叫端也能用的入口
-   * (UI、或 e2e 決定性測試不依賴真實模型的呼叫路徑),走完全相同的
-   * `MessageBus.requestReview()` 實作。
-   */
-  z.object({
-    ...baseRequest,
-    method: z.literal("message.requestReview"),
-    params: z.object({
-      teamId: z.string(),
-      fromMemberId: z.string(),
-      to: z.string().min(1),
-      taskId: z.string().optional(),
-    }),
-  }),
-  /**
-   * S2(message-budget)新增:比照 `message.reportStatus`/`message.requestReview`
-   * 的既有先例(見上方兩者的註解)——`MessageBus.sendMessage()`/`broadcast()`
-   * (team-bus 的 `send_message`/`broadcast` 工具)原本只能透過真正的
-   * Claude Agent SDK session 呼叫(team-bus MCP server 只掛載在
-   * `ClaudeAgentSdkAdapter`,見 packages/adapters/src/team-bus-mcp.ts),沒有
-   * 任何不依賴真實模型的決定性呼叫路徑可以測試 contextId 推導/訊息預算閘
-   * (message-budget_detail.md §7 檢查清單的 e2e 項目)。這裡多開兩個入口,
-   * `fromMemberId` 一律代表一個**已知的 team member**(不是 agent 自報,呼叫
-   * 端本身要嘛是人類/UI,要嘛是本來就知道自己是誰的 e2e 測試),走與 team-bus
-   * MCP 工具完全相同的 `MessageBus.sendMessage()`/`broadcast()` 實作,包含
-   * S2 這輪新增的 contextId 推導與預算檢查——**不是**繞過閘門的後門。
-   */
-  z.object({
-    ...baseRequest,
-    method: z.literal("message.sendMessage"),
-    params: z.object({
-      teamId: z.string(),
-      fromMemberId: z.string(),
-      to: z.string().min(1),
-      content: z.string().min(1),
-      priority: MessagePrioritySchema.optional(),
-    }),
-  }),
-  z.object({
-    ...baseRequest,
-    method: z.literal("message.broadcast"),
-    params: z.object({
-      teamId: z.string(),
-      fromMemberId: z.string(),
-      content: z.string().min(1),
-      priority: MessagePrioritySchema.optional(),
-    }),
-  }),
-  /**
-   * S2(message-budget)新增:團隊群聊視圖顯示「這個 context 目前用了多少
-   * 訊息額度、是否已 trip」用(見 message-budget_detail.md §7 檢查清單「UI
-   * 群聊視圖:顯示 context 與額度餘量;trip 狀態」),直接複用
-   * `MessageBus.getContextBudgetStatus()`。
-   */
-  z.object({
-    ...baseRequest,
-    method: z.literal("message.getContextBudget"),
-    params: z.object({ contextId: z.string() }),
-  }),
-  // ---- M4 Round A: TaskService + WorkspaceManager -----------------------
-  z.object({ ...baseRequest, method: z.literal("task.create"), params: CreateTaskInputSchema }),
-  z.object({ ...baseRequest, method: z.literal("task.list"), params: z.object({ teamId: z.string() }) }),
-  z.object({ ...baseRequest, method: z.literal("task.get"), params: z.object({ taskId: z.string() }) }),
-  z.object({ ...baseRequest, method: z.literal("task.assign"), params: AssignTaskInputSchema }),
-  z.object({ ...baseRequest, method: z.literal("task.updateStatus"), params: UpdateTaskStatusInputSchema }),
-  z.object({ ...baseRequest, method: z.literal("task.delete"), params: z.object({ taskId: z.string() }) }),
-  /**
-   * M4 Round B 新增:「人類批准合併」的唯一實際執行 git merge 的入口(見
-   * apps/core/src/tasks/task-service.ts 的 mergeAndComplete()、
-   * apps/core/src/workspace/workspace-manager.ts 的 mergeWorkspace())。要求
-   * 任務現狀必須是 "merging",合併衝突或其他錯誤會讓這個 RPC 直接失敗
-   * (ok:false),任務狀態維持在 "merging" 不變。
-   */
-  z.object({ ...baseRequest, method: z.literal("task.merge"), params: z.object({ taskId: z.string() }) }),
-  /**
-   * M4 Round B 新增:查詢單一 workspace(任務看板 UI 顯示每個任務綁定的
-   * worktree 分支名稱用,見 apps/desktop/src/stores/task-store.ts)。
-   */
-  z.object({ ...baseRequest, method: z.literal("workspace.get"), params: z.object({ workspaceId: z.string() }) }),
-  /**
-   * S4(機器驗收閘)新增:事後設定/清除一個既有任務的機器驗收條件(見
-   * task.ts 的 `SetTaskAcceptanceInputSchema` 註解——只能由人類/UI 呼叫,
-   * team-bus MCP 工具沒有對應入口,完整性紀律見該檔案說明)。
-   */
-  z.object({ ...baseRequest, method: z.literal("task.setAcceptance"), params: SetTaskAcceptanceInputSchema }),
-  /**
-   * S4(機器驗收閘)新增:跑一個任務的機器驗收(見
-   * apps/core/src/tasks/task-service.ts 的 `runAcceptance()`、
-   * apps/core/src/tasks/acceptance-runner.ts 的 `AcceptanceRunner`)。切片是
-   * **諮詢性**——這個方法本身完全不擋任何狀態轉換,純粹跑指令回結果,由
-   * 呼叫端(UI)自行決定要不要理會(見 acceptance-gate_detail.md §0/§4)。
-   * 沒有 `acceptance` 時回 `{ passed: false, skippedReason: "no-acceptance" }`,
-   * 不當成失敗。
-   */
-  z.object({ ...baseRequest, method: z.literal("task.runAcceptance"), params: z.object({ taskId: z.string() }) }),
-  /**
-   * S5(dispose-gate)新增:人類核可一個「沒有機器驗收條件(或連續驗收失敗達
-   * 上限)、正在等待人類核可」的任務進入 review(見
-   * apps/core/src/tasks/task-service.ts 的 `approveReview()`、
-   * docs/LAYER-4-detail-design/dispose-gate-and-lead_detail.md §1.2/§4)。
-   * 只有 `Task.awaitingHumanReview === true` 的任務能呼叫,否則明確拋錯。
-   * **本機/遠端皆可**——這不是安全罩設定,是日常操作(L4 §4 檢查清單)。
-   */
-  z.object({ ...baseRequest, method: z.literal("task.approveReview"), params: z.object({ taskId: z.string() }) }),
   /**
    * S3b(CostGovernor)新增:查詢一個 session 目前的成本累計與門檻狀態(見
    * apps/core/src/cost/cost-governor.ts 的 `getSummary()`,對應
@@ -627,7 +421,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   // docs/LAYER-4-detail-design/crash-recovery_detail.md §5)------------------
   /**
    * 復原視圖的資料來源——列出所有 `status === "interrupted"` 的 session,含
-   * 各自綁定的任務/worktree 狀態與「這個後端支不支援繼續」(見
+   * 「這個後端支不支援繼續」(見
    * packages/shared/src/recovery.ts 的 `RecoverySessionInfoSchema`)。`params`
    * 刻意是空物件——一律回傳全部(§6:大量孤兒時**對帳**批次處理不阻塞啟動,
    * 但這裡的清單本身沒有分頁,復原視圖本身的分頁留給 UI 端做,見該 case 的
@@ -642,30 +436,9 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   z.object({ ...baseRequest, method: z.literal("recovery.continue"), params: z.object({ sessionId: z.string() }) }),
   /** 「接手(讀摘要重啟)」——一律可用(§5.2),見 RecoveryService.takeover()。 */
   z.object({ ...baseRequest, method: z.literal("recovery.takeover"), params: z.object({ sessionId: z.string() }) }),
-  /**
-   * 「重跑」前查看 worktree 現況——回傳 `git status --porcelain` + `git diff`
-   * (§5.2「先顯示 diff」)。`merging` 崩潰的任務改查 `baseDir`(§5.3「檢查 git
-   * 狀態」,不提供任何自動修復)。
-   */
-  z.object({ ...baseRequest, method: z.literal("recovery.gitStatus"), params: z.object({ sessionId: z.string() }) }),
-  /**
-   * 對髒 worktree 的強制前置流程(§5.2):`action: "keep"` 建 wip 分支並
-   * commit;`action: "discard"` 執行 `git reset --hard` + `git clean -fd`,
-   * 必須帶 `confirmDiscard: true`(二次確認)否則拒絕——**絕不默默丟棄**。
-   */
-  z.object({
-    ...baseRequest,
-    method: z.literal("recovery.resolveDirtyWorktree"),
-    params: RecoveryResolveDirtyWorktreeInputSchema,
-  }),
-  /**
-   * 「重跑」——要求 worktree 目前必須乾淨(呼叫前應已呼叫過
-   * `recovery.resolveDirtyWorktree` 處理過,或這條 session 原本就沒有 worktree/
-   * worktree 本來就乾淨)。**絕不默默在髒 worktree 上重跑**——髒時直接拋出
-   * 明確錯誤,不自動處理。
-   */
-  z.object({ ...baseRequest, method: z.literal("recovery.rerun"), params: z.object({ sessionId: z.string() }) }),
-  /** 「放棄」——session 標 `closed`;worktree/任務一律保留(§5.2,同 S3b「回收 ≠ 丟棄」)。 */
+  /** 「放棄」——session 標 `closed`(§5.2,同 S3b「回收 ≠ 丟棄」,對話紀錄保留)。
+   *  2026-10-02:原本還有 `recovery.rerun`/`recovery.gitStatus`/
+   *  `recovery.resolveDirtyWorktree`(任務 worktree 專用),已隨 task 一併移除。 */
   z.object({ ...baseRequest, method: z.literal("recovery.abandon"), params: z.object({ sessionId: z.string() }) }),
 ]);
 export type ClientRequest = z.infer<typeof ClientRequestSchema>;
@@ -701,19 +474,6 @@ export const ServerPushSchema = z.object({
     "session-updated",
     "session-list-updated",
     "permission-resolved",
-    /** M3 Round A:一筆 TeamMessage 被 MessageBus 持久化時推播給所有 client
-     * (ARCHITECTURE.md 4.2 節「所有訊息同步寫入 Event Log,並推播到 UI 的
-     * 團隊群聊視圖」)。群聊 UI 本身留給 Round B,這輪只確保 payload 送達。 */
-    "team-message",
-    /** M4 Round A:一個任務的狀態(或指派/刪除相關欄位)變更時推播給所有
-     * client(ARCHITECTURE.md 3.1 節「任務看板」M4 消費這個 channel;看板 UI
-     * 本身留給 Round B,這輪只確保 payload 送達)。 */
-    "task-updated",
-    /** M4 Round B 新增:任務被 task.delete 刪除時推播(payload:
-     * `{ id: string; teamId: string }`)—— "task-updated" 只在任務仍然存在、
-     * 欄位變更時觸發,刪除是另一種語意,看板 UI 需要明確訊號才能把已刪除的
-     * 任務從畫面上移除。 */
-    "task-deleted",
     /** S11(Notification)新增:升級/熔斷需要帶外通知人類時推播(payload 見
      *  notification.ts 的 `EnforcementNotificationPushSchema`)——Core 是
      *  headless、沒有 Electron API,實際的原生系統通知由 desktop renderer
@@ -946,81 +706,6 @@ export const ConfigSetFileResultSchema = z.object({
   requiresRestart: z.boolean(),
 });
 
-// ---- M3 Round A: Team / MessageBus result shapes -------------------------
-export const TeamCreateResultSchema = z.object({ team: TeamSchema });
-export const TeamListResultSchema = z.object({ teams: z.array(TeamWithMembersSchema) });
-export const TeamAddMemberResultSchema = z.object({ member: TeamMemberSchema });
-export const TeamMessagesResultSchema = z.object({ messages: z.array(TeamMessageSchema) });
-export const TeamTeammatesResultSchema = z.object({ teammates: z.array(TeammateInfoSchema) });
-/**
- * `team.delete` 的回應。刪除本身一定完成(不會因為有未提交變更就中止),這裡
- * 回報的是「順帶清掉了什麼」,讓 UI 能誠實告訴使用者代價:
- *  - `deletedTasks` / `deletedMembers`:一併刪掉的任務數與成員數。
- *  - `disposedSessions`:被中止的活躍 session 數(等於有幾個 agent 被停掉)。
- *  - `tasksWithUncommittedChanges`:worktree 內有未提交變更、仍被移除的任務標題
- *    ——這是唯一「真的可能失去工作成果」的部分,UI 應該明確顯示出來。
- */
-export const TeamDeleteResultSchema = z.object({
-  deletedTasks: z.number().int().nonnegative(),
-  deletedMembers: z.number().int().nonnegative(),
-  disposedSessions: z.number().int().nonnegative(),
-  tasksWithUncommittedChanges: z.array(z.string()),
-});
-export const MessageSendResultSchema = z.object({
-  message: TeamMessageSchema,
-  delivered: z.enum(["immediate", "queued", "no-session"]),
-  downgraded: z.boolean(),
-});
-
-export const MessageReportStatusResultSchema = z.object({ message: TeamMessageSchema });
-
-/** M4 Round B:message.requestReview 的回應(見 apps/core/src/bus/message-bus.ts 的 RequestReviewOutcome)。 */
-export const MessageRequestReviewResultSchema = z.object({
-  message: TeamMessageSchema,
-  delivered: z.enum(["immediate", "queued", "no-session"]),
-  downgraded: z.boolean(),
-  taskUpdated: z.boolean(),
-  taskFromStatus: TaskStatusSchema.optional(),
-  taskToStatus: TaskStatusSchema.optional(),
-  taskSkippedReason: z.string().optional(),
-});
-
-/** S2(message-budget):`message.sendMessage`/`message.broadcast` 的回應,
- *  形狀與 `message.send`(人類插話)的 `MessageSendResultSchema` 相同,直接
- *  複用。 */
-export const MessageSendMessageResultSchema = MessageSendResultSchema;
-export const MessageBroadcastResultSchema = MessageSendResultSchema;
-
-/** S2(message-budget):`message.getContextBudget` 的回應,見
- *  `MessageBus.getContextBudgetStatus()`。 */
-export const MessageGetContextBudgetResultSchema = z.object({
-  contextId: z.string(),
-  count: z.number().int().nonnegative(),
-  max: z.number().int().positive(),
-  tripped: z.boolean(),
-});
-
-// ---- M4 Round A: TaskService / WorkspaceManager result shapes -------------
-export const TaskCreateResultSchema = z.object({ task: TaskSchema });
-export const TaskListResultSchema = z.object({ tasks: z.array(TaskSchema) });
-export const TaskGetResultSchema = z.object({ task: TaskSchema });
-export const TaskAssignResultSchema = z.object({ task: TaskSchema, workspace: WorkspaceSchema });
-export const TaskUpdateStatusResultSchema = z.object({ task: TaskSchema });
-/** M4 Round B:task.merge 的回應 —— 成功時任務一定是 "done"(mergeAndComplete 的保證)。 */
-export const TaskMergeResultSchema = z.object({ task: TaskSchema });
-/** M4 Round B:task.delete 的回應多了 hadUncommittedChanges(見 WorkspaceManager.removeWorkspace)。 */
-export const TaskDeleteResultSchema = z.object({ ok: z.literal(true), hadUncommittedChanges: z.boolean() });
-/** M4 Round B:workspace.get 的回應。 */
-export const WorkspaceGetResultSchema = z.object({ workspace: WorkspaceSchema });
-/** M4 Round B:task-deleted server push 的 payload。 */
-export const TaskDeletedPushSchema = z.object({ id: z.string(), teamId: z.string() });
-/** S4:task.setAcceptance 的回應——回傳更新後的完整 Task。 */
-export const TaskSetAcceptanceResultSchema = z.object({ task: TaskSchema });
-/** S4:task.runAcceptance 的回應——見 `AcceptanceResultSchema`(task.ts)完整欄位說明。 */
-export const TaskRunAcceptanceResultSchema = z.object({ result: AcceptanceResultSchema });
-/** S5(dispose-gate):task.approveReview 的回應——回傳轉入 review 後的完整 Task。 */
-export const TaskApproveReviewResultSchema = z.object({ task: TaskSchema });
-
 /**
  * S3b(CostGovernor):`cost.getSummary` 的回應——見
  * apps/core/src/cost/cost-governor.ts 的 `CostGovernor.getSummary()`。
@@ -1036,15 +721,6 @@ const RollupSnapshotSchema = z.object({
 });
 export const CostGetSummaryResultSchema = z.object({
   session: RollupSnapshotSchema,
-  task: z
-    .object({
-      taskId: z.string(),
-      title: z.string(),
-      rollup: RollupSnapshotSchema,
-      /** 這個任務是否已觸發任務預算 trip(後續 prompt 已被擋下)。 */
-      tripped: z.boolean(),
-    })
-    .optional(),
   day: RollupSnapshotSchema,
   /** 今天是否已觸發每日 kill-switch(所有 session 的新 prompt 都會被擋下)。 */
   dailyTripped: z.boolean(),
@@ -1052,8 +728,8 @@ export const CostGetSummaryResultSchema = z.object({
 export type CostGetSummaryResult = z.infer<typeof CostGetSummaryResultSchema>;
 
 // ---- S6(crash-recovery)result shapes -------------------------------------
-export { RecoveryListResultSchema, RecoveryGitStatusResultSchema, RecoveryResolveDirtyWorktreeResultSchema };
-/** `recovery.continue` / `recovery.takeover` / `recovery.rerun` 都回傳更新後的完整 Session。 */
+export { RecoveryListResultSchema };
+/** `recovery.continue` / `recovery.takeover` 都回傳更新後的完整 Session。 */
 export const RecoverySessionResultSchema = z.object({ session: SessionSchema });
 export const RecoveryAbandonResultSchema = z.object({ ok: z.literal(true) });
 

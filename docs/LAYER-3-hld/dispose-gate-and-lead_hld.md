@@ -1,5 +1,7 @@
 # S5 HLD:Lead(AgentProfile)+ dispose-gate(收斂閘)
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 階段:**Phase 2**(L3 最後一份)｜對應 L1:**A1、A2**｜上層:[L2 §3](../LAYER-2-design-spec.md)、[DECISIONS §A](../DECISIONS.md)
 > 前置:[S8](./agent-lifecycle_hld.md)(Lead 長命=在線可達 + 外部記憶)、[S2](./message-budget_hld.md)(訊息受 context 預算)、[S4](./acceptance-gate_hld.md)(驗收閘)
 > **L2 定案的關鍵定性**:**Lead 不是 Core 模組,是一個 AgentProfile**(prompt/設定)。Core 淨新增的只有一層薄的 **dispose-gate**。若把 Lead 寫成 Core 程式,會蓋出一套確定性編排引擎,**正好違反 A2「LLM 提議」**。

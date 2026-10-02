@@ -10,9 +10,6 @@
     "unknownHandle": "No se encontró ninguna sesión en ejecución para: {{handleId}}",
     "missingConfig": "Al perfil \"{{profileId}}\" le falta la configuración requerida por {{software}}: {{configField}}"
   },
-  "task": {
-    "invalidTransition": "La tarea \"{{taskId}}\" no puede pasar de {{from}} a {{to}}"
-  },
   "auth": {
     "notYetAuthenticated": "Aún no se ha autenticado: el primer mensaje debe ser una solicitud auth con un token válido",
     "invalidToken": "Error de autenticación: token incorrecto",
@@ -20,16 +17,10 @@
   },
   "gateway": {
     "localOnlyMethod": "Esta operación solo está disponible en una conexión local: {{method}}",
-    "localOnlyField": "Esta operación no puede proporcionar «{{field}}» desde una conexión remota: {{method}}",
     "invalidRequest": "Solicitud no válida: {{detail}}"
   },
   "budget": {
-    "dailyLimitReached": "Se alcanzó el límite de presupuesto diario",
-    "taskLimitReached": "La tarea \"{{taskTitle}}\" alcanzó su límite de presupuesto"
-  },
-  "recovery": {
-    "discardConfirmRequired": "Se requiere confirmación antes de descartar los cambios",
-    "worktreeLost": "No se encontró el worktree: {{worktreePath}}"
+    "dailyLimitReached": "Se alcanzó el límite de presupuesto diario"
   },
   "internal": {
     "unexpected": "Se produjo un error inesperado"

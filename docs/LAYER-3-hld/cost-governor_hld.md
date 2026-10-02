@@ -1,5 +1,7 @@
 # S3b HLD:CostGovernor(成本治理 / 第三條斷路器)
 
+> ⚠️ 2026-10-02:本文件中與 team / 任務 / 任務 worktree 相關的部分已移除,見 [DECISIONS §H](../DECISIONS.md)(其餘部分仍有效)
+
 > 階段:**Phase 1**｜對應 L1:**E2、E3、E4**｜上層:[L2 §3](../LAYER-2-design-spec.md)、[DECISIONS §E](../DECISIONS.md)
 > 前置:[S3a](./usage-metering_hld.md)(量測半)、[S1](./policy-engine_hld.md)(共用底座 `trip`/`AuditLog`)、[S11](./notification_hld.md)(送達端)
 > 定位:三斷路器的**第三條**。S3a 把 token 攤在陽光下,S3b 決定**何時叫停**。

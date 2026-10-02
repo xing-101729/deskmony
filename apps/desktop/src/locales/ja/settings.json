@@ -38,8 +38,6 @@
     "authRateLimitMaxLabel": "認証失敗のしきい値(回)",
     "authRateLimitCooldownLabel": "認証のクールダウン期間(ms)",
     "defaultWorkingDirLabel": "デフォルトの作業ディレクトリ",
-    "taskWorktreesRootLabel": "タスク worktree のルート",
-    "taskWorktreesRootPlaceholder": "省略 = 既定のロジックを維持(team ごとに隣接する .deskmony-worktrees)",
     "staticDirLabel": "ブラウザ UI の静的ディレクトリ",
     "logLevelLabel": "Log レベル",
     "dataDirLabel": "SQLite データディレクトリ(読み取り専用)",

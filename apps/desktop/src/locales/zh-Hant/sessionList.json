@@ -1,9 +1,4 @@
 {
-  "nav": {
-    "session": "Session",
-    "teamChat": "團隊群聊",
-    "taskBoard": "任務看板"
-  },
   "connection": {
     "open": "已連線",
     "connecting": "連線中…",

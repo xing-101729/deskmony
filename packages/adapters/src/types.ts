@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, PromptInput, TeamBusPort } from "@deskmony/shared";
+import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, PromptInput } from "@deskmony/shared";
 import type { AdapterCapabilities } from "@deskmony/shared";
 
 /**
@@ -14,25 +14,6 @@ export type { AdapterCapabilities };
 export interface Workspace {
   /** 工作目錄的絕對路徑 */
   path: string;
-}
-
-/**
- * M3 Round A:session 建立時若屬於某個 team 成員,`SessionManager` 會把這個
- * context 傳給 `AgentAdapter.spawn()`。`ClaudeAgentSdkAdapter` 用它掛載
- * team-bus MCP 工具(見 packages/adapters/src/team-bus-mcp.ts);其餘 adapter
- * (ACP/PTY)這輪不掛 MCP,可以忽略這個參數。
- *
- * `bus` 是 `TeamBusPort`(定義在 packages/shared,而非 apps/core 的
- * MessageBus 具體類別)—— 依賴方向規則:packages/* 不得 import apps/*,
- * 這裡只依賴介面,實例由 apps/core 在建立 session 時注入(見
- * apps/core/src/session/session-manager.ts 的 setTeamBus()/teamBus 欄位)。
- */
-export interface TeamSpawnContext {
-  teamId: string;
-  memberId: string;
-  memberName: string;
-  memberRole: string;
-  bus: TeamBusPort;
 }
 
 /**
@@ -61,15 +42,14 @@ export interface ResumeOptions {
 
 export interface AgentAdapter {
   capabilities(): AdapterCapabilities;
-  spawn(profile: AgentProfile, workspace: Workspace, team?: TeamSpawnContext, resume?: ResumeOptions): Promise<AgentHandle>;
+  spawn(profile: AgentProfile, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle>;
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void;
   /** AgentEvent = 訊息增量 | 工具呼叫 | 權限請求 | 完成 | 錯誤 */
   events(handle: AgentHandle): AsyncIterable<AgentEvent>;
   /**
    * 中斷目前回合。回傳的 Promise 在「中斷確實生效、控制權已交還呼叫端」時才
-   * resolve(M3 Round B 修正,見 apps/core/src/bus/message-bus.ts 頂端註解的
-   * 「interrupt 時序」設計決策)——呼叫端(尤其是 MessageBus 的 interrupt
-   * 投遞路徑)必須先 await 這個 Promise 完成,才能安全地注入下一個 prompt,
+   * resolve(M3 Round B 修正的「interrupt 時序」設計決策)——呼叫端必須先
+   * await 這個 Promise 完成,才能安全地注入下一個 prompt,
    * 否則會與尚未真正停下的回合競爭(race)。各 adapter 對「生效」的定義依其
    * 協議能力而異(ClaudeAgentSdkAdapter 用 SDK 官方文件明載語意的
    * `Query.interrupt()` Promise;AcpAdapter/GenericPtyAdapter 沒有對應的

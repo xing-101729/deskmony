@@ -348,23 +348,6 @@ async function main() {
       record("斷言 G: session.list 含 parent+child", false, String(err));
     }
 
-    // ---- 斷言 H: 沒有建立任何 team/task ----
-    try {
-      const { teams } = await client.rpc("team.list", {});
-      const { sessions } = await client.rpc("session.list", {});
-      // 確認 session 清單裡 parent 與 child 都在
-      const parentOk = sessions.some((s) => s.id === parentId);
-      const childOk = sessions.some((s) => s.id === childId);
-      const okH = teams.length === 0 && parentOk && childOk;
-      record(
-        "斷言 H: 沒有建立任何 team/task, parent 與 child 均在 session.list 中",
-        okH,
-        `teams=${teams.length}`,
-      );
-    } catch (err) {
-      record("斷言 H: 無 team/task", false, String(err));
-    }
-
     // ---- 斷言 I: 最終父 session 回到 idle(注入後不會無限迴圈/卡 busy) ----
     try {
       const deadline = Date.now() + 10_000;

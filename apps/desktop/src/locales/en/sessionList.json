@@ -1,9 +1,4 @@
 {
-  "nav": {
-    "session": "Session",
-    "teamChat": "Team chat",
-    "taskBoard": "Task board"
-  },
   "connection": {
     "open": "Connected",
     "connecting": "Connecting…",

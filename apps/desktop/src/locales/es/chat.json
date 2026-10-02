@@ -38,18 +38,15 @@
     "customPlaceholder": "Escribe tu propia respuesta"
   },
   "usage": {
-    "cannotMeasureTitle": "Este backend no puede medir el costo (o aún no se ha confirmado si lo reportará) — el presupuesto de costo diario/de la tarea no aplica a esta sesión; solo el límite de tiempo por turno/número de llamadas a herramientas sigue protegiendo.",
+    "cannotMeasureTitle": "Este backend no puede medir el costo (o aún no se ha confirmado si lo reportará) — el presupuesto de costo diario no aplica a esta sesión; solo el límite de tiempo por turno/número de llamadas a herramientas sigue protegiendo.",
     "unknownLabel": "Costo desconocido",
     "cannotMeasureLabel": "No se puede medir el costo",
     "hasValueTitle": "Costo acumulado (este backend reporta el costo, S3a usage-metering)",
     "noValueYetTitle": "Este backend reporta el costo acumulado, pero esta sesión aún no ha recibido el primer valor (se envía al finalizar un turno)"
   },
   "cost": {
-    "taskTrippedLabel": "La tarea \"{{title}}\" alcanzó su límite de presupuesto — los nuevos prompts están bloqueados",
-    "taskBudgetPercentLabel": "Presupuesto de la tarea {{percent}}%",
     "dailyTrippedLabel": "El kill-switch de costo diario se activó — todas las sesiones están en pausa",
-    "trippedTitle": "Esta sesión/tarea fue detenida por el disyuntor de costo (el worktree/tarea se conserva — ajusta el presupuesto y reinicia core para continuar)",
-    "percentTitle": "Costo acumulado/uso de tokens a nivel de tarea como porcentaje del presupuesto"
+    "trippedTitle": "El kill-switch de costo diario se activó y los nuevos prompts están bloqueados (el historial de la conversación se conserva — ajusta el presupuesto y reinicia core para continuar)"
   },
   "empty": {
     "selectOrCreateSession": "Selecciona o crea una conversación en el panel izquierdo para comenzar",

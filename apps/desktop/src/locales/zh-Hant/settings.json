@@ -38,8 +38,6 @@
     "authRateLimitMaxLabel": "認證失敗門檻(次)",
     "authRateLimitCooldownLabel": "認證冷卻期(ms)",
     "defaultWorkingDirLabel": "預設工作目錄",
-    "taskWorktreesRootLabel": "任務 worktree 根目錄",
-    "taskWorktreesRootPlaceholder": "省略 = 維持既有算法(每個 team 各自旁邊的 .deskmony-worktrees)",
     "staticDirLabel": "瀏覽器 UI 靜態目錄",
     "logLevelLabel": "Log 等級",
     "dataDirLabel": "SQLite 資料目錄(唯讀)",

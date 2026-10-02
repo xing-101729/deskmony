@@ -248,7 +248,6 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
   const [rateLimitMax, setRateLimitMax] = useState(String(config.daemon.authRateLimit.max.value));
   const [rateLimitCooldownMs, setRateLimitCooldownMs] = useState(String(config.daemon.authRateLimit.cooldownMs.value));
   const [defaultWorkingDir, setDefaultWorkingDir] = useState(config.workspace.defaultWorkingDir.value);
-  const [worktreesRoot, setWorktreesRoot] = useState(config.workspace.worktreesRoot.value ?? "");
   const [staticDir, setStaticDir] = useState(config.features.staticDir.value ?? "");
   const [logLevel, setLogLevel] = useState(config.log.level.value);
   const [saving, setSaving] = useState(false);
@@ -278,9 +277,6 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
       }
       if (config.workspace.defaultWorkingDir.source !== "env" && defaultWorkingDir !== config.workspace.defaultWorkingDir.value) {
         patch.workspace = { ...patch.workspace, defaultWorkingDir };
-      }
-      if (worktreesRoot.trim() && worktreesRoot !== (config.workspace.worktreesRoot.value ?? "")) {
-        patch.workspace = { ...patch.workspace, worktreesRoot: worktreesRoot.trim() };
       }
       if (config.features.staticDir.source !== "env" && staticDir.trim() && staticDir !== (config.features.staticDir.value ?? "")) {
         patch.features = { staticDir: staticDir.trim() };
@@ -347,9 +343,6 @@ function GlobalConfigSection({ config }: { config: EffectiveCoreConfig }): JSX.E
         lockedReason={t("settings:global.lockedByEnvVar", { envVarName: "DESKMONY_WORKSPACE" })}
       >
         <Input mono value={defaultWorkingDir} onChange={(e) => setDefaultWorkingDir(e.target.value)} disabled={config.workspace.defaultWorkingDir.source === "env"} />
-      </ConfigFieldRow>
-      <ConfigFieldRow label={t("settings:global.taskWorktreesRootLabel")} source={config.workspace.worktreesRoot.source} locked={false}>
-        <Input mono value={worktreesRoot} onChange={(e) => setWorktreesRoot(e.target.value)} placeholder={t("settings:global.taskWorktreesRootPlaceholder")} />
       </ConfigFieldRow>
       <ConfigFieldRow
         label={t("settings:global.staticDirLabel")}

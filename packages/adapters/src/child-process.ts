@@ -41,12 +41,12 @@ export function killProcessTree(child: ChildProcess): void {
  *
  * 「送出終止指令」不等於「子程序已經死掉」——在 Windows 上,行程要再過一小段
  * 時間才會釋放它對 cwd(= 任務 worktree)的佔用。若 `dispose()` 在此之前就
- * resolve,呼叫端(TaskService.deleteTask → WorkspaceManager.removeWorkspace)
+ * resolve,呼叫端(原任務刪除流程(2026-10-02 已移除,見 docs/DECISIONS.md §H))
  * 會立刻 `git worktree remove`,撞上 `Permission denied` / `EBUSY`。
  *
  * 已經退出時立即回傳;逾時則**放棄等待且不丟錯**——呼叫端不該因為「等不到
- * 子程序死透」而失敗,這是 fail-safe 方向:最壞情況退回 WorkspaceManager
- * 既有的 worktree 刪除重試機制。
+ * 子程序死透」而失敗,這是 fail-safe 方向:最壞情況退回呼叫端
+ * 自己的重試機制。
  */
 export function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();

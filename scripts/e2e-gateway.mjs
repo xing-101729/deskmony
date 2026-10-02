@@ -42,7 +42,6 @@ import {
   DIFF_CONTENT_PREFIX,
   CALL_BRIDGE_TOOL_PREFIX,
   REPORT_MCP_SERVERS_PREFIX,
-  delayEchoMarker,
 } from "./fake-acp-agent.mjs";
 import { FAKE_OPENCODE_REPLY_CHUNKS, TOOL_CALL_PREFIX, SLOW_PREFIX, TEST_COMMANDS } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
@@ -64,7 +63,7 @@ const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 //
 // 分類原則(對應 README「端到端冒煙測試」章節的完整說明):
 //   - deterministic:結果不受「真實模型當輪自由選擇怎麼講/怎麼做」影響 ——
-//     即使底層真的起了一個 Claude SDK session(例如步驟 3/4/6/13a/14a-e),
+//     即使底層真的起了一個 Claude SDK session(例如步驟 3/4/6),
 //     只要斷言的是「系統行為」(協定/事件順序、side effect 是否發生、
 //     session 狀態機是否卡死、DB 是否落地)而不是「模型自由選擇的用詞/是否
 //     照做」,就算 deterministic。
@@ -80,17 +79,8 @@ const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 //     是否會重試/换句話說法再問一次」——這是模型的自由選擇,决定了整個檢查
 //     點在時間預算內能不能收斂,已實測連續執行時偶發單獨 FAIL(見 README
 //     「e2e 的殘留 flakiness」),因此整組列為 model-behavior。
-//   - 步驟13b:斷言「模型實際呼叫了 send_message 工具」,直接是模型的自由
-//     選擇(模型當輪可能選擇不呼叫任何工具),已知 flake。
-//   - 步驟14f:斷言「原本冗長任務確實被中斷」,依賴模型在送出 interrupt
-//     前累積了多少內容、以及模型是否還在繼續原任務,屬於模型行為的時間點
-//     巧合,不是系統本身的行為保證(系統保證是14c/14d/14e這三個硬性子步驟)。
-//   - 步驟14g:斷言「後續 assistant 回覆提及注入的確認碼」,直接是模型是否
-//     照字面回覆的自由選擇,已知 flake(比照步驟5/13)。
-//   14c/14d/14e 雖然也依賴一個真實、正在忙碌中的 Claude SDK session,但斷言
-//   的是「訊息是否被注入 session.history」「priority 是否被降級」「session
-//   是否最終回到 idle」—— 這些是程式碼路徑本身的行為保證,不受模型是否遵從
-//   指令影響,因此維持 deterministic。
+//   (2026-10-02:原本還有步驟 13b/14f/14g 三個 model-behavior 檢查點,都是
+//   team 專屬測試,已隨 team 一併移除,見 docs/DECISIONS.md §H。)
 // ---------------------------------------------------------------------
 const CLI_ONLY_ARG = process.argv.find((a) => a.startsWith("--only="));
 const ONLY_MODE = CLI_ONLY_ARG ? CLI_ONLY_ARG.slice("--only=".length).trim() : undefined;
@@ -278,9 +268,6 @@ class GatewayClient {
     /** @type {{sessionId:string, requestId:string, decision:string, source:string}[]} */
     this.permissionResolvedEvents = [];
     this.permissionResolvedWaiters = [];
-    /** M4 Round A(步驟15):"task-updated" 推播(TaskService.emit → WsGateway.broadcast)。 */
-    this.taskUpdates = [];
-    this.taskUpdateWaiters = [];
   }
 
   async connect() {
@@ -335,9 +322,6 @@ class GatewayClient {
       } else if (msg.channel === "permission-resolved") {
         this.permissionResolvedEvents.push(msg.payload);
         for (const w of [...this.permissionResolvedWaiters]) w(msg.payload);
-      } else if (msg.channel === "task-updated") {
-        this.taskUpdates.push(msg.payload);
-        for (const w of [...this.taskUpdateWaiters]) w(msg.payload);
       }
       // session-list-updated: 不需要
     }
@@ -360,26 +344,6 @@ class GatewayClient {
         }
       };
       this.permissionResolvedWaiters.push(waiter);
-    });
-  }
-
-  /** 等待符合 predicate 的 task-updated 推播(步驟15用)。 */
-  waitForTaskUpdate(predicate, timeoutMs) {
-    const existing = this.taskUpdates.find(predicate);
-    if (existing) return Promise.resolve(existing);
-    return new Promise((resolve, reject) => {
-      const t = setTimeout(() => {
-        this.taskUpdateWaiters = this.taskUpdateWaiters.filter((w) => w !== waiter);
-        reject(new Error(`等待 task-updated 事件逾時 (${timeoutMs}ms)`));
-      }, timeoutMs);
-      const waiter = (payload) => {
-        if (predicate(payload)) {
-          clearTimeout(t);
-          this.taskUpdateWaiters = this.taskUpdateWaiters.filter((w) => w !== waiter);
-          resolve(payload);
-        }
-      };
-      this.taskUpdateWaiters.push(waiter);
     });
   }
 
@@ -775,546 +739,6 @@ async function waitForTerminalText(client, sessionId, predicate, timeoutMs) {
   }
 }
 
-/**
- * 等待某個 session 收到一則 message-delta 事件,其 delta 內含指定子字串
- * (M3 Round A 步驟 12 用:fake ACP agent 的 DELAY_ECHO 回顯是單一 chunk,
- * 不需要像 waitForTerminalText 那樣累積多個片段)。用 substring 而不是
- * exact match,因為 MessageBus 注入時會在原始內容外包一層「來自 @X(角色)
- * 的訊息:」的格式化文字。
- */
-async function waitForMessageContaining(client, sessionId, substring, timeoutMs) {
-  return client.waitForEvent(
-    (e) =>
-      e.sessionId === sessionId &&
-      e.event.type === "message-delta" &&
-      typeof e.event.delta === "string" &&
-      e.event.delta.includes(substring),
-    timeoutMs,
-  );
-}
-
-// ---------------------------------------------------------------------
-// 步驟 12: MessageBus(M3 Round A,決定性測試,不依賴外部模型)
-//
-// 用兩個(後面再加一個)software="acp" 的 fake-acp-agent 成員組成一個 team,
-// 全程透過 gateway 的 team.*/message.send 方法測試 MessageBus 的投遞策略
-// (ARCHITECTURE.md 4.2 節):idle 立即注入、busy 排隊 + completed 後批次
-// 注入、priority=interrupt 的 canInterrupt 權限檢查、無活躍 session 時留在
-// Mailbox 並在 session 建立後補投。fake-acp-agent.mjs 的 DELAY_ECHO 標記
-// (delayEchoMarker())讓它把「完整收到的 prompt」加上 "ECHO:" 前綴延遲回顯,
-// 藉此驗證 MessageBus 注入的 prompt 確實送達,並用可控延遲製造 busy 視窗 ——
-// 全程不叫任何真實模型,結果應為 100% 決定性。
-// ---------------------------------------------------------------------
-async function messageBusSmokeTest(client, workspaceDir) {
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
-  const makeAcpProfileInput = (name) => ({
-    name,
-    software: "acp",
-    workingDir: workspaceDir,
-    acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-  });
-
-  let teamId;
-  let coderProfileId;
-  let reviewerProfileId;
-  let coderMemberId;
-  let reviewerMemberId;
-  let coderSessionId;
-  let reviewerSessionId;
-  let qaSessionId;
-
-  // ---- 12a: 建 team + 兩個 acp fake-agent 成員與各自的 session ----
-  try {
-    const team = await client.rpc("team.create", { name: "E2E MessageBus Team" });
-    teamId = team.team.id;
-
-    const coderProfile = await client.rpc("profile.create", makeAcpProfileInput("E2E Bus Coder"));
-    const reviewerProfile = await client.rpc("profile.create", makeAcpProfileInput("E2E Bus Reviewer"));
-    coderProfileId = coderProfile.profile.id;
-    reviewerProfileId = reviewerProfile.profile.id;
-
-    const coderMember = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: coderProfileId,
-      name: "Coder",
-      role: "Coder",
-      canInterrupt: false,
-    });
-    const reviewerMember = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: reviewerProfileId,
-      name: "Reviewer",
-      role: "Reviewer",
-      canInterrupt: true,
-    });
-    coderMemberId = coderMember.member.id;
-    reviewerMemberId = reviewerMember.member.id;
-
-    const coderSession = await client.rpc(
-      "session.create",
-      { agentProfileId: coderProfileId, workingDir: workspaceDir, title: "e2e-bus-coder", teamMemberId: coderMemberId },
-      30_000,
-    );
-    const reviewerSession = await client.rpc(
-      "session.create",
-      {
-        agentProfileId: reviewerProfileId,
-        workingDir: workspaceDir,
-        title: "e2e-bus-reviewer",
-        teamMemberId: reviewerMemberId,
-      },
-      30_000,
-    );
-    coderSessionId = coderSession.session.id;
-    reviewerSessionId = reviewerSession.session.id;
-
-    record(
-      "步驟12a 建立 team + 兩個 acp fake-agent 成員與各自的 session(teamMemberId 綁定)",
-      true,
-      `teamId=${teamId}, coderMemberId=${coderMemberId}, reviewerMemberId=${reviewerMemberId}, coderSessionId=${coderSessionId}, reviewerSessionId=${reviewerSessionId}`,
-    );
-  } catch (err) {
-    record("步驟12a 建立 team + 兩個 acp fake-agent 成員與各自的 session", false, String(err));
-    return;
-  }
-
-  // ---- 12b: idle 成員立即注入 ----
-  try {
-    const content = `idle-test-${randomUUID()} ${delayEchoMarker(0)}`;
-    const sendResult = await client.rpc("message.send", { teamId, to: "Coder", content, fromName: "Tester" });
-
-    const ev = await waitForMessageContaining(client, coderSessionId, content, 15_000);
-    const echoed = ev.event.delta;
-    const wrapperOk = echoed.includes("來自 @Tester") && echoed.includes(content);
-    // 2026-08-28:注入的 prompt 會附一句「回覆指引」。收訊者是 acp(有掛
-    // team-bus 工具,見 SOFTWARE_WITH_TEAM_BUS),且發送者是人類(沒有對應的
-    // TeamMember 可以被 send_message 指名),所以應該指引它用 broadcast——
-    // 且**不可**出現「沒有團隊訊息工具」那句(那是給 opencode/pty 的,見 12f)。
-    const replyHintOk = echoed.includes("broadcast") && !echoed.includes("沒有團隊訊息工具");
-    // 2026-08-31:這是一對一訊息(to:"Coder"),注入文字必須明講「專門發給你的」、
-    // 不可標成廣播;而且措辭要中性——保留「不必為了回覆而回覆」這句,不能退回成
-    // 無條件催促回覆的版本(見 message-bus.ts replyHint() 註解)。
-    const directScopeOk = echoed.includes("專門發給你的") && !echoed.includes("[廣播]");
-    const neutralToneOk = echoed.includes("不必為了回覆而回覆");
-
-    const historyResult = await client.rpc("team.messages", { teamId });
-    const persisted = historyResult.messages.find((m) => m.content === content);
-    const notFlaggedBroadcast = persisted?.isBroadcast === false;
-
-    record(
-      "步驟12b MessageBus:idle 成員立即以 prompt 注入(fake ACP agent 回顯驗證確實收到),附上正確的回覆指引(acp → broadcast 工具),標示為「專門發給你的」而非廣播,且措辭中性(明講不必為回覆而回覆)",
-      sendResult.delivered === "immediate" &&
-        wrapperOk &&
-        replyHintOk &&
-        directScopeOk &&
-        neutralToneOk &&
-        notFlaggedBroadcast &&
-        Boolean(persisted) &&
-        persisted?.to === "Coder",
-      `delivered=${sendResult.delivered}, replyHintOk=${replyHintOk}, directScopeOk=${directScopeOk}, ` +
-        `neutralToneOk=${neutralToneOk}, isBroadcast=${persisted?.isBroadcast}, echoed=${JSON.stringify(echoed)}`,
-    );
-  } catch (err) {
-    record("步驟12b MessageBus:idle 成員立即以 prompt 注入", false, String(err));
-  }
-
-  // ---- 12c: busy 成員排隊,completed 後批次合併注入 ----
-  try {
-    // 先讓 Reviewer 忙碌:直接送一個延遲 2500ms 才回覆的 prompt(不經過 bus),
-    // session.sendPrompt 的 RPC 回應前就已經把狀態切成 busy(見
-    // SessionManager.sendPrompt:persist + setStatus("busy") 都在 RPC 回應前 await 完)。
-    const primeMarker = delayEchoMarker(2500);
-    await client.rpc("session.sendPrompt", { sessionId: reviewerSessionId, prompt: { text: `priming ${primeMarker}` } });
-
-    const msg1Content = `queued-1-${randomUUID()} ${delayEchoMarker(0)}`;
-    const msg2Content = `queued-2-${randomUUID()} ${delayEchoMarker(0)}`;
-    const send1 = await client.rpc("message.send", { teamId, to: "Reviewer", content: msg1Content, fromName: "Tester" });
-    const send2 = await client.rpc("message.send", { teamId, to: "Reviewer", content: msg2Content, fromName: "Tester" });
-    const queuedOk = send1.delivered === "queued" && send2.delivered === "queued";
-
-    // 等 priming 那輪完成(~2.5s)、MessageBus 偵測到 idle 後應該批次注入上面
-    // 兩則排隊訊息成單一 prompt,fake agent 會把整段批次 prompt 回顯。
-    const batchEvent = await waitForMessageContaining(client, reviewerSessionId, msg2Content, 15_000);
-    const batchText = batchEvent.event.delta;
-    const batchOk = batchText.includes(msg1Content) && batchText.includes(msg2Content);
-
-    record(
-      "步驟12c MessageBus:busy 成員排隊(mailbox),回合 completed 轉 idle 後批次合併成單一 prompt 注入",
-      queuedOk && batchOk,
-      `send1.delivered=${send1.delivered}, send2.delivered=${send2.delivered}, batchText 片段=${JSON.stringify(batchText.slice(0, 220))}`,
-    );
-  } catch (err) {
-    record("步驟12c MessageBus:busy 成員排隊,completed 後批次合併注入", false, String(err));
-  }
-
-  // ---- 12d: priority=interrupt 的 canInterrupt 權限檢查 ----
-  try {
-    // Coder(canInterrupt=false)嘗試 interrupt → 應被降級為 normal 並標註。
-    const downgradeContent = `interrupt-downgrade-${randomUUID()} ${delayEchoMarker(0)}`;
-    const downgradeResult = await client.rpc("message.send", {
-      teamId,
-      to: "Reviewer",
-      content: downgradeContent,
-      priority: "interrupt",
-      fromName: "Coder",
-    });
-
-    // Reviewer(canInterrupt=true)使用 interrupt → 應維持 interrupt,不降級。
-    const allowContent = `interrupt-allowed-${randomUUID()} ${delayEchoMarker(0)}`;
-    const allowResult = await client.rpc("message.send", {
-      teamId,
-      to: "Coder",
-      content: allowContent,
-      priority: "interrupt",
-      fromName: "Reviewer",
-    });
-
-    const downgradeOk =
-      downgradeResult.downgraded === true &&
-      downgradeResult.message.priority === "normal" &&
-      typeof downgradeResult.message.note === "string" &&
-      downgradeResult.message.note.includes("canInterrupt=false");
-    const allowOk = allowResult.downgraded === false && allowResult.message.priority === "interrupt";
-
-    record(
-      "步驟12d MessageBus:priority=interrupt 權限檢查(canInterrupt=false 自動降級為 normal 並標註;canInterrupt=true 維持 interrupt)",
-      downgradeOk && allowOk,
-      `downgrade: downgraded=${downgradeResult.downgraded}, priority=${downgradeResult.message.priority}, note=${JSON.stringify(downgradeResult.message.note)}; allow: downgraded=${allowResult.downgraded}, priority=${allowResult.message.priority}`,
-    );
-  } catch (err) {
-    record("步驟12d MessageBus:priority=interrupt 權限檢查", false, String(err));
-  }
-
-  // ---- 12e: 目標成員沒有活躍 session 時留在 Mailbox,session 建立後自動補投 ----
-  try {
-    const qaProfile = await client.rpc("profile.create", makeAcpProfileInput("E2E Bus QA"));
-    const qaMember = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: qaProfile.profile.id,
-      name: "QA",
-      role: "QA",
-      canInterrupt: false,
-    });
-
-    const noSessionContent = `no-session-${randomUUID()} ${delayEchoMarker(0)}`;
-    const noSessionResult = await client.rpc("message.send", {
-      teamId,
-      to: "QA",
-      content: noSessionContent,
-      fromName: "Tester",
-    });
-
-    const qaSession = await client.rpc(
-      "session.create",
-      { agentProfileId: qaProfile.profile.id, workingDir: workspaceDir, title: "e2e-bus-qa", teamMemberId: qaMember.member.id },
-      30_000,
-    );
-    qaSessionId = qaSession.session.id;
-
-    const flushedEvent = await waitForMessageContaining(client, qaSessionId, noSessionContent, 15_000);
-
-    record(
-      "步驟12e MessageBus:目標成員沒有活躍 session 時留在 Mailbox,session 建立後自動補投",
-      noSessionResult.delivered === "no-session" && Boolean(flushedEvent),
-      `delivered=${noSessionResult.delivered}, 補投內容片段=${JSON.stringify((flushedEvent?.event.delta ?? "").slice(0, 200))}`,
-    );
-  } catch (err) {
-    record("步驟12e MessageBus:目標成員沒有活躍 session 時留在 Mailbox,session 建立後自動補投", false, String(err));
-  }
-
-  // ---- 12b2: 廣播訊息必須看得出是廣播(2026-08-31)----
-  // 這正是先前漏掉的那個缺口:`deliverBroadcast()` 投遞時把廣播展開成 N 筆、
-  // 每筆 `to` 改寫成個別收件者,於是 `to === "broadcast"` 永遠不成立,
-  // `[廣播]` 標籤形同失效 —— agent 收到廣播時看起來就像有人專程找它,分不出
-  // 「全隊都收到了」。改用持久化的 `isBroadcast` 旗標後,這裡把兩件事都釘住:
-  // ①DB 裡確實標成廣播;②注入文字要讓 agent 看得出來、並提醒不必每個人都回。
-  try {
-    const bcContent = `broadcast-scope-${randomUUID().slice(0, 8)} ${delayEchoMarker(0)}`;
-    await client.rpc("message.send", { teamId, to: "broadcast", content: bcContent, fromName: "Tester" });
-
-    const bcEv = await waitForMessageContaining(client, coderSessionId, bcContent, 15_000);
-    const bcEchoed = bcEv.event.delta;
-    const labelledBroadcast = bcEchoed.includes("[廣播]");
-    const saysWholeTeam = bcEchoed.includes("發給全隊的廣播");
-    const saysNotEveryoneNeedsToReply = bcEchoed.includes("通常不需要每個人都回應");
-    // **不可**同時說成「專門發給你的」——那是一對一才對的措辭。
-    const notMislabelledDirect = !bcEchoed.includes("專門發給你的");
-
-    const bcHistory = await client.rpc("team.messages", { teamId });
-    const bcRows = bcHistory.messages.filter((m) => m.content === bcContent);
-    // 展開成 N 筆(收件者各一筆),每筆的 to 是個別成員名字、且都標記為廣播。
-    const expandedPerRecipient = bcRows.length >= 2 && bcRows.every((m) => m.to !== "broadcast");
-    const allFlaggedBroadcast = bcRows.length > 0 && bcRows.every((m) => m.isBroadcast === true);
-
-    record(
-      "步驟12b2 MessageBus:廣播展開成 N 筆後仍標記為廣播(isBroadcast 持久化),注入文字讓 agent 看得出「發給全隊」並提醒不必每個人都回——修正前 to 被改寫成收件者名字,廣播這個事實在投遞路徑上整個消失",
-      labelledBroadcast &&
-        saysWholeTeam &&
-        saysNotEveryoneNeedsToReply &&
-        notMislabelledDirect &&
-        expandedPerRecipient &&
-        allFlaggedBroadcast,
-      `labelled=${labelledBroadcast}, saysWholeTeam=${saysWholeTeam}, notEveryone=${saysNotEveryoneNeedsToReply}, ` +
-        `notMislabelledDirect=${notMislabelledDirect}, rows=${bcRows.length}, allFlagged=${allFlaggedBroadcast}, ` +
-        `echoed=${JSON.stringify(bcEchoed.slice(0, 400))}`,
-    );
-  } catch (err) {
-    record("步驟12b2 MessageBus:廣播訊息可被辨識為廣播", false, String(err));
-  }
-
-  // ---- 12f: 回覆指引依收訊者的 software 而變(2026-08-28,使用者實測回報)----
-  // 12b 已驗證正向情境(acp,有掛 team-bus → 指引呼叫 broadcast)。這裡驗證
-  // **負向**情境:software="pty" 的成員架構上沒有任何工具通道(見
-  // packages/adapters/src/pty-adapter.ts 檔頭),絕不能叫它去呼叫不存在的
-  // 工具——否則它會反覆嘗試然後困惑地卡住(這正是這輪要修的真實問題)。
-  // 用既有的 fake-pty-echo.mjs(步驟10 的同一支)把注入的 prompt 回顯出來,
-  // 走 terminal-data 事件斷言,不依賴任何真實模型行為。
-  let ptyBusSessionId;
-  try {
-    const ptyBusProfile = await client.rpc("profile.create", {
-      name: "E2E Bus PTY Member",
-      software: "pty",
-      workingDir: workspaceDir,
-      ptyConfig: { command: process.execPath, args: [path.join(REPO_ROOT, "scripts", "fake-pty-echo.mjs")] },
-    });
-    const ptyMember = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: ptyBusProfile.profile.id,
-      name: "PtyMember",
-      role: "Coder",
-      canInterrupt: false,
-    });
-    const ptySession = await client.rpc(
-      "session.create",
-      {
-        agentProfileId: ptyBusProfile.profile.id,
-        workingDir: workspaceDir,
-        title: "e2e-bus-pty",
-        teamMemberId: ptyMember.member.id,
-      },
-      30_000,
-    );
-    ptyBusSessionId = ptySession.session.id;
-
-    await waitForTerminalText(client, ptyBusSessionId, (buf) => buf.includes("READY"), 15_000);
-
-    const ptyContent = `pty-hint-${randomUUID().slice(0, 8)}`;
-    await client.rpc("message.send", { teamId, to: "PtyMember", content: ptyContent, fromName: "Tester" });
-
-    const terminalBuf = await waitForTerminalText(
-      client,
-      ptyBusSessionId,
-      (buf) => buf.includes(ptyContent),
-      15_000,
-    );
-    // 訊息本體照樣送達(pty 成員仍然收得到訊息,只是回不了話),但指引必須是
-    // 「沒有工具」那句,且**絕不能**出現叫它呼叫 broadcast/send_message 的字樣。
-    const contentDelivered = terminalBuf.includes(ptyContent);
-    const saysNoTools = terminalBuf.includes("沒有團隊訊息工具");
-    const noToolInstruction = !terminalBuf.includes("回覆請呼叫");
-
-    record(
-      "步驟12f MessageBus:回覆指引依收訊者 software 而變——pty 成員(架構上沒有工具通道)收到的是「沒有團隊訊息工具」的如實告知,不會被叫去呼叫不存在的工具",
-      contentDelivered && saysNoTools && noToolInstruction,
-      `contentDelivered=${contentDelivered}, saysNoTools=${saysNoTools}, noToolInstruction=${noToolInstruction}, ` +
-        `terminal=${JSON.stringify(terminalBuf.slice(-400))}`,
-    );
-  } catch (err) {
-    record("步驟12f MessageBus:回覆指引依收訊者 software 而變(pty 負向情境)", false, String(err));
-  }
-
-  // ---- 12g: 清理 ----
-  const createdSessions = [coderSessionId, reviewerSessionId, qaSessionId, ptyBusSessionId].filter(Boolean);
-  try {
-    for (const sid of createdSessions) {
-      try {
-        await client.rpc("session.delete", { sessionId: sid });
-      } catch (err) {
-        log(`[cleanup] 刪除步驟12 session(${sid})時發生錯誤(忽略): ${err}`);
-      }
-    }
-    const listAfter = await client.rpc("session.list", {});
-    const stillThere = createdSessions.filter((sid) => listAfter.sessions.some((s) => s.id === sid));
-    record(
-      "步驟12g MessageBus 測試清理 session",
-      stillThere.length === 0,
-      `已嘗試刪除 ${createdSessions.length} 個 session,刪除後仍存在: ${JSON.stringify(stillThere)}`,
-    );
-  } catch (err) {
-    record("步驟12f MessageBus 測試清理 session", false, String(err));
-  }
-}
-
-// ---------------------------------------------------------------------
-// 步驟 13: team-bus MCP 工具(M3 Round A,真實模型,允許軟性判定 —— 比照
-// 步驟 5 的處理方式:模型偶發不呼叫工具視為已知 flake,如實記錄)
-//
-// 建一個含 Claude SDK 成員的 team,要求模型呼叫 send_message MCP 工具傳訊給
-// "Reviewer",斷言 team_messages 出現該訊息且 to/content 正確。Reviewer 不
-// 需要真的建立 session(send_message 只要求對方是已知的 team member 名稱),
-// 這樣可以只驗證「工具呼叫 → MessageBus.sendMessage() → 落地 team_messages」
-// 這條路徑,不受第二個 session 的模型行為影響。
-// ---------------------------------------------------------------------
-async function teamBusMcpToolSmokeTest(client, workspaceDir, defaultProfile) {
-  let teamId;
-  let coderSessionId;
-  let repoDir;
-  let taskId;
-  const FIXED_TEXT = `STATUS_UPDATE_${randomUUID().slice(0, 8)}`;
-
-  try {
-    // S2(message-budget)L4 §2:send_message 現在需要發送者當下綁定一個進行中
-    // 任務(assigned/in-progress/review/merging)才能推導出 contextId,否則
-    // 一律拒收(見 apps/core/src/bus/message-bus.ts 的 `deriveContextId()`)。
-    // 這個 team 需要真的 git repo 當 workingDir 才能 task.assign(比照步驟15a
-    // 的既有先例,見上方 `runGitSync`/`taskWorkspaceSmokeTest`),否則13b(即使
-    // 模型真的呼叫了 send_message)會被 contextId 推導拒收,把「已知 flake」
-    // 變成「保證失敗」。
-    const gitVersion = runGitSync(["--version"], process.cwd());
-    if (gitVersion.status !== 0) {
-      record("步驟13a(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
-      return;
-    }
-    repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-mcp-team-"));
-    runGitSync(["init"], repoDir);
-    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-    writeFileSync(path.join(repoDir, "README.md"), "# e2e team-bus mcp repo\n", "utf8");
-    runGitSync(["add", "."], repoDir);
-    runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-    const team = await client.rpc("team.create", { name: "E2E MCP Team", workingDir: repoDir });
-    teamId = team.team.id;
-
-    // S8(agent-lifecycle):role="Coder" 預設推導為 lifecycle="ephemeral",而
-    // ephemeral 成員被 `task.assign` 指派時 `TaskService.assignTask()` 會**自動
-    // spawn 一個 session**(cwd = 剛建立的 worktree)。這個測試緊接著又自己
-    // `session.create` 了一個掛在同一個 memberId 上的 session —— 於是同一個成員
-    // 身上有兩個 session,但 `SessionManager.memberSessions` 是
-    // `Map<memberId, sessionId>`(一個成員只記得住一個),後建立的把自動 spawn
-    // 的那個蓋掉了。結果是收尾時 `task.delete` → `disposeSessionForMember()`
-    // 只 dispose 得到後者,自動 spawn 的那個 session 沒人管、繼續佔住 worktree,
-    // `git worktree remove` 失敗,worktree 每跑一次就殘留一份。
-    // 明確指定 persistent 讓 assignTask() 略過自動 spawn(見
-    // agent-lifecycle_detail.md §2.1「persistent:不做任何事」),回到「這個測試
-    // 只需要一個自己建立的 session」的原意——比照步驟16 與 e2e-message-budget
-    // 測試 B 的既有先例。這個測試要驗證的是 team-bus MCP 工具與 contextId 推導,
-    // 與 lifecycle 無關。
-    const coderMember = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: defaultProfile.id,
-      name: "Coder",
-      role: "Coder",
-      canInterrupt: false,
-      lifecycle: "persistent",
-    });
-    await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: defaultProfile.id,
-      name: "Reviewer",
-      role: "Reviewer",
-      canInterrupt: false,
-    });
-
-    // 建一個任務並指派給 coderMember(assigned 狀態,落在 §2「推導規則」允許
-    // 的狀態集合內),讓 send_message/broadcast 的 contextId 能被推導出來。
-    const task = await client.rpc("task.create", { teamId, title: "E2E MCP Task" });
-    taskId = task.task.id; // 收尾要 task.delete 掉它才會清掉 worktree,見下方 cleanup 區塊
-    await client.rpc("task.assign", { taskId, memberId: coderMember.member.id });
-
-    const coderSession = await client.rpc(
-      "session.create",
-      {
-        agentProfileId: defaultProfile.id,
-        workingDir: workspaceDir,
-        title: "e2e-mcp-coder",
-        teamMemberId: coderMember.member.id,
-      },
-      30_000,
-    );
-    coderSessionId = coderSession.session.id;
-
-    record(
-      "步驟13a 建立含 Claude SDK 成員的 team + session(ClaudeAgentSdkAdapter 掛載 team-bus MCP)+ 指派任務(S2 contextId 推導所需)",
-      true,
-      `teamId=${teamId}, sessionId=${coderSessionId}, taskId=${taskId}`,
-    );
-  } catch (err) {
-    record("步驟13a 建立含 Claude SDK 成員的 team + session", false, String(err));
-    return;
-  }
-
-  // 13b:model-behavior —— 直接斷言「模型是否選擇呼叫 send_message 工具」,
-  // 是模型的自由選擇,已知 flake(比照步驟5)。--only=deterministic 時整個
-  // 跳過(不送出這個 prompt,不消耗一輪真實模型呼叫);13a 建立的 team/session
-  // 仍會在 finally 被清理。
-  if (shouldRun("model-behavior")) {
-    try {
-      const prompt =
-        `請直接呼叫你被授予的 send_message 這個 MCP 工具(不要用其他方式、不要先說明、不要詢問我任何問題):` +
-        `參數 to 設為 "Reviewer"、content 必須完全等於(不要加任何多餘文字或標點):${FIXED_TEXT}`;
-
-      await client.drivePrompt(coderSessionId, prompt, {
-        onPermission: async () => "allow", // team-bus 工具在 allowedTools 內,理論上不會觸發權限請求
-        timeoutMs: 60_000,
-      });
-
-      // drivePrompt 收到 completed 時,工具呼叫(含 MessageBus.sendMessage 的
-      // DB 寫入)理論上已在同一輪內完成,保守起見仍 poll 一小段時間。
-      const deadline = Date.now() + 15_000;
-      let found;
-      while (Date.now() < deadline && !found) {
-        const history = await client.rpc("team.messages", { teamId });
-        found = history.messages.find((m) => m.to === "Reviewer" && m.content === FIXED_TEXT);
-        if (!found) await sleep(500);
-      }
-
-      record(
-        "步驟13b 模型實際呼叫 send_message 工具,team_messages 出現正確的 to/content(軟性判定,見下方 detail)",
-        Boolean(found),
-        found
-          ? `已找到: ${JSON.stringify(found)}`
-          : `逾時未在 team_messages 找到 to="Reviewer" content="${FIXED_TEXT}" 的訊息 —— 若模型這輪選擇不呼叫 send_message 工具屬已知 flake(比照步驟5的軟性判定),非 regression`,
-        "model-behavior",
-      );
-    } catch (err) {
-      record("步驟13b 模型實際呼叫 send_message 工具,team_messages 出現正確的 to/content", false, String(err), "model-behavior");
-    }
-  } else {
-    skipNote("步驟13b 模型實際呼叫 send_message 工具", "model-behavior");
-  }
-  {
-    // task.delete 要排在 session.delete 之前:任務指派給的是一個 lifecycle
-    // 預設為 "ephemeral" 的成員,`TaskService.deleteTask()` 會先 dispose 該
-    // 成員的 session、再由 WorkspaceManager 移除 worktree —— 這是唯一會清掉
-    // worktree 的路徑。少了這一步,worktree 會留在
-    // `<tmpdir>/.deskmony-worktrees/` 底下(它不在 repoDir 底下,見
-    // apps/core/src/workspace/workspace-manager.ts 的 `createWorkspaceForTask()`),
-    // 下面那個 rmSync(repoDir) 掃不到,每跑一次 e2e 就多積一份殘留。
-    if (taskId) {
-      try {
-        await client.rpc("task.delete", { taskId });
-      } catch (err) {
-        log(`[cleanup] 刪除步驟13 任務(含 worktree)時發生錯誤(忽略): ${err}`);
-      }
-    }
-    if (coderSessionId) {
-      try {
-        await client.rpc("session.delete", { sessionId: coderSessionId });
-      } catch (err) {
-        log(`[cleanup] 刪除步驟13 session 時發生錯誤(忽略): ${err}`);
-      }
-    }
-    if (repoDir) {
-      try {
-        rmSync(repoDir, { recursive: true, force: true });
-      } catch (err) {
-        log(`[cleanup] 刪除步驟13 repoDir 時發生錯誤(忽略): ${err}`);
-      }
-    }
-  }
-}
-
 // ---------------------------------------------------------------------
 // 步驟 10: GenericPtyAdapter(fake pty echo,決定性測試,不依賴外部模型)
 // ---------------------------------------------------------------------
@@ -1602,7 +1026,7 @@ async function opencodeAdapterSmokeTest(client, workspaceDir) {
     const startIdx = client.events.length;
     await client.rpc("session.sendPrompt", { sessionId: opencodeSessionId, prompt: { text: `${SLOW_PREFIX} counting` } });
     // 等一小段時間讓 fake server 先送出至少一個 message-delta,確認回合真的在進行中,
-    // 才呼叫 interrupt()(比照步驟14 的既有先例:先確認忙碌中,再中斷)。
+    // 才呼叫 interrupt()(先確認忙碌中,再中斷)。
     await client.waitForEvent(
       (e) => e.sessionId === opencodeSessionId && e.event.type === "message-delta",
       10_000,
@@ -1762,935 +1186,6 @@ async function windowsCmdSpawnRegressionTest(client, workspaceDir) {
       rmSync(wrapperDir, { recursive: true, force: true });
     } catch {
       // ignore
-    }
-  }
-}
-
-// ---------------------------------------------------------------------
-// 步驟 14: MessageBus interrupt 時序修正驗證(M3 Round B 任務 3,真實模型,
-// 允許軟性判定 —— 比照步驟 5/13)
-//
-// Round A review 待辦:MessageBus 的 interrupt 投遞路徑(deliverToMember)
-// 修正前是 `this.sessionManager.interrupt(sessionId)` 不 await 就緊接著
-// `await this.inject(...)` —— SDK 的 `Query.interrupt()`(sdk.d.ts 明載)是
-// 非同步的,resolve 才代表「查詢確實停止處理、控制權交還呼叫端」,不 await
-// 就注入下一個 prompt,理論上會與尚未真正停下的回合競爭。M3 Round B 已修正
-// (`AgentAdapter.interrupt()` 改回傳 `Promise<void>`,
-// `ClaudeAgentSdkAdapter.interrupt()`/`SessionManager.interrupt()`/
-// `MessageBus.deliverToMember()` 全部串起來 await,見
-// packages/adapters/src/claude-sdk-adapter.ts、
-// apps/core/src/session/session-manager.ts、
-// apps/core/src/bus/message-bus.ts)。這裡用「真實 Claude SDK session、真的
-// 處於忙碌中」驗證修正後的路徑不會卡死、注入確實送達。
-//
-// 用兩個 team member:Worker 真的建立 session(忙碌的一方,也是這個修正真正
-// 要驗證的路徑 —— ClaudeAgentSdkAdapter.interrupt() 作用在一個真的忙碌中的
-// 真實 session 上);PM 只用來提供 canInterrupt=true 的身分送出 interrupt,
-// 不需要真的建立 session —— resolvePriorityForSender() 只依名稱查
-// TeamMember,不要求發送者本身有活躍 session(e2e 步驟12d 已用同一手法驗證
-// 過這個機制),這裡沿用,把真實模型資源集中在被中斷的那一端。
-//
-// 判定拆成硬性(不依賴模型是否遵從指令,只依賴程式碼路徑本身沒有卡死/沒有
-// 把訊息搞丟,應為決定性)與軟性(依賴模型是否確實照做,模型偶發不配合視為
-// 已知 flake,如實記錄,不影響其他步驟判定)兩組。
-// ---------------------------------------------------------------------
-async function interruptTimingSmokeTest(client, workspaceDir, defaultProfile) {
-  let teamId;
-  let workerSessionId;
-  const ACK_TOKEN = `ACK_${randomUUID().slice(0, 8)}`;
-
-  // ---- 14a: 建立 team + Worker(真實 session)+ PM(canInterrupt=true,無 session)----
-  try {
-    const team = await client.rpc("team.create", { name: "E2E Interrupt Team" });
-    teamId = team.team.id;
-
-    const workerMember = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: defaultProfile.id,
-      name: "Worker",
-      role: "Coder",
-      canInterrupt: false,
-    });
-    await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: defaultProfile.id,
-      name: "PM",
-      role: "PM",
-      canInterrupt: true,
-    });
-
-    const workerSession = await client.rpc(
-      "session.create",
-      {
-        agentProfileId: defaultProfile.id,
-        workingDir: workspaceDir,
-        title: "e2e-interrupt-worker",
-        teamMemberId: workerMember.member.id,
-      },
-      30_000,
-    );
-    workerSessionId = workerSession.session.id;
-
-    record(
-      "步驟14a 建立 team(Worker 有真實 Claude SDK session,PM canInterrupt=true 無 session)",
-      true,
-      `teamId=${teamId}, workerSessionId=${workerSessionId}`,
-    );
-  } catch (err) {
-    record("步驟14a 建立 team(Worker 有真實 Claude SDK session,PM canInterrupt=true 無 session)", false, String(err));
-    return;
-  }
-
-  // ---- 14b: 讓 Worker 開始一個冗長任務,確認真的在忙碌中串流 ----
-  const longTaskStartIdx = client.events.length;
-  try {
-    const longPrompt =
-      "請從 1 開始,一個數字接一個數字慢慢數到 100,每個數字單獨一行,並在每個數字後面附上一句話描述它的其中一個數學性質" +
-      "(例如是否為質數、完全平方數、偶數或奇數等,每個數字挑一個性質簡短描述即可)。在數到 100 之前絕對不要停止," +
-      "也不要事先說明或詢問我任何問題,直接開始輸出第一行。";
-    await client.rpc("session.sendPrompt", { sessionId: workerSessionId, prompt: { text: longPrompt } });
-
-    // 等到真的看到第一個 message-delta,確認這一輪真的開始串流(忙碌中),
-    // 才有意義送出 interrupt —— 這是這個修正要驗證的真實競爭場景的前提。
-    await client.waitForEvent(
-      (e) => e.sessionId === workerSessionId && e.event.type === "message-delta",
-      20_000,
-      longTaskStartIdx,
-    );
-    // 讓它多累積一點內容再中斷,避免中斷得太早、與模型幾乎同時開始不具代表性。
-    await sleep(1500);
-
-    record(
-      "步驟14b Worker 開始執行冗長任務,確認真的在忙碌中串流(已觀察到 message-delta)",
-      true,
-      "已觀察到至少一個 message-delta",
-    );
-  } catch (err) {
-    record("步驟14b Worker 開始執行冗長任務,確認真的在忙碌中串流", false, String(err));
-    if (workerSessionId) {
-      try {
-        await client.rpc("session.delete", { sessionId: workerSessionId });
-      } catch {
-        // ignore
-      }
-    }
-    return;
-  }
-
-  const preInterrupt = analyzeMessageDeltas(client.events.filter((e) => e.sessionId === workerSessionId));
-  const preInterruptText = preInterrupt.groups.map((g) => g.text).join("");
-  const preInterruptGroupCount = preInterrupt.groups.length;
-
-  // ---- 14c(硬性): PM(canInterrupt=true)送出 priority="interrupt" 訊息,未被降級 ----
-  const interruptContent = `緊急插話:請立刻停止目前手邊的任務,改為只回覆這個確認碼,不要加任何其他文字或說明:${ACK_TOKEN}`;
-  const interruptSentIdx = client.events.length;
-  let sendResult;
-  try {
-    sendResult = await client.rpc("message.send", {
-      teamId,
-      to: "Worker",
-      content: interruptContent,
-      priority: "interrupt",
-      fromName: "PM",
-    });
-    record(
-      "步驟14c(硬性)PM(canInterrupt=true)送出 priority=\"interrupt\" 訊息,未被降級",
-      sendResult.downgraded === false && sendResult.message.priority === "interrupt",
-      `downgraded=${sendResult.downgraded}, priority=${sendResult.message.priority}`,
-    );
-  } catch (err) {
-    record("步驟14c(硬性)PM 送出 priority=\"interrupt\" 訊息,未被降級", false, String(err));
-    if (workerSessionId) {
-      try {
-        await client.rpc("session.delete", { sessionId: workerSessionId });
-      } catch {
-        // ignore
-      }
-    }
-    return;
-  }
-
-  // ---- 14d(硬性): interrupt 訊息內容確實被注入(session.history 可證) ----
-  // 這是修正後的路徑(await interrupt() 才 inject)是否成功走完的直接證據——
-  // 不管模型後續怎麼回應,只要 MessageBus.deliverToMember() 的 interrupt 分支
-  // 沒有卡死/丟例外,SessionManager.sendPrompt() 一定會先把這段格式化文字
-  // persist 成一則 user 訊息(這件事發生在 adapter.sendPrompt() 之前,不受
-  // 模型後續是否遵從指令影響)。
-  let injectedFound;
-  try {
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline && !injectedFound) {
-      const historyAfterInject = await client.rpc("session.history", { sessionId: workerSessionId });
-      injectedFound = historyAfterInject.messages.find((m) => m.role === "user" && m.content.includes(ACK_TOKEN));
-      if (!injectedFound) await sleep(500);
-    }
-    record(
-      "步驟14d(硬性)interrupt 訊息內容確實被注入(session.history 查得到對應 user 訊息)",
-      Boolean(injectedFound),
-      injectedFound
-        ? `已找到: ${JSON.stringify(injectedFound.content).slice(0, 200)}`
-        : "逾時未在 session.history 找到注入的 user 訊息(這會是 regression,不是模型行為 flake)",
-    );
-  } catch (err) {
-    record("步驟14d(硬性)interrupt 訊息內容確實被注入(session.history 可證)", false, String(err));
-  }
-
-  // ---- 14e(硬性): session 沒有卡死,最終回到 idle ----
-  let finalStatus;
-  try {
-    const deadline = Date.now() + 90_000;
-    while (Date.now() < deadline) {
-      const listResult = await client.rpc("session.list", {});
-      const session = listResult.sessions.find((s) => s.id === workerSessionId);
-      finalStatus = session?.status;
-      if (finalStatus === "idle") break;
-      await sleep(1000);
-    }
-    record(
-      "步驟14e(硬性)session 沒有卡死,插話處理完後最終回到 idle(90s 內)",
-      finalStatus === "idle",
-      `最終狀態=${finalStatus}`,
-    );
-  } catch (err) {
-    record("步驟14e(硬性)session 沒有卡死,最終回到 idle", false, String(err));
-  }
-
-  // ---- 14f(軟性): 原本冗長任務確實被中斷(而非自然跑完才處理插話) ----
-  try {
-    const postDeltas = analyzeMessageDeltas(client.events.filter((e) => e.sessionId === workerSessionId));
-    const firstGroupAfter = postDeltas.groups[0];
-    const originalGroupGrewALot = Boolean(firstGroupAfter) && firstGroupAfter.text.length > preInterruptText.length + 4000;
-    const originalReachedEnd =
-      Boolean(firstGroupAfter) &&
-      (firstGroupAfter.text.includes("100.") || firstGroupAfter.text.includes("100、") || firstGroupAfter.text.includes("100 "));
-    const likelyInterrupted = Boolean(firstGroupAfter) && !originalReachedEnd && !originalGroupGrewALot;
-    record(
-      "步驟14f(軟性)原本冗長任務確實被中斷(未跑完就停止,佐證 interrupt() 真的生效,而非自然完成後才處理插話)",
-      likelyInterrupted,
-      likelyInterrupted
-        ? `中斷前長度=${preInterruptText.length}, 中斷後最終長度=${firstGroupAfter?.text.length ?? 0}, 未包含「100」`
-        : `軟性判定 —— 模型這輪可能在送出 interrupt 前就已經跑得很快、或恰好完整跑完,屬已知 flake(比照步驟5/13),非 regression。preInterruptGroupCount=${preInterruptGroupCount}, 中斷後長度=${firstGroupAfter?.text.length ?? "N/A"}`,
-      "model-behavior",
-    );
-  } catch (err) {
-    record("步驟14f(軟性)原本冗長任務確實被中斷", false, String(err), "model-behavior");
-  }
-
-  // ---- 14g(軟性): 插話之後 assistant 有回覆確認碼(佐證「後續 assistant 回應提及該訊息」) ----
-  // 註:14f/14g 不需要額外的模型呼叫(分析的是 14a-e 既有流程已經收集到的
-  // 事件/等待既有進行中回合的後續事件),因此不論 --only 為何都照常執行,
-  // 只是被歸類進 model-behavior 統計組、不影響 deterministic 組結論。
-  try {
-    const ackEvent = await client.waitForEvent(
-      (e) => e.sessionId === workerSessionId && e.event.type === "message-delta" && e.event.delta.includes(ACK_TOKEN),
-      45_000,
-      interruptSentIdx,
-    );
-    record(
-      "步驟14g(軟性)後續 assistant 回應提及注入的確認碼(佐證訊息確實被模型看到並處理)",
-      Boolean(ackEvent),
-      `已在後續回應中找到確認碼 ${ACK_TOKEN}`,
-      "model-behavior",
-    );
-  } catch (err) {
-    record(
-      "步驟14g(軟性)後續 assistant 回應提及注入的確認碼",
-      false,
-      `逾時未在後續回應找到確認碼 —— 模型這輪可能選擇用自己的話回應而非照字面重複確認碼,屬已知 flake(比照步驟5/13,已有14d 的 session.history 決定性證據佐證訊息確實注入),非 regression: ${err}`,
-      "model-behavior",
-    );
-  }
-
-  // ---- 14h: 清理 ----
-  try {
-    await client.rpc("session.delete", { sessionId: workerSessionId });
-    const listAfter = await client.rpc("session.list", {});
-    const stillThere = listAfter.sessions.some((s) => s.id === workerSessionId);
-    record("步驟14h 清理 session", !stillThere, `刪除後 session.list 是否仍含此 session: ${stillThere}`);
-  } catch (err) {
-    record("步驟14h 清理 session", false, String(err));
-  }
-}
-
-// ---------------------------------------------------------------------
-// 步驟 15: TaskService + WorkspaceManager(M4 Round A,決定性測試 —— 用真實
-// git 子程序 + 真實的 team/task/member,不叫任何真實模型或 fake agent,
-// 結果應為 100% 決定性)
-//
-// ⚠️ S8(agent-lifecycle)之後這個步驟**不再是「全程不建立任何 agent
-// session」**:成員的 lifecycle 預設是 "ephemeral"(見 packages/shared/src/
-// team.ts 的 `LifecycleSchema` 與 `lifecycle: LifecycleSchema.default("ephemeral")`),
-// 而 `TaskService.assignTask()` 對 ephemeral 成員會自動 spawn 一個 session
-// (docs/LAYER-4-detail-design/agent-lifecycle_detail.md §2.1)—— 也就是說
-// 15b/15d 的每一次 task.assign 都會真的起一個 `claude` 子程序,cwd 就是剛
-// 建立的 worktree。這**不影響決定性**(斷言的仍是 task/workspace/git 這些
-// 系統行為,不碰模型講了什麼),但它是 15e「task.delete 清理 worktree」會
-// 踩到子程序佔住目錄的原因,見 packages/adapters/src/claude-sdk-adapter.ts
-// 的 `dispose()` 註解。原本寫在這裡的「全程不建立任何 agent session」是 S8
-// 之前的前提,已經不成立。
-//
-// 涵蓋:
-//   15a 準備一個真的 git repo(git init + 初始 commit)當 team workingDir。
-//   15b task.create(backlog)→ task.assign(assigned,觸發 WorkspaceManager
-//       建立 worktree)—— 斷言 worktree 目錄實際存在、`git worktree list`
-//       看得到、分支命名正確。
-//   15c 一個非法跳轉(assigned → done,跳過中間狀態)斷言被拒;接著走一條
-//       合法路徑 assigned → in-progress → review → merging → done(比 e2e
-//       任務描述列出的「assigned→in-progress→review→done」多了 merging 這一
-//       步 —— TaskService 的狀態機依 ARCHITECTURE.md 第 5 節與這輪任務描述
-//       第 2 節都明講 review 之後要先進 merging 才能到 done,review → done
-//       本身在我們的合法轉換表裡就不存在,所以這裡改用真正合法、涵蓋完整
-//       狀態機的路徑,而不是照抄任務描述裡可能省略了 merging 的那句話),
-//       每一步都斷言狀態與 "task-updated" 推播。
-//   15d report_status(帶 taskId)↔ task 狀態整合:透過這輪新增的
-//       `message.reportStatus` gateway 方法(比照 M3 Round B「team.teammates」
-//       的先例,包一層既有的 MessageBus.reportStatus() 邏輯給非 agent 呼叫端
-//       用,詳見 packages/shared/src/gateway.ts 的註解)——
-//         - 對映得到且轉換合法:任務狀態同步更新。
-//         - 對映不到:只記錄訊息,任務狀態不變。
-//         - taskId 指到的任務,回報者不是該任務的指派人:只記錄訊息,不更動。
-//         - 不帶 taskId:行為與 M3 完全相同(訊息內容不含任務同步字樣)。
-//   15e task.delete → 斷言 worktree 被清理(`git worktree list` 不再含它、
-//       目錄從磁碟上移除、對應分支也被刪除)。
-// ---------------------------------------------------------------------
-function runGitSync(args, cwd) {
-  return spawnSync("git", args, { cwd, encoding: "utf8" });
-}
-
-async function taskWorkspaceSmokeTest(client) {
-  const gitVersion = runGitSync(["--version"], process.cwd());
-  if (gitVersion.status !== 0) {
-    record(
-      "步驟15 TaskService + WorkspaceManager(git 不可用,整個步驟略過)",
-      false,
-      `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`,
-    );
-    return;
-  }
-
-  const repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-git-"));
-  const worktreeRoot = path.join(path.dirname(repoDir), ".deskmony-worktrees");
-  let teamId;
-  let memberId;
-  let task1Id;
-  let task3Id;
-  let task4Id;
-  let task1WorktreePath;
-  let task1Branch;
-  let task3WorktreePath;
-  let task3Branch;
-
-  try {
-    // ---- 15a: 真的 git repo(git init + 初始 commit)+ team + 成員 ----
-    try {
-      const initResult = runGitSync(["init"], repoDir);
-      runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-      runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-      writeFileSync(path.join(repoDir, "README.md"), "# deskmony e2e task worktree repo\n", "utf8");
-      runGitSync(["add", "."], repoDir);
-      const commitResult = runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-      const team = await client.rpc("team.create", { name: "E2E Task Team", workingDir: repoDir });
-      teamId = team.team.id;
-
-      const profileCreated = await client.rpc("profile.create", {
-        name: "E2E Task Member Profile",
-        software: "claude-agent-sdk",
-        workingDir: repoDir,
-      });
-      const member = await client.rpc("team.addMember", {
-        teamId,
-        agentProfileId: profileCreated.profile.id,
-        name: "Coder",
-        role: "Coder",
-        canInterrupt: false,
-      });
-      memberId = member.member.id;
-
-      record(
-        // 成員刻意沿用預設的 lifecycle="ephemeral"(不像步驟16 明確指定
-        // persistent)—— 15b/15d 的 task.assign 因此會自動 spawn session,
-        // 這正是 15e 要驗證「dispose 後 worktree 真的能刪掉」的前提,見上方
-        // 這個步驟開頭的 ⚠️ 說明。
-        "步驟15a 準備真實 git repo(git init + 初始 commit)+ team + 成員(lifecycle 預設 ephemeral,assign 時會自動 spawn session)",
-        initResult.status === 0 && commitResult.status === 0,
-        `repoDir=${repoDir}, teamId=${teamId}, memberId=${memberId}, git init status=${initResult.status}, commit status=${commitResult.status}`,
-      );
-    } catch (err) {
-      record("步驟15a 準備真實 git repo + team + 成員", false, String(err));
-      return;
-    }
-
-    // ---- 15b: task.create(backlog) → task.assign(assigned,建立 worktree) ----
-    try {
-      const created = await client.rpc("task.create", { teamId, title: "E2E Task 1" });
-      task1Id = created.task.id;
-      const backlogOk = created.task.status === "backlog";
-      const createPushOk = Boolean(
-        await client.waitForTaskUpdate((t) => t.id === task1Id && t.status === "backlog", 5_000).catch(() => undefined),
-      );
-
-      const assignResult = await client.rpc("task.assign", { taskId: task1Id, memberId });
-      task1WorktreePath = assignResult.workspace.worktreePath;
-      task1Branch = assignResult.workspace.branch;
-
-      const assignedOk =
-        assignResult.task.status === "assigned" &&
-        assignResult.task.assigneeMemberId === memberId &&
-        assignResult.task.workspaceId === assignResult.workspace.id;
-      const dirExists = existsSync(task1WorktreePath);
-      const worktreeListOutput = runGitSync(["worktree", "list", "--porcelain"], repoDir).stdout ?? "";
-      // `git worktree list --porcelain` 一律用 POSIX 風格正斜線輸出路徑(即使在
-      // Windows 上),但 `task1WorktreePath` 是 `path.join()` 產生的、Windows 上
-      // 會是反斜線 —— 比對前正規化成正斜線(比照既有步驟 4/9c 對 `targetFilePosix`
-      // 的既有慣例),否則在 Windows 上永遠比不到,誤判為「worktree 沒被 git 認得」
-      // (但目錄/git 本身其實都正確,純粹是這裡字串比對沒有正規化路徑分隔字元)。
-      const listedInGit = worktreeListOutput.includes(task1WorktreePath.split(path.sep).join("/"));
-      const branchOk = /^deskmony\/task-[0-9a-f]{8}$/.test(task1Branch);
-      const assignPushOk = Boolean(
-        await client.waitForTaskUpdate((t) => t.id === task1Id && t.status === "assigned", 5_000).catch(() => undefined),
-      );
-
-      record(
-        "步驟15b task.create(backlog)→ task.assign(assigned,實際建立 git worktree)+ task-updated 推播",
-        backlogOk && createPushOk && assignedOk && dirExists && listedInGit && branchOk && assignPushOk,
-        `backlogOk=${backlogOk}, createPush=${createPushOk}, task.status=${assignResult.task.status}, assignPush=${assignPushOk}, ` +
-          `worktreePath=${task1WorktreePath}, dirExists=${dirExists}, listedInGit=${listedInGit}, branch=${task1Branch}, branchOk=${branchOk}\n` +
-          `git worktree list --porcelain:\n${worktreeListOutput}`,
-      );
-    } catch (err) {
-      record("步驟15b task.create → task.assign", false, String(err));
-    }
-
-    // ---- 15c: 非法跳轉被拒 + 一條完整合法路徑(每步斷言狀態 + task-updated 推播) ----
-    try {
-      let illegalRejected = false;
-      let illegalErrorMessage = "";
-      try {
-        await client.rpc("task.updateStatus", { taskId: task1Id, status: "done" });
-      } catch (err) {
-        illegalRejected = true;
-        illegalErrorMessage = String(err);
-      }
-
-      const path15c = ["in-progress", "review", "merging", "done"];
-      const stepResults = [];
-      for (const status of path15c) {
-        const result = await client.rpc("task.updateStatus", { taskId: task1Id, status });
-        const pushed = await client.waitForTaskUpdate((t) => t.id === task1Id && t.status === status, 5_000).catch(() => undefined);
-        stepResults.push({ status, actual: result.task.status, pushed: Boolean(pushed) });
-      }
-      const pathOk = stepResults.every((s) => s.status === s.actual && s.pushed);
-
-      record(
-        "步驟15c 非法跳轉(assigned→done)被拒 + 合法路徑 assigned→in-progress→review→merging→done(每步狀態 + task-updated 推播)",
-        illegalRejected && pathOk,
-        `illegalRejected=${illegalRejected}(${illegalErrorMessage}), steps=${JSON.stringify(stepResults)}`,
-      );
-    } catch (err) {
-      record("步驟15c 非法跳轉被拒 + 合法路徑狀態流轉", false, String(err));
-    }
-
-    // ---- 15d: report_status(帶 taskId)↔ task 狀態整合 ----
-    try {
-      const task3Created = await client.rpc("task.create", { teamId, title: "E2E Task 3 (report_status)" });
-      task3Id = task3Created.task.id;
-      const task3Assigned = await client.rpc("task.assign", { taskId: task3Id, memberId });
-      task3WorktreePath = task3Assigned.workspace.worktreePath;
-      task3Branch = task3Assigned.workspace.branch;
-
-      // (1) 對映得到 + 合法轉換:任務狀態應同步更新為 in-progress。
-      const mappedReport = await client.rpc("message.reportStatus", {
-        teamId,
-        fromMemberId: memberId,
-        status: "in-progress",
-        summary: "開始動工",
-        taskId: task3Id,
-      });
-      await client.waitForTaskUpdate((t) => t.id === task3Id && t.status === "in-progress", 5_000);
-      const task3AfterMapped = await client.rpc("task.get", { taskId: task3Id });
-      const mappedOk =
-        mappedReport.message.content.includes("任務狀態已同步") && task3AfterMapped.task.status === "in-progress";
-
-      // (2) 對映不到的自由文字:只記錄訊息,任務狀態不變。
-      const unmappedReport = await client.rpc("message.reportStatus", {
-        teamId,
-        fromMemberId: memberId,
-        status: "still writing tests, nothing conclusive yet",
-        taskId: task3Id,
-      });
-      const task3AfterUnmapped = await client.rpc("task.get", { taskId: task3Id });
-      const unmappedOk =
-        unmappedReport.message.content.includes("任務狀態未同步") && task3AfterUnmapped.task.status === "in-progress";
-
-      // (3) taskId 指到的任務,回報者不是該任務的指派人:只記錄訊息,不更動。
-      const task4Created = await client.rpc("task.create", { teamId, title: "E2E Task 4 (unassigned)" });
-      task4Id = task4Created.task.id;
-      const notAssigneeReport = await client.rpc("message.reportStatus", {
-        teamId,
-        fromMemberId: memberId,
-        status: "done",
-        taskId: task4Id,
-      });
-      const task4AfterReport = await client.rpc("task.get", { taskId: task4Id });
-      const notAssigneeOk =
-        notAssigneeReport.message.content.includes("未被指派任務") && task4AfterReport.task.status === "backlog";
-
-      // (4) 不帶 taskId:行為與 M3 完全相同(訊息內容不含任務同步字樣)。
-      const noTaskIdReport = await client.rpc("message.reportStatus", {
-        teamId,
-        fromMemberId: memberId,
-        status: "just a note",
-      });
-      const backwardCompatOk =
-        !noTaskIdReport.message.content.includes("任務狀態已同步") &&
-        !noTaskIdReport.message.content.includes("任務狀態未同步") &&
-        noTaskIdReport.message.content === "[狀態回報] just a note";
-
-      record(
-        "步驟15d report_status(message.reportStatus)帶 taskId ↔ task 狀態整合(對映成功同步/對映不到不變/非指派人不變/不帶 taskId 向下相容)",
-        mappedOk && unmappedOk && notAssigneeOk && backwardCompatOk,
-        `mappedOk=${mappedOk}(${mappedReport.message.content}), unmappedOk=${unmappedOk}(${unmappedReport.message.content}), ` +
-          `notAssigneeOk=${notAssigneeOk}(${notAssigneeReport.message.content}), backwardCompatOk=${backwardCompatOk}(${JSON.stringify(noTaskIdReport.message.content)})`,
-      );
-    } catch (err) {
-      record("步驟15d report_status 帶 taskId ↔ task 狀態整合", false, String(err));
-    }
-
-    // ---- 15e: task.delete → worktree 被清理(git worktree list 不再含它、目錄移除、分支刪除) ----
-    try {
-      await client.rpc("task.delete", { taskId: task3Id });
-
-      let getAfterDeleteRejected = false;
-      try {
-        await client.rpc("task.get", { taskId: task3Id });
-      } catch {
-        getAfterDeleteRejected = true;
-      }
-
-      const dirRemoved = !existsSync(task3WorktreePath);
-      const worktreeListAfter = runGitSync(["worktree", "list", "--porcelain"], repoDir).stdout ?? "";
-      const noLongerListed = !worktreeListAfter.includes(task3WorktreePath);
-      const branchListAfter = runGitSync(["branch", "--list", task3Branch], repoDir).stdout ?? "";
-      const branchRemoved = branchListAfter.trim().length === 0;
-
-      record(
-        "步驟15e task.delete 清理 worktree(目錄移除 + git worktree list 不再含它 + 分支刪除)+ 任務本身查不到",
-        getAfterDeleteRejected && dirRemoved && noLongerListed && branchRemoved,
-        `getAfterDeleteRejected=${getAfterDeleteRejected}, dirRemoved=${dirRemoved}(${task3WorktreePath}), noLongerListed=${noLongerListed}, branchRemoved=${branchRemoved}\n` +
-          `git worktree list --porcelain(刪除後):\n${worktreeListAfter}`,
-      );
-    } catch (err) {
-      record("步驟15e task.delete 清理 worktree", false, String(err));
-    }
-  } finally {
-    // ---- 清理:task1(done,仍持有 worktree,見 workspace-manager.ts 說明:
-    // 進入 done 不會自動清理,只有明確 delete 才清理)、task4(backlog,無
-    // workspace)一併刪除;最後移除整個暫存 git repo 與 worktree 根目錄,
-    // 確保這個步驟結束後無殘留 worktree/暫存 repo。 ----
-    for (const taskId of [task1Id, task4Id]) {
-      if (!taskId) continue;
-      try {
-        await client.rpc("task.delete", { taskId });
-      } catch (err) {
-        log(`[cleanup] 刪除步驟15任務(${taskId})時發生錯誤(忽略): ${err}`);
-      }
-    }
-    try {
-      rmSync(repoDir, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟15暫存 git repo(${repoDir})時發生錯誤(忽略): ${err}`);
-    }
-    try {
-      rmSync(worktreeRoot, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟15 worktree 根目錄(${worktreeRoot})時發生錯誤(忽略): ${err}`);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------
-// 步驟 16: Review 合併流程 + request_review(M4 Round B,決定性測試 —— 全程
-// 用真實 git 子程序 + 真實建立的 team/task/member 驅動,不建立任何 agent
-// session、不叫任何真實模型或 fake agent,結果應為 100% 決定性)
-//
-// 涵蓋:
-//   16a 合併成功路徑:assign 後在 worktree 實際做一個 commit → review →
-//       merging → task.merge → 斷言 done、baseDir(主幹)git log 看得到這個
-//       commit、分支已合併(git branch --merged)。
-//   16b 合併衝突路徑(獨立的暫存 repo,避免弄髒 16a/16c/16d 共用的 repo):
-//       baseDir 與 worktree 對同一個檔案做衝突變更 → task.merge 應失敗、任務
-//       留在 merging、baseDir 乾淨(git merge --abort 生效,無殘留合併狀態)。
-//   16c request_review(直接呼叫 message.reportStatus 對應的
-//       message.requestReview gateway 方法 —— 這輪任務描述允許「fake ACP
-//       成員或直接 gateway」,ClaudeAgentSdkAdapter 才會掛載 team-bus MCP,
-//       用 fake agent 呼叫不到真正的 MCP 工具,直接打 gateway 才是決定性且
-//       涵蓋同一段 MessageBus.requestReview() 實作的正確做法):斷言任務轉
-//       review + reviewer 收到的訊息可從 team.messages 查得到。
-//   16d agent 不能自己合併到 done:task2(16c 用過的任務)推進到 merging 後,
-//       用 message.reportStatus(status: "done", taskId) 企圖繞過人類批准 ——
-//       斷言任務仍留在 merging,回應訊息說明原因(需經 task.merge)。
-//   16e task.delete 的 hadUncommittedChanges 旗標:worktree 有未 commit 的
-//       變更時應回 true,乾淨的 worktree 應回 false。
-// ---------------------------------------------------------------------
-async function taskMergeReviewSmokeTest(client) {
-  const gitVersion = runGitSync(["--version"], process.cwd());
-  if (gitVersion.status !== 0) {
-    record(
-      "步驟16 Review 合併流程 + request_review(git 不可用,整個步驟略過)",
-      false,
-      `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`,
-    );
-    return;
-  }
-
-  // ==== 16a / 16c / 16d / 16e:共用一個 repo + team(彼此不衝突,合併成功後
-  // baseDir 仍然乾淨,可以繼續讓後面的子步驟使用同一個 team)====
-  const repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-merge-"));
-  const worktreeRoot = path.join(path.dirname(repoDir), ".deskmony-worktrees");
-  let teamId;
-  let coderId;
-  let task1Id;
-  let task2Id;
-
-  try {
-    // ---- 共用前置:git repo(明確指定初始分支名為 main,避免依賴這台機器
-    // 的 git 全域設定 init.defaultBranch,讓這個步驟在任何機器上都決定性)
-    // + team + 兩個成員(Coder / Reviewer,Reviewer 不建立 session)----
-    try {
-      const initResult = runGitSync(["init", "-b", "main"], repoDir);
-      runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-      runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-      writeFileSync(path.join(repoDir, "README.md"), "# deskmony e2e merge repo\n", "utf8");
-      runGitSync(["add", "."], repoDir);
-      const commitResult = runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-      const team = await client.rpc("team.create", { name: "E2E Merge Team", workingDir: repoDir });
-      teamId = team.team.id;
-
-      const coderProfile = await client.rpc("profile.create", {
-        name: "E2E Merge Coder Profile",
-        software: "claude-agent-sdk",
-        workingDir: repoDir,
-      });
-      // S8(agent-lifecycle):role="Coder" 預設推導為 lifecycle="ephemeral",
-      // 但這個步驟(16a/16c/16d/16e)刻意讓同一個 memberId 掛著好幾個「尚未
-      // 走到終態」的任務(task2 在 16d 之後仍停在 "merging",16e 才把它跟
-      // task3/task4 一起指派給同一個 coderId)——這與 S8 的「一 member 一
-      // session」約束互斥,但這個測試本來就與 lifecycle/session 生命週期無關
-      // (純粹測 task/workspace/git merge 機制),明確指定 persistent 讓
-      // TaskService.assignTask() 略過 ephemeral 專屬的自動 spawn/檢查(見
-      // agent-lifecycle_detail.md §2.1「persistent:不做任何事」),恢復這個
-      // 測試原本的行為。
-      const coder = await client.rpc("team.addMember", {
-        teamId,
-        agentProfileId: coderProfile.profile.id,
-        name: "Coder",
-        role: "Coder",
-        canInterrupt: false,
-        lifecycle: "persistent",
-      });
-      coderId = coder.member.id;
-
-      const reviewerProfile = await client.rpc("profile.create", {
-        name: "E2E Merge Reviewer Profile",
-        software: "claude-agent-sdk",
-        workingDir: repoDir,
-      });
-      await client.rpc("team.addMember", {
-        teamId,
-        agentProfileId: reviewerProfile.profile.id,
-        name: "Reviewer",
-        role: "Reviewer",
-        canInterrupt: false,
-      });
-
-      record(
-        "步驟16 前置:git repo(main 分支) + team + Coder/Reviewer 成員(不建立任何 session)",
-        initResult.status === 0 && commitResult.status === 0,
-        `repoDir=${repoDir}, teamId=${teamId}, coderId=${coderId}, init status=${initResult.status}, commit status=${commitResult.status}`,
-      );
-    } catch (err) {
-      record("步驟16 前置設置", false, String(err));
-      return;
-    }
-
-    // ---- 16a: 合併成功路徑 ----
-    try {
-      const created = await client.rpc("task.create", { teamId, title: "E2E Merge Task 1" });
-      task1Id = created.task.id;
-      const assigned = await client.rpc("task.assign", { taskId: task1Id, memberId: coderId });
-      const worktreePath = assigned.workspace.worktreePath;
-      const branch = assigned.workspace.branch;
-
-      // 在 worktree 裡實際做一個 commit(不是 core 自動做的,模擬 agent 真的完成了工作)。
-      writeFileSync(path.join(worktreePath, "feature.txt"), "feature work\n", "utf8");
-      runGitSync(["add", "."], worktreePath);
-      const featureCommit = runGitSync(["commit", "-m", "add feature.txt"], worktreePath);
-
-      await client.rpc("task.updateStatus", { taskId: task1Id, status: "in-progress" });
-      await client.rpc("task.updateStatus", { taskId: task1Id, status: "review" });
-      await client.rpc("task.updateStatus", { taskId: task1Id, status: "merging" });
-
-      const mergeResult = await client.rpc("task.merge", { taskId: task1Id });
-      const mergedOk = mergeResult.task.status === "done";
-
-      const logOutput = runGitSync(["log", "--oneline", "--all"], repoDir).stdout ?? "";
-      const commitVisibleOnMain = logOutput.includes("add feature.txt");
-      const fileExistsOnMain = existsSync(path.join(repoDir, "feature.txt"));
-      const branchMergedOutput = runGitSync(["branch", "--merged", "main"], repoDir).stdout ?? "";
-      // `git branch --merged` 對「目前分支」用 `* ` 前綴,對「目前簽出在另一個
-      // worktree 裡的分支」用 `+ ` 前綴(這裡的任務分支這時候還簽出在
-      // worktreePath 這個 worktree 裡,worktree 要等外層清理階段的
-      // task.delete 才會移除)——兩種前綴都要去掉才能正確比對分支名稱。
-      const branchMerged = branchMergedOutput
-        .split(/\r?\n/)
-        .some((line) => line.trim().replace(/^[*+]\s*/, "") === branch);
-
-      record(
-        "步驟16a task.merge 合併成功(worktree 內真實 commit → review → merging → task.merge → done," +
-          "baseDir git log 看得到 commit、分支已合併)",
-        featureCommit.status === 0 && mergedOk && commitVisibleOnMain && fileExistsOnMain && branchMerged,
-        `featureCommitStatus=${featureCommit.status}, mergeResult.task.status=${mergeResult.task.status}, ` +
-          `commitVisibleOnMain=${commitVisibleOnMain}, fileExistsOnMain=${fileExistsOnMain}, branchMerged=${branchMerged}, branch=${branch}\n` +
-          `git log --oneline --all(baseDir):\n${logOutput}`,
-      );
-    } catch (err) {
-      record("步驟16a task.merge 合併成功路徑", false, String(err));
-    }
-
-    // ---- 16c: request_review(直接打 gateway 的 message.requestReview,決定性)----
-    //
-    // S5(dispose-gate)補充:這個任務必須帶一條會通過的 `acceptance`,
-    // request_review(映射到 in-progress→review)才會被 S5 的驗收閘自動放行
-    // ——沒有 acceptance 的任務現在會改成「等待人類核可」而不是直接推進(見
-    // task-service.ts 的 applyHumanReviewGate()/dispose-gate-and-lead_detail.md
-    // §1.2)。這是這輪(S5)刻意的行為變更,不是回歸:步驟16c 原本測的是
-    // 「request_review 能推進任務進 review + reviewer 收到訊息」,加一條確定
-    // 會 exit 0 的驗收指令維持這個斷言不變,同時額外驗證了 S5 的機器放行路徑
-    // 對 request_review 這個入口同樣生效。
-    const passCommand16c = `${JSON.stringify(process.execPath)} -e "process.exit(0)"`;
-    try {
-      const created = await client.rpc("task.create", {
-        teamId,
-        title: "E2E Merge Task 2 (request_review)",
-        acceptance: { commands: [passCommand16c] },
-      });
-      task2Id = created.task.id;
-      await client.rpc("task.assign", { taskId: task2Id, memberId: coderId });
-      await client.rpc("task.updateStatus", { taskId: task2Id, status: "in-progress" });
-
-      const reviewOutcome = await client.rpc("message.requestReview", {
-        teamId,
-        fromMemberId: coderId,
-        to: "Reviewer",
-        taskId: task2Id,
-      });
-      const task2AfterReview = await client.rpc("task.get", { taskId: task2Id });
-
-      const taskMovedToReview =
-        reviewOutcome.taskUpdated &&
-        reviewOutcome.taskFromStatus === "in-progress" &&
-        reviewOutcome.taskToStatus === "review" &&
-        task2AfterReview.task.status === "review";
-      const messageOk =
-        reviewOutcome.message.to === "Reviewer" &&
-        reviewOutcome.message.content.includes("請審查") &&
-        reviewOutcome.message.content.includes("E2E Merge Task 2");
-
-      const historyResult = await client.rpc("team.messages", { teamId });
-      const messageInHistory = historyResult.messages.some(
-        (m) => m.id === reviewOutcome.message.id && m.to === "Reviewer",
-      );
-
-      record(
-        "步驟16c request_review(message.requestReview)推進任務進 review + reviewer 收到的訊息可從 team.messages 查得到",
-        taskMovedToReview && messageOk && messageInHistory,
-        `taskMovedToReview=${taskMovedToReview}(from=${reviewOutcome.taskFromStatus}, to=${reviewOutcome.taskToStatus}, ` +
-          `task2.status=${task2AfterReview.task.status}), messageOk=${messageOk}(content=${reviewOutcome.message.content}), ` +
-          `delivered=${reviewOutcome.delivered}, messageInHistory=${messageInHistory}`,
-      );
-    } catch (err) {
-      record("步驟16c request_review", false, String(err));
-    }
-
-    // ---- 16d: agent 不能自己合併到 done ----
-    try {
-      if (!task2Id) throw new Error("task2Id 未建立(16c 失敗),無法測試 16d");
-      // task2 目前應該是 review(16c 結果)——先合法推進到 merging,再嘗試用
-      // report_status(done) 企圖繞過人類批准(task.merge)直接把任務標記完成。
-      await client.rpc("task.updateStatus", { taskId: task2Id, status: "merging" });
-      const bypassAttempt = await client.rpc("message.reportStatus", {
-        teamId,
-        fromMemberId: coderId,
-        status: "done",
-        taskId: task2Id,
-      });
-      const task2AfterBypass = await client.rpc("task.get", { taskId: task2Id });
-
-      const stillMerging = task2AfterBypass.task.status === "merging";
-      const explainedInMessage =
-        bypassAttempt.message.content.includes("未同步") && bypassAttempt.message.content.includes("task.merge");
-
-      record(
-        "步驟16d agent 無法透過 report_status(done)自行把任務標記完成(仍留在 merging,需人類經 task.merge 走完最後一哩)",
-        stillMerging && explainedInMessage,
-        `stillMerging=${stillMerging}(task2.status=${task2AfterBypass.task.status}), explainedInMessage=${explainedInMessage}, ` +
-          `message=${bypassAttempt.message.content}`,
-      );
-    } catch (err) {
-      record("步驟16d agent 無法自行合併到 done", false, String(err));
-    }
-
-    // ---- 16e: task.delete 的 hadUncommittedChanges 旗標 ----
-    let task3Id;
-    let task4Id;
-    try {
-      // (1) worktree 有未 commit 的變更:應回 hadUncommittedChanges=true。
-      const created3 = await client.rpc("task.create", { teamId, title: "E2E Merge Task 3 (uncommitted)" });
-      task3Id = created3.task.id;
-      const assigned3 = await client.rpc("task.assign", { taskId: task3Id, memberId: coderId });
-      writeFileSync(path.join(assigned3.workspace.worktreePath, "scratch.txt"), "not committed\n", "utf8");
-      const deleteResult3 = await client.rpc("task.delete", { taskId: task3Id });
-      task3Id = undefined; // 已刪除,finally 不需要再刪一次
-
-      // (2) worktree 乾淨、沒有任何變更:應回 hadUncommittedChanges=false。
-      const created4 = await client.rpc("task.create", { teamId, title: "E2E Merge Task 4 (clean)" });
-      task4Id = created4.task.id;
-      await client.rpc("task.assign", { taskId: task4Id, memberId: coderId });
-      const deleteResult4 = await client.rpc("task.delete", { taskId: task4Id });
-      task4Id = undefined;
-
-      record(
-        "步驟16e task.delete 回應正確帶出 hadUncommittedChanges(worktree 有未 commit 變更 → true;乾淨 worktree → false)",
-        deleteResult3.hadUncommittedChanges === true && deleteResult4.hadUncommittedChanges === false,
-        `dirty.hadUncommittedChanges=${deleteResult3.hadUncommittedChanges}, clean.hadUncommittedChanges=${deleteResult4.hadUncommittedChanges}`,
-      );
-    } catch (err) {
-      record("步驟16e task.delete hadUncommittedChanges 旗標", false, String(err));
-    } finally {
-      for (const id of [task3Id, task4Id]) {
-        if (!id) continue;
-        try {
-          await client.rpc("task.delete", { taskId: id });
-        } catch (err) {
-          log(`[cleanup] 刪除步驟16e任務(${id})時發生錯誤(忽略): ${err}`);
-        }
-      }
-    }
-  } finally {
-    // ---- 清理:task1(done,仍持有 worktree)、task2(merging)一併刪除;
-    // 最後移除整個暫存 git repo 與 worktree 根目錄。----
-    for (const taskId of [task1Id, task2Id]) {
-      if (!taskId) continue;
-      try {
-        await client.rpc("task.delete", { taskId });
-      } catch (err) {
-        log(`[cleanup] 刪除步驟16任務(${taskId})時發生錯誤(忽略): ${err}`);
-      }
-    }
-    try {
-      rmSync(repoDir, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟16暫存 git repo(${repoDir})時發生錯誤(忽略): ${err}`);
-    }
-    try {
-      rmSync(worktreeRoot, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟16 worktree 根目錄(${worktreeRoot})時發生錯誤(忽略): ${err}`);
-    }
-  }
-
-  // ==== 16b: 合併衝突路徑(獨立的暫存 repo,避免弄髒上面共用的 repo)====
-  const conflictRepoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-conflict-"));
-  const conflictWorktreeRoot = path.join(path.dirname(conflictRepoDir), ".deskmony-worktrees");
-  let conflictTaskId;
-  try {
-    runGitSync(["init", "-b", "main"], conflictRepoDir);
-    runGitSync(["config", "user.email", "e2e@deskmony.local"], conflictRepoDir);
-    runGitSync(["config", "user.name", "Deskmony E2E"], conflictRepoDir);
-    writeFileSync(path.join(conflictRepoDir, "conflict.txt"), "original\n", "utf8");
-    runGitSync(["add", "."], conflictRepoDir);
-    runGitSync(["commit", "-m", "initial commit"], conflictRepoDir);
-
-    const team = await client.rpc("team.create", { name: "E2E Conflict Team", workingDir: conflictRepoDir });
-    const conflictTeamId = team.team.id;
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Conflict Coder Profile",
-      software: "claude-agent-sdk",
-      workingDir: conflictRepoDir,
-    });
-    const member = await client.rpc("team.addMember", {
-      teamId: conflictTeamId,
-      agentProfileId: profileCreated.profile.id,
-      name: "Coder",
-      role: "Coder",
-      canInterrupt: false,
-    });
-
-    const created = await client.rpc("task.create", { teamId: conflictTeamId, title: "E2E Conflict Task" });
-    conflictTaskId = created.task.id;
-    const assigned = await client.rpc("task.assign", { taskId: conflictTaskId, memberId: member.member.id });
-    const worktreePath = assigned.workspace.worktreePath;
-    const branch = assigned.workspace.branch;
-
-    // worktree 上修改同一個檔案並 commit。
-    writeFileSync(path.join(worktreePath, "conflict.txt"), "worktree change\n", "utf8");
-    runGitSync(["add", "."], worktreePath);
-    runGitSync(["commit", "-m", "worktree change"], worktreePath);
-
-    // baseDir(主幹)上也修改同一個檔案並 commit,製造真正的合併衝突。
-    writeFileSync(path.join(conflictRepoDir, "conflict.txt"), "main change\n", "utf8");
-    runGitSync(["add", "."], conflictRepoDir);
-    runGitSync(["commit", "-m", "main change"], conflictRepoDir);
-
-    await client.rpc("task.updateStatus", { taskId: conflictTaskId, status: "in-progress" });
-    await client.rpc("task.updateStatus", { taskId: conflictTaskId, status: "review" });
-    await client.rpc("task.updateStatus", { taskId: conflictTaskId, status: "merging" });
-
-    let mergeRejected = false;
-    let mergeErrorMessage = "";
-    try {
-      await client.rpc("task.merge", { taskId: conflictTaskId });
-    } catch (err) {
-      mergeRejected = true;
-      mergeErrorMessage = String(err);
-    }
-
-    const taskAfterConflict = await client.rpc("task.get", { taskId: conflictTaskId });
-    const stillMerging = taskAfterConflict.task.status === "merging";
-
-    const statusAfterConflict = runGitSync(["status", "--porcelain"], conflictRepoDir).stdout ?? "";
-    const baseDirClean = statusAfterConflict.trim().length === 0;
-    const mergeHeadPath = path.join(conflictRepoDir, ".git", "MERGE_HEAD");
-    const noResidualMergeState = !existsSync(mergeHeadPath);
-
-    record(
-      "步驟16b task.merge 合併衝突自動 abort 還原(task.merge 失敗、任務留在 merging、baseDir 乾淨無殘留合併狀態)",
-      mergeRejected && stillMerging && baseDirClean && noResidualMergeState,
-      `mergeRejected=${mergeRejected}(${mergeErrorMessage}), stillMerging=${stillMerging}(status=${taskAfterConflict.task.status}), ` +
-        `baseDirClean=${baseDirClean}, noResidualMergeState=${noResidualMergeState}, branch=${branch}\n` +
-        `git status --porcelain(baseDir,合併失敗後):\n${statusAfterConflict}`,
-    );
-  } catch (err) {
-    record("步驟16b task.merge 合併衝突路徑", false, String(err));
-  } finally {
-    if (conflictTaskId) {
-      try {
-        await client.rpc("task.delete", { taskId: conflictTaskId });
-      } catch (err) {
-        log(`[cleanup] 刪除步驟16b衝突任務時發生錯誤(忽略): ${err}`);
-      }
-    }
-    try {
-      rmSync(conflictRepoDir, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟16b暫存 git repo(${conflictRepoDir})時發生錯誤(忽略): ${err}`);
-    }
-    try {
-      rmSync(conflictWorktreeRoot, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟16b worktree 根目錄(${conflictWorktreeRoot})時發生錯誤(忽略): ${err}`);
     }
   }
 }
@@ -3172,13 +1667,12 @@ async function slashCommandSmokeTest(client, workspaceDir) {
 // 步驟 32: ACP scoped MCP bridge token(Phase 2,決定性測試,不依賴任何真實
 // 模型/真實 codex-acp/gemini)。
 //
-// 核心手法:用 fake-acp-agent.mjs 建立真實的 `software:"acp"` session(團隊
-// 成員或個人單機皆有),送出 `REPORT_MCP_SERVERS_PREFIX` 這個確定性 prompt,
-// 讓假 agent 把它在 `session/new` 收到的 `mcpServers`(AcpAdapter.spawn() 真
-// 的呼叫 `WsGateway.mintMcpBridgeToken()` 核發、透過 `SessionBuilder.
-// withMcpServer()` 掛上的那組設定,含真實 scoped token)原樣回顯——藉此拿到
-// 一個「真的由生產程式碼核發」的 token,而不是自己在測試裡憑空捏造一個假的
-// grant。拿到之後分兩路驗證:
+// 核心手法:用 fake-acp-agent.mjs 建立真實的 `software:"acp"` session,送出
+// `REPORT_MCP_SERVERS_PREFIX` 這個確定性 prompt,讓假 agent 把它在 `session/new`
+// 收到的 `mcpServers`(AcpAdapter.spawn() 真的呼叫 `WsGateway.mintMcpBridgeToken()`
+// 核發、透過 `SessionBuilder.withMcpServer()` 掛上的那組設定,含真實 scoped
+// token)原樣回顯——藉此拿到一個「真的由生產程式碼核發」的 token,而不是自己在
+// 測試裡憑空捏造一個假的 grant。拿到之後分兩路驗證:
 //   (a) 32b-32f:直接用這個 token 開一條新的 WS 連線(重用既有
 //       `GatewayClient`),打各種白名單內/外、綁定範圍內/外、過期、撤銷後的
 //       請求,決定性地驗證 apps/core/src/gateway/ws-gateway.ts 的
@@ -3187,18 +1681,17 @@ async function slashCommandSmokeTest(client, workspaceDir) {
 //   (b) 32g:用 `CALL_BRIDGE_TOOL_PREFIX` 讓假 agent **真的**把
 //       mcp-bridge-server.ts 的編譯產物 spawn 成子行程,用真正的 MCP client
 //       連上去呼叫一個工具——證明(a)驗證過的 token 真的能驅動完整的
-//       ACP→bridge→WS→gateway→MessageBus 管線,產生真實可見的 side effect
-//       (team_messages 多一筆),不是紙上談兵。
+//       ACP→bridge→WS→gateway→SessionManager 管線,產生真實可見的 side effect
+//       (多出一個掛在呼叫者底下的子 session),不是紙上談兵。
 //
-// `AcpAdapter` 的 `subagentPort` 這輪(見 apps/core/src/index.ts)已改成與
-// `claudeAdapter` 共用同一個實例,全域生效——所以這裡建立的**任何** ACP
-// session(不論有沒有 team)都會拿到 subagent 系列方法的授權,32d 特別驗證
-// 「沒有 team 的 session,它的 token 確實拿不到 team-bus 系列方法」,確保
-// scope 是真的照請求核發、不是無條件全授權。
+// 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):token 的範圍只剩
+// subagent 系列(原本還有團隊訊息系列的五個方法與 teamId/memberId
+// 綁定檢查)。原 32e(沒有 team 的 session 拿不到團隊訊息方法)隨 team 一併移除;
+// 原 32g 改用 spawn_subagent 驗證端到端管線。
 // ---------------------------------------------------------------------
 
 /** 把 `REPORT_MCP_SERVERS_PREFIX` 回覆的 `"MCP_SERVERS:[...]"` 文字轉成
- *  `{token, gatewayUrl, sessionId, teamId?, memberId?, subagentEnabled}`。
+ *  `{token, gatewayUrl, sessionId, subagentEnabled}`。
  *  沒有掛任何 MCP server 時(mcpServers 是空陣列)回傳 undefined。 */
 function parseBridgeEnvFromReport(fullText) {
   const marker = "MCP_SERVERS:";
@@ -3224,12 +1717,8 @@ function parseBridgeEnvFromReport(fullText) {
 /** 建一個 ACP session(fake-acp-agent.mjs),送出 REPORT_MCP_SERVERS_PREFIX,
  *  回傳解析後的 bridge env(見上方)——`undefined` 代表這個 session 沒有掛
  *  任何 MCP server(不應該發生,除非 tokenMinter/subagentPort 都沒注入)。 */
-async function createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, title, teamMemberId) {
-  const created = await client.rpc(
-    "session.create",
-    { agentProfileId: acpProfileId, workingDir: workspaceDir, title, ...(teamMemberId ? { teamMemberId } : {}) },
-    30_000,
-  );
+async function createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, title) {
+  const created = await client.rpc("session.create", { agentProfileId: acpProfileId, workingDir: workspaceDir, title }, 30_000);
   const sessionId = created.session.id;
   const { finalEvent, collected } = await client.drivePrompt(sessionId, REPORT_MCP_SERVERS_PREFIX, {
     onPermission: async () => "deny",
@@ -3257,177 +1746,13 @@ async function connectAndAuth(gatewayUrl, token) {
   }
 }
 
-/**
- * 步驟 35:`team.delete`(破壞性操作,決定性驗證,不依賴任何真實模型)。
- *
- * 這個操作會**中止正在跑的 agent、移除任務的 git worktree**,所以驗收重點不是
- * 「有沒有回 ok」,而是**連帶清理有沒有真的做完**——半完成(DB 刪了但 session
- * 還在跑、worktree 還留在磁碟上)比直接失敗更糟,那正是 `TeamCascadePort` 存在
- * 的理由。這裡逐項檢查刪除前存在、刪除後消失。
- */
-async function teamDeleteSmokeTest(client, workspaceDir) {
-  const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
-  const gitVersion = runGitSync(["--version"], process.cwd());
-  if (gitVersion.status !== 0) {
-    record("步驟35(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
-    return;
-  }
-
-  let repoDir;
-  try {
-    repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-team-delete-"));
-    runGitSync(["init"], repoDir);
-    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-    writeFileSync(path.join(repoDir, "README.md"), "# e2e team delete repo\n", "utf8");
-    runGitSync(["add", "."], repoDir);
-    runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-    const profileCreated = await client.rpc("profile.create", {
-      name: "E2E Team Delete Profile",
-      software: "acp",
-      workingDir: repoDir,
-      acpConfig: { command: process.execPath, args: [fakeAgentPath] },
-    });
-    const profileId = profileCreated.profile.id;
-
-    const team = await client.rpc("team.create", { name: "E2E Team To Delete", workingDir: repoDir });
-    const teamId = team.team.id;
-
-    // worker:ephemeral,指派任務後會自動 spawn session + 建 worktree。
-    const worker = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: profileId,
-      name: "DeleteWorker",
-      role: "Coder",
-      lifecycle: "ephemeral",
-    });
-    // lead:persistent,session 由人手動建立——**這個成員沒有任務**,所以它的
-    // session 不會被 deleteTask() 的連帶清理碰到,必須靠 deleteTeam() 第二步
-    // 專門處理。少了那一步這裡就會留下孤兒 session(還在跑的 agent)。
-    const lead = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: profileId,
-      name: "DeleteLead",
-      role: "Lead",
-      lifecycle: "persistent",
-    });
-    await client.rpc(
-      "session.create",
-      { agentProfileId: profileId, workingDir: repoDir, title: "e2e-team-delete-lead", teamMemberId: lead.member.id },
-      30_000,
-    );
-
-    const task = await client.rpc("task.create", { teamId, title: "E2E Task To Be Deleted" });
-    const assigned = await client.rpc("task.assign", { taskId: task.task.id, memberId: worker.member.id });
-    const worktreePath = assigned.workspace.worktreePath;
-
-    await client.rpc("message.send", { teamId, to: "DeleteLead", content: "before-delete", fromName: "Tester" });
-
-    // ---- 刪除前的狀態:兩個 session 都活著、worktree 真的在磁碟上 ----
-    const teammatesBefore = await client.rpc("team.teammates", { teamId });
-    const activeBefore = teammatesBefore.teammates.filter((tm) => tm.hasActiveSession).length;
-    const worktreeExistsBefore = existsSync(worktreePath);
-    const messagesBefore = (await client.rpc("team.messages", { teamId })).messages.length;
-
-    // ---- 刪除 ----
-    const result = await client.rpc("team.delete", { teamId }, 60_000);
-
-    // ---- 刪除後:team/成員/訊息/任務/worktree/session 全都要消失 ----
-    const teamsAfter = await client.rpc("team.list", {});
-    const teamGone = !teamsAfter.teams.some((tm) => tm.id === teamId);
-    const worktreeGone = !existsSync(worktreePath);
-
-    // 成員的 session 是否真的被 dispose:team 已經不存在了,不能再用
-    // team.teammates 查,改用 session.list 確認那些 session 不再是活躍狀態。
-    const sessionsAfter = await client.rpc("session.list", {});
-    const liveSessionsInRepo = sessionsAfter.sessions.filter(
-      (s) => (s.workingDir === repoDir || s.workingDir === worktreePath) && s.status !== "closed",
-    );
-
-    // 任務也該連帶消失(team 沒了,task.list 應該查不到任何屬於它的任務)。
-    let tasksGone = false;
-    try {
-      const tasksAfter = await client.rpc("task.list", { teamId });
-      tasksGone = (tasksAfter.tasks ?? []).length === 0;
-    } catch {
-      // team 已不存在時 task.list 直接報錯也是合理的「查不到」語意。
-      tasksGone = true;
-    }
-
-    const countsOk =
-      result.deletedTasks === 1 &&
-      result.deletedMembers === 2 &&
-      result.disposedSessions >= 1 &&
-      Array.isArray(result.tasksWithUncommittedChanges);
-
-    record(
-      "步驟35 team.delete:連帶刪除成員/群聊訊息/任務(含 git worktree)並 dispose 所有成員的活躍 session——包含沒有任務、不會被 deleteTask 連帶處理的長命成員,不留孤兒 session 或殘留 worktree",
-      teamGone && worktreeGone && tasksGone && liveSessionsInRepo.length === 0 && countsOk,
-      `刪除前: 活躍session=${activeBefore}, worktree存在=${worktreeExistsBefore}, 訊息數=${messagesBefore} | ` +
-        `刪除後: teamGone=${teamGone}, worktreeGone=${worktreeGone}, tasksGone=${tasksGone}, ` +
-        `殘留活躍session=${liveSessionsInRepo.length} | result=${JSON.stringify(result)}`,
-    );
-
-    // ---- 35b: 刪不存在的 team → 明確報錯,不是靜默成功 ----
-    let rejected = false;
-    let rejectErr = "";
-    try {
-      await client.rpc("team.delete", { teamId });
-    } catch (err) {
-      rejected = true;
-      rejectErr = String(err);
-    }
-    record(
-      "步驟35b team.delete 對已不存在的 team 明確報錯(不靜默成功)",
-      rejected && rejectErr.includes(teamId),
-      `rejected=${rejected}, err=${rejectErr}`,
-    );
-  } catch (err) {
-    record("步驟35 team.delete", false, String(err));
-  } finally {
-    if (repoDir) {
-      rmTaskWorktreesFor(repoDir);
-      try {
-        rmSync(repoDir, { recursive: true, force: true });
-      } catch {
-        // ignore
-      }
-    }
-  }
-}
-
-/** 清掉這個 repo 產生的任務 worktree(它們不在 repoDir 底下,見
- *  workspace-manager.ts 的 createWorkspaceForTask())。只刪前綴對得上的項目,
- *  `.deskmony-worktrees` 根目錄是所有 e2e 共用的,絕不整個刪掉。 */
-function rmTaskWorktreesFor(repoDir) {
-  const root = path.join(path.dirname(repoDir), ".deskmony-worktrees");
-  if (!existsSync(root)) return;
-  const prefix = `${path.basename(repoDir)}-task-`;
-  let entries;
-  try {
-    entries = readdirSync(root);
-  } catch {
-    return;
-  }
-  for (const name of entries) {
-    if (!name.startsWith(prefix)) continue;
-    try {
-      rmSync(path.join(root, name), { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
-  }
-}
-
 async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
   const fakeAgentPath = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 
-  // ---- 32a: 準備——team(Coder/Reviewer)+ ACP profile + 兩個 session
-  //           (team 成員一個、沒有 team 的個人單機一個),各自取得真實核發的
-  //           bridge env。----
-  let teamId, coderMemberId, reviewerMemberId, teamSessionId, soloSessionId, repoDir, taskId;
-  let teamBridgeEnv, soloBridgeEnv;
+  // ---- 32a: 準備——ACP profile + 兩個 session(主要的一個、另一個當「別人的
+  //           session」用來驗證冒名防護),各自取得真實核發的 bridge env。----
+  let primarySessionId, otherSessionId;
+  let primaryBridgeEnv, otherBridgeEnv;
   try {
     const profileCreated = await client.rpc("profile.create", {
       name: "E2E Scoped MCP Bridge Token",
@@ -3437,106 +1762,51 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     });
     const acpProfileId = profileCreated.profile.id;
 
-    // MessageBus.sendMessage()/broadcast() 的 contextId 推導(S2
-    // message-budget)要求發送者當下有一個進行中的任務(assigned/
-    // in-progress/review/merging),否則會被拒收(比照步驟13a 的既有先例)
-    // ——這裡的 team 需要真的 git repo 當 workingDir 才能 task.assign。
-    const gitVersion = runGitSync(["--version"], process.cwd());
-    if (gitVersion.status !== 0) {
-      record("步驟32(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
-      return;
-    }
-    repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-scoped-token-"));
-    runGitSync(["init"], repoDir);
-    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-    writeFileSync(path.join(repoDir, "README.md"), "# e2e scoped mcp bridge token repo\n", "utf8");
-    runGitSync(["add", "."], repoDir);
-    runGitSync(["commit", "-m", "initial commit"], repoDir);
+    const primaryResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-primary");
+    primarySessionId = primaryResult.sessionId;
+    primaryBridgeEnv = primaryResult.bridgeEnv;
 
-    const team = await client.rpc("team.create", { name: "E2E Scoped Token Team", workingDir: repoDir });
-    teamId = team.team.id;
-    const coder = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: acpProfileId,
-      name: "Coder",
-      role: "Coder",
-      canInterrupt: false,
-      lifecycle: "persistent",
-    });
-    coderMemberId = coder.member.id;
-    const reviewer = await client.rpc("team.addMember", {
-      teamId,
-      agentProfileId: acpProfileId,
-      name: "Reviewer",
-      role: "Reviewer",
-      canInterrupt: false,
-      lifecycle: "persistent",
-    });
-    reviewerMemberId = reviewer.member.id;
-
-    // 指派一個任務給 coderMemberId(assigned 狀態),讓 message.sendMessage/
-    // broadcast 的 contextId 能被推導出來(見上方註解)。
-    const task = await client.rpc("task.create", { teamId, title: "E2E Scoped Token Task" });
-    taskId = task.task.id;
-    await client.rpc("task.assign", { taskId, memberId: coderMemberId });
-
-    const teamResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-team", coderMemberId);
-    teamSessionId = teamResult.sessionId;
-    teamBridgeEnv = teamResult.bridgeEnv;
-
-    const soloResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-solo", undefined);
-    soloSessionId = soloResult.sessionId;
-    soloBridgeEnv = soloResult.bridgeEnv;
+    const otherResult = await createAcpSessionAndGetBridgeEnv(client, acpProfileId, workspaceDir, "e2e-scoped-other");
+    otherSessionId = otherResult.sessionId;
+    otherBridgeEnv = otherResult.bridgeEnv;
 
     const ok =
-      Boolean(teamBridgeEnv?.token) &&
-      teamBridgeEnv.token.startsWith("dmbt_") &&
-      teamBridgeEnv.teamId === teamId &&
-      teamBridgeEnv.memberId === coderMemberId &&
-      teamBridgeEnv.sessionId === teamSessionId &&
-      teamBridgeEnv.subagentEnabled === true &&
-      Boolean(soloBridgeEnv?.token) &&
-      soloBridgeEnv.teamId === undefined &&
-      soloBridgeEnv.sessionId === soloSessionId &&
-      soloBridgeEnv.subagentEnabled === true;
+      Boolean(primaryBridgeEnv?.token) &&
+      primaryBridgeEnv.token.startsWith("dmbt_") &&
+      primaryBridgeEnv.sessionId === primarySessionId &&
+      primaryBridgeEnv.subagentEnabled === true &&
+      primaryBridgeEnv.teamId === undefined &&
+      primaryBridgeEnv.memberId === undefined &&
+      Boolean(otherBridgeEnv?.token) &&
+      otherBridgeEnv.token !== primaryBridgeEnv.token &&
+      otherBridgeEnv.sessionId === otherSessionId &&
+      otherBridgeEnv.subagentEnabled === true;
     record(
-      "步驟32a 建立 team 成員與個人單機兩種 ACP session,AcpAdapter.spawn() 真的核發 scoped token(dmbt_ 前綴)且內容正確綁定各自的 session/team/member",
+      "步驟32a 建立兩個 ACP session,AcpAdapter.spawn() 真的各自核發 scoped token(dmbt_ 前綴、彼此不同)且內容正確綁定各自的 session(不再帶任何 team/member 環境變數)",
       ok,
-      `team=${JSON.stringify({ ...teamBridgeEnv, token: teamBridgeEnv?.token ? "(redacted)" : undefined })}, solo=${JSON.stringify({ ...soloBridgeEnv, token: soloBridgeEnv?.token ? "(redacted)" : undefined })}`,
+      `primary=${JSON.stringify({ ...primaryBridgeEnv, token: primaryBridgeEnv?.token ? "(redacted)" : undefined })}, other=${JSON.stringify({ ...otherBridgeEnv, token: otherBridgeEnv?.token ? "(redacted)" : undefined })}`,
     );
   } catch (err) {
-    record("步驟32a 準備 team + 兩種 ACP session 並取得真實核發的 scoped token", false, String(err));
+    record("步驟32a 準備 ACP session 並取得真實核發的 scoped token", false, String(err));
     return; // 後續子步驟都依賴這裡的結果,拿不到就整組略過。
   }
 
-  // ---- 32b: 白名單內的方法(team-bus + subagent 兩類)用 team session 的
-  //           token 呼叫,一律成功。----
+  // ---- 32b: 白名單內的方法(subagent 系列)用 primary session 的 token 呼叫,
+  //           一律成功。----
   try {
-    const { client: bridgeClient, ok: authOk } = await connectAndAuth(teamBridgeEnv.gatewayUrl, teamBridgeEnv.token);
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(primaryBridgeEnv.gatewayUrl, primaryBridgeEnv.token);
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
 
-    const sendResult = await bridgeClient.rpc("message.sendMessage", {
-      teamId,
-      fromMemberId: coderMemberId,
-      to: "Reviewer",
-      content: "步驟32b 白名單內方法測試",
-    });
-    const listChildrenResult = await bridgeClient.rpc("session.listChildren", { parentSessionId: teamSessionId });
+    const listChildrenResult = await bridgeClient.rpc("session.listChildren", { parentSessionId: primarySessionId });
     const listProfilesResult = await bridgeClient.rpc("profile.listForSubagent", {});
-    const teammatesResult = await bridgeClient.rpc("team.teammates", { teamId });
 
     bridgeClient.close();
 
-    const ok =
-      Boolean(sendResult?.message?.id) &&
-      Array.isArray(listChildrenResult?.children) &&
-      Array.isArray(listProfilesResult?.profiles) &&
-      Array.isArray(teammatesResult?.teammates);
+    const ok = Array.isArray(listChildrenResult?.children) && Array.isArray(listProfilesResult?.profiles);
     record(
-      "步驟32b scoped token 呼叫白名單內的方法(message.sendMessage/session.listChildren/profile.listForSubagent/team.teammates)全部成功",
+      "步驟32b scoped token 呼叫白名單內的方法(session.listChildren/profile.listForSubagent)全部成功",
       ok,
-      `sendResult=${JSON.stringify(sendResult)}, listChildren=${JSON.stringify(listChildrenResult)}, listProfiles 數=${listProfilesResult?.profiles?.length}, teammates 數=${teammatesResult?.teammates?.length}`,
+      `listChildren=${JSON.stringify(listChildrenResult)}, listProfiles 數=${listProfilesResult?.profiles?.length}`,
     );
   } catch (err) {
     record("步驟32b scoped token 呼叫白名單內方法全部成功", false, String(err));
@@ -3545,14 +1815,14 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
   // ---- 32c: 白名單外的方法一律被拒絕(errorCode 對應
   //           GATEWAY_SCOPED_TOKEN_FORBIDDEN,訊息含「無權呼叫」)。----
   try {
-    const { client: bridgeClient, ok: authOk } = await connectAndAuth(teamBridgeEnv.gatewayUrl, teamBridgeEnv.token);
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(primaryBridgeEnv.gatewayUrl, primaryBridgeEnv.token);
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
 
     const forbiddenMethods = [
       ["session.create", { agentProfileId: "whatever", workingDir: workspaceDir }],
       ["profile.delete", { id: "whatever" }],
       ["config.setFile", { log: { level: "warn" } }],
-      ["session.setPermissionMode", { sessionId: teamSessionId, mode: "auto-accept-all" }],
+      ["session.setPermissionMode", { sessionId: primarySessionId, mode: "auto-accept-all" }],
     ];
     const rejections = [];
     for (const [method, params] of forbiddenMethods) {
@@ -3576,21 +1846,16 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
   }
 
   // ---- 32d: 綁定範圍檢查——同樣是白名單內的方法,但參數指向別的
-  //           session/team/member 時一律被拒絕。----
+  //           session 時一律被拒絕。----
   try {
-    const { client: bridgeClient, ok: authOk } = await connectAndAuth(teamBridgeEnv.gatewayUrl, teamBridgeEnv.token);
+    const { client: bridgeClient, ok: authOk } = await connectAndAuth(primaryBridgeEnv.gatewayUrl, primaryBridgeEnv.token);
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
 
-    const otherTeam = await client.rpc("team.create", { name: "E2E Scoped Token Other Team" });
     const cases = [
-      // teamId 對,但 fromMemberId 冒充 Reviewer(不是這個 token 綁定的 coderMemberId)。
-      ["message.sendMessage", { teamId, fromMemberId: reviewerMemberId, to: "Coder", content: "冒名" }, "fromMemberId 不符"],
-      // fromMemberId 對,但 teamId 指向別的 team。
-      ["message.broadcast", { teamId: otherTeam.team.id, fromMemberId: coderMemberId, content: "冒名" }, "teamId 不符"],
-      ["team.teammates", { teamId: otherTeam.team.id }, "teamId 不符(team.teammates)"],
-      // parentSessionId 指向不是這個 token 綁定的 soloSessionId。
-      ["session.listChildren", { parentSessionId: soloSessionId }, "parentSessionId 不符"],
-      ["session.spawnChildForSubagent", { parentSessionId: soloSessionId, prompt: "冒名" }, "parentSessionId 不符(spawn)"],
+      // parentSessionId 指向不是這個 token 綁定的 otherSessionId。
+      ["session.listChildren", { parentSessionId: otherSessionId }, "parentSessionId 不符"],
+      ["session.spawnChildForSubagent", { parentSessionId: otherSessionId, prompt: "冒名" }, "parentSessionId 不符(spawn)"],
+      ["session.sendToChild", { parentSessionId: otherSessionId, childSessionId: primarySessionId, message: "冒名" }, "parentSessionId 不符(sendToChild)"],
     ];
     const rejections = [];
     for (const [method, params, label] of cases) {
@@ -3605,7 +1870,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
 
     const ok = rejections.every((r) => r.rejected && r.message.includes("不符"));
     record(
-      "步驟32d scoped token 呼叫白名單內方法,但參數指向不屬於自己綁定的 session/team/member 時一律被拒絕(冒名防護)",
+      "步驟32d scoped token 呼叫白名單內方法,但參數指向不屬於自己綁定的 session 時一律被拒絕(冒名防護)",
       ok,
       JSON.stringify(rejections),
     );
@@ -3613,37 +1878,10 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     record("步驟32d scoped token 綁定範圍檢查(冒名防護)", false, String(err));
   }
 
-  // ---- 32e: 沒有 team 的 session,它的 token 拿不到 team-bus 系列方法
-  //           (即使 subagentPort 全域生效、team-bus 與 subagent 是各自獨立
-  //           判斷的兩組範圍),但拿得到 subagent 系列方法。----
-  try {
-    const { client: bridgeClient, ok: authOk } = await connectAndAuth(soloBridgeEnv.gatewayUrl, soloBridgeEnv.token);
-    if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
-
-    let teamBusRejected = false;
-    try {
-      await bridgeClient.rpc("message.sendMessage", { teamId, fromMemberId: coderMemberId, to: "Reviewer", content: "不該成功" });
-    } catch (err) {
-      teamBusRejected = String(err).includes("無權呼叫");
-    }
-
-    const listProfilesResult = await bridgeClient.rpc("profile.listForSubagent", {});
-    bridgeClient.close();
-
-    const ok = teamBusRejected && Array.isArray(listProfilesResult?.profiles);
-    record(
-      "步驟32e 沒有 team 的 ACP session,其 scoped token 呼叫 team-bus 方法(message.sendMessage)被拒絕,但 subagent 方法(profile.listForSubagent)仍然成功——scope 精確反映核發時的請求,不是全有全無",
-      ok,
-      `teamBusRejected=${teamBusRejected}, listProfiles 數=${listProfilesResult?.profiles?.length}`,
-    );
-  } catch (err) {
-    record("步驟32e 無 team session 的 token 精確反映 scope(team-bus 拒絕/subagent 允許)", false, String(err));
-  }
-
   // ---- 32f: session dispose 後,對應 token 立即失效(呼叫任何方法都被拒絕)。----
   try {
     // 用一個獨立的 session(不是 32a 那兩個,避免影響後面步驟還要用到
-    // teamSessionId/soloSessionId)。
+    // primarySessionId/otherSessionId)。
     const profileList = await client.rpc("profile.list", {});
     const acpProfile = profileList.profiles.find((p) => p.name === "E2E Scoped MCP Bridge Token");
     const { sessionId: disposableSessionId, bridgeEnv: disposableBridgeEnv } = await createAcpSessionAndGetBridgeEnv(
@@ -3651,7 +1889,6 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
       acpProfile.id,
       workspaceDir,
       "e2e-scoped-dispose",
-      undefined,
     );
 
     // 先確認 token 一開始確實可用(排除「本來就核發失敗」這個混淆變因)。
@@ -3701,7 +1938,6 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
       acpProfile.id,
       workspaceDir,
       "e2e-scoped-dispose-live-conn",
-      undefined,
     );
 
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(disposableBridgeEnv2.gatewayUrl, disposableBridgeEnv2.token);
@@ -3732,14 +1968,16 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     record("步驟32f-2 session dispose 後,既有已認證連線的下一次請求被拒絕", false, String(err));
   }
 
-  // ---- 32g: 端到端——真的透過 mcp-bridge-server.ts 子行程呼叫 MCP 工具,
-  //           真的透過 WS 打回 gateway,真的觸發 MessageBus.sendMessage(),
-  //           team_messages 真的多一筆。----
+  // ---- 32g: 端到端——真的透過 mcp-bridge-server.ts 子行程呼叫 MCP 工具
+  //           (spawn_subagent),真的透過 WS 打回 gateway,真的觸發
+  //           SessionManager.spawnChildFromTool(),session.list 真的多出一個
+  //           掛在呼叫者(primary)底下的子 session。----
+  let bridgeChildId;
   try {
-    const fixedContent = `步驟32g 端到端 bridge 工具呼叫 ${randomUUID()}`;
-    const callPayload = { tool: "send_message", args: { to: "Reviewer", content: fixedContent } };
+    const childTitle = `e2e-bridge-child-${randomUUID().slice(0, 8)}`;
+    const callPayload = { tool: "spawn_subagent", args: { prompt: "步驟32g 端到端 bridge 工具呼叫", title: childTitle } };
     const prompt = `${CALL_BRIDGE_TOOL_PREFIX}${JSON.stringify(callPayload)}`;
-    const { finalEvent, collected } = await client.drivePrompt(teamSessionId, prompt, {
+    const { finalEvent, collected } = await client.drivePrompt(primarySessionId, prompt, {
       onPermission: async () => "deny",
       timeoutMs: 30_000,
     });
@@ -3751,47 +1989,30 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     const bridgeSucceeded = fullText.includes("BRIDGE_TOOL_RESULT:") && !fullText.includes("BRIDGE_TOOL_RESULT_ERROR");
 
     const deadline = Date.now() + 15_000;
-    let found;
-    while (Date.now() < deadline && !found) {
-      const history = await client.rpc("team.messages", { teamId });
-      found = history.messages.find((m) => m.to === "Reviewer" && m.content === fixedContent);
-      if (!found) await sleep(500);
+    let child;
+    while (Date.now() < deadline && !child) {
+      const { sessions } = await client.rpc("session.list", {});
+      child = sessions.find((s) => s.title === childTitle);
+      if (!child) await sleep(500);
     }
+    bridgeChildId = child?.id;
 
     record(
-      "步驟32g 端到端:fake-acp-agent 真的 spawn mcp-bridge-server.ts 子行程,用真正的 MCP client 呼叫 send_message 工具,經 WS 打回 gateway 後 team_messages 真的出現這筆訊息",
-      bridgeSucceeded && Boolean(found),
-      `bridgeReply=${JSON.stringify(fullText)}, foundInTeamMessages=${JSON.stringify(found)}`,
+      "步驟32g 端到端:fake-acp-agent 真的 spawn mcp-bridge-server.ts 子行程,用真正的 MCP client 呼叫 spawn_subagent 工具,經 WS 打回 gateway 後 session.list 真的出現掛在呼叫者底下(parentSessionId=primary)的子 session",
+      bridgeSucceeded && Boolean(child) && child.parentSessionId === primarySessionId,
+      `bridgeReply=${JSON.stringify(fullText)}, child=${JSON.stringify(child ? { id: child.id, parentSessionId: child.parentSessionId } : undefined)}`,
     );
   } catch (err) {
     record("步驟32g 端到端 mcp-bridge-server.ts 子行程真實呼叫", false, String(err));
   }
 
   // ---- 清理 ----
-  // task.delete 要排在 session.delete 之前(比照步驟13a 的既有先例)——
-  // coderMemberId 是 lifecycle:"persistent",不會被自動 dispose,但
-  // task.delete 本身會清掉 worktree,遲於 session.delete 呼叫沒有順序上的
-  // 風險,這裡仍維持與既有慣例一致的順序。
-  if (taskId) {
-    try {
-      await client.rpc("task.delete", { taskId });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟32任務(含 worktree)時發生錯誤(忽略): ${err}`);
-    }
-  }
-  for (const sessionId of [teamSessionId, soloSessionId]) {
+  for (const sessionId of [bridgeChildId, primarySessionId, otherSessionId]) {
     if (!sessionId) continue;
     try {
       await client.rpc("session.delete", { sessionId });
     } catch (err) {
       log(`[cleanup] 刪除步驟32 session(${sessionId})時發生錯誤(忽略): ${err}`);
-    }
-  }
-  if (repoDir) {
-    try {
-      rmSync(repoDir, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟32暫存 git repo(${repoDir})時發生錯誤(忽略): ${err}`);
     }
   }
 }
@@ -4015,303 +2236,6 @@ async function scopedTokenAuthInterplaySmokeTest() {
 }
 
 // ---------------------------------------------------------------------
-// 步驟 30: 機器驗收閘(S4,決定性測試,真實 git 子程序 + 真實 node 子程序,
-// 不依賴任何真實模型)
-//
-// 用 `node -e "process.exit(0/1)"` 當確定性指令(見 L4 §7 檢查清單),驗證:
-//   30a-30c 定義驗收 → 跑 → 斷言 pass/fail(passed 路徑 + 依序執行遇到非 0
-//       立即停止,後續指令不列入 perCommand)。
-//   30d 無 acceptance → skippedReason "no-acceptance",不當成失敗。
-//   30e 無 workspace(從未指派)→ skippedReason "workspace-missing"。
-//   30f 逾時:timeoutMs 設得比指令實際耗時短 → timedOut:true、exitCode:null、
-//       passed:false。
-//   30g task.setAcceptance 事後設定/清除驗收條件。
-//   30h 併發鎖:同一任務同時只能跑一次,重複請求得到明確錯誤;跑完之後鎖
-//       釋放,可以再跑一次。
-//   30i team-bus MCP 工具確實沒有任何寫入 acceptance 的入口(完整性紀律,
-//       靜態檢查編譯產物的工具名稱清單)。
-// ---------------------------------------------------------------------
-async function acceptanceGateSmokeTest(client) {
-  const gitVersion = runGitSync(["--version"], process.cwd());
-  if (gitVersion.status !== 0) {
-    record(
-      "步驟30 機器驗收閘(git 不可用,整個步驟略過)",
-      false,
-      `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`,
-    );
-    return;
-  }
-
-  const repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-acceptance-"));
-  const worktreeRoot = path.join(path.dirname(repoDir), ".deskmony-worktrees");
-  let teamId;
-  let memberId;
-
-  try {
-    // ---- 30a: 準備 git repo + team + 成員(比照步驟15a)----
-    try {
-      const initResult = runGitSync(["init", "-b", "main"], repoDir);
-      runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-      runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-      writeFileSync(path.join(repoDir, "README.md"), "# deskmony e2e acceptance repo\n", "utf8");
-      runGitSync(["add", "."], repoDir);
-      const commitResult = runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-      const team = await client.rpc("team.create", { name: "E2E Acceptance Team", workingDir: repoDir });
-      teamId = team.team.id;
-
-      const profileCreated = await client.rpc("profile.create", {
-        name: "E2E Acceptance Member Profile",
-        software: "claude-agent-sdk",
-        workingDir: repoDir,
-      });
-      // S8(agent-lifecycle):同一個 memberId 在這個步驟(30b~30h)被重複指派
-      // 到一連串永遠不會走到終態的任務(只 assign + runAcceptance,從不
-      // updateStatus 到 done)——與步驟16 的理由完全相同,明確指定 persistent
-      // 讓 assignTask() 略過 ephemeral 專屬的「一 member 一 session」檢查,
-      // 這個測試本身測的是機器驗收閘,與 lifecycle 無關。
-      const member = await client.rpc("team.addMember", {
-        teamId,
-        agentProfileId: profileCreated.profile.id,
-        name: "Coder",
-        role: "Coder",
-        canInterrupt: false,
-        lifecycle: "persistent",
-      });
-      memberId = member.member.id;
-
-      record(
-        "步驟30a 準備真實 git repo + team + 成員",
-        initResult.status === 0 && commitResult.status === 0,
-        `repoDir=${repoDir}, teamId=${teamId}, memberId=${memberId}`,
-      );
-    } catch (err) {
-      record("步驟30a 準備真實 git repo + team + 成員", false, String(err));
-      return;
-    }
-
-    const passCommand = `${JSON.stringify(process.execPath)} -e "process.exit(0)"`;
-    const failCommand = `${JSON.stringify(process.execPath)} -e "process.exit(1)"`;
-
-    // ---- 30b: 定義驗收(單條 pass 指令)→ task.assign → task.runAcceptance → passed:true ----
-    try {
-      const created = await client.rpc("task.create", {
-        teamId,
-        title: "E2E Acceptance Pass",
-        acceptance: { commands: [passCommand] },
-      });
-      await client.rpc("task.assign", { taskId: created.task.id, memberId });
-      const run = await client.rpc("task.runAcceptance", { taskId: created.task.id });
-
-      const ok =
-        run.result.passed === true &&
-        run.result.perCommand.length === 1 &&
-        run.result.perCommand[0].exitCode === 0 &&
-        run.result.perCommand[0].timedOut === false &&
-        !run.result.skippedReason;
-
-      record(
-        "步驟30b 定義驗收(單條 pass 指令)→ task.assign → task.runAcceptance → passed:true",
-        ok,
-        JSON.stringify(run.result),
-      );
-    } catch (err) {
-      record("步驟30b 驗收 pass 路徑", false, String(err));
-    }
-
-    // ---- 30c: 兩條指令,第一條 fail → 立即停止,第二條不執行、不列入 perCommand ----
-    try {
-      const created = await client.rpc("task.create", {
-        teamId,
-        title: "E2E Acceptance Fail-Fast",
-        acceptance: { commands: [failCommand, passCommand] },
-      });
-      await client.rpc("task.assign", { taskId: created.task.id, memberId });
-      const run = await client.rpc("task.runAcceptance", { taskId: created.task.id });
-
-      const ok =
-        run.result.passed === false &&
-        run.result.perCommand.length === 1 && // 第二條(pass)不應該被執行
-        run.result.perCommand[0].exitCode === 1 &&
-        !run.result.skippedReason;
-
-      record(
-        "步驟30c 依序執行:第一條指令非 0 → 立即停止,第二條指令不執行、不列入 perCommand,passed:false",
-        ok,
-        JSON.stringify(run.result),
-      );
-    } catch (err) {
-      record("步驟30c 驗收 fail-fast 路徑", false, String(err));
-    }
-
-    // ---- 30d: 無 acceptance → skippedReason "no-acceptance",不當成失敗 ----
-    try {
-      const created = await client.rpc("task.create", { teamId, title: "E2E Acceptance None" });
-      await client.rpc("task.assign", { taskId: created.task.id, memberId });
-      const run = await client.rpc("task.runAcceptance", { taskId: created.task.id });
-
-      const ok = run.result.skippedReason === "no-acceptance" && run.result.perCommand.length === 0;
-      record(
-        "步驟30d 任務無 acceptance → task.runAcceptance 回 skippedReason=\"no-acceptance\"(不是拋錯)",
-        ok,
-        JSON.stringify(run.result),
-      );
-    } catch (err) {
-      record("步驟30d 無 acceptance 路徑", false, String(err));
-    }
-
-    // ---- 30e: 有 acceptance 但從未指派(無 workspace)→ skippedReason "workspace-missing" ----
-    try {
-      const created = await client.rpc("task.create", {
-        teamId,
-        title: "E2E Acceptance No Workspace",
-        acceptance: { commands: [passCommand] },
-      });
-      // 刻意不呼叫 task.assign —— 這個任務永遠沒有 workspaceId。
-      const run = await client.rpc("task.runAcceptance", { taskId: created.task.id });
-
-      const ok = run.result.skippedReason === "workspace-missing" && run.result.passed === false;
-      record(
-        "步驟30e 任務有 acceptance 但未指派(無 workspace)→ skippedReason=\"workspace-missing\"",
-        ok,
-        JSON.stringify(run.result),
-      );
-    } catch (err) {
-      record("步驟30e 無 workspace 路徑", false, String(err));
-    }
-
-    // ---- 30f: 逾時(timeoutMs 設得比指令實際耗時短)→ timedOut:true, exitCode:null ----
-    try {
-      const sleepCommand = `${JSON.stringify(process.execPath)} -e "setTimeout(() => {}, 5000)"`;
-      const created = await client.rpc("task.create", {
-        teamId,
-        title: "E2E Acceptance Timeout",
-        acceptance: { commands: [sleepCommand], timeoutMs: 800 },
-      });
-      await client.rpc("task.assign", { taskId: created.task.id, memberId });
-      const run = await client.rpc("task.runAcceptance", { taskId: created.task.id }, 15_000);
-
-      const cmd = run.result.perCommand[0];
-      const ok =
-        run.result.passed === false &&
-        cmd?.timedOut === true &&
-        cmd?.exitCode === null &&
-        cmd.durationMs < 4_000; // 遠早於 5000ms 的 sleep 就該被 kill,證明真的逾時中止而非等它自然結束
-
-      record(
-        "步驟30f 逾時(timeoutMs 短於指令實際耗時)→ timedOut:true、exitCode:null、passed:false,且提前 kill(未等滿 5s)",
-        ok,
-        JSON.stringify(run.result),
-      );
-    } catch (err) {
-      record("步驟30f 逾時路徑", false, String(err));
-    }
-
-    // ---- 30g: task.setAcceptance 事後設定/清除驗收條件 ----
-    try {
-      const created = await client.rpc("task.create", { teamId, title: "E2E Acceptance SetLater" });
-      await client.rpc("task.assign", { taskId: created.task.id, memberId });
-
-      const noneYet = await client.rpc("task.get", { taskId: created.task.id });
-      const setResult = await client.rpc("task.setAcceptance", {
-        taskId: created.task.id,
-        acceptance: { commands: [passCommand] },
-      });
-      const afterSet = await client.rpc("task.get", { taskId: created.task.id });
-      const runAfterSet = await client.rpc("task.runAcceptance", { taskId: created.task.id });
-
-      const clearResult = await client.rpc("task.setAcceptance", { taskId: created.task.id, acceptance: undefined });
-      const afterClear = await client.rpc("task.get", { taskId: created.task.id });
-
-      const ok =
-        noneYet.task.acceptance === undefined &&
-        setResult.task.acceptance?.commands.length === 1 &&
-        afterSet.task.acceptance?.commands.length === 1 &&
-        runAfterSet.result.passed === true &&
-        clearResult.task.acceptance === undefined &&
-        afterClear.task.acceptance === undefined;
-
-      record(
-        "步驟30g task.setAcceptance 事後設定(task.get 讀回一致、runAcceptance 生效)與清除(acceptance 變回 undefined)",
-        ok,
-        `noneYet=${JSON.stringify(noneYet.task.acceptance)}, afterSet=${JSON.stringify(afterSet.task.acceptance)}, ` +
-          `runAfterSet.passed=${runAfterSet.result.passed}, afterClear=${JSON.stringify(afterClear.task.acceptance)}`,
-      );
-    } catch (err) {
-      record("步驟30g task.setAcceptance", false, String(err));
-    }
-
-    // ---- 30h: 併發鎖 —— 同一任務同時只能跑一次,重複請求得到明確錯誤;跑完後鎖釋放 ----
-    try {
-      const sleepCommand = `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 3000)"`;
-      const created = await client.rpc("task.create", {
-        teamId,
-        title: "E2E Acceptance Concurrency Lock",
-        acceptance: { commands: [sleepCommand] },
-      });
-      await client.rpc("task.assign", { taskId: created.task.id, memberId });
-
-      const firstCall = client.rpc("task.runAcceptance", { taskId: created.task.id }, 15_000);
-      // 給第一個請求一點時間確保它已經真的開始跑、拿到鎖(避免兩個請求幾乎
-      // 同時抵達 core 時的競態,讓這個檢查點決定性)。
-      await sleep(300);
-      let secondCallRejected = false;
-      let secondCallError = "";
-      try {
-        await client.rpc("task.runAcceptance", { taskId: created.task.id }, 5_000);
-      } catch (err) {
-        secondCallRejected = true;
-        secondCallError = String(err);
-      }
-      const firstResult = await firstCall;
-
-      // 鎖釋放後,同一任務應該可以再跑一次。
-      const thirdCall = await client.rpc("task.runAcceptance", { taskId: created.task.id }, 15_000);
-
-      const ok =
-        firstResult.result.passed === true &&
-        secondCallRejected &&
-        thirdCall.result.passed === true;
-
-      record(
-        "步驟30h 併發鎖:同一任務同時只能跑一次驗收(重複請求得到明確錯誤),跑完後鎖釋放、可再次執行",
-        ok,
-        `firstResult.passed=${firstResult.result.passed}, secondCallRejected=${secondCallRejected}(${secondCallError}), thirdCall.passed=${thirdCall.result.passed}`,
-      );
-    } catch (err) {
-      record("步驟30h 併發鎖", false, String(err));
-    }
-
-    // ---- 30i: team-bus MCP 工具沒有任何寫入 acceptance 的入口(完整性紀律)----
-    try {
-      const mod = await import(pathToFileURL(path.join(REPO_ROOT, "packages", "adapters", "dist", "team-bus-mcp.js")).href);
-      const toolNames = mod.TEAM_BUS_TOOL_NAMES;
-      const expectedCount = 5; // send_message / broadcast / list_teammates / report_status / request_review
-      const noAcceptanceTool = toolNames.every((name) => !/accept/i.test(name));
-
-      record(
-        "步驟30i team-bus MCP 工具清單(TEAM_BUS_TOOL_NAMES)不含任何 acceptance 相關工具(agent 無法自己寫入 acceptance)",
-        Array.isArray(toolNames) && toolNames.length === expectedCount && noAcceptanceTool,
-        `toolNames=${JSON.stringify(toolNames)}`,
-      );
-    } catch (err) {
-      record("步驟30i team-bus MCP 工具清單檢查", false, String(err));
-    }
-  } finally {
-    try {
-      rmSync(repoDir, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟30暫存 git repo(${repoDir})時發生錯誤(忽略): ${err}`);
-    }
-    try {
-      rmSync(worktreeRoot, { recursive: true, force: true });
-    } catch (err) {
-      log(`[cleanup] 刪除步驟30 worktree 根目錄(${worktreeRoot})時發生錯誤(忽略): ${err}`);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------
 // 步驟 19: 刪除對話(M5 Round C 功能2,決定性測試,不依賴任何真實模型)
 //
 // 對應 apps/desktop/src/stores/session-store.ts 新增的 `deleteSession()`
@@ -4366,7 +2290,7 @@ async function sessionDeleteSmokeTest(client, workspaceDir, defaultProfile) {
 //
 // 20a-20d 只斷言系統行為(`session.model` 欄位是否確實更新、`session-updated`
 // 推播是否同步、acp/pty 是否被明確拒絕),不依賴模型當輪的自由選擇,一律
-// 執行(比照步驟13a/14a-e 的先例:混合步驟裡不涉及模型自由選擇的子步驟,
+// 執行(混合步驟裡不涉及模型自由選擇的子步驟,
 // 不論 `--only` 為何都照常計算)。20e 額外送一個 prompt 驗證換 model 後該
 // session 仍能正常完成一輪對話,直接依賴真實模型是否配合,歸 model-behavior
 // 組,只在 `--only=model-behavior`(或未指定 `--only`)時才送出這個額外的
@@ -5637,8 +3561,6 @@ async function configLayeringSmokeTest() {
         effective.daemon.authRateLimit.cooldownMs.source === "default" &&
         effective.workspace.defaultWorkingDir.value === os.homedir() &&
         effective.workspace.defaultWorkingDir.source === "default" &&
-        effective.workspace.worktreesRoot.value === undefined &&
-        effective.workspace.worktreesRoot.source === "default" &&
         effective.features.staticDir.value === expectedStaticDir &&
         effective.features.staticDir.source === "default" &&
         effective.log.level.value === "info" &&
@@ -5646,7 +3568,7 @@ async function configLayeringSmokeTest() {
         effective.version.value === 1;
 
       record(
-        "步驟28a 沒有設定檔時,有效設定等同現行預設(bindHost/permissionTimeoutMs/authRateLimit/defaultWorkingDir/worktreesRoot/staticDir/log.level 皆為 default 來源且值與既有行為一致)",
+        "步驟28a 沒有設定檔時,有效設定等同現行預設(bindHost/permissionTimeoutMs/authRateLimit/defaultWorkingDir/staticDir/log.level 皆為 default 來源且值與既有行為一致)",
         ok,
         `effective=${JSON.stringify(effective)}`,
       );
@@ -6367,40 +4289,6 @@ async function main() {
       skipNote("步驟11 Windows .cmd spawn 修復迴歸測試", "deterministic");
     }
 
-    // ---- 步驟 12: MessageBus(M3 Round A,fake ACP agent,決定性測試)----
-    if (shouldRun("deterministic")) {
-      await messageBusSmokeTest(client, workspaceDir);
-    } else {
-      skipNote("步驟12 MessageBus(fake ACP agent)", "deterministic");
-    }
-
-    // ---- 步驟 13: team-bus MCP 工具(M3 Round A,混合:13a 決定性 / 13b 真實
-    // 模型軟性判定)—— 13a 本身建立 team + session 不依賴模型自由選擇,兩種
-    // --only 模式都需要它(13b 依賴同一個 session);只有 13b 內部的實際
-    // 模型呼叫會依 --only=model-behavior 才執行,見 teamBusMcpToolSmokeTest()。
-    await teamBusMcpToolSmokeTest(client, workspaceDir, profile);
-
-    // ---- 步驟 14: MessageBus interrupt 時序修正驗證(M3 Round B,混合:
-    // 14a-14e 決定性 / 14f-14g 真實模型軟性判定)—— 14a-e 兩種 --only 模式
-    // 都需要執行(14f/14g 是對同一輪已收集事件的事後分析,不需要額外的模型
-    // 呼叫,因此一律計算,只是被歸類進 model-behavior 統計組,不影響
-    // deterministic 組的結論),見 interruptTimingSmokeTest()。
-    await interruptTimingSmokeTest(client, workspaceDir, profile);
-
-    // ---- 步驟 15: TaskService + WorkspaceManager(M4 Round A,決定性測試,真實 git 子程序)----
-    if (shouldRun("deterministic")) {
-      await taskWorkspaceSmokeTest(client);
-    } else {
-      skipNote("步驟15 TaskService + WorkspaceManager", "deterministic");
-    }
-
-    // ---- 步驟 16: Review 合併流程 + request_review(M4 Round B,決定性測試,真實 git 子程序)----
-    if (shouldRun("deterministic")) {
-      await taskMergeReviewSmokeTest(client);
-    } else {
-      skipNote("步驟16 Review 合併流程 + request_review", "deterministic");
-    }
-
     // ---- 步驟 29: usage-metering(S3a,決定性測試,不依賴任何真實模型)----
     if (shouldRun("deterministic")) {
       await usageMeteringSmokeTest(client, workspaceDir);
@@ -6416,13 +4304,6 @@ async function main() {
       skipNote("步驟31 slash command", "deterministic");
     }
 
-    // ---- 步驟 30: 機器驗收閘(S4,決定性測試,真實 git + node 子程序)----
-    if (shouldRun("deterministic")) {
-      await acceptanceGateSmokeTest(client);
-    } else {
-      skipNote("步驟30 機器驗收閘(S4)", "deterministic");
-    }
-
     // ---- 步驟 32: ACP scoped MCP bridge token(Phase 2,決定性測試,不依賴
     // 任何真實模型/真實 codex-acp/gemini)----
     if (shouldRun("deterministic")) {
@@ -6431,12 +4312,6 @@ async function main() {
       skipNote("步驟32 ACP scoped MCP bridge token", "deterministic");
     }
 
-    // ---- 步驟 35: team.delete(破壞性操作的連帶清理,決定性測試)----
-    if (shouldRun("deterministic")) {
-      await teamDeleteSmokeTest(client, workspaceDir);
-    } else {
-      skipNote("步驟35 team.delete 連帶清理", "deterministic");
-    }
     // ---- 步驟 33/34: scoped token 絕對過期 + 與 master token 認證交互
     // (各自獨立 core 子程序,函式內部自行處理 --only 過濾)----
     await scopedTokenTtlSmokeTest();
@@ -6717,21 +4592,23 @@ async function authGatewaySmokeTest() {
     }
 
     // 17d: 既有 e2e 腳本(這支腳本自身的 GatewayClient)支援帶 token 連線並
-    // 正常運作 —— 認證後跑幾個具代表性的 RPC(建團隊 + 查詢),證明整條
+    // 正常運作 —— 認證後跑幾個具代表性的 RPC(建 profile + 查詢),證明整條
     // request/response 路徑在認證開啟時依然正常。
     try {
       const client = new GatewayClient(url);
       await client.connect();
       await client.rpc("auth", { token: AUTH_TOKEN });
-      const team = await client.rpc("team.create", { name: "E2E Auth Smoke Team" });
-      const list = await client.rpc("team.list", {});
-      // team.list 回傳 TeamWithMembers[](team 欄位是攤平的,不是巢狀
-      // { team, members }),比對用 t.id,不是 t.team.id。
-      const found = list.teams.some((t) => t.id === team.team.id);
+      const created = await client.rpc("profile.create", {
+        name: "E2E Auth Smoke Profile",
+        software: "claude-agent-sdk",
+        workingDir: os.tmpdir(),
+      });
+      const list = await client.rpc("profile.list", {});
+      const found = list.profiles.some((p) => p.id === created.profile.id);
       record(
         "步驟17d 既有 e2e 腳本(GatewayClient)支援帶 token 連線並正常運作",
         found,
-        `teamId=${team.team.id}, found=${found}`,
+        `profileId=${created.profile.id}, found=${found}`,
       );
       client.close();
     } catch (err) {

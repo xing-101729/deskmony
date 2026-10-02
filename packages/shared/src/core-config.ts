@@ -84,15 +84,9 @@ export const WorkspaceConfigSchema = z
      * 讓每一層欄位都變成 optional,包含這個),兩者並不衝突。
      */
     defaultWorkingDir: z.string().min(1),
-    /**
-     * 這輪新增:`WorkspaceManager` 原本把任務 worktree 寫死在
-     * `dirname(baseDir)/.deskmony-worktrees`(見 apps/core/src/workspace/
-     * workspace-manager.ts 頂端註解)。省略 = **維持既有這個動態算法**(不是
-     * 「沒有 worktree root」),提供時整批取代成固定目錄(所有 team 的 baseDir
-     * 都共用同一個 worktree root)。沒有對應的環境變數(這輪只開放設定檔/
-     * gateway `config.setFile` 可覆寫,見 README)。
-     */
-    worktreesRoot: z.string().min(1).optional(),
+    // 2026-10-02:原本還有 `worktreesRoot`(任務 git worktree 的根目錄,只有
+    // `WorkspaceManager` 讀)——task/worktree 已移除,見 docs/DECISIONS.md §H。
+    // 既有 config.json 若還帶這個欄位,載入時會被當成未知欄位警告後忽略,不會壞。
   })
   .strict();
 export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>;
@@ -258,26 +252,21 @@ export type NotificationConfig = z.infer<typeof NotificationConfigSchema>;
 // ---- budget(S3b:CostGovernor,見 docs/LAYER-4-detail-design/cost-governor_detail.md)----
 
 /**
- * 任務層級預算(HLD E2)。**兩個欄位都選填**——`undefined` = 這一層沒有上限
- * (只有 `warnAtPercent` 之外完全不擋)。這是這輪的自行判斷(L4 沒有給出具體
- * 數字預設值,只說「保守預設、要開大得有意識地開」,見 cost-governor_hld.md
+ * 每日/全域 kill-switch(HLD E3)。**兩個欄位都選填**——`undefined` = 這一層沒有
+ * 上限(只有 `warnAtPercent` 之外完全不擋)。這是當時的自行判斷(L4 沒有給出
+ * 具體數字預設值,只說「保守預設、要開大得有意識地開」,見 cost-governor_hld.md
  * §3):比照 `回合硬上限`(§3 明訂寬鬆預設,理由是「太緊會打斷合法工作,失去
  * 信任就會直接關掉」)的同一個哲學——**沒有根據地發明一個任意的低額美金數字
  * 當預設值**,一來會讓幾乎所有使用者一開機就被卡住(對「保守」的字面理解是
  * 「限制」,但沒有根據的限制本身就是一種謊言,見 core-config.ts 對 `不猜價`
  * 的一貫要求),二來這個數字本身就是「猜測」——與 `不猜價` 的紀律矛盾。真正
- * 不依賴 usage 的兜底是 `turn`(下方,永遠寬鬆啟用),任務/每日預算保持
+ * 不依賴 usage 的兜底是 `turn`(下方,永遠寬鬆啟用),每日預算保持
  * `undefined`(不啟用)直到使用者明確設定,才是誠實的保守(不假裝有保護)。
+ *
+ * 2026-10-02:原本還有任務層級預算 `budget.task`(HLD E2)——task 已移除
+ * (見 docs/DECISIONS.md §H),整個鍵一併拿掉。既有 config.json 若還帶
+ * `budget.task`,載入時會被當成未知欄位警告後忽略,不會壞。
  */
-export const BudgetTaskConfigSchema = z
-  .object({
-    maxCostUsd: z.number().positive().optional(),
-    maxTokens: z.number().int().positive().optional(),
-  })
-  .strict();
-export type BudgetTaskConfig = z.infer<typeof BudgetTaskConfigSchema>;
-
-/** 每日/全域 kill-switch(HLD E3)。語意與 `BudgetTaskConfigSchema` 相同,見其註解。 */
 export const BudgetDailyConfigSchema = z
   .object({
     maxCostUsd: z.number().positive().optional(),
@@ -307,7 +296,7 @@ export type BudgetTurnConfig = z.infer<typeof BudgetTurnConfigSchema>;
  * 可能過時或錯誤的價格表,比完全沒有這個功能更危險(使用者會相信一個錯的
  * 金額),違反「不猜價」的紀律(見 cost-governor_detail.md §6 失敗模式表)。
  * 只有使用者透過這裡明確覆寫的 model 才會被換算成 $;查無定價的 model 一律
- * 退回 `budget.task/daily.maxTokens` 的 token 上限(雙軌設計本身保證「永遠有
+ * 退回 `budget.daily.maxTokens` 的 token 上限(雙軌設計本身保證「永遠有
  * 一條線」,見 HLD §3.2)。
  */
 export const BudgetModelPricingSchema = z
@@ -320,7 +309,6 @@ export type BudgetModelPricing = z.infer<typeof BudgetModelPricingSchema>;
 
 export const BudgetConfigSchema = z
   .object({
-    task: BudgetTaskConfigSchema.default({}),
     daily: BudgetDailyConfigSchema.default({}),
     turn: BudgetTurnConfigSchema,
     /** 軟警告門檻(百分比,0-100)。達到後只發通知,不 halt。 */
@@ -337,6 +325,10 @@ export type BudgetConfig = z.infer<typeof BudgetConfigSchema>;
  * 每個 task context 的訊息數上限(A5 後半、message-budget_detail.md §3)——
  * Phase 2 唯一主防線,hop 深度 / A↔B 頻率 / broadcast 冷卻全部延後(理由見該
  * 文件 §3.1:訊息數是所有失控形態的共同表徵,簡單、無法繞過、一定會斷)。
+ *
+ * 2026-10-02 起由 P3 訊息鏈預算沿用,見 simplify-agents-sessions_detail.md §P3.4
+ * (docs/LAYER-4-detail-design/):task/team 已於 P1 移除,P3 之前這個鍵沒有消費者;
+ * 保留鍵名是為了不破壞使用者既有 config,P3 起的語意是「每條訊息鏈」的訊息數上限。
  *
  * **與 `budget`(CostGovernor)同等對待**:agent 不可寫(家目錄在 worktree
  * 外)、遠端不可改(見下方 `ConfigSetFilePatchSchema` 刻意不含這個欄位的說明,
@@ -407,10 +399,9 @@ export const CoreConfigSchema = z
      * (家目錄在 worktree 外)、**遠端不可改**(見下方 `ConfigSetFilePatchSchema`
      * 刻意不含這個欄位的說明,與 `policy`/`notification` 同等對待,F4)。
      * `.default(...)` 讓沒有這個區塊的舊設定檔/全新安裝行為等同「只有回合
-     * 硬上限生效(30分/200次工具呼叫),任務/每日預算不啟用」。
+     * 硬上限生效(30分/200次工具呼叫),每日預算不啟用」。
      */
     budget: BudgetConfigSchema.default({
-      task: {},
       daily: {},
       turn: { maxDurationMs: 30 * 60_000, maxToolCalls: 200 },
       warnAtPercent: 80,
@@ -461,10 +452,9 @@ export const PURE_DEFAULT_CORE_CONFIG = {
     batchIntervalMinutes: 20,
   },
   // S3b(CostGovernor):沒有設定檔時 = 只有回合硬上限生效(寬鬆預設,見
-  // `BudgetTurnConfigSchema` 註解),任務/每日預算不啟用(誠實的保守,不發明
-  // 任意數字,見 `BudgetTaskConfigSchema` 註解)。
+  // `BudgetTurnConfigSchema` 註解),每日預算不啟用(誠實的保守,不發明
+  // 任意數字,見 `BudgetDailyConfigSchema` 註解)。
   budget: {
-    task: {},
     daily: {},
     turn: { maxDurationMs: 30 * 60_000, maxToolCalls: 200 },
     warnAtPercent: 80,
@@ -525,7 +515,6 @@ export const ConfigSetFileDaemonPatchSchema = z
 export const ConfigSetFileWorkspacePatchSchema = z
   .object({
     defaultWorkingDir: z.string().min(1).optional(),
-    worktreesRoot: z.string().min(1).optional(),
   })
   .strict();
 export const ConfigSetFileFeaturesPatchSchema = z
@@ -592,8 +581,6 @@ export const EffectiveCoreConfigSchema = z
     workspace: z
       .object({
         defaultWorkingDir: effectiveFieldSchema(z.string()),
-        /** 可能是 undefined(維持既有動態算法,見上方 WorkspaceConfigSchema 註解)。 */
-        worktreesRoot: effectiveFieldSchema(z.string().optional()),
       })
       .strict(),
     data: z.object({ dataDir: effectiveFieldSchema(z.string()) }).strict(),
@@ -638,12 +625,6 @@ export const EffectiveCoreConfigSchema = z
      */
     budget: z
       .object({
-        task: z
-          .object({
-            maxCostUsd: effectiveFieldSchema(z.number().optional()),
-            maxTokens: effectiveFieldSchema(z.number().optional()),
-          })
-          .strict(),
         daily: z
           .object({
             maxCostUsd: effectiveFieldSchema(z.number().optional()),
@@ -661,8 +642,9 @@ export const EffectiveCoreConfigSchema = z
       })
       .strict(),
     /**
-     * S2(message-budget)新增。UI(團隊群聊視圖)靠這裡讀取目前生效的訊息數
-     * 上限,不含任何機敏資料,不需要遮罩(與 `budget` 同等對待)。
+     * S2(message-budget)新增。UI 靠這裡讀取目前生效的訊息數上限,不含任何機敏
+     * 資料,不需要遮罩(與 `budget` 同等對待)。2026-10-02 起由 P3 訊息鏈預算沿用,
+     * 見 simplify-agents-sessions_detail.md §P3.4。
      */
     messageBudget: z
       .object({

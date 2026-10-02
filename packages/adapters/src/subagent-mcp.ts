@@ -8,8 +8,7 @@ export const SUBAGENT_MCP_SERVER_NAME = "subagent";
 const SUBAGENT_TOOL_LOCAL_NAMES = ["spawn_subagent", "send_to_subagent", "list_subagents", "list_profiles"] as const;
 export const SUBAGENT_TOOL_NAMES = SUBAGENT_TOOL_LOCAL_NAMES.map((name) => `mcp__${SUBAGENT_MCP_SERVER_NAME}__${name}`);
 
-/** list_profiles/list_subagents 是純查詢,比照 team-bus-mcp.ts 的
- *  list_teammates,可以放進 allowedTools 自動放行;spawn_subagent/
+/** list_profiles/list_subagents 是純查詢,可以放進 allowedTools 自動放行;spawn_subagent/
  *  send_to_subagent 刻意 **不** 在這裡——兩者都會讓某個 session 多跑一輪
  *  (前者是新起子程序,後者是讓既有子 agent 多花一輪 token),必須走既有
  *  權限彈窗(見 claude-sdk-adapter.ts §4「權限」的既有設計,不因為這次新增

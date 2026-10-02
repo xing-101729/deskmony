@@ -2,7 +2,7 @@
 
 # Deskmony
 
-**一個給 AI coding agent 團隊用的桌面控制室 —— 讓一整隊 agent 能無人值守跑上好幾個小時,也不會失控。**
+**一個給 AI coding agent 用的桌面控制室 —— 讓 agent 能無人值守跑上好幾個小時,也不會失控。**
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
@@ -18,29 +18,28 @@
 
 ---
 
-Deskmony 讓你跑一整支 AI coding agent **團隊**,而不是側邊欄裡的一個聊天機器人。每個成員有自己的角色、自己的後端(Claude Code、Codex、OpenCode,或任何你手邊已有的 CLI)、自己的 git worktree。他們自己規劃、寫程式、互相審查,透過內建的訊息匯流排彼此傳訊 —— 你可以在旁邊看,也可以不用一直盯著。
+Deskmony 讓你跑 AI coding agent —— 不是側邊欄裡的一個聊天機器人 —— 後端隨你選(Claude Code、Codex、OpenCode,或任何你手邊已有的 CLI),底下有一整套安全罩,你可以在旁邊看,也可以不用一直盯著。
+
+> **2026-10-02:**為了簡化產品,team / 任務看板 / 每任務一個 git worktree 這一整層已經移除(見 [`DECISIONS.md` §H](docs/DECISIONS.md))。session 仍然可以開子 agent;「任何 session 都能傳訊給任何其他 session」是下一階段,**還沒做**。
 
 ## 為什麼是 Deskmony
 
 多數多 agent coding 工具只給你兩個選項:每個權限彈窗都自己盯著核准,或者整組開自動核可、然後賭。Deskmony 走第三條路。
 
-論點很簡單:**讓 agent 無人值守運作,靠的不是「更信任它」,而是不管你信不信任它、斷路器都一樣會跳。** 三個各自獨立的斷路器罩住每個 agent、每則訊息、每一分花費。任一條都能單獨叫停失控。訊息與成本兩條**遠端無法停用**;權限那條自 2026-08-25 起遠端與本機同權(有意識、有記錄的翻案,見 [`DECISIONS.md` §G](docs/DECISIONS.md)),詳見下方「遠端能做什麼、不能做什麼」。
+論點很簡單:**讓 agent 無人值守運作,靠的不是「更信任它」,而是不管你信不信任它、斷路器都一樣會跳。** 三個各自獨立的斷路器罩住每個 agent、每則訊息、每一分花費。任一條都能單獨叫停失控。成本那條**遠端無法停用**;權限那條自 2026-08-25 起遠端與本機同權(有意識、有記錄的翻案,見 [`DECISIONS.md` §G](docs/DECISIONS.md)),詳見下方「遠端能做什麼、不能做什麼」。(訊息斷路器目前是空的:它隨訊息匯流排於 2026-10-02 一併移除,session 互傳訊息那一階段再重建 —— 見斷路器二。)
 
-純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **1,545 行實際程式碼(不含空行與註解),佔 orchestration core 的 22%**,這還沒算上散在 session manager 與 message bus 裡的決策編排。
+純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **1,322 行實際程式碼(不含空行與註解),佔 orchestration core 的 29%**(core 共 4,566 行;2026-10-02 移除 team 與任務層之前是 1,545 行 / 22%),這還沒算上散在 session manager 裡的決策編排。
 
-(這個數字刻意扣掉註解。這份 codebase 有 31% 是註解,把它們算進去會得到比較好看的 2,372 行 —— 但註解不會擋下任何一次工具呼叫,拿來當「安全投入」的證據是假的。**行數本來就證明不了安全性**,真正該看的是下面那張決策流程圖,以及 `scripts/e2e-hard-deny.mjs` 對四類 hard-deny 的逐條斷言。)
+(這個數字刻意扣掉註解。這份 codebase 約三成是註解,把它們算進去會得到比較好看的數字 —— 但註解不會擋下任何一次工具呼叫,拿來當「安全投入」的證據是假的。**行數本來就證明不了安全性**,真正該看的是下面那張決策流程圖,以及 `scripts/e2e-hard-deny.mjs` 對四類 hard-deny 的逐條斷言。)
 
 ## ✨ 亮點
 
-- 🛡️ **三個獨立斷路器** —— 權限、訊息、成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
-- 🤝 **是一支團隊,不是一個聊天機器人** —— 角色(PM / Architect / Coder / Reviewer / QA),每個可綁不同後端與 model。
-- 💬 **agent 之間互相傳訊** —— 內建 `team-bus` MCP server,提供 `send_message`、`broadcast`、`request_review`、`report_status`、`list_teammates`。人類看著即時群聊,隨時可以插話。長命成員收到訊息時若還沒有 session,會自動幫它開一條;每則注入的訊息也會直接點名該用哪個工具回覆,回話才會回到群聊,而不是卡在 agent 自己的對話紀錄裡。那句提示同時會告訴 agent「這則是專門找你的,還是發給全隊的廣播」,並明講不回覆也是正常選項——否則一則廣播給五個人就等於邀請五則回覆,那正是訊息斷路器要防的迴圈。這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸上(後者涵蓋 Codex、Gemini,以及走 `opencode acp` 的 OpenCode);`pty` 直通**架構上沒有工具通道**,這類成員仍然收得到訊息,但會被如實告知「回覆傳不回去」,而不是被交付一個根本不存在的工具。
-- 🌱 **agent 可以開子 agent** —— 第二個 `subagent` MCP server 讓 session 把子任務委派出去並收回結果。開子 agent **刻意不自動放行**。
+- 🛡️ **獨立的斷路器** —— 目前是權限與成本(訊息斷路器隨 session 互傳訊息重建)。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
+- 🌱 **agent 可以開子 agent** —— `subagent` MCP server 讓 session 把子任務委派出去並收回結果。這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸上(後者涵蓋 Codex、Gemini,以及走 `opencode acp` 的 OpenCode)。開子 agent **刻意不自動放行**。
 - 🖥️ **貨真價實的桌面 IDE** —— 串流 markdown、行內 diff、內嵌終端機、todo 追蹤、圖片工具輸出、互動式提問元件。
-- 🗂️ **git worktree 隔離** —— 每個任務一個 worktree;合併回主幹永遠需要人類親手點一下。
 - 🔌 **四個 adapter,同一套介面** —— 內嵌 Claude Agent SDK、ACP、OpenCode HTTP/SSE,以及保底的原始 PTY。
 - 🔄 **不靠猜的崩潰復原** —— 孤兒 session 在啟動時對帳,由人逐一分流。**刻意不做任何自動續接。**
-- 🌐 **可遠端,但清楚劃出哪些事只能留在本機** —— 瀏覽器或手機經 token 認證連上;2026-08-25 起遠端在 session 控制與政策編輯上與本機同權,但 profile 管理、綁定介面、預算上限永遠只能本機動。
+- 🌐 **可遠端,但清楚劃出哪些事只能留在本機** —— 瀏覽器或手機經 token 認證連上;2026-08-25 起遠端在 session 控制與政策編輯上與本機同權,但 profile 管理與綁定介面永遠只能本機動。
 - 🌍 **多語系** —— 英文、繁體中文、日文、西班牙文。
 
 ## 🛡️ 安全罩
@@ -65,7 +64,7 @@ flowchart TB
     Auto -- 否 --> Esc["4 · ESCALATE<br/>default-deny"]
 ```
 
-**四類硬性 deny,config 關不掉**:worktree 外的寫入或刪除 · 讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、`**/credentials`)· 危險 git(`push --force`、刪遠端分支、`branch -D`)· 對非白名單主機的外連。
+**四類硬性 deny,config 關不掉**:session 工作目錄外的寫入或刪除 · 讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、`**/credentials`)· 危險 git(`push --force`、刪遠端分支、`branch -D`)· 對非白名單主機的外連。
 
 有幾個性質值得直說:
 
@@ -75,24 +74,18 @@ flowchart TB
 - **「永遠允許」有三條紀律**:寫最窄的規則(`commandEquals` / `pathUnder`);同時寫進設定檔與記憶體,讓重啟前後行為一致;hard-deny 升級來的請求**永遠**不符資格 —— 就算 client 硬塞 `rememberRule`,core 也會把它拔掉。
 - **唯一能跨過 hard-deny 地板的例外,是刻意設計、有稽核的**:疊在 YOLO 之上的「真.無限制」層,需要打對一段確認字串才能啟用,2026-08-25 起本機與遠端皆可用(見 [`DECISIONS.md` §G](docs/DECISIONS.md))。這是 `decide()` 裡唯一能跳過 hard-deny 的路徑 —— 只在該 session 已經開著 YOLO 時才能開、只能逐 session 開、且一定要人打對確認字串;啟用當下會跳桌面通知,也會寫進稽核紀錄。
 
-### 斷路器二 —— 訊息
+### 斷路器二 —— 訊息(2026-10-02 移除,待重建)
 
-在既有投遞策略前面加兩道閘:
-
-1. **contextId 由 core 推導,agent 給不了。** 它來自發送者當下綁定的任務;沒有進行中的任務時,則落在 `member:<memberId>` 這個同樣由 core 推導的專屬桶。讓被管制的對象自己申報管制欄位,等於讓它換個名字就能把預算歸零。*(2026-08-28 之前推不出任務一律拒收,但那連帶擋掉了「手上沒任務的成員回覆人類或隊友」——人類插話天然有速度上限,不是同一種風險。現在無任務的情況改成獨立計費的一桶,照樣吃同一條上限,成員之間也互不相干。)*
-2. **每 context 的訊息預算。** 燒完就熔斷,拒收該 context 後續的 `send_message` / `broadcast` / `request_review`。
-
-**只切橫向閒聊,不切縱向進度** —— `report_status` 與 `list_teammates` 照常運作,已熔斷的 context 仍然回報得了自己做到哪。
+原本的訊息預算(core 推導的 contextId + 每 context 的訊息數上限)活在訊息匯流排裡,而訊息匯流排已隨 team 與任務看板一併移除 —— 見 [`DECISIONS.md` §H](docs/DECISIONS.md)。`messageBudget` 設定鍵**保留**:下一階段會在同一個鍵上把這條斷路器重建成「**每條訊息鏈**的預算」(人類輸入開一條新鏈;agent 之間的訊息沿用觸發它那一輪的鏈;超過上限就熔斷並通知人)。在那之前,agent 之間沒有橫向傳訊通道,也就沒有訊息迴圈要斷。
 
 ### 斷路器三 —— 成本
 
 | 元件 | 訊號 | 何時跳 | 怎麼止血 |
 |---|---|---|---|
 | **TurnLimiter** | `tool-call` 事件 + 時間 —— **完全不需要 usage** | 單回合超過 30 分鐘或 200 次工具呼叫 | 立即 interrupt |
-| **CostGovernor**(任務預算) | `usage` 事件 | 任務累計花費超標 | 擋掉後續 prompt,不砍已結束的回合 |
-| **CostGovernor**(每日 kill-switch) | `usage` 事件 | 當日團隊總花費超標 | interrupt 所有 session |
+| **CostGovernor**(每日 kill-switch) | `usage` 事件 | 當日總花費超標 | interrupt 所有 session,並擋後續 prompt |
 | **WaitingWatchdog** T1 | `waiting` 停留時間 | 6 小時 | 只通知,不 halt |
-| **WaitingWatchdog** T2 | `waiting` 停留時間 | 72 小時 | dispose 子程序;任務留 blocked、worktree 保留 |
+| **WaitingWatchdog** T2 | `waiting` 停留時間 | 72 小時 | dispose 子程序;對話紀錄保留 |
 
 > **TurnLimiter 是其中最重要的一個。** 對真實 Claude Code 經 ACP 實測:bridge 回報 **0 筆** usage —— 不是設定問題,是結構性缺口。對那個後端,所有依賴 usage 的預算全部形同虛設,回合硬上限是唯一剩下的保護。
 
@@ -100,7 +93,7 @@ flowchart TB
 
 `isLocal` 由 core 依連線本身的位址判定,**絕不採信 client 自稱**。隧道連線(Tailscale、WireGuard)不是 loopback,一律算**遠端** —— 隧道保護的是傳輸,不代表現場有個操作者。
 
-遠端 client **可以**旁觀、送 prompt、核准或拒絕升級請求、把 session 切成 auto/YOLO、編輯政策允許清單、在核准時附帶「永遠允許」規則 —— 2026-08-25 起與本機同權,這是有意識、有記錄的翻案(見 [`DECISIONS.md` §G](docs/DECISIONS.md)),推翻了先前的遠端限制。遠端甚至能透過與本機相同的打字確認閘門,開啟上面提到的「真.無限制」層。遠端**仍然不可以**:管理 agent profile、改網路綁定位址、調高預算上限。這道閘擋在 dispatch 層,**不是靠 UI 藏按鈕** —— 繞過 UI 直接送 raw request 一樣會被擋。
+遠端 client **可以**旁觀、送 prompt、核准或拒絕升級請求、把 session 切成 auto/YOLO、編輯政策允許清單、在核准時附帶「永遠允許」規則 —— 2026-08-25 起與本機同權,這是有意識、有記錄的翻案(見 [`DECISIONS.md` §G](docs/DECISIONS.md)),推翻了先前的遠端限制。遠端甚至能透過與本機相同的打字確認閘門,開啟上面提到的「真.無限制」層。遠端**仍然不可以**:管理 agent profile、改網路綁定位址。這道閘擋在 dispatch 層,**不是靠 UI 藏按鈕** —— 繞過 UI 直接送 raw request 一樣會被擋。
 
 綁非 loopback 位址又沒設 `DESKMONY_AUTH_TOKEN` 會**直接拒絕啟動**。token 刻意不是設定檔欄位,所以改設定檔擴大不了曝露面 —— 只能來自環境變數,或(僅桌面殼)Settings「遠端存取」面板用 Electron `safeStorage` 加密保存在本機的值,讓你能複製一組穩定的 token 交給瀏覽器或手機使用。
 
@@ -114,21 +107,17 @@ WebSocket 升級另外有一道**與 token 獨立的同源檢查**(2026-09-04 �
 flowchart TB
     subgraph SHELL["apps/desktop —— Electron 44 + React 18"]
         direction LR
-        Views["views/ 對話・團隊群聊・任務看板・復原"]
-        Stores["stores/ zustand × 4"]
+        Views["views/ 對話・復原"]
+        Stores["stores/ zustand × 2"]
     end
 
     subgraph CORE["apps/core —— headless orchestration server"]
-        GW["gateway/ —— 68 個 RPC + 11 個 push channel"]
+        GW["gateway/ —— 41 個 RPC + 8 個 push channel"]
         subgraph DOMAIN["領域"]
             direction LR
             Sess["session/"]
-            Bus["bus/"]
-            Task["tasks/"]
-            Team["team/"]
-            Work["workspace/"]
         end
-        subgraph SHIELD["安全罩 · 佔 core 22%"]
+        subgraph SHIELD["安全罩 · 佔 core 29%"]
             direction LR
             Perm["permissions/"]
             Cost["cost/"]
@@ -139,9 +128,9 @@ flowchart TB
 
     subgraph PKG["packages/"]
         direction LR
-        Adapters["adapters/ —— 4 個 adapter + 2 個 MCP server"]
+        Adapters["adapters/ —— 4 個 adapter + 1 個 MCP server"]
         Shared["shared/ —— zod 單一事實來源"]
-        Db["db/ —— 11 張表"]
+        Db["db/ —— 6 張表"]
     end
 
     SHELL -- "WebSocket + token 認證" --> GW
@@ -152,11 +141,11 @@ flowchart TB
     CORE --> Db
 ```
 
-**依賴鐵則**:`packages/*` 絕不 import `apps/*`。跨界需求一律在 `packages/shared` 宣告介面(`TeamBusPort`、`SubagentPort`、`ClientPresencePort`、`SessionControlPort`),建構時注入。
+**依賴鐵則**:`packages/*` 絕不 import `apps/*`。跨界需求一律在 `packages/shared` 宣告介面(`SubagentPort`、`ClientPresencePort`、`SessionControlPort`),建構時注入。
 
 ### Adapter
 
-註冊了四個 adapter,全部實作同一套介面,所以權限、訊息匯流排、任務看板都不需要知道對面是哪套 CLI。
+註冊了四個 adapter,全部實作同一套介面,所以權限與 session manager 都不需要知道對面是哪套 CLI。
 
 | Adapter | 對接方式 | 目前涵蓋的後端 | 能力等級 |
 |---|---|---|---|
@@ -165,43 +154,21 @@ flowchart TB
 | `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用 |
 | `GenericPtyAdapter` | 原始 `node-pty` 直通 | Claude Code CLI、Aider、任意互動式 CLI | **保底 —— 沒有權限事件** |
 
-使用者看到的那一層是八項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,團隊訊息工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY、`custom-pty`。
+使用者看到的那一層是八項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,子 agent 工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY、`custom-pty`。
 
 **PTY 這層缺的權限事件是安全邊界,不是待辦事項。** 它是 raw stdin 直通,**結構上**沒辦法被政策引擎管。在真正的執行沙箱做出來之前,PTY agent 一律唯讀、不給無人值守的自主權。Deskmony 刻意**不做** shell 指令攔截:`bash -c`、`$()`、base64 幾秒就能繞過,做了只是 security theater。
 
 **能力回報對「自己不知道的事」很誠實。** usage 與 context 回報是三態 —— `supported` / `unsupported` / `unknown` —— 因為一條連線到底報不報用量,是被 spawn 出來的那個 agent 決定的,不是 adapter。同一個 `AcpAdapter`,對某個 agent 忠實轉發用量,對另一個從頭到尾收不到半個事件。靜態布林值不管填哪邊都是在對 UI 說謊,所以消費端必須靠「這條 session 實際觀察到什麼」自己收斂。
 
-## 📋 任務流程與三道人類把關
+## 📋 任務流程 —— 2026-10-02 移除
 
-```mermaid
-stateDiagram-v2
-    [*] --> backlog
-    backlog --> assigned: 建立 worktree
-    assigned --> in_progress
-    in_progress --> review: 過驗收閘 或 人類核可
-    review --> in_progress: 退回意見
-    review --> merging
-    merging --> done: 人類點下核准
-    done --> [*]
-    in_progress --> blocked
-    blocked --> in_progress: 回到原本的狀態
-```
-
-1. **機器驗收閘** —— 任務可以帶驗收指令(test / build / typecheck)。`report_status(done)` 必須先過,任務才進得了 review。
-2. **人類 review 閘** —— 沒有驗收條件、或連續失敗達上限時,任務停在 `in-progress` 並標記 `awaitingHumanReview`,等人核可。
-3. **人類合併** —— `task.merge` 是整個系統裡**唯一**會執行 `git merge` 的路徑,而且只從任務看板的按鈕觸發。
-
-**agent 沒有任何一個工具能把自己的工作標成完成。** `report_status` 與 `request_review` 最多把任務推到 `review` 或 `merging`;那些對映到 `done` 的別名會在套用階段被明確擋下。
-
-合併不留半完成狀態:`git merge --no-ff` 衝突時,會蒐集衝突檔案清單、跑 `git merge --abort` 還原、然後拋錯 —— 任務維持在 `merging`。主幹分支是動態偵測的(`origin/HEAD` → 本機 `main` → `master` → 都沒有就明確報錯)。**不猜測,不寫死。**
+任務看板(backlog → assigned → in-progress → review → merging → done)、每任務一個 git worktree、機器驗收閘、人類 review 閘、人類核可的合併,隨 team 一併移除 —— 見 [`DECISIONS.md` §H](docs/DECISIONS.md)。你 SQLite 檔案裡既有的 `tasks` / `workspaces` 等表原封不動,只是不再有程式碼讀寫它們。
 
 ## 🔄 崩潰復原
 
 最貴的東西 —— agent 累積的推理與 context —— 活在後端行程裡,不在資料庫。replay 事件流重建的是你的帳本,不是 agent 的腦。所以這裡的復原是**對帳 + 人工分流**,不是 replay。
 
-啟動時,在 gateway 接受第一個連線之前,沒被乾淨關閉的 session 會被標記 `interrupted` 並寫進稽核 log。接著由人逐一決定:**繼續**(只有後端真的把 session 持久化到磁碟才行 —— 由 core 重新驗證,絕不採信 client 的舊快照)、**接手**(讀摘要重啟)、**重跑**(在髒 worktree 上會拒絕執行)、**放棄**(worktree 與任務都保留 —— 回收不等於丟棄)。
-
-髒 worktree 會先強制你做一個決定:把工作留在 WIP 分支,還是丟掉 —— 而丟掉需要明確的二次確認。**沒有東西會被默默丟棄,也沒有東西會自動續跑。**
+啟動時,在 gateway 接受第一個連線之前,沒被乾淨關閉的 session 會被標記 `interrupted` 並寫進稽核 log。接著由人逐一決定:**繼續**(只有後端真的把 session 持久化到磁碟才行 —— 由 core 重新驗證,絕不採信 client 的舊快照)、**接手**(讀摘要重啟)、或**放棄**(session 標記為已關閉,對話紀錄仍保留 —— 回收不等於丟棄)。**沒有東西會被默默丟棄,也沒有東西會自動續跑。**
 
 ## 🚀 快速開始
 
@@ -264,7 +231,7 @@ deskmony doctor                # 偵測 agent 後端、檢查連線
 deskmony tui
 ```
 
-`chat` 和 `run` 一次只看得到一個 session。`tui` 看得到整隊,而這個差別正是它存在的理由:**在行導向的 REPL 裡,由你當下沒在看的那個 session 跳出來的權限請求是完全看不見的,而無人值守的請求不會逾時。** 你讀著第一個 agent 的輸出時,第二個可能已經卡住好幾小時。TUI 不論焦點在哪個 session,都會把跨 session 的待決數量放在畫面上,按 `a` 逐一處理——而且顯示的是工具的實際參數,不是只有工具名稱,因為光看名稱(「Write file」)根本無從判斷。
+`chat` 和 `run` 一次只看得到一個 session。`tui` 看得到所有 session,而這個差別正是它存在的理由:**在行導向的 REPL 裡,由你當下沒在看的那個 session 跳出來的權限請求是完全看不見的,而無人值守的請求不會逾時。** 你讀著第一個 agent 的輸出時,第二個可能已經卡住好幾小時。TUI 不論焦點在哪個 session,都會把跨 session 的待決數量放在畫面上,按 `a` 逐一處理——而且顯示的是工具的實際參數,不是只有工具名稱,因為光看名稱(「Write file」)根本無從判斷。
 
 命中硬性拒絕清單的請求會長得不一樣,行為也不一樣:不提供「永遠允許」,而且要完整打字輸入 `yes`,不接受單鍵。
 
@@ -299,7 +266,7 @@ pnpm package:dir    # 未封裝版本,方便本機快速測試
 | 對話渲染 | react-markdown + remark-gfm + react-syntax-highlighter + 自製 diff-hunk viewer |
 | i18n | i18next / react-i18next —— en、zh-Hant、ja、es |
 | Core | Node.js headless,WebSocket gateway(`ws`) |
-| 資料庫 | SQLite,better-sqlite3 + Drizzle ORM,11 張表 |
+| 資料庫 | SQLite,better-sqlite3 + Drizzle ORM,6 張表 |
 | 驗證 | `packages/shared` 的 zod schema,兩端共用的單一事實來源 |
 | Agent 協議 | Claude Agent SDK、ACP、OpenCode HTTP/SSE、原始 PTY |
 | Monorepo | pnpm workspaces |
@@ -310,32 +277,32 @@ pnpm package:dir    # 未封裝版本,方便本機快速測試
 Deskmony/
 ├─ apps/
 │  ├─ desktop/          # Electron + React 殼
-│  │  ├─ views/         # 對話、團隊群聊、任務看板、復原、各式對話框
-│  │  ├─ stores/        # zustand × 4
+│  │  ├─ views/         # 對話、復原、各式對話框
+│  │  ├─ stores/        # zustand × 2
 │  │  ├─ ui/            # 設計系統(含 ErrorBoundary)
 │  │  └─ locales/       # en、zh-Hant、ja、es
 │  └─ core/             # headless orchestration server
-│     ├─ session/ bus/ tasks/ team/ workspace/     # 領域
+│     ├─ session/                                  # 領域
 │     ├─ permissions/ cost/ enforcement/ recovery/ # 安全罩
 │     ├─ gateway/ http/ config/ detect/ settings/  # 支撐
 ├─ packages/
-│  ├─ adapters/         # 4 個 adapter + team-bus 與 subagent MCP server
+│  ├─ adapters/         # 4 個 adapter + subagent MCP server
 │  ├─ db/               # Drizzle schema、冪等遷移
 │  └─ shared/           # 型別、gateway 協議、zod schema
-├─ scripts/             # 11 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
-├─ .github/workflows/   # CI(typecheck → build → 10 支決定性測試)
+├─ scripts/             # 14 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
+├─ .github/workflows/   # CI(typecheck → build → 13 支決定性測試)
 └─ docs/                # 架構、設計定案、分層設計、開發日誌
 ```
 
 ## 🧪 測試
 
 ```bash
-pnpm test          # typecheck + build + 10 支決定性測試(約 8 分鐘)
+pnpm test          # typecheck + build + 13 支決定性測試(約 7 分鐘)
 pnpm test:e2e      # 只跑測試(需要 pnpm build 已是最新)
 pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會實際消耗額度
 ```
 
-**十一支端到端測試。** 其中十支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十支:**138 個斷言,全部必須通過。**
+**十四支端到端測試。** 其中十三支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十三支:**180 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180。)
 
 `e2e-gateway.mjs` 刻意不在預設範圍內。它需要真實 Claude Code 憑證、會花真的錢,而且有一組 *model-behavior* 斷言依賴模型當輪自由選擇怎麼講 —— 檔案自己標註為已知 flake。一個會因為模型換句話說就變紅的 CI,很快就會被所有人忽略。
 
@@ -358,14 +325,13 @@ pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會�
 
 ## 🗺️ 現況
 
-已完成,並由 CI 上每次 push/PR 都會跑的端到端測試把關(見上方「測試」):團隊與 profile 管理、跨 agent 傳訊、桌面 IDE、git worktree 隔離、帶 token 認證的瀏覽器/遠端存取、完整的三斷路器安全罩、崩潰復原、桌面與 webhook 通知、機器驗收閘、session 子 agent、自助式政策允許清單管理介面、真.無限制繞過層。
+已完成,並由 CI 上每次 push/PR 都會跑的端到端測試把關(見上方「測試」):profile 管理、桌面 IDE、帶 token 認證的瀏覽器/遠端存取、安全罩的權限與成本斷路器、崩潰復原、桌面與 webhook 通知、session 子 agent、自助式政策允許清單管理介面、真.無限制繞過層。2026-10-02 已移除(見 [`DECISIONS.md` §H](docs/DECISIONS.md)):team、任務看板、每任務一個 git worktree、驗收閘、訊息匯流排與它的斷路器。
 
 **刻意留白的部分,在你依賴它之前值得先知道:**
 
 - **PTY 層沒有執行沙箱。** 在做出來之前,PTY agent 就是唯讀 —— 這是誠實的後果,不是疏忽。
-- **沒有 LLM lead。** 任務拆解目前純人工,`TaskService` 是完全確定性的。
 - **沒有回合中途的成本熔斷。** 唯一會發 usage 的 adapter 是在回合結束時才發,根本沒有可觀測的「回合進行中收到 usage」情境可以對著做。硬分岔只是憑空編造行為。
-- **只有 Claude SDK 與 ACP 的 session 能「主動」傳訊。** ACP agent(Codex、Gemini CLI)透過一個持有 scoped、逐 session token 的橋接子行程接到同樣那兩個 MCP server;`opencode` 這個 provider(bespoke HTTP/SSE)與 PTY 沒有掛載 —— 但 `opencode-acp` 有,因為它是把 OpenCode 走 ACP 跑。「接收」注入的訊息則在所有後端都能運作。
+- **只有 Claude SDK 與 ACP 的 session 能開子 agent。** ACP agent(Codex、Gemini CLI)透過一個持有 scoped、逐 session token 的橋接子行程接到 `subagent` MCP server;`opencode` 這個 provider(bespoke HTTP/SSE)與 PTY 沒有掛載 —— 但 `opencode-acp` 有,因為它是把 OpenCode 走 ACP 跑。「接收」注入的 prompt 則在所有後端都能運作。
 - **provider 的密鑰對外遮罩,本機是明文儲存**,與 Paseo 對它的設定檔採取同一種取捨。
 - **孤兒 agent 行程只能在下次啟動時回收。** core 若被 SIGKILL / 強制終止 / 斷電,優雅關機路徑完全沒機會跑,已 spawn 的 agent 與它們的 MCP 孫程序會繼續活著。現在會把 pid 記到 `<dataDir>/child-pids.json`,下次啟動時比對行程建立時間後回收(對不上就**不殺**,防 pid 重用誤傷)。真正的當下回收需要 Windows Job Object,那要多一個原生相依 —— 這個專案刻意不要求打包機器具備 MSVC 工具鏈。
 - **SQLite 遷移只能加欄位。** `packages/db/src/client.ts` 是十餘個「查 `PRAGMA table_info` → 沒有就 `ALTER TABLE ADD COLUMN`」的手刻函式,沒有版本表。改型別 / rename / drop / 加約束都做不到,將來要做破壞性遷移得先換成正式的 migration 機制。

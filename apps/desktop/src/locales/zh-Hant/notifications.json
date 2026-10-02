@@ -1,6 +1,5 @@
 {
   "tripReason": {
-    "task-budget": "任務預算上限",
     "daily-limit": "每日成本上限",
     "waiting-ttl": "等待逾時上限",
     "message-budget": "訊息數上限",
@@ -18,7 +17,7 @@
     },
     "idle": {
       "title": "Deskmony:任務閒置提醒",
-      "body": "{{who}}:已等待回應超過 6 小時,尚未被中斷,worktree/任務仍保留,請確認是否需要回來處理"
+      "body": "{{who}}:已等待回應超過 6 小時,尚未被中斷,對話紀錄仍保留,請確認是否需要回來處理"
     }
   },
   "escalation": {
