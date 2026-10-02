@@ -72,5 +72,27 @@
   },
   "attachment": {
     "tooLarge": "These attachments exceed {{limit}} MB and were skipped: {{files}}"
+  },
+  "origin": {
+    "fromSession": "From {{title}}",
+    "fromSessionTitle": "This message was sent by another session (click to switch to it)",
+    "fromSessionGone": "This message was sent by another session (that session no longer exists)",
+    "forwardedFrom": "Forwarded from {{title}}",
+    "forwardedFromTitle": "You forwarded this message from that session (click to switch to it)",
+    "forwardedFromGone": "You forwarded this message from another session (that session no longer exists)"
+  },
+  "forward": {
+    "button": "Forward to…",
+    "buttonTitle": "Forward this message to another session",
+    "dialogTitle": "Forward to another session",
+    "dialogDescription": "Pick the session that should receive this message (any session works). It will get a message saying you forwarded it from this session and decides for itself what to do with it — nothing is sent back automatically.",
+    "previewLabel": "Content to forward",
+    "targetLabel": "Target session",
+    "targetPlaceholder": "Choose a session…",
+    "noTargets": "There is no other session to forward to",
+    "noteLabel": "Note (optional)",
+    "notePlaceholder": "e.g. Please fix your implementation based on this result",
+    "submit": "Forward",
+    "sending": "Forwarding…"
   }
 }

@@ -17,7 +17,8 @@
   },
   "gateway": {
     "localOnlyMethod": "この操作はローカル接続でのみ実行できます: {{method}}",
-    "invalidRequest": "無効なリクエストです: {{detail}}"
+    "invalidRequest": "無効なリクエストです: {{detail}}",
+    "bridgeTokenRequired": "{{method}} は MCP ブリッジトークン専用です(呼び出し元の身元はトークンで決まります)"
   },
   "budget": {
     "dailyLimitReached": "1日の予算上限に達しました"

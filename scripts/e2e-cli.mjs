@@ -39,7 +39,7 @@
  * e2e,佔用的區段是:4319-4334(e2e-gateway)、4341-4344(auto-mode-yolo)、
  * 4351(notification)、4360-4364(cost-governor)、4370-4376(message-budget)、
  * 4380-4389(crash-recovery)、4700-4705(agent-lifecycle)、4710-4713
- * (lead-gate)、5321(session-subagents)。4720/4721 兩個都不在其中,選用:
+ * (lead-gate)、5321-5322(session-network)。4720/4721 兩個都不在其中,選用:
  *   - 4720:一般(無認證)core,案例 5/6/7/8/9/10 共用。
  *   - 4721:啟用 `DESKMONY_AUTH_TOKEN` 的 core,只給案例 4 用。
  * （`run-e2e.mjs` 依序、不平行執行各支套件,port 其實不必跨檔案互斥;獨立

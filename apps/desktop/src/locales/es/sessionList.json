@@ -6,8 +6,8 @@
   },
   "confirmDeleteSession": "¿Eliminar la conversación \"{{title}}\"? Esta acción no se puede deshacer.",
   "contextUsageTitle": "Uso de la ventana de contexto (S3a usage-metering)",
-  "spawnChildAriaLabel": "Iniciar agent hijo",
-  "spawnChildTitle": "Iniciar un agent hijo para ejecutar una subtarea",
+  "spawnChildAriaLabel": "Abrir una sesión nueva bajo esta",
+  "spawnChildTitle": "Abrir una sesión nueva bajo esta sesión",
   "deleteSessionAriaLabel": "Eliminar conversación",
   "expandSidebarAriaLabel": "Expandir barra lateral",
   "commandPaletteAriaLabel": "Paleta de comandos",
@@ -43,12 +43,12 @@
   "logoutAriaLabel": "Cerrar sesión",
   "unnamedWorkspace": "(Sin directorio especificado)",
   "spawnChildDialog": {
-    "title": "Iniciar un agent hijo bajo \"{{title}}\"",
-    "description": "Dale al agent hijo un prompt de tarea y elige con qué agent y model crearlo (por defecto, el agent de este session). El session hijo usa la carpeta de trabajo de este session.",
-    "promptLabel": "Prompt de la tarea",
-    "promptPlaceholder": "Describe la tarea que debe realizar este agent hijo…",
+    "title": "Abrir una sesión nueva bajo «{{title}}»",
+    "description": "Elige un agente y un modelo y escribe el primer mensaje (se trata como si lo hubieras escrito tú). La sesión nueva reutiliza la carpeta de trabajo de esta y se muestra anidada bajo ella — solo para visualización y trazabilidad; es igual a las demás sesiones y sus resultados no vuelven aquí automáticamente.",
+    "promptLabel": "Primer mensaje",
+    "promptPlaceholder": "Describe lo que debe hacer esta sesión…",
     "titleFieldLabel": "Título (opcional)",
     "titlePlaceholder": "p. ej., Repetir la verificación de aceptación de este UI slice",
-    "submit": "Iniciar agent hijo"
+    "submit": "Abrir sesión"
   }
 }

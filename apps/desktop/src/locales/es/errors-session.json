@@ -2,9 +2,16 @@
   "sessionManager": {
     "abandonRequiresInterrupted": "La sesión {{sessionId}} está actualmente en estado \"{{status}}\", no \"interrupted\" — no se puede abandonar",
     "promptBlockedByBudget": "{{reason}}",
-    "notYourChild": "La sesión {{sessionId}} no es tu sesión hija, no se le puede enviar un mensaje",
     "continueRequiresInterrupted": "La sesión {{sessionId}} está actualmente en estado \"{{status}}\", no \"interrupted\" — no se puede continuar",
     "continueUnsupportedBackend": "El backend de la sesión {{sessionId}} ({{adapterType}}) no admite \"continuar (conservar memoria)\", o no se capturó el ID de sesión del backend antes de la interrupción — usa \"retomar\" en su lugar",
     "vanishedDuringContinue": "La sesión {{sessionId}} desapareció inesperadamente durante el proceso de \"continuar\""
+  },
+  "sessionNetwork": {
+    "cannotSendToSelf": "Una sesión no puede enviarse un mensaje a sí misma (usa list_sessions para encontrar otra sesión)",
+    "targetUnavailable": "La sesión {{sessionId}} («{{title}}») está actualmente en estado «{{status}}» y no puede recibir mensajes",
+    "chainBudgetExceeded": "Esta cadena de conversación alcanzó su límite de {{limit}} mensajes y se detuvo — hace falta la intervención del usuario (escribir un mensaje nuevo en la interfaz inicia una cadena nueva)",
+    "createdButNotDelivered": "Se creó la sesión {{sessionId}}, pero falló el envío de su primer mensaje: {{detail}}",
+    "cannotForwardToSelf": "No se puede reenviar un mensaje a su propia sesión de origen",
+    "forwardMessageNotFound": "No se encontró ese mensaje del asistente para reenviar (puede que aún no se haya guardado — inténtalo de nuevo en un momento)"
   }
 }

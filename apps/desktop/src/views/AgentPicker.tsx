@@ -14,7 +14,7 @@ import { EmptyState } from "../ui/Feedback.js";
  * 「用哪個 agent 開新對話」的選單組:**agent 下拉**(從這台電腦偵測到、且沒被停用的 provider,顯示 label + 版本)
  * + **model 下拉**(該 provider 的 models;`supportsModelSelection` 為 false 或清單為空時整個隱藏)
  * + **effort**(只有 claude-agent-sdk 顯示)+(選填)**工作資料夾**。取代原本的「選 profile」下拉與
- * ProfileCreateDialog——SessionList 側欄頂部與「開子 agent」對話框共用同一份,選擇狀態由呼叫端持有(見
+ * ProfileCreateDialog——SessionList 側欄頂部與「在這個 session 底下開新 session」對話框共用同一份,選擇狀態由呼叫端持有(見
  * lib/new-session-selection.ts,上次的選擇存 localStorage)。
  *
  * 沒有任何可用 agent 時(例如 claude-agent-sdk 被停用、其餘 CLI 都沒裝)顯示說明 + 「重新偵測」鈕
@@ -26,7 +26,7 @@ interface AgentPickerProps {
   onChange: (next: NewSessionSelection) => void;
   /** true = 側欄用的緊湊排版(沒有欄位標籤,只有 aria-label);false = 對話框排版。 */
   compact?: boolean;
-  /** 是否顯示「工作資料夾」欄位(側欄「新對話」要,「開子 agent」不用——子 session 預設沿用父的目錄)。 */
+  /** 是否顯示「工作資料夾」欄位(側欄「新對話」要,「在這個 session 底下開新 session」不用——新 session 預設沿用該 session 的目錄)。 */
   showWorkingDir?: boolean;
   /** 工作資料夾留空時實際會用的預設值(只用來當 placeholder 顯示)。 */
   defaultWorkingDir?: string;

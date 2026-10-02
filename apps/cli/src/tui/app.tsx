@@ -1,13 +1,14 @@
 import React, { useEffect, useReducer } from "react";
 import { Box, render, Text } from "ink";
 import type { GatewayClient } from "@deskmony/client";
-import type { EffectiveCoreConfig, MessageRecord, Session, SessionEventEnvelope } from "@deskmony/shared";
+import type { EffectiveCoreConfig, MessageRecord, Session, SessionEventEnvelope, SessionMessagePush } from "@deskmony/shared";
 import type { GlobalOptions } from "../args.js";
 import { CliExitError, closeGateway, connectGateway } from "../connect.js";
 import {
   advancePermissionModal,
   appendPermissionYesInput,
   applyPermissionResolved,
+  applySessionMessage,
   applySessionEvent,
   backspacePermissionYesInput,
   buildPermissionResolution,
@@ -629,6 +630,8 @@ export async function runTui(options: GlobalOptions): Promise<void> {
       } else if (push.channel === "permission-resolved") {
         const payload = push.payload as { sessionId: string; requestId: string };
         applyPermissionResolved(model, payload.sessionId, payload.requestId);
+      } else if (push.channel === "session-message") {
+        applySessionMessage(model, push.payload as SessionMessagePush);
       }
     }),
   );

@@ -243,6 +243,22 @@ MCP server 名稱改為 `deskmony`(工具全名 `mcp__deskmony__<name>`)。
   9. `session.forwardMessage` 轉傳後目標收到 `origin.kind === "forward"`,且開了新鏈。
 - 真實憑證 smoke test(本體做,不交給實作 subagent):Claude SDK session 在不提工具名的情況下,被要求「問另一個 session 一個問題」時能自己找到並使用 `send_to_session`。
 
+### P3.8 實作備註(與上文不同、或上文沒寫清楚的地方)
+
+- 新檔案:`packages/shared/src/session-network.ts`(`SessionNetworkPort` + 五個工具回傳資料的 schema + `softwareCanUseTools()`)、`packages/adapters/src/session-network-mcp.ts`(in-process,MCP server 名稱 `deskmony`)、`apps/core/src/session/message-chain-budget.ts`(鏈預算)、`apps/core/src/session/session-envelope.ts`(信封,純函式)、`apps/desktop/src/views/chat/ForwardMessageDialog.tsx`。
+- **ACP bridge 掛給 agent 的 MCP server 名稱也改成 `deskmony`**(原本是 `deskmony-mcp-bridge`),agent 看到的工具全名才會與 in-process 一致(`mcp__deskmony__<name>`)。bridge 的環境變數 `DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED` 改為 `DESKMONY_MCP_BRIDGE_NETWORK_ENABLED`。
+- **工具描述逐字一致由測試保證**:`scripts/e2e-session-network.mjs` 用 MCP client 分別連 in-process server 與真的 spawn 出來的 bridge 子行程,比對 `tools/list`(名稱、描述、參數名稱/型別/描述/必填)與 `instructions`。
+- **`read_session` 只回 `user`/`assistant` 訊息**:`tool` 訊息是工具呼叫/結果的原始 JSON(可能很大)、`system` 是內部事件 JSON(切換 model、權限逾時…),都不是 agent 想讀的對話。附件只標示 `hasAttachments`(SQL 只問 `attachments IS NOT NULL`,連 base64 都不讀進記憶體)。
+- **續接(`continueSession()`)後的呼叫者身分**:in-process 工具的呼叫者是 adapter 以 `handle.id` 閉包捕捉的,但續接時 `SessionManager` 沿用的是既有的 DB session id(不是新 handle 的 id)。`ResumeOptions` 新增選填 `sessionId`,`ClaudeAgentSdkAdapter.spawn()` 提供時用它當 `handle.id`,否則續接後的 session 呼叫 `list_sessions`/`send_to_session` 時 `isYou`、「不能送給自己」、鏈追蹤全部對不上。
+- **鏈追蹤**:人類輸入(gateway `session.sendPrompt`、recovery 接手)在 `SessionManager.sendPrompt()` 產生新的 `chainId`;跨 session 投遞走 `deliverNetworkMessage()`,沿用訊息帶的 `chainId` 與 `origin`;兩者共用同一個 per-session 序列化入口 `sendPromptSerialized()`。每個 runtime 的 `currentChainId` 在 `sendPromptInner()` 設定;agent 這一輪送出的訊息沿用它(`chainOfCaller()`)。`session.sendPrompt` 的 schema 不收 `origin`/`chainId`(多送會被 zod 丟掉,e2e 有斷言)。
+- **鏈預算語意**:計數在送出**之前**判斷(第 `max` 則放行、第 `max+1` 則起被拒);`create_session` 在鏈已熔斷時不會 spawn 新 session;新 session 的 agent 先驗證(`buildLaunch()`)再佔預算。第一次越線才走 `enforcementTrip()`(audit + 通知,`interrupt:false`),同一條鏈之後再被拒只回錯誤、不重複通知。達 `warnAtPercent` 發一次軟警告(audit + 通知,`reminder`/`message`/`message-chain-warning`)。UI 轉傳是人類操作,開新鏈、**不計數、不會被擋**。鏈的計數只存記憶體,且只保留「還有 session 的 `currentChainId` 或待送佇列指向」的鏈(新建鏈時與 session 刪除/關閉/回收時修剪,另有 10,000 條硬上限當最後防線)。
+- **新增事件型別**:`TripEnforcementEvent.reason` 為自由字串,通知分類 `NotificationTripReasonSchema` 新增 `"message-chain-budget"`(舊的 `"message-budget"` 保留只為相容舊 payload);`ReminderEnforcementEvent` 的 `source` 加 `"message"`、`reason` 加 `"message-chain-warning"`;通知文案四語系已補。
+- **新增 push channel `session-message`**(規格沒寫):別的 session 送來的訊息(`origin` 有值的 user 訊息)寫進歷史時推播 `{sessionId, message}`,讓正在看那個 session 的 UI(桌面、TUI)即時顯示「來自 <title>」;取代 S12 的 `child-result`。
+- **`session.forwardMessage` 的附註**併進訊息本體(`附註\n\n被轉傳內容`),因為 `origin` 的形狀是固定的;來源訊息必須是 `sourceSessionId` 底下 `role === "assistant"` 的持久化訊息。桌面端即時串流中的訊息項目 id 是 adapter 的 messageId、對不上 DB 那一筆,所以 UI 先用 `session.history` 找出對應的持久化訊息(id → 內容相同 → 內容包含,由新到舊),找不到就顯示 `sessionNetwork.forwardMessageNotFound`。
+- **gateway 的五個 bridge 方法呼叫者身分**:`checkScopedGrantAccess()` 回傳 token 綁定的 `sessionId`,`dispatch()` 以第三個參數接收;沒有 token 的一般連線呼叫這五個方法回 `gateway.bridgeTokenRequired`(fail-closed)。
+- **pty 的待送佇列**:pty 沒有 `completed` 事件,靜止計時器把它轉回 idle 時也 flush 待送訊息(否則排隊的訊息永遠送不到)。
+- **e2e 手法**:`scripts/fake-acp-agent.mjs` 新增 `[[E2E_BRIDGE_ON_PROMPT:<base64>]]` 標記(收到含標記的 prompt 就自己呼叫指定的 bridge 工具,用來模擬「agent 收到訊息後自己決定回覆」,A↔B 互傳的鏈就靠它推進)與 `ACP_SAY <文字>`;呼叫 bridge 工具的三條路徑排在 prompt 比對的最前面。`closed` 的 session 由序幕 core 造出(強制終止 → 重啟對帳成 `interrupted` → `recovery.abandon` 成 `closed`)。
+
 ---
 
 ## 不做(記為後續)

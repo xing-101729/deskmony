@@ -3,7 +3,8 @@
     "daily-limit": "每日成本上限",
     "waiting-ttl": "等待逾時上限",
     "message-budget": "訊息數上限",
-    "turn-limit": "回合時間/工具呼叫次數上限"
+    "turn-limit": "回合時間/工具呼叫次數上限",
+    "message-chain-budget": "session 之間的訊息鏈已達訊息數上限,agent 對 agent 的傳遞已熔斷,需要你介入"
   },
   "trip": {
     "reasonFallback": "已被熔斷叫停",
@@ -14,6 +15,10 @@
     "budgetWarning": {
       "title": "Deskmony:預算即將用盡",
       "body": "{{who}}:花費/token 已達到警戒線,尚未 halt,建議關注或調整預算上限"
+    },
+    "messageChainWarning": {
+      "title": "Deskmony:session 之間的訊息數接近上限",
+      "body": "{{who}}:agent 之間的訊息鏈已達警戒線,尚未熔斷,請確認它們不是在無限對話"
     },
     "idle": {
       "title": "Deskmony:任務閒置提醒",

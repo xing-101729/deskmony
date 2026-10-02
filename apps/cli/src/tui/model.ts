@@ -1,4 +1,4 @@
-import type { AgentEvent, MessageRecord, PolicyRule, Session, SessionEventEnvelope } from "@deskmony/shared";
+import type { AgentEvent, MessageRecord, PolicyRule, Session, SessionEventEnvelope, SessionMessagePush } from "@deskmony/shared";
 import {
   buildNarrowestRememberRule,
   createToolCallLineTracker,
@@ -471,10 +471,31 @@ export function seedHistoryIfEmpty(model: TuiModel, sessionId: string, messages:
   const view = model.sessions.get(sessionId);
   if (!view || view.lines.length > 0) return;
   for (const m of messages) {
-    if (m.role === "user") pushLine(view, { kind: "user", text: m.content });
+    if (m.role === "user") pushLine(view, { kind: "user", text: userLineText(m) });
     else if (m.role === "assistant") pushLine(view, { kind: "agent", text: m.content });
   }
   if (messages.length > 0) markDirty(model);
+}
+
+/**
+ * 2026-10-02(P3:session 網路):user 訊息在 transcript 的文字。別的 session 送來的(或使用者轉傳來的)訊息
+ * (`origin` 有值)前面標明來源,讓人看得出那不是這個 session 的使用者打的字;內文是原始 message 本體
+ * (給 agent 看的信封樣板文字不落地)。
+ */
+function userLineText(m: Pick<MessageRecord, "content" | "origin">): string {
+  if (!m.origin) return m.content;
+  return `[${m.origin.kind === "forward" ? "轉傳自" : "來自"} ${m.origin.title}] ${m.content}`;
+}
+
+/**
+ * `session-message` push:別的 session 送來的訊息剛寫進 `push.sessionId` 的歷史——即時接進那條 session 的
+ * transcript(對應桌面端的 `handleSessionMessage()`)。沒追蹤這個 session 時忽略。
+ */
+export function applySessionMessage(model: TuiModel, push: SessionMessagePush): void {
+  const view = model.sessions.get(push.sessionId);
+  if (!view || push.message.role !== "user") return;
+  pushLine(view, { kind: "user", text: userLineText(push.message) });
+  markDirty(model);
 }
 
 // ---- 成本/斷路器(輪詢,見 app.tsx)-------------------------------------------

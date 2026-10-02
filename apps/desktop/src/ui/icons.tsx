@@ -26,6 +26,7 @@ export type IconName =
   | "external"
   | "file"
   | "folder"
+  | "forward"
   | "gauge"
   | "image"
   | "logout"
@@ -120,6 +121,12 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   folder: <path d="M3 7.5A2 2 0 0 1 5 5.5h3.6a2 2 0 0 1 1.5.7l1 1.3H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9Z" />,
+  forward: (
+    <>
+      <path d="m15 4 5 5-5 5" />
+      <path d="M20 9H10a6 6 0 0 0-6 6v4" />
+    </>
+  ),
   gauge: (
     <>
       <path d="M4 17a9 9 0 1 1 16 0" />

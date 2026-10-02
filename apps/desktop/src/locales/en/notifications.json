@@ -3,7 +3,8 @@
     "daily-limit": "Daily cost limit",
     "waiting-ttl": "Waiting timeout limit",
     "message-budget": "Message count limit",
-    "turn-limit": "Turn time / tool-call count limit"
+    "turn-limit": "Turn time / tool-call count limit",
+    "message-chain-budget": "A message chain between sessions reached its message limit — agent-to-agent delivery has been halted and needs your attention"
   },
   "trip": {
     "reasonFallback": "Halted by the circuit breaker",
@@ -14,6 +15,10 @@
     "budgetWarning": {
       "title": "Deskmony: Budget nearly exhausted",
       "body": "{{who}}: Cost/token usage has reached the warning threshold. Not halted yet — consider reviewing or adjusting the budget limit"
+    },
+    "messageChainWarning": {
+      "title": "Deskmony: Message chain nearing its limit",
+      "body": "{{who}}: a chain of messages between agents has reached the warning threshold. Not halted yet — check that they are not talking in circles"
     },
     "idle": {
       "title": "Deskmony: Task idle reminder",

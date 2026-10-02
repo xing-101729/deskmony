@@ -72,5 +72,27 @@
   },
   "attachment": {
     "tooLarge": "以下附件超過 {{limit}} MB,已略過:{{files}}"
+  },
+  "origin": {
+    "fromSession": "來自 {{title}}",
+    "fromSessionTitle": "這則訊息是別的 session 送來的(點擊切換到那個 session)",
+    "fromSessionGone": "這則訊息是別的 session 送來的(那個 session 已不存在)",
+    "forwardedFrom": "轉傳自 {{title}}",
+    "forwardedFromTitle": "這則訊息是使用者從那個 session 轉傳過來的(點擊切換到那個 session)",
+    "forwardedFromGone": "這則訊息是使用者從別的 session 轉傳過來的(那個 session 已不存在)"
+  },
+  "forward": {
+    "button": "轉傳到…",
+    "buttonTitle": "把這則訊息轉傳給另一個 session",
+    "dialogTitle": "轉傳到另一個 session",
+    "dialogDescription": "選擇要接收這則訊息的 session(任何 session 都可以)。對方會收到一則標明「使用者從這個 session 轉來」的訊息,並自己決定要不要處理——系統不會自動把對方的回答送回來。",
+    "previewLabel": "要轉傳的內容",
+    "targetLabel": "目標 session",
+    "targetPlaceholder": "選擇 session…",
+    "noTargets": "目前沒有其他 session 可以轉傳",
+    "noteLabel": "附註(選填)",
+    "notePlaceholder": "例如:請根據這份結果修正你那邊的實作",
+    "submit": "轉傳",
+    "sending": "轉傳中…"
   }
 }

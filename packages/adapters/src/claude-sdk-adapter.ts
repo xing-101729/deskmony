@@ -14,13 +14,17 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
-import type { SubagentPort } from "@deskmony/shared";
+import type { SessionNetworkPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
-import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMcpServer } from "./subagent-mcp.js";
+import {
+  SESSION_NETWORK_MCP_SERVER_NAME,
+  SESSION_NETWORK_ALLOWED_TOOL_NAMES,
+  createSessionNetworkMcpServer,
+} from "./session-network-mcp.js";
 
 /**
  * ClaudeAgentSdkAdapter — 使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` API
@@ -102,12 +106,12 @@ import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMc
  */
 export class ClaudeAgentSdkAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
-  // S12 Phase2 R2:spawn_subagent 的注入 port(apps/core 的 SessionManager 在
-  // 啟動時用 setSubagentPort() 事後注入,「先建構、後注入」
-  // 手法打破建構循環——adapter 建立時 core 的 SessionManager 還沒好)。
-  private subagentPort?: SubagentPort;
-  setSubagentPort(port: SubagentPort): void {
-    this.subagentPort = port;
+  // 2026-10-02(P3:session 網路):`list_agents`/`list_sessions`/`read_session`/`create_session`/
+  // `send_to_session` 五個工具的注入 port(apps/core 在啟動時用 setSessionNetworkPort() 事後注入,
+  // 「先建構、後注入」手法打破建構循環——adapter 建立時 core 的 SessionManager 還沒好)。
+  private sessionNetworkPort?: SessionNetworkPort;
+  setSessionNetworkPort(port: SessionNetworkPort): void {
+    this.sessionNetworkPort = port;
   }
 
   capabilities(): AdapterCapabilities {
@@ -144,7 +148,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     workspace: Workspace,
     resume?: ResumeOptions,
   ): Promise<AgentHandle> {
-    const handle: AgentHandle = { id: randomUUID(), launch, workspace };
+    // 續接時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`):session 網路工具的呼叫者身分
+    // 是這個 handle.id 的閉包捕捉,必須等於 SessionManager 用來登記這條 session 的 id。
+    const handle: AgentHandle = { id: resume?.sessionId ?? randomUUID(), launch, workspace };
     const agentLabel = launch.providerId ?? "claude-agent-sdk";
 
     const inputQueue = new AsyncQueue<SDKUserMessage>();
@@ -276,20 +282,20 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       },
     };
 
-    // S12 Phase2 R2:掛載內建的 subagent MCP server(見
-    // packages/adapters/src/subagent-mcp.ts)。純查詢的工具額外放進
+    // 2026-10-02(P3):掛載內建的 session 網路 MCP server(名稱 `deskmony`,見
+    // packages/adapters/src/session-network-mcp.ts)。純查詢的三個工具額外放進
     // allowedTools 略過 canUseTool 的權限彈窗(純粹的平台內部管線)。
-    // (2026-10-02:原本還有一組團隊訊息工具,隨 team 一併移除,見 docs/DECISIONS.md §H。)
+    // (原本還有一組團隊訊息工具與 S12 的 subagent 四件套,分別隨 team 與 P3 移除,見 docs/DECISIONS.md §H。)
     const mcpServers: Record<string, McpServerConfig> = {};
     const allowedTools: string[] = [];
-    if (this.subagentPort) {
-      // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生(line 101),
-      // 這裡閉包捕捉當作 parentSessionId,agent 無法覆寫。
-      mcpServers[SUBAGENT_MCP_SERVER_NAME] = createSubagentMcpServer(this.subagentPort, handle.id);
-      // list_profiles/list_subagents 是純查詢,自動放行;spawn_subagent/
-      // send_to_subagent 刻意 **不** 放進 allowedTools —— 見 §4「權限」(兩者
+    if (this.sessionNetworkPort) {
+      // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生,這裡閉包捕捉當作**呼叫者身分**,
+      // agent 無法覆寫(工具參數裡沒有任何 caller 欄位)。
+      mcpServers[SESSION_NETWORK_MCP_SERVER_NAME] = createSessionNetworkMcpServer(this.sessionNetworkPort, handle.id);
+      // list_agents/list_sessions/read_session 是純查詢,自動放行;create_session/
+      // send_to_session 刻意 **不** 放進 allowedTools —— 見 §4「權限」(兩者
       // 都會讓某個 session 多跑一輪、燒 token,必須走權限彈窗)。
-      allowedTools.push(...SUBAGENT_ALLOWED_TOOL_NAMES);
+      allowedTools.push(...SESSION_NETWORK_ALLOWED_TOOL_NAMES);
     }
     if (Object.keys(mcpServers).length > 0) {
       options.mcpServers = mcpServers;

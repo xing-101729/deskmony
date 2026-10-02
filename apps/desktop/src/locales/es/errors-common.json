@@ -17,7 +17,8 @@
   },
   "gateway": {
     "localOnlyMethod": "Esta operación solo está disponible en una conexión local: {{method}}",
-    "invalidRequest": "Solicitud no válida: {{detail}}"
+    "invalidRequest": "Solicitud no válida: {{detail}}",
+    "bridgeTokenRequired": "{{method}} es solo para tokens de puente MCP (la identidad del llamante la determina el token)"
   },
   "budget": {
     "dailyLimitReached": "Se alcanzó el límite de presupuesto diario"

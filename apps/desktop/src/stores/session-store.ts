@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  DeskmonyError,
   type AdapterCapabilities,
   type AgentDetectionEntry,
   type AgentSoftware,
@@ -11,6 +12,7 @@ import {
   type EnforcementNotificationPush,
   type GatewayCapabilities,
   type KnownClaudeModel,
+  type MessageOrigin,
   type MessageRecord,
   type PermissionRequestEvent,
   type PermissionResolvedPush,
@@ -24,6 +26,7 @@ import {
   type ResolvedProvider,
   type Session,
   type SessionEventEnvelope,
+  type SessionMessagePush,
   type SessionPermissionMode,
   type SlashCommandInfo,
   type UserDialogRequestEvent,
@@ -90,6 +93,12 @@ export type ChatItem =
        *  history 兩條路徑都會填(見 sendPrompt() action 與
        *  messageRecordsToItems())。 */
       attachments?: PendingAttachment[];
+      /**
+       * 2026-10-02(P3:session 網路):這則訊息是別的 session 送來的(`send_to_session`/`create_session`)或使用者
+       * 轉傳來的(`forward`)——不是人類在這個 session 輸入的。`content` 是**原始 message 本體**(信封樣板文字只給
+       * agent 看,不落地)。DB reload 後的 history 與即時的 `session-message` push 兩條路徑都會填。
+       */
+      origin?: MessageOrigin;
     }
   | { kind: "assistant"; id: string; content: string; createdAt: number; streaming: boolean }
   | {
@@ -279,14 +288,30 @@ interface SessionStoreState {
    * 打架或造成畫面閃爍。
    */
   deleteSession: (sessionId: string) => Promise<void>;
-  /** S12 Phase2 R3:從一個既有 session 開子 agent —— agent/model/effort 由呼叫端
-   *  (SpawnChildDialog,與側欄「新對話」同一組選單)指定。呼叫既有 `session.spawnChild` RPC。
-   *  2026-10-02(P2):原本的 `agentProfileId`/`agentOverride` 改成 `providerId`/`model`/`effort`。 */
-  spawnChild: (
+  /**
+   * 使用者手動從某個 session 底下開一個新 session(側欄的「在這個 session 底下開新 session」對話框,與側欄
+   * 「新對話」同一組 agent/model 選單)。2026-10-02(P3):呼叫 `session.create`(帶 `parentSessionId`,工作資料夾沿用
+   * 該 session)後,再用 `session.sendPrompt` 送第一則訊息——這是**人類輸入**(開新訊息鏈、沒有 `origin`),
+   * 與 agent 用 `create_session` 開的不同;新 session 掛在該 session 底下只為巢狀顯示與溯源。
+   * (原本的 `session.spawnChild` gateway 方法與「子完成 → 結果自動注入父」已整個移除。)
+   */
+  createChildSession: (
     parentSessionId: string,
     prompt: string,
     agent: { providerId: string; model?: string; effort?: EffortLevel },
     title?: string,
+  ) => Promise<void>;
+  /**
+   * 「轉傳到…」:把 `sourceSessionId` 的一則 assistant 訊息轉給 `targetSessionId`(`session.forwardMessage`)。
+   * gateway 要的是**持久化的訊息 id**,但即時串流中的訊息項目 id 是 adapter 的 messageId(對不上 DB 那一筆),
+   * 所以這裡先用 `session.history` 找出對應的持久化 assistant 訊息(id 相同 → 內容相同 → 內容包含,
+   * 由新到舊);找不到就丟 `sessionNetwork.forwardMessageNotFound`(UI 顯示翻譯後的訊息)。
+   */
+  forwardMessage: (
+    sourceSessionId: string,
+    item: { id: string; content: string },
+    targetSessionId: string,
+    note?: string,
   ) => Promise<void>;
   /** Phase 6:`attachments` 選填——composer 沒有待送附件時省略/傳空陣列皆可,
    *  action 內部一律正規化成「非空才附加」,樂觀回顯與 wire payload 兩處共用
@@ -590,7 +615,7 @@ export function selectResolvedProviders(
  * 2026-10-02(P2:移除 profile)新增:「現在真的能用來開 session 的 agent」清單——對應 core 端
  * `AgentCatalog.listAvailable()`(`enabled && installed`),但在 UI 端用同一份偵測結果 + 偏好
  * 自己算(UI 已經有這兩份資料,不需要多一個 RPC)。內嵌的 claude-agent-sdk 不需要偵測,只要沒被停用就一定在。
- * SessionList 的 agent 下拉、`⌘N`、「開子 agent」對話框都走這個 selector,不要各自過濾。
+ * SessionList 的 agent 下拉、`⌘N`、「在這個 session 底下開新 session」對話框都走這個 selector,不要各自過濾。
  */
 export function selectAvailableProviders(
   detectedAgents: AgentDetectionEntry[],
@@ -718,6 +743,7 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
         content: msg.content,
         createdAt: msg.createdAt,
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(msg.origin ? { origin: msg.origin } : {}),
       });
     } else if (msg.role === "assistant") {
       items.push({ kind: "assistant", id: msg.id, content: msg.content, createdAt: msg.createdAt, streaming: false });
@@ -820,6 +846,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         handleUserDialogResolved(set, push.payload as UserDialogResolvedPush);
       } else if (push.channel === "enforcement-notification") {
         handleEnforcementNotification(push.payload as EnforcementNotificationPush);
+      } else if (push.channel === "session-message") {
+        handleSessionMessage(set, push.payload as SessionMessagePush);
       } else if (push.channel === "policy-updated") {
         const { action, rule } = push.payload as PolicyUpdatedPush;
         set((state) => ({
@@ -923,23 +951,51 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void get().fetchCapabilities(session.adapterType);
   },
 
-  spawnChild: async (parentSessionId, prompt, agent, title) => {
+  createChildSession: async (parentSessionId, prompt, agent, title) => {
     const parent = get().sessions.find((s) => s.id === parentSessionId);
     if (!parent) return;
-    const raw = await client.call("session.spawnChild", {
-      parentSessionId,
+    const raw = await client.call("session.create", {
       providerId: agent.providerId,
       model: agent.model,
       effort: agent.effort,
-      prompt,
+      workingDir: parent.workingDir,
       title,
+      parentSessionId,
     });
     const { session } = SessionCreateResultSchema.parse(raw);
+    // 樂觀回顯第一則訊息(人類輸入,沒有 origin)——與 `sendPrompt()` action 同一種處理。
     set((state) => ({
-      sessions: [...state.sessions, session],
-      itemsBySession: { ...state.itemsBySession, [session.id]: [] },
+      sessions: state.sessions.some((s) => s.id === session.id) ? state.sessions : [...state.sessions, session],
+      itemsBySession: {
+        ...state.itemsBySession,
+        [session.id]: [{ kind: "user", id: crypto.randomUUID(), content: prompt, createdAt: Date.now() }],
+      },
     }));
     void get().fetchCapabilities(session.adapterType);
+    await client.call("session.sendPrompt", { sessionId: session.id, prompt: { text: prompt } });
+  },
+
+  forwardMessage: async (sourceSessionId, item, targetSessionId, note) => {
+    const raw = await client.call("session.history", { sessionId: sourceSessionId });
+    const { messages } = SessionHistoryResultSchema.parse(raw);
+    const assistants = messages.filter((m) => m.role === "assistant");
+    const match =
+      assistants.find((m) => m.id === item.id) ??
+      [...assistants].reverse().find((m) => m.content === item.content) ??
+      [...assistants].reverse().find((m) => m.content.includes(item.content));
+    if (!match) {
+      throw new DeskmonyError(
+        "sessionNetwork.forwardMessageNotFound",
+        { sessionId: sourceSessionId, messageId: item.id },
+        `找不到可轉傳的訊息(${item.id})`,
+      );
+    }
+    await client.call("session.forwardMessage", {
+      sourceSessionId,
+      messageId: match.id,
+      targetSessionId,
+      ...(note && note.trim() ? { note: note.trim() } : {}),
+    });
   },
 
   selectSession: async (sessionId) => {
@@ -1379,6 +1435,39 @@ function handleEnforcementNotification(rawPayload: unknown): void {
   // 傳入 i18next 的裸 t 而非 hook 版本,理由見上方 import 處註解。
   const { title, body } = formatEnforcementNotificationText(payload, i18next.t);
   void window.deskmony.notify({ title, body, sessionId: payload.sessionId });
+}
+
+/**
+ * 2026-10-02(P3):別的 session 送來的訊息(或使用者轉傳來的)剛寫進 `sessionId` 的歷史——把它接進這條 session 的時間軸,
+ * 讓正在看它的人即時看到「來自 <title>」的訊息。以訊息 id 去重(`selectSession()` 重新載入 history 與這個 push
+ * 可能在時間上交錯)。這條 session 的時間軸還沒載入過(從沒選過)時只是先放著:`selectSession()` 一律從
+ * `session.history` 重新載入整串,不會漏。
+ */
+function handleSessionMessage(
+  set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
+  push: SessionMessagePush,
+): void {
+  const { sessionId, message } = push;
+  if (message.role !== "user") return;
+  set((state) => {
+    const items = state.itemsBySession[sessionId] ?? [];
+    if (items.some((item) => item.id === message.id)) return {};
+    return {
+      itemsBySession: {
+        ...state.itemsBySession,
+        [sessionId]: capItems([
+          ...items,
+          {
+            kind: "user",
+            id: message.id,
+            content: message.content,
+            createdAt: message.createdAt,
+            ...(message.origin ? { origin: message.origin } : {}),
+          },
+        ]),
+      },
+    };
+  });
 }
 
 function handleSessionEvent(

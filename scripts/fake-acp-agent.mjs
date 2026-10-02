@@ -102,12 +102,23 @@
  *     client。這是**決定性**的(完全由這支腳本的程式碼決定要不要呼叫、呼叫
  *     哪個工具,不依賴任何真實模型的自由選擇),但走的是完整的真實管線:
  *     AcpAdapter 核發的 scoped token → 真的透過 WS 打回 gateway → 真的觸發
- *     SubagentPort 對應的方法——見
+ *     SessionManager 對應的方法(session 網路五個工具)——見
  *     packages/adapters/src/mcp-bridge-server.ts 的完整安全/協定說明。
  *     `mcpServers` 陣列為空(這個 session 沒有掛任何 MCP server,例如沒有
  *     subagentPort 的一般 ACP session)時,回覆一則固定的錯誤文字
  *     `"BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured"`,不嘗試 spawn
  *     任何東西。
+ *   - 若 prompt 文字**任何位置**含 BRIDGE_ON_PROMPT_PATTERN 標記
+ *     `[[E2E_BRIDGE_ON_PROMPT:<base64>]]`(2026-10-02,P3 session 網路 e2e 用,見
+ *     scripts/e2e-session-network.mjs):`<base64>` 是 `{"tool": string, "args": object}` 的 JSON 以 base64
+ *     編碼(base64 不含 `]`,所以標記可以巢狀塞進另一則訊息的內文而不會截斷)。這個 agent 收到含標記的
+ *     prompt 時,**自己**用 `CALL_BRIDGE_TOOL_PREFIX` 那條完全相同的真實管線(spawn mcp-bridge 子行程 → scoped
+ *     token → gateway)呼叫該工具,把結果回成 `BRIDGE_ON_PROMPT_RESULT:` + JSON。用來決定性地模擬「agent 收到訊息後
+ *     自己決定回覆(send_to_session)」——A↔B 互傳的訊息鏈就是靠這個巢狀標記一層一層推進的,不依賴任何真實模型。
+ *     標記是明確的、由測試腳本逐字組出來的,不是「看起來像指令的自然語言」,所以不會誤觸。
+ *   - 若 prompt 文字以 SAY_PREFIX("ACP_SAY ")開頭:原封不動把其後的文字當成這一輪的回覆(不加任何前綴、
+ *     **不**解讀裡面的標記)——e2e 用它造出「內文含 BRIDGE_ON_PROMPT 標記的 assistant 訊息」,再被「轉傳到…」
+ *     給另一個 session,驗證轉傳開的新鏈會被收到的 agent 沿用。
  *   - 若 prompt 文字等於 UPSERT_TOOL_CALLS_PREFIX("ACP_UPSERT_TOOL_CALLS",
  *     不接受任何參數)(CLI/TUI「同一個 toolCallId 只印一行」的 e2e 用,見
  *     scripts/e2e-cli.mjs 的案例 11 與 scripts/e2e-cli-tui.mjs 的案例 9f):
@@ -197,6 +208,14 @@ export const CALL_BRIDGE_TOOL_PREFIX = "ACP_CALL_BRIDGE_TOOL ";
  * MCP 管線」兩個不同的斷言面向。
  */
 export const REPORT_MCP_SERVERS_PREFIX = "ACP_REPORT_MCP_SERVERS";
+/** P3(session 網路)e2e 用,見檔頭註解:把其後的文字原樣當成這一輪的回覆。 */
+export const SAY_PREFIX = "ACP_SAY ";
+/** P3(session 網路)e2e 用,見檔頭註解:prompt 任何位置含這個標記就自己呼叫 bridge 工具。 */
+const BRIDGE_ON_PROMPT_PATTERN = /\[\[E2E_BRIDGE_ON_PROMPT:([A-Za-z0-9+/=]+)\]\]/;
+/** 建構出一段「收到這則 prompt 的 agent 要呼叫 bridge 工具 `tool`(帶 `args`)」的標記文字。 */
+export function bridgeOnPromptMarker(tool, args) {
+  return `[[E2E_BRIDGE_ON_PROMPT:${Buffer.from(JSON.stringify({ tool, args }), "utf8").toString("base64")}]]`;
+}
 /** CLI/TUI「同一個 toolCallId 只印一行」e2e 用(不接受參數),見檔頭註解。 */
 export const UPSERT_TOOL_CALLS_PREFIX = "ACP_UPSERT_TOOL_CALLS";
 /** 上面那一輪用到的固定字串——e2e 直接 import,不在兩邊各寫一份字面值。 */
@@ -266,7 +285,16 @@ class FakeAcpAgent {
     session.abort = abort;
 
     try {
-      if (DELAY_ECHO_PATTERN.test(text)) {
+      // 2026-10-02(P3):呼叫 bridge 工具的三條路徑**排在最前面**——它們的內文(`message` 參數、巢狀標記)本來就會
+      // 含 `[[E2E_DELAY_ECHO:...]]` 這類標記,先比對 DELAY_ECHO 的話,A 的「呼叫 send_to_session」prompt 會被當成
+      // 回顯而不是真的呼叫工具。
+      if (text.startsWith(CALL_BRIDGE_TOOL_PREFIX)) {
+        await this.handleCallBridgeTool(params.sessionId, text.slice(CALL_BRIDGE_TOOL_PREFIX.length), cx);
+      } else if (text.startsWith(SAY_PREFIX)) {
+        await this.handleSay(params.sessionId, text.slice(SAY_PREFIX.length), cx);
+      } else if (BRIDGE_ON_PROMPT_PATTERN.test(text)) {
+        await this.handleBridgeOnPrompt(params.sessionId, text, cx);
+      } else if (DELAY_ECHO_PATTERN.test(text)) {
         await this.handleDelayEcho(params.sessionId, text, cx);
       } else if (text.startsWith(WRITE_FILE_PREFIX)) {
         await this.handleWriteFile(params.sessionId, text.slice(WRITE_FILE_PREFIX.length), cx);
@@ -280,8 +308,6 @@ class FakeAcpAgent {
         await this.handleAvailableCommands(params.sessionId, text.slice(AVAILABLE_COMMANDS_PREFIX.length), cx);
       } else if (text.startsWith(DIFF_CONTENT_PREFIX)) {
         await this.handleDiffContent(params.sessionId, text.slice(DIFF_CONTENT_PREFIX.length), cx);
-      } else if (text.startsWith(CALL_BRIDGE_TOOL_PREFIX)) {
-        await this.handleCallBridgeTool(params.sessionId, text.slice(CALL_BRIDGE_TOOL_PREFIX.length), cx);
       } else if (text === UPSERT_TOOL_CALLS_PREFIX) {
         await this.handleUpsertToolCalls(params.sessionId, cx);
       } else if (text === EMPTY_RESULT_TOOL_NAME_PREFIX) {
@@ -439,8 +465,28 @@ class FakeAcpAgent {
    * 檔頭註解對這個分支的完整說明。
    */
   async handleCallBridgeTool(sessionId, rawJson, cx) {
-    const session = this.sessions.get(sessionId);
     const { tool: toolName, args } = JSON.parse(rawJson);
+    await this.runBridgeTool(sessionId, toolName, args, cx, "BRIDGE_TOOL_RESULT");
+  }
+
+  /** P3 e2e 用,見檔頭 BRIDGE_ON_PROMPT_PATTERN 註解:收到含標記的 prompt,自己呼叫標記裡指定的 bridge 工具。 */
+  async handleBridgeOnPrompt(sessionId, text, cx) {
+    const match = text.match(BRIDGE_ON_PROMPT_PATTERN);
+    const { tool: toolName, args } = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
+    await this.runBridgeTool(sessionId, toolName, args, cx, "BRIDGE_ON_PROMPT_RESULT");
+  }
+
+  /** P3 e2e 用,見檔頭 SAY_PREFIX 註解:原封不動把 `text` 當成這一輪的回覆。 */
+  async handleSay(sessionId, text, cx) {
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text } },
+    });
+  }
+
+  /** `handleCallBridgeTool()` 與 `handleBridgeOnPrompt()` 共用:真的 spawn bridge 子行程並呼叫一個工具。 */
+  async runBridgeTool(sessionId, toolName, args, cx, resultPrefix) {
+    const session = this.sessions.get(sessionId);
     const mcpServer = session?.mcpServers?.[0];
     const messageId = randomUUID();
 
@@ -450,7 +496,7 @@ class FakeAcpAgent {
         update: {
           sessionUpdate: "agent_message_chunk",
           messageId,
-          content: { type: "text", text: "BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured" },
+          content: { type: "text", text: `${resultPrefix}_ERROR: no mcpServers configured` },
         },
       });
       return;
@@ -472,9 +518,9 @@ class FakeAcpAgent {
     try {
       await client.connect(transport);
       const result = await client.callTool({ name: toolName, arguments: args ?? {} });
-      resultText = `BRIDGE_TOOL_RESULT:${JSON.stringify(result)}`;
+      resultText = `${resultPrefix}:${JSON.stringify(result)}`;
     } catch (err) {
-      resultText = `BRIDGE_TOOL_RESULT_ERROR: ${err instanceof Error ? err.message : String(err)}`;
+      resultText = `${resultPrefix}_ERROR: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       try {
         await client.close();

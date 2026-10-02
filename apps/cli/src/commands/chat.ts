@@ -55,7 +55,11 @@ async function replayHistory(client: GatewayClient, sessionId: string, color: bo
     for (const m of messages) {
       // system/tool 訊息這裡不重播——Phase 1 的 REPL 只重播使用者與 agent
       // 之間的對話本身,一大串工具呼叫細節反而會蓋過真正的對話脈絡。
-      if (m.role === "user") process.stdout.write(`${paint("你", "cyan", color)}: ${m.content}\n`);
+      // 2026-10-02(P3):別的 session 送來的(或使用者轉傳來的)訊息標明來源,不是「你」打的。
+      if (m.role === "user") {
+        const who = m.origin ? `${m.origin.kind === "forward" ? "轉傳自" : "來自"} ${m.origin.title}` : "你";
+        process.stdout.write(`${paint(who, "cyan", color)}: ${m.content}\n`);
+      }
       else if (m.role === "assistant") process.stdout.write(`${paint("agent", "green", color)}: ${m.content}\n`);
     }
     process.stdout.write(paint("-- 歷史紀錄結束 --", "dim", color) + "\n");

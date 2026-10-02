@@ -17,7 +17,8 @@
   },
   "gateway": {
     "localOnlyMethod": "This operation is only available on a local connection: {{method}}",
-    "invalidRequest": "Invalid request: {{detail}}"
+    "invalidRequest": "Invalid request: {{detail}}",
+    "bridgeTokenRequired": "{{method}} is only for MCP bridge tokens (the caller identity is determined by the token)"
   },
   "budget": {
     "dailyLimitReached": "Daily budget limit reached"

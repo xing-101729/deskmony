@@ -94,6 +94,14 @@ export const messages = sqliteTable("messages", {
    * `ensureMessagesAttachmentsColumn()` 冪等 `ALTER TABLE` 補上。
    */
   attachments: text("attachments"),
+  /**
+   * 2026-10-02(P3:session 網路):這則 user 訊息是別的 session 送來的(`send_to_session`/`create_session`)
+   * 或使用者從別的 session 轉傳來的——`MessageOrigin`(packages/shared/src/session.ts)序列化成的 JSON 字串。
+   * `content` 存**原始 message 本體**,給 agent 看的信封樣板文字不落地(只在送進 adapter 那一刻組裝)。
+   * Nullable——人類自己輸入的訊息與 assistant/system/tool 訊息都是 NULL。既有的舊 DB 檔案靠
+   * `packages/db/src/client.ts` 的 `ensureMessagesOriginColumn()` 冪等 `ALTER TABLE` 補上。
+   */
+  origin: text("origin"),
   createdAt: integer("created_at").notNull(),
 });
 

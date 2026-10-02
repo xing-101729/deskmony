@@ -60,6 +60,10 @@ export type EscalationEnforcementEvent = z.infer<typeof EscalationEnforcementEve
 /**
  * 訊息/成本熔斷單方面叫停(S2/S3b 專用)。S1 階段只定型 schema、不產生這種
  * 事件——`source` 之後可能還會擴充,這裡先覆蓋 HLD §5 列出的兩種已知來源。
+ *
+ * 2026-10-02(P3:session 網路):`source: "message"` 現在是「**每條訊息鏈**的訊息數預算」超標
+ * (`reason: "message-chain-budget"`,targetIds = 鏈上相關的 session:送出方與目標),見
+ * apps/core/src/session/session-manager.ts 的鏈預算。熔斷只擋 agent 對 agent 的傳遞,不 interrupt 任何回合。
  */
 export const TripEnforcementEventSchema = z
   .object({
@@ -90,12 +94,14 @@ export type TripEnforcementEvent = z.infer<typeof TripEnforcementEventSchema>;
  * `reason: "budget-warning"`(HLD §3「中間地帶軟警告」):達 `warnAtPercent`
  * 時發通知、**不 halt**,與 T1 同一種「純提醒」語意,故共用這個 kind——差別
  * 只在提醒的具體原因,見 `EnforcementNotificationPushSchema.reminderReason`。
+ * 2026-10-02(P3):`reason: "message-chain-warning"`(`source: "message"`)是同一種軟警告,對象是訊息鏈的訊息數。
  */
 export const ReminderEnforcementEventSchema = z
   .object({
     kind: z.literal("reminder"),
-    source: z.literal("cost"),
-    reason: z.enum(["waiting-ttl", "budget-warning"]),
+    /** 2026-10-02(P3):新增 `"message"`——訊息鏈的訊息數達 `warnAtPercent`(軟警告,不 halt)。 */
+    source: z.enum(["cost", "message"]),
+    reason: z.enum(["waiting-ttl", "budget-warning", "message-chain-warning"]),
     targetIds: z.array(z.string()),
     ts: z.number(),
   })

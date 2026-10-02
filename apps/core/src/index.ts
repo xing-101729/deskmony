@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AcpAdapter, AdapterRegistry, ClaudeAgentSdkAdapter, GenericPtyAdapter, OpenCodeAdapter } from "@deskmony/adapters";
 import { initChildRegistry, reapOrphans } from "@deskmony/adapters";
-import type { SubagentPort } from "@deskmony/shared";
+import type { SessionNetworkPort } from "@deskmony/shared";
 import { initDb } from "./db.js";
 import { AgentCatalog, E2E_EXTRA_PROVIDERS_ENV } from "./agents/agent-catalog.js";
 import { PermissionGateway } from "./permissions/permission-gateway.js";
@@ -148,12 +148,11 @@ async function main(): Promise<void> {
   // `DESKMONY_YOLO_DURATION_MS` 等既有覆寫一樣,不經 `loadConfig()` 的分層合併、不落地任何設定檔。
   const catalog = new AgentCatalog(settingsStore, { extraProvidersJson: process.env[E2E_EXTRA_PROVIDERS_ENV] });
   catalog.startBackgroundDetection();
-  // S12 Phase2 R2:保留 claude adapter 的具名參考——SessionManager 建好後要用
-  // `setSubagentPort()` 把 `spawn_subagent` 的實作(SpawningChildFromTool)注入
-  // 給它(見下方 sessionManager 建好後的注入行),adapter 建立時 SessionManager
-  // 還不存在,沿用既有的「先建構、事後注入」手法。
+  // 2026-10-02(P3:session 網路):保留 claude adapter 的具名參考——SessionManager 建好後要用
+  // `setSessionNetworkPort()` 把五個 session 網路工具的實作注入給它(見下方 sessionManager 建好後的
+  // 注入行),adapter 建立時 SessionManager 還不存在,沿用既有的「先建構、事後注入」手法。
   const claudeAdapter = new ClaudeAgentSdkAdapter();
-  // Phase 2(ACP 掛載 subagent MCP 工具):保留具名參考——`WsGateway`
+  // Phase 2(ACP 掛載 session 網路 MCP 工具):保留具名參考——`WsGateway`
   // 建好後要用 `setTokenMinter()` 把 scoped token 的核發/撤銷實作(委派給
   // `WsGateway.mintMcpBridgeToken()`/`revokeMcpBridgeTokensForSession()`)注入
   // 給它,理由同 `claudeAdapter` 的既有先例(見下方注入處的完整說明)。
@@ -267,6 +266,8 @@ async function main(): Promise<void> {
     configPath,
     turnLimiter,
     costGovernor,
+    // 2026-10-02(P3):訊息鏈預算(`messageBudget.maxMessagesPerContext` 現在的意義是「每條訊息鏈」)。
+    config.messageBudget,
     yoloDurationMsOverride && Number.isFinite(yoloDurationMsOverride) ? yoloDurationMsOverride : undefined,
   );
   // 見上方建構順序說明:SessionManager 建好後才能回頭注入(同
@@ -286,46 +287,32 @@ async function main(): Promise<void> {
   notifier.setSessionInfo({
     getSessionTitle: async (sessionId) => (await sessionManager.getSession(sessionId))?.title,
   });
-  // S12 Phase2 R2+R4+R5:注入 `spawn_subagent`/`send_to_subagent`/
-  // `list_subagents` 的 SubagentPort——子 session 預設沿用父 session 自己的
-  // agent 與 model,agent 也可以呼叫 list_profiles(2026-10-02 P2:現在回傳
-  // `AgentCatalog` 的可用 agent 摘要)查完可用選項後自行指定別的 agent/model
-  // (見 session-manager.ts 的 spawnChildFromTool());`send_to_subagent`
-  // (R4)讓 agent 對已經開好的子 session 追加訊息(見 sendToChildFromTool());
-  // `list_subagents`(R5)讓 agent 查自己名下有哪些子——包含使用者透過 UI
-  // 手動開、agent 完全不知情的那些(見 listChildrenFromTool())。
-  // SessionManager 已建好,正是能回頭注入的時機。
+  // 2026-10-02(P3:session 網路):注入 `list_agents`/`list_sessions`/`read_session`/`create_session`/
+  // `send_to_session` 的 SessionNetworkPort(取代 S12 的子 agent 工具組)。每個 session 都看得到**所有**
+  // session、能對任一 session 傳訊息;**沒有任何自動回送**(收到訊息的 agent 自己決定要不要回、回給誰)。
+  // 呼叫者身分(`callerSessionId`)由各 adapter 以自己的 handle.id 閉包捕捉(in-process)或由 bridge
+  // token 綁定(ACP),**不是工具參數**。SessionManager 已建好,正是能回頭注入的時機。
   //
-  // Phase 2(ACP 掛載 subagent MCP 工具):抽成具名變數,**同一個
-  // 實例**同時注入給 `claudeAdapter` 與 `acpAdapter`——兩個 adapter 對
-  // `spawn_subagent`/`send_to_subagent`/`list_subagents`/`list_profiles` 的
-  // 行為(誰能對誰做什麼、看到哪些欄位)必須完全一致,共用同一個物件參考從
-  // 結構上保證不會漂移,比各自組一份重複的物件字面量更不容易之後兩邊不同步。
-  // **這是刻意的取捨**:讓 `AcpAdapter` 也拿到 subagentPort,代表**所有**
-  // ACP session(含目前唯一在測的 Gemini 個人單機情境)都
-  // 會在 spawn 時核發一個 scoped token、掛載 mcp-bridge-server.ts(見
-  // `AcpAdapter.spawn()`/`buildMcpBridgeServer()`)——多一個子行程與一條
-  // (惰性建立,只在 agent 真的呼叫工具時才連線)WS 連線。選擇這樣接的理由:
-  // (a) 讓 ACP 也具備與 ClaudeAgentSdkAdapter 對等的 subagent 能力;
-  // (b) 唯有這樣接,`session.spawnChildForSubagent`/
-  // `session.sendToChild`/`session.listChildren`/`agent.listForSubagent`
-  // 這四個這輪新增的 gateway 方法才能透過標準的 `apps/core/dist/index.js`
-  // 產物被 e2e 決定性測試真正走過一次完整管線(見
-  // scripts/e2e-gateway.mjs 的 `scopedMcpBridgeTokenSmokeTest()`),而不是
-  // 只測到型別/白名單邏輯本身。若之後覺得這個資源足跡不划算,把下面這一行
-  // `acpAdapter.setSubagentPort(subagentPort);` 刪掉即可完全回退,`AcpAdapter`
-  // 本身的 `subagentPort` 欄位/setter/spawn() 內的累加掛載邏輯不需要跟著改。
-  const subagentPort = {
-    spawnChild: (input: Parameters<SubagentPort["spawnChild"]>[0]) => sessionManager.spawnChildFromTool(input),
-    sendToChild: (input: Parameters<SubagentPort["sendToChild"]>[0]) => sessionManager.sendToChildFromTool(input),
-    listChildren: (input: Parameters<SubagentPort["listChildren"]>[0]) => sessionManager.listChildrenFromTool(input.parentSessionId),
-    // listProfiles:只回傳 agent 決策需要的最小欄位,不把 command/args/env 等可能
-    // 含本機路徑/密鑰的欄位送進 agent 的對話 context(見 SubagentPort.listProfiles() 的
-    // 介面註解)。與 gateway 的 `agent.listForSubagent` 共用同一個函式,結構上保證一致。
-    listProfiles: () => catalog.summarizeAvailable(),
+  // 抽成具名變數,**同一個實例**同時注入給 `claudeAdapter` 與 `acpAdapter`——兩個 adapter 對五個工具的
+  // 行為(誰能對誰做什麼、看到哪些欄位)必須完全一致,共用同一個物件參考從結構上保證不會漂移。
+  // **這是刻意的取捨**:讓 `AcpAdapter` 也拿到 port,代表**所有** ACP session 都會在 spawn 時核發一個
+  // scoped token、掛載 mcp-bridge-server.ts(見 `AcpAdapter.spawn()`/`buildMcpBridgeServer()`)——多一個子行程與一條
+  // (惰性建立,只在 agent 真的呼叫工具時才連線)WS 連線。選擇這樣接的理由:(a) 讓 ACP 也具備與
+  // ClaudeAgentSdkAdapter 對等的 session 網路能力;(b) 唯有這樣接,五個 `*ForAgent`/`*FromAgent` gateway 方法
+  // 才能透過標準的 `apps/core/dist/index.js` 產物被 e2e 決定性測試真正走過一次完整管線
+  // (見 scripts/e2e-session-network.mjs、scripts/e2e-gateway.mjs 的 `scopedMcpBridgeTokenSmokeTest()`)。
+  // 若之後覺得這個資源足跡不划算,把下面 `acpAdapter.setSessionNetworkPort(...)` 那一行刪掉即可完全回退。
+  const sessionNetworkPort: SessionNetworkPort = {
+    // 只回傳 agent 決策需要的最小欄位,不把 command/args/env 等可能含本機路徑/密鑰的欄位送進 agent 的對話
+    // context。與 gateway 的 `agent.listForAgent` 共用同一個函式,結構上保證一致。
+    listAgents: () => catalog.summarizeAvailable(),
+    listSessions: (input) => sessionManager.listSessionsForAgent(input.callerSessionId),
+    readSession: (input) => sessionManager.readSessionForAgent(input),
+    createSession: (input) => sessionManager.createSessionFromAgent(input),
+    sendToSession: (input) => sessionManager.sendToSessionFromAgent(input),
   };
-  claudeAdapter.setSubagentPort(subagentPort);
-  acpAdapter.setSubagentPort(subagentPort);
+  claudeAdapter.setSessionNetworkPort(sessionNetworkPort);
+  acpAdapter.setSessionNetworkPort(sessionNetworkPort);
 
   // S6(crash-recovery):純組合層,不擁有任何狀態,見 recovery-service.ts 頂端
   // 說明。放在這裡是因為它需要 sessionManager/catalog 建構完成。
@@ -347,13 +334,13 @@ async function main(): Promise<void> {
   );
   // S7 L4 §2.1:`ExecContext` 的 `attended`/`local` 是**環境事實**(現在有沒有
   // 人看得到彈窗、有沒有遠端 client 連線中),只有 Gateway 知道。與上面
-  // `setSubagentPort()` 同一個解耦手法:Gateway 的建構子需要 SessionManager,所以
+  // `setSessionNetworkPort()` 同一個解耦手法:Gateway 的建構子需要 SessionManager,所以
   // 反向依賴只能在 Gateway 建好之後用 setter 注入(見 session-manager.ts 的
   // `ClientPresencePort`)。**務必在 `gateway.listen()` 之前注入**——不然第一
   // 個連上來的 client 有機會在注入完成前就觸發權限決策,那一筆會用退化預設值
   // (attended=false)決定逾時語意。
   sessionManager.setClientPresence(gateway);
-  // Phase 2(ACP 掛載 subagent MCP 工具):`AcpAdapter` 需要
+  // Phase 2(ACP 掛載 session 網路 MCP 工具):`AcpAdapter` 需要
   // `WsGateway` 才能核發/撤銷 scoped MCP bridge token(見
   // `apps/core/src/gateway/ws-gateway.ts` 的 `mintMcpBridgeToken()`/
   // `revokeMcpBridgeTokensForSession()`)——與上面 `setClientPresence()` 同一

@@ -72,5 +72,27 @@
   },
   "attachment": {
     "tooLarge": "Estos adjuntos superan {{limit}} MB y se omitieron: {{files}}"
+  },
+  "origin": {
+    "fromSession": "De {{title}}",
+    "fromSessionTitle": "Este mensaje lo envió otra sesión (haz clic para cambiar a ella)",
+    "fromSessionGone": "Este mensaje lo envió otra sesión (esa sesión ya no existe)",
+    "forwardedFrom": "Reenviado desde {{title}}",
+    "forwardedFromTitle": "Reenviaste este mensaje desde esa sesión (haz clic para cambiar a ella)",
+    "forwardedFromGone": "Reenviaste este mensaje desde otra sesión (esa sesión ya no existe)"
+  },
+  "forward": {
+    "button": "Reenviar a…",
+    "buttonTitle": "Reenviar este mensaje a otra sesión",
+    "dialogTitle": "Reenviar a otra sesión",
+    "dialogDescription": "Elige la sesión que debe recibir este mensaje (sirve cualquiera). Recibirá un mensaje que indica que lo reenviaste desde esta sesión y decidirá por sí misma qué hacer — no se devuelve nada automáticamente.",
+    "previewLabel": "Contenido a reenviar",
+    "targetLabel": "Sesión de destino",
+    "targetPlaceholder": "Elige una sesión…",
+    "noTargets": "No hay otra sesión a la que reenviar",
+    "noteLabel": "Nota (opcional)",
+    "notePlaceholder": "p. ej.: Corrige tu implementación a partir de este resultado",
+    "submit": "Reenviar",
+    "sending": "Reenviando…"
   }
 }

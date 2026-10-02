@@ -107,8 +107,9 @@ export const SessionSchema = z.object({
    */
   backendSessionId: z.string().optional(),
   /**
-   * S12(session-subagent):這個 session 的 parent session id——只有
-   * 子 session(subagent)有值,根 session 為 undefined。
+   * 這個 session 是從哪個 session 底下開出來的(`create_session` 工具,或使用者在畫面上
+   * 從某個 session 底下開新 session)——**只用於 UI 巢狀顯示與溯源**,不代表任何權限或
+   * 回報關係(2026-10-02 P3:所有 session 互相可見、互相可傳訊息,不限父子)。根 session 為 undefined。
    */
   parentSessionId: z.string().optional(),
 });
@@ -131,31 +132,13 @@ export const CreateSessionInputSchema = z.object({
   workingDir: z.string(),
   title: z.string().optional(),
   /**
-   * S12(session-subagent):建立子 session 時帶入 parent session id。
-   * (2026-10-02:原本還有 `teamMemberId`——team 已移除,見 DECISIONS §H。)
+   * 掛在哪個 session 底下顯示(UI 巢狀 + 溯源,見 `Session.parentSessionId`)。使用者從畫面
+   * 「在這個 session 底下開新 session」時帶入;agent 用 `create_session` 建立時由 core 以呼叫者
+   * 身分帶入(不是工具參數)。(2026-10-02:原本還有 `teamMemberId`——team 已移除,見 DECISIONS §H。)
    */
   parentSessionId: z.string().optional(),
 });
 export type CreateSessionInput = z.infer<typeof CreateSessionInputSchema>;
-
-/**
- * S12(session-subagent):spawn child session 的輸入參數。
- * 2026-10-02(P2):`agentProfileId`/`agentOverride` 改成 `providerId`/`model`/`effort`
- * (P3 會再把整組子 agent 工具換成 session 網路,這裡先讓它在沒有 profile 的世界裡
- * 能編譯運作)。`providerId`/`model`/`effort` 省略時沿用父 session 自己的值。
- */
-export const SpawnChildSessionInputSchema = z.object({
-  parentSessionId: z.string(),
-  providerId: z.string().min(1).optional(),
-  model: z.string().optional(),
-  effort: EffortLevelSchema.optional(),
-  /** 省略時沿用父 session 的 workingDir。 */
-  workingDir: z.string().optional(),
-  title: z.string().optional(),
-  /** 建立子 session 後立即送出的第一段 prompt（子 agent 的任務）。 */
-  prompt: z.string().min(1),
-});
-export type SpawnChildSessionInput = z.infer<typeof SpawnChildSessionInputSchema>;
 
 /**
  * 訊息角色與持久化訊息紀錄(對應 ERD MESSAGE,單一 session 內的
@@ -164,12 +147,35 @@ export type SpawnChildSessionInput = z.infer<typeof SpawnChildSessionInputSchema
 export const MessageRoleSchema = z.enum(["user", "assistant", "system", "tool"]);
 export type MessageRole = z.infer<typeof MessageRoleSchema>;
 
+/**
+ * 2026-10-02(P3:session 網路,見 docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md §P3.2):
+ * 一則 user 訊息的**來源標記**——這則訊息不是人類在這個 session 的輸入框打的,而是別的 session 送來的。
+ *   - `session`:別的 session 的 agent 用 `send_to_session` / `create_session` 送來的。
+ *   - `forward`:使用者在畫面上把別的 session 的某則 assistant 訊息「轉傳到…」過來的。
+ * `sessionId`/`title` 是**送出方**(快照:title 是送出當下的標題,送出方之後改名或被刪除不影響顯示);
+ * `chainId` 是這則訊息所屬的訊息鏈(只用於鏈預算斷路器與除錯,見 SessionManager)。
+ *
+ * ⚠️ **只有 core 能設這個欄位**:`session.sendPrompt` 的 schema 不收 `origin`/`chainId`,gateway 的任何 client
+ * 都不能偽造「這是別的 session 送來的」(否則人類輸入可以假冒成 agent 訊息、也能指定鏈 id 繞過鏈預算)。
+ */
+export const MessageOriginSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("session"), sessionId: z.string(), title: z.string(), chainId: z.string() }),
+  z.object({ kind: z.literal("forward"), sessionId: z.string(), title: z.string(), chainId: z.string() }),
+]);
+export type MessageOrigin = z.infer<typeof MessageOriginSchema>;
+
 export const MessageRecordSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
   role: MessageRoleSchema,
+  /**
+   * 對 `role === "user"` 且有 `origin` 的訊息,這裡存的是**原始 message 本體**(送出方寫的內容),
+   * 不含給 agent 看的信封樣板文字——信封只在送進 adapter 那一刻才組裝(見 SessionManager)。
+   */
   content: z.string(),
   createdAt: z.number(),
+  /** 見 `MessageOriginSchema`。人類在這個 session 輸入的訊息、assistant/system/tool 訊息沒有這個欄位。 */
+  origin: MessageOriginSchema.optional(),
   /**
    * async-scribbling-llama.md Phase 6:使用者傳送訊息時夾帶的圖片(只有
    * `role === "user"` 的紀錄可能有值)。持久化在獨立的 `messages.attachments`

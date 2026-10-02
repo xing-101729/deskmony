@@ -39,6 +39,14 @@ export interface AgentHandle {
 export interface ResumeOptions {
   /** `getBackendSessionId()` 先前回傳的值。 */
   backendSessionId: string;
+  /**
+   * 2026-10-02(P3:session 網路):這個 handle 對應的 **Deskmony session id**。續接時 `SessionManager` 沿用
+   * 既有的 DB session id(不是新 handle 的 id),而 session 網路工具的**呼叫者身分**是 adapter 以 `handle.id`
+   * 閉包捕捉的——若續接後 `handle.id` 仍是新產生的 uuid,工具認出的「我是誰」就不是任何一個 session
+   * (`list_sessions` 的 `isYou`、`send_to_session` 的「不能送給自己」、鏈追蹤全部對不上)。
+   * 提供時 adapter 必須用它當 `handle.id`。
+   */
+  sessionId?: string;
 }
 
 export interface AgentAdapter {

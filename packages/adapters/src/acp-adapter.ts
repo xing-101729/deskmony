@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
-import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SlashCommandInfo, SubagentPort } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
@@ -76,19 +76,20 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
 export class AcpAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
 
-  // Phase 2(ACP 掛載 subagent MCP 工具):`subagentPort` 完全比照
-  // `ClaudeAgentSdkAdapter` 既有的 `setSubagentPort()` 模式——apps/core 的
+  // Phase 2(ACP 掛載 session 網路 MCP 工具):`sessionNetworkPort` 完全比照
+  // `ClaudeAgentSdkAdapter` 既有的 `setSessionNetworkPort()` 模式——apps/core 的
   // SessionManager 在啟動時用 setter 事後注入(adapter 建構當下 core 的
   // SessionManager 還沒好,打破建構循環,見 claude-sdk-adapter.ts 同名欄位的
-  // 註解)。`tokenMinter` 是這輪新增的第二個事後注入依賴——見
+  // 註解)。ACP 這邊 port 本身只當「要不要掛載」的開關(真正的工作由 bridge 子行程經 gateway 打回 core)。
+  // `tokenMinter` 是第二個事後注入依賴——見
   // packages/shared/src/mcp-bridge-auth.ts 的 `McpBridgeTokenPort` 完整背景
   // 說明,實例由 apps/core 的 WsGateway 提供。兩者都是 **可選**:`spawn()`
-  // 只在 `subagentPort` 已注入、且 `tokenMinter` 也已注入時,才會核發 token、
+  // 只在 `sessionNetworkPort` 已注入、且 `tokenMinter` 也已注入時,才會核發 token、
   // 掛載 mcp-bridge-server.ts——兩者缺一,行為與這輪之前完全相同(不核發 token、
   // 不多一個子行程)。
-  private subagentPort?: SubagentPort;
-  setSubagentPort(port: SubagentPort): void {
-    this.subagentPort = port;
+  private sessionNetworkPort?: SessionNetworkPort;
+  setSessionNetworkPort(port: SessionNetworkPort): void {
+    this.sessionNetworkPort = port;
   }
   private tokenMinter?: McpBridgeTokenPort;
   setTokenMinter(minter: McpBridgeTokenPort): void {
@@ -160,7 +161,7 @@ export class AcpAdapter implements AgentAdapter {
       );
     }
 
-    // Phase 2(ACP 掛載 subagent MCP 工具):`AgentHandle.id` 提前在
+    // Phase 2(ACP 掛載 session 網路 MCP 工具):`AgentHandle.id` 提前在
     // 這裡生成(這輪之前是等 ACP handshake 成功後才在下面產生)——scoped
     // token 需要綁定「這一個 session」,但核發時機必須在
     // `buildSession().withMcpServer()` 之前(掛進 `session/new` 請求的
@@ -240,10 +241,10 @@ export class AcpAdapter implements AgentAdapter {
 
     const connection = clientApp.connect(stream);
 
-    // Phase 2:this.subagentPort(已注入)存在時,核發 scoped token 並算出
+    // Phase 2:this.sessionNetworkPort(已注入)存在時,核發 scoped token 並算出
     // 要掛載的 mcp-bridge-server.ts 設定——ACP 只有一個統一的 bridge
     // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是
-    // in-process 的 MCP server。沒有 subagentPort 時 `buildMcpBridgeServer()`
+    // in-process 的 MCP server。沒有 sessionNetworkPort 時 `buildMcpBridgeServer()`
     // 直接回傳 undefined,不核發任何 token、不掛任何 MCP server。
     const bridgeMcpServer = this.buildMcpBridgeServer(handleId);
 
@@ -324,17 +325,17 @@ export class AcpAdapter implements AgentAdapter {
   /**
    * Phase 2:算出這個 session 要不要掛載 mcp-bridge-server.ts,以及要掛的話
    * 需要的完整 `McpServerStdio` 設定(含核發好的 scoped token)。回傳
-   * `undefined` 代表不掛載(沒有 `subagentPort`,或缺少
+   * `undefined` 代表不掛載(沒有 `sessionNetworkPort`,或缺少
    * `tokenMinter`/找不到已編譯的 bridge server 進入點這兩種**優雅降級**的
    * 情況——後兩者理論上不該發生,但寧可略過掛載、印警告,也不要讓整個
-   * session 建立失敗:subagent 工具是加分項,不是這個 session 能不
+   * session 建立失敗:session 網路工具是加分項,不是這個 session 能不
    * 能建立的前提)。
    */
   private buildMcpBridgeServer(sessionId: string): acp.McpServer | undefined {
-    if (!this.subagentPort) return undefined;
+    if (!this.sessionNetworkPort) return undefined;
     if (!this.tokenMinter) {
       console.warn(
-        `[acp-adapter] session ${sessionId}: subagentPort 存在但尚未注入 tokenMinter,略過掛載 subagent MCP 工具`,
+        `[acp-adapter] session ${sessionId}: sessionNetworkPort 存在但尚未注入 tokenMinter,略過掛載 session 網路 MCP 工具`,
       );
       return undefined;
     }
@@ -342,14 +343,14 @@ export class AcpAdapter implements AgentAdapter {
     if (!entryPath || !existsSync(entryPath)) {
       console.warn(
         `[acp-adapter] session ${sessionId}: 找不到 mcp-bridge-server.js(${entryPath ?? "無法解析路徑"}),` +
-          "略過掛載 subagent MCP 工具——請確認 packages/adapters 已執行過 pnpm build。",
+          "略過掛載 session 網路 MCP 工具——請確認 packages/adapters 已執行過 pnpm build。",
       );
       return undefined;
     }
 
     const grant: McpBridgeTokenGrant = this.tokenMinter.mint({
       sessionId,
-      subagent: Boolean(this.subagentPort),
+      network: Boolean(this.sessionNetworkPort),
     });
 
     // 見 mcp-bridge-server.ts 檔頭「環境變數」段落——一律透過 env(不是 CLI
@@ -360,11 +361,12 @@ export class AcpAdapter implements AgentAdapter {
       { name: "DESKMONY_MCP_BRIDGE_GATEWAY_URL", value: grant.gatewayUrl },
       { name: "DESKMONY_MCP_BRIDGE_SESSION_ID", value: sessionId },
     ];
-    if (this.subagentPort) {
-      env.push({ name: "DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED", value: "1" });
+    if (this.sessionNetworkPort) {
+      env.push({ name: "DESKMONY_MCP_BRIDGE_NETWORK_ENABLED", value: "1" });
     }
 
-    return { name: "deskmony-mcp-bridge", command: process.execPath, args: [entryPath], env };
+    // MCP server 名稱與 in-process 版一致(`deskmony`),agent 看到的工具全名才會是 `mcp__deskmony__<name>`。
+    return { name: "deskmony", command: process.execPath, args: [entryPath], env };
   }
 
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void {

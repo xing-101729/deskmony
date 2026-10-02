@@ -80,6 +80,7 @@ export function createDb(dbFilePath: string): NexusDb {
       role TEXT NOT NULL,
       content TEXT NOT NULL,
       attachments TEXT,
+      origin TEXT,
       created_at INTEGER NOT NULL
     );
 
@@ -121,6 +122,7 @@ export function createDb(dbFilePath: string): NexusDb {
   ensureSessionsRecoveryColumns(sqlite);
   ensureSessionsParentColumn(sqlite);
   ensureMessagesAttachmentsColumn(sqlite);
+  ensureMessagesOriginColumn(sqlite);
   ensureSessionsLaunchColumns(sqlite);
   backfillLegacySessionsProvider(sqlite);
 
@@ -228,6 +230,23 @@ function ensureMessagesAttachmentsColumn(sqlite: Database.Database): void {
   if (hasColumn) return;
   try {
     sqlite.exec("ALTER TABLE messages ADD COLUMN attachments TEXT");
+  } catch {
+    // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
+  }
+}
+
+/**
+ * 2026-10-02(P3:session 網路):對「已存在的舊 DB 檔案」補上 `messages.origin` 欄位——跨 session 訊息的
+ * 來源標記(`MessageOrigin` 序列化成的 JSON,見 packages/shared/src/session.ts 的 `MessageOriginSchema`)。
+ * 理由與作法完全比照 `ensureMessagesAttachmentsColumn()`:`ALTER TABLE ADD COLUMN` 對既有列填 NULL,
+ * 正是「人類輸入/沒有來源」的正確既有語意,不需要回填。
+ */
+function ensureMessagesOriginColumn(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  const hasColumn = columns.some((col) => col.name === "origin");
+  if (hasColumn) return;
+  try {
+    sqlite.exec("ALTER TABLE messages ADD COLUMN origin TEXT");
   } catch {
     // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
   }

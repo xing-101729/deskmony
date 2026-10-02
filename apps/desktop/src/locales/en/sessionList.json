@@ -6,8 +6,8 @@
   },
   "confirmDeleteSession": "Delete the conversation \"{{title}}\"? This cannot be undone.",
   "contextUsageTitle": "Context window usage (S3a usage-metering)",
-  "spawnChildAriaLabel": "Start child agent",
-  "spawnChildTitle": "Start a child agent to run a subtask",
+  "spawnChildAriaLabel": "Open a new session under this one",
+  "spawnChildTitle": "Open a new session under this session",
   "deleteSessionAriaLabel": "Delete conversation",
   "expandSidebarAriaLabel": "Expand sidebar",
   "commandPaletteAriaLabel": "Command palette",
@@ -43,12 +43,12 @@
   "logoutAriaLabel": "Log out",
   "unnamedWorkspace": "(No directory specified)",
   "spawnChildDialog": {
-    "title": "Start a child agent under \"{{title}}\"",
-    "description": "Give the child agent a task prompt and choose which agent and model to create it with (defaults to this session's agent). The child session uses this session's working folder.",
-    "promptLabel": "Task prompt",
-    "promptPlaceholder": "Describe the task this child agent should carry out…",
+    "title": "Open a new session under \"{{title}}\"",
+    "description": "Choose an agent and model and write the first message (treated as typed by you). The new session reuses this session's working folder and is shown nested under it — for display and provenance only; it is equal to every other session and its results do not flow back here automatically.",
+    "promptLabel": "First message",
+    "promptPlaceholder": "Describe what this session should do…",
     "titleFieldLabel": "Title (optional)",
     "titlePlaceholder": "e.g., Rerun the acceptance check for this UI slice",
-    "submit": "Start child agent"
+    "submit": "Open session"
   }
 }

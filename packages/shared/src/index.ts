@@ -8,7 +8,7 @@ export * from "./session.js";
 export * from "./prompt.js";
 export * from "./events.js";
 export * from "./adapter-capabilities.js";
-export * from "./subagent.js";
+export * from "./session-network.js";
 export * from "./mcp-bridge-auth.js";
 export * from "./gateway.js";
 export * from "./enforcement.js";

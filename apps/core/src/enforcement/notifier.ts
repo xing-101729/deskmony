@@ -138,7 +138,7 @@ export function msUntilQuietHoursEnd(now: Date, quietHours: { from: string; to: 
  *  例外」的分類文案。 */
 const TRIP_REASON_TO_SOURCE_FALLBACK: Record<"cost" | "message", NotificationTripReason> = {
   cost: "daily-limit",
-  message: "message-budget",
+  message: "message-chain-budget",
 };
 
 export interface RealNotifierOptions {
@@ -320,7 +320,10 @@ export class RealNotifier extends EventEmitter implements Notifier {
   private async buildPayload(
     kind: "escalation" | "trip" | "reminder",
     items: Array<{ sessionId: string; toolName?: string }>,
-    opts: { tripReason?: NotificationTripReason; reminderReason?: "waiting-ttl" | "budget-warning" } = {},
+    opts: {
+      tripReason?: NotificationTripReason;
+      reminderReason?: "waiting-ttl" | "budget-warning" | "message-chain-warning";
+    } = {},
   ): Promise<EnforcementNotificationPush> {
     const distinctSessionIds = [...new Set(items.map((i) => i.sessionId))];
     const names = await this.resolveSessionNames(distinctSessionIds);

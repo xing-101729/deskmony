@@ -6,8 +6,8 @@
   },
   "confirmDeleteSession": "「{{title}}」を削除しますか?この操作は元に戻せません。",
   "contextUsageTitle": "context ウィンドウの使用率(S3a usage-metering)",
-  "spawnChildAriaLabel": "子 agent を起動",
-  "spawnChildTitle": "子 agent を起動してサブタスクを実行",
+  "spawnChildAriaLabel": "このセッションの下に新しいセッションを開く",
+  "spawnChildTitle": "このセッションの下に新しいセッションを開く",
   "deleteSessionAriaLabel": "会話を削除",
   "expandSidebarAriaLabel": "サイドバーを展開",
   "commandPaletteAriaLabel": "コマンドパレット",
@@ -43,12 +43,12 @@
   "logoutAriaLabel": "ログアウト",
   "unnamedWorkspace": "(ディレクトリ未指定)",
   "spawnChildDialog": {
-    "title": "「{{title}}」の下で子 agent を起動",
-    "description": "子 agent にタスク prompt を与え、どの agent と model で作成するかを選択します(デフォルトはこの session の agent)。子 session の作業フォルダはこの session と同じです。",
-    "promptLabel": "タスク prompt",
-    "promptPlaceholder": "この子 agent に実行させたいタスクを記述してください…",
+    "title": "「{{title}}」の下に新しいセッションを開く",
+    "description": "エージェントとモデルを選び、最初のメッセージを書きます(あなたが直接入力したものとして扱われます)。新しいセッションはこのセッションの作業フォルダーを引き継ぎ、その下に入れ子で表示されます。表示と出所の記録のためだけで、他のセッションと対等であり、結果が自動でここに戻ることはありません。",
+    "promptLabel": "最初のメッセージ",
+    "promptPlaceholder": "このセッションにやってほしいことを書いてください…",
     "titleFieldLabel": "タイトル(任意)",
     "titlePlaceholder": "例:この UI slice の受け入れ確認を再実行",
-    "submit": "子 agent を起動"
+    "submit": "セッションを開く"
   }
 }

@@ -238,12 +238,13 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
   },
   {
     id: "opencode-acp",
-    label: "OpenCode(ACP,支援子 agent 工具)",
+    label: "OpenCode(ACP,可主動傳訊息)",
     description:
       "同一個 opencode 執行檔,但改用它內建的 `opencode acp` 子命令以 ACP 對接。" +
-      "與上面的「OpenCode」項目差別只有一個、但很關鍵:ACP 這條路會掛載 subagent MCP 工具," +
-      "所以這個 provider 建立的 session **能自己呼叫 spawn_subagent 等工具開子 agent**;" +
-      "走 HTTP server API 的那個不行(adapter 內沒有任何 MCP 掛載)。單機使用兩者差異不大。",
+      "與上面的「OpenCode」項目差別只有一個、但很關鍵:ACP 這條路會掛載 session 網路 MCP 工具," +
+      "所以這個 provider 建立的 session **能自己呼叫 list_sessions / create_session / send_to_session 等工具," +
+      "看到其他 session 並主動傳訊息**;走 HTTP server API 的那個只能收訊息、不能主動傳(adapter 內沒有任何 MCP 掛載)。" +
+      "單機使用兩者差異不大。",
     software: "acp",
     detectKey: "opencode-cli",
     // `opencode acp`——2026-08-28 對本機實際安裝的 opencode 1.18.7 實測驗證

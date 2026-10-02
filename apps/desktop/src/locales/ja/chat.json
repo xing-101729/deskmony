@@ -72,5 +72,27 @@
   },
   "attachment": {
     "tooLarge": "次の添付ファイルは {{limit}} MB を超えているため、スキップしました:{{files}}"
+  },
+  "origin": {
+    "fromSession": "{{title}} から",
+    "fromSessionTitle": "このメッセージは別のセッションから送られました(クリックでそのセッションに切り替え)",
+    "fromSessionGone": "このメッセージは別のセッションから送られました(そのセッションはもう存在しません)",
+    "forwardedFrom": "{{title}} から転送",
+    "forwardedFromTitle": "このメッセージはそのセッションからユーザーが転送したものです(クリックでそのセッションに切り替え)",
+    "forwardedFromGone": "このメッセージは別のセッションからユーザーが転送したものです(そのセッションはもう存在しません)"
+  },
+  "forward": {
+    "button": "転送先…",
+    "buttonTitle": "このメッセージを別のセッションに転送",
+    "dialogTitle": "別のセッションに転送",
+    "dialogDescription": "このメッセージを受け取るセッションを選択します(どのセッションでも可)。相手には「ユーザーがこのセッションから転送した」と明記されたメッセージが届き、どう扱うかは相手が決めます。相手の回答が自動で戻ってくることはありません。",
+    "previewLabel": "転送する内容",
+    "targetLabel": "転送先セッション",
+    "targetPlaceholder": "セッションを選択…",
+    "noTargets": "転送できる他のセッションがありません",
+    "noteLabel": "メモ(任意)",
+    "notePlaceholder": "例:この結果をもとに実装を修正してください",
+    "submit": "転送",
+    "sending": "転送中…"
   }
 }

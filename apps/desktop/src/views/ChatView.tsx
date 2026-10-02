@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { EffortLevel, Session, SlashCommandInfo } from "@deskmony/shared";
+import type { EffortLevel, MessageOrigin, Session, SlashCommandInfo } from "@deskmony/shared";
 import { PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
 import {
   useSessionStore,
@@ -27,6 +27,7 @@ import { TodoListView, parseTodoWriteInput } from "./chat/TodoListView.js";
 import { DiffHunkView, parseDiffResult } from "./chat/DiffHunkView.js";
 import { ToolImage, parseImageBlock } from "./chat/ToolImage.js";
 import { AskUserQuestionWidget, PendingUserDialogsDock, isQuestionToolName } from "./chat/AskUserQuestionWidget.js";
+import { ForwardMessageDialog } from "./chat/ForwardMessageDialog.js";
 
 /**
  * 2026-09-04(稽核修補):「沒有選中 session」時 `items` selector 的固定回傳值。
@@ -330,6 +331,82 @@ function AttachmentFileChip({ name, className }: { name: string; className?: str
 }
 
 /**
+ * 2026-10-02(P3:session 網路):有 `origin` 的訊息(別的 session 送來的,或使用者轉傳來的)頂端的來源標籤
+ * 「來自 <title>」——可點擊切到那個 session(那個 session 已被刪除時只顯示、不可點)。標籤文字用送出當下記下的
+ * title 快照(`origin.title`);若來源 session 還在,顯示它**目前**的標題。
+ */
+function OriginTag({ origin }: { origin: MessageOrigin }): JSX.Element {
+  const { t } = useTranslation(["chat"]);
+  const sourceSession = useSessionStore((s) => s.sessions.find((x) => x.id === origin.sessionId));
+  const selectSession = useSessionStore((s) => s.selectSession);
+  const title = sourceSession?.title ?? origin.title;
+  const forwarded = origin.kind === "forward";
+  const label = forwarded ? t("chat:origin.forwardedFrom", { title }) : t("chat:origin.fromSession", { title });
+  const className =
+    "mb-1.5 inline-flex max-w-full items-center gap-1 rounded bg-accent/10 px-1.5 py-0.5 text-2xs font-medium text-accent";
+  const icon = <Icon name={forwarded ? "forward" : "message"} size={11} className="flex-shrink-0" />;
+  if (!sourceSession) {
+    return (
+      <div>
+        <span
+          className={className}
+          title={forwarded ? t("chat:origin.forwardedFromGone") : t("chat:origin.fromSessionGone")}
+        >
+          {icon}
+          <span className="truncate">{label}</span>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => void selectSession(origin.sessionId)}
+        title={forwarded ? t("chat:origin.forwardedFromTitle") : t("chat:origin.fromSessionTitle")}
+        className={`focus-ring ${className} transition hover:bg-accent/20`}
+      >
+        {icon}
+        <span className="truncate">{label}</span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 每則 assistant 訊息的動作列(串流完才出現):「轉傳到…」→ `ForwardMessageDialog`。滑過整則訊息才顯示
+ * (`group-hover`),鍵盤聚焦時也會顯示(`focus-visible`),比照 SessionList 列上動作鈕的既有作法。
+ */
+function AssistantActions({ item }: { item: Extract<ChatItem, { kind: "assistant" }> }): JSX.Element | null {
+  const { t } = useTranslation(["chat"]);
+  const [forwarding, setForwarding] = useState(false);
+  const sourceSession = useSessionStore((s) => s.sessions.find((x) => x.id === s.currentSessionId));
+  if (!sourceSession) return null;
+  return (
+    <>
+      <div className="mt-0.5 flex justify-start opacity-0 transition focus-within:opacity-100 group-hover:opacity-100">
+        <button
+          type="button"
+          onClick={() => setForwarding(true)}
+          title={t("chat:forward.buttonTitle")}
+          className="focus-ring inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-2xs text-fg-faint transition hover:bg-surface hover:text-fg-muted"
+        >
+          <Icon name="forward" size={11} />
+          {t("chat:forward.button")}
+        </button>
+      </div>
+      {forwarding && (
+        <ForwardMessageDialog
+          source={sourceSession}
+          item={{ id: item.id, content: item.content }}
+          onClose={() => setForwarding(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/**
  * 2026-09-04(稽核修補):包了 `memo`。
  *
  * `items.map()` 每次 render 都會重建整份元素陣列,而 `ChatItem` 物件本身在
@@ -388,43 +465,59 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
     );
   }
 
+  // 2026-10-02(P3):別的 session 送來的(或使用者轉傳來的)訊息——靠左、不是 accent 色(那不是使用者在這個
+  // session 打的字),頂端帶「來自 <title>」標籤;內文是原始 message 本體(信封樣板文字只給 agent 看)。
+  if (item.kind === "user" && item.origin) {
+    return (
+      <div className="my-1 flex justify-start">
+        <div className="max-w-[75%] whitespace-pre-wrap rounded-lg border border-line-subtle bg-surface-2 px-3.5 py-2.5 text-sm leading-relaxed text-fg">
+          <OriginTag origin={item.origin} />
+          {item.content}
+        </div>
+      </div>
+    );
+  }
+
   const isUser = item.kind === "user";
   return (
-    <div className={`my-1 flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[75%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
-          isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
-        }`}
-      >
-        {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片/檔案——
-            樂觀回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後
-            的 history(messageRecordsToItems())兩條路徑都會填
-            item.attachments,這裡不需要區分來源。 */}
-        {item.kind === "user" && item.attachments && item.attachments.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-1.5">
-            {item.attachments.map((att, index) =>
-              att.type === "image" ? (
-                <img
-                  key={index}
-                  src={`data:${att.mediaType};base64,${att.data}`}
-                  alt={t("chat:composer.attachmentAltText")}
-                  className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
-                />
-              ) : (
-                <AttachmentFileChip
-                  key={index}
-                  name={att.name}
-                  className="rounded-md border border-accent-fg/20 bg-accent-fg/10 px-2 py-1 text-2xs"
-                />
-              ),
-            )}
-          </div>
-        )}
-        {isUser ? item.content : <MarkdownMessage content={item.content} />}
-        {item.kind === "assistant" && item.streaming && (
-          <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-fg-muted align-middle" />
-        )}
+    <div className={`group my-1 ${isUser ? "" : "flex flex-col items-start"}`}>
+      <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
+        <div
+          className={`max-w-[75%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
+            isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
+          }`}
+        >
+          {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片/檔案——
+              樂觀回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後
+              的 history(messageRecordsToItems())兩條路徑都會填
+              item.attachments,這裡不需要區分來源。 */}
+          {item.kind === "user" && item.attachments && item.attachments.length > 0 && (
+            <div className="mb-1.5 flex flex-wrap gap-1.5">
+              {item.attachments.map((att, index) =>
+                att.type === "image" ? (
+                  <img
+                    key={index}
+                    src={`data:${att.mediaType};base64,${att.data}`}
+                    alt={t("chat:composer.attachmentAltText")}
+                    className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
+                  />
+                ) : (
+                  <AttachmentFileChip
+                    key={index}
+                    name={att.name}
+                    className="rounded-md border border-accent-fg/20 bg-accent-fg/10 px-2 py-1 text-2xs"
+                  />
+                ),
+              )}
+            </div>
+          )}
+          {isUser ? item.content : <MarkdownMessage content={item.content} />}
+          {item.kind === "assistant" && item.streaming && (
+            <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-fg-muted align-middle" />
+          )}
+        </div>
       </div>
+      {item.kind === "assistant" && !item.streaming && item.content.trim() !== "" && <AssistantActions item={item} />}
     </div>
   );
 });

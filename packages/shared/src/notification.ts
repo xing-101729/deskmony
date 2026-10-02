@@ -52,6 +52,9 @@ export const NotificationTripReasonSchema = z.enum([
   "waiting-ttl",
   "message-budget",
   "turn-limit",
+  /** 2026-10-02(P3):某條訊息鏈(agent 對 agent 的傳遞)的訊息數超過 `messageBudget.maxMessagesPerContext`。
+   *  `"message-budget"`(A5 的每 context 預算)已不再有生產端,保留只為相容舊的通知 payload/webhook 接收端。 */
+  "message-chain-budget",
 ]);
 export type NotificationTripReason = z.infer<typeof NotificationTripReasonSchema>;
 
@@ -72,7 +75,7 @@ export const EnforcementNotificationPushSchema = z
     /** 僅 trip 事件會有值。 */
     tripReason: NotificationTripReasonSchema.optional(),
     /** 僅 reminder 事件會有值——見 `ReminderEnforcementEventSchema.reason`。 */
-    reminderReason: z.enum(["waiting-ttl", "budget-warning"]).optional(),
+    reminderReason: z.enum(["waiting-ttl", "budget-warning", "message-chain-warning"]).optional(),
     ts: z.number(),
     /** 深連結(§4.1):`<gateway 的 http base>/#/session/<id>`。批次彙總涉及
      *  多個不同 session 時,無法用單一連結精準指向其中一個(保守選擇:退化成
@@ -129,6 +132,12 @@ export function formatEnforcementNotificationText(
       return {
         title: t("notifications:reminder.budgetWarning.title"),
         body: t("notifications:reminder.budgetWarning.body", { who }),
+      };
+    }
+    if (payload.reminderReason === "message-chain-warning") {
+      return {
+        title: t("notifications:reminder.messageChainWarning.title"),
+        body: t("notifications:reminder.messageChainWarning.body", { who }),
       };
     }
     return {

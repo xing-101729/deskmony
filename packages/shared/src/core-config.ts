@@ -348,30 +348,28 @@ export const BudgetConfigSchema = z
   .strict();
 export type BudgetConfig = z.infer<typeof BudgetConfigSchema>;
 
-// ---- messageBudget(S2:訊息預算 + Mailbox 持久化,第三條斷路器,見
-// docs/LAYER-4-detail-design/message-budget_detail.md §3)----
+// ---- messageBudget(第三條斷路器,見 docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md §P3.4;
+// 原 S2 設計見 docs/LAYER-4-detail-design/message-budget_detail.md §3)----
 
 /**
- * 每個 task context 的訊息數上限(A5 後半、message-budget_detail.md §3)——
- * Phase 2 唯一主防線,hop 深度 / A↔B 頻率 / broadcast 冷卻全部延後(理由見該
- * 文件 §3.1:訊息數是所有失控形態的共同表徵,簡單、無法繞過、一定會斷)。
+ * **每條訊息鏈**的訊息數上限(2026-10-02 P3 起的語意;鍵名 `maxMessagesPerContext` 為了不破壞使用者
+ * 既有 config 而保留,原本 A5 的意思是「每個 task context」,task/team 已於 P1 移除)。
  *
- * 2026-10-02 起由 P3 訊息鏈預算沿用,見 simplify-agents-sessions_detail.md §P3.4
- * (docs/LAYER-4-detail-design/):task/team 已於 P1 移除,P3 之前這個鍵沒有消費者;
- * 保留鍵名是為了不破壞使用者既有 config,P3 起的語意是「每條訊息鏈」的訊息數上限。
+ * 「鏈」= 人類直接輸入的 prompt 開啟一條新鏈;agent 經 `create_session`/`send_to_session` 送出的訊息沿用
+ * 「呼叫者**這一輪**是被哪條鏈觸發的」那條鏈;UI 轉傳(`session.forwardMessage`)也開新鏈。每條鏈的計數只存
+ * 記憶體(core 重啟歸零)。達 `warnAtPercent` 時發 audit + 通知(`reminder`,不 halt);**超過上限時** 這條鏈上
+ * 後續的 agent→agent 傳遞一律被拒(工具回錯誤給 agent,講明已熔斷、需要使用者介入),並走 `enforcementTrip()`
+ * (audit log + 桌面通知)。熔斷只擋 agent 對 agent 的傳遞——人類照常能對任何 session 輸入,輸入即開新鏈。
+ * 訊息熔斷 = 訊息數是所有失控形態(互相回覆的無限迴圈、扇出)的共同表徵,簡單、無法繞過、一定會斷
+ * (message-budget_detail.md §3.1)。
  *
  * **與 `budget`(CostGovernor)同等對待**:agent 不可寫(家目錄在 worktree
  * 外)、遠端不可改(見下方 `ConfigSetFilePatchSchema` 刻意不含這個欄位的說明,
  * F4)——這是安全罩本身的設定,不是使用者體驗偏好。
  *
- * `maxMessagesPerContext` 預設 50:一個任務的正常協作往返(交辦/澄清/review
- * 意見/修正回報)量級在 10–20 則,50 給 2–3 倍餘裕,又能在失控迴圈跑掉前斷掉
- * (見該文件 §3「預設值 50 的理由」)。`warnAtPercent` 比照 `BudgetConfigSchema`
- * 同名欄位的形狀(L4 §3 的 config 區塊明訂這個欄位),但這輪**沒有**對應的軟
- * 警告通知實作(`EnforcementEvent` 的 `reminder` kind 目前 `source` 只收斂
- * `"cost"`,見 packages/shared/src/enforcement.ts——擴充它需要新的、這輪 L4
- * 文字完全沒描述行為的設計決定,保守起見這輪只落地欄位本身,不擅自發明行為,
- * 這是實作當下的自行判斷,repo 外沒有留下任何紀錄——理由就寫在這裡,不必去找別的文件)。
+ * `maxMessagesPerContext` 預設 50:兩個 agent 之間一次正常的協作往返(交辦/澄清/回報/修正)量級在 10–20
+ * 則,50 給 2–3 倍餘裕,又能在失控迴圈跑掉前斷掉(message-budget_detail.md §3「預設值 50 的理由」)。
+ * `warnAtPercent` 比照 `BudgetConfigSchema` 同名欄位的形狀:鏈上訊息數達上限的這個百分比時發一次軟警告。
  */
 export const MessageBudgetConfigSchema = z
   .object({
@@ -438,8 +436,8 @@ export const CoreConfigSchema = z
       modelPricing: {},
     }),
     /**
-     * S2(message-budget)新增:訊息預算上限(見
-     * docs/LAYER-4-detail-design/message-budget_detail.md §3)。**agent 不可寫**
+     * 訊息鏈預算(S2 message-budget 的第三條斷路器;2026-10-02 P3 起是**每條訊息鏈**的訊息數上限,見
+     * `MessageBudgetConfigSchema`)。**agent 不可寫**
      * (家目錄在 worktree 外)、**遠端不可改**(見下方 `ConfigSetFilePatchSchema`
      * 刻意不含這個欄位的說明,與 `policy`/`notification`/`budget` 同等對待,
      * F4)。`.default(...)` 讓沒有這個區塊的舊設定檔/全新安裝行為等同
@@ -490,8 +488,7 @@ export const PURE_DEFAULT_CORE_CONFIG = {
     warnAtPercent: 80,
     modelPricing: {},
   },
-  // S2(message-budget):沒有設定檔時 = maxMessagesPerContext=50(見
-  // `MessageBudgetConfigSchema` 註解的「預設值 50 的理由」)。
+  // 訊息鏈預算:沒有設定檔時 = 每條鏈 50 則(見 `MessageBudgetConfigSchema` 註解的「預設值 50 的理由」)。
   messageBudget: {
     maxMessagesPerContext: 50,
     warnAtPercent: 80,

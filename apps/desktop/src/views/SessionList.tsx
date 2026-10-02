@@ -157,8 +157,8 @@ export function SessionList({
     });
   };
 
-  /** S12 Phase2 R3:單一 session 列(頂層與縮排的子 session 共用同一份 JSX,
-   *  只是子列多 `pl-4` 縮排 + 標題前綴 `↳`)。 */
+  /** 單一 session 列(頂層與縮排的子 session 共用同一份 JSX,只是子列多 `pl-4` 縮排 + 標題前綴 `↳`;
+   *  巢狀只反映「從哪個 session 底下開出來的」,2026-10-02 起不代表任何權限或回報關係)。 */
   const renderSessionRow = (session: Session, isChild: boolean): JSX.Element => {
     const meta = sessionStatusMeta(session.status);
     const contextPct =
@@ -556,14 +556,17 @@ function FontScaleSwitcher(): JSX.Element {
 }
 
 /**
- * S12 Phase2 R3:從選定的 session 開一個子 agent 的極簡對話框。
+ * 從選定的 session 底下開一個新 session 的極簡對話框(使用者手動操作)。
  * 2026-10-02(P2:移除 profile):agent/model/effort 改用與側欄「新對話」同一組 `AgentPicker`
- * (預設帶入父 session 自己的 agent 與 model——父的 provider 已不可用時退回第一個可用的);
- * 送出時由 core 端依選擇組啟動規格,子 session 的資料夾沿用父的。
+ * (預設帶入該 session 自己的 agent 與 model——它的 provider 已不可用時退回第一個可用的);
+ * 新 session 的資料夾沿用該 session。
+ * 2026-10-02(P3:session 網路):送出時呼叫 `session.create`(帶 `parentSessionId`)再送第一則訊息——
+ * 這是**人類輸入**(開新訊息鏈、沒有 origin);新 session 掛在該 session 底下只為巢狀顯示與溯源,
+ * 它跟其他 session 一樣平等,結果**不會**自動回到這個 session(原本的 `session.spawnChild` 已移除)。
  */
 function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () => void }): JSX.Element {
   const { t } = useTranslation(["sessionList", "common"]);
-  const spawnChild = useSessionStore((s) => s.spawnChild);
+  const createChildSession = useSessionStore((s) => s.createChildSession);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [prompt, setPrompt] = useState("");
@@ -588,7 +591,7 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
     setError(null);
     setSubmitting(true);
     try {
-      await spawnChild(
+      await createChildSession(
         session.id,
         prompt.trim(),
         { providerId: effective.providerId, model: effective.model || undefined, effort: effective.effort || undefined },

@@ -17,7 +17,8 @@
   },
   "gateway": {
     "localOnlyMethod": "此操作僅限本機連線呼叫:{{method}}",
-    "invalidRequest": "無效的請求:{{detail}}"
+    "invalidRequest": "無效的請求:{{detail}}",
+    "bridgeTokenRequired": "{{method}} 只給 MCP bridge token 使用(呼叫者身分由 token 決定)"
   },
   "budget": {
     "dailyLimitReached": "已達每日預算上限"

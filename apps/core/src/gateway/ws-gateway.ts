@@ -5,7 +5,6 @@ import {
   ClientRequestSchema,
   DeskmonyError,
   ErrorCodes,
-  type ChildResultPush,
   type ClientRequest,
   type ClientRequestMethod,
   type EffectiveCoreConfig,
@@ -19,6 +18,7 @@ import {
   type ServerPush,
   type Session,
   type SessionEventEnvelope,
+  type SessionMessagePush,
   type UserDialogResolvedPush,
 } from "@deskmony/shared";
 import { applyConfigFilePatch } from "../config/config-file-writer.js";
@@ -100,7 +100,7 @@ const DEFAULT_MCP_BRIDGE_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
 /**
  * 一個已核發、尚未失效的 scoped bridge token 的完整狀態。`sessionId`/
- * `subagent` 直接對應 `McpBridgeTokenScope`(核發時呼叫端提供的綁定範圍),
+ * `network` 直接對應 `McpBridgeTokenScope`(核發時呼叫端提供的綁定範圍),
  * `allowedMethods` 是依這個範圍算出的方法白名單(見 `computeAllowedMethods()`)
  * ——連 `allowedMethods` 本身也一併存進 grant,而不是每次請求都重新計算,
  * 避免核發時的範圍與檢查時的白名單邏輯有機會不同步。
@@ -108,32 +108,38 @@ const DEFAULT_MCP_BRIDGE_TOKEN_TTL_MS = 24 * 60 * 60_000;
 interface ScopedTokenGrant {
   token: string;
   sessionId: string;
-  subagent: boolean;
+  network: boolean;
   allowedMethods: ReadonlySet<ClientRequestMethod>;
   expiresAt: number;
 }
 
 /**
  * 依 `McpBridgeTokenScope` 算出允許呼叫的 gateway 方法白名單——**精確**列出
- * 每個 subagent MCP 工具對應的 gateway 方法,
+ * 每個 session 網路 MCP 工具對應的 gateway 方法,
  * 刻意不用任何前綴比對或範圍歸類的方式圖方便(例如「所有 `session.*` 方法」
  * 都不精確,`session.setPermissionMode` 等完全不相干的方法會被誤放行)。
- * (2026-10-02:team-bus 那五個方法已隨 team 一併移除,見 docs/DECISIONS.md §H。)
+ * (2026-10-02:team-bus 那五個方法已隨 team 一併移除;S12 的 subagent 四個方法在 P3 換成下面五個,
+ * 見 docs/DECISIONS.md §H。)
  *
  * 對照表(MCP 工具 → gateway 方法,見 packages/adapters/src/
- * subagent-mcp.ts / mcp-bridge-server.ts):
- *   spawn_subagent    → session.spawnChildForSubagent
- *   send_to_subagent  → session.sendToChild
- *   list_subagents    → session.listChildren
- *   list_profiles     → agent.listForSubagent(2026-10-02 P2:原 profile.listForSubagent)
+ * session-network-mcp.ts / mcp-bridge-server.ts):
+ *   list_agents      → agent.listForAgent
+ *   list_sessions    → session.listForAgent
+ *   read_session     → session.readForAgent
+ *   create_session   → session.createFromAgent
+ *   send_to_session  → session.sendFromAgent
+ *
+ * 這五個方法的參數**都沒有 caller/parent 欄位**:呼叫者 session 由 token 綁定的 `sessionId` 決定
+ * (見 `checkScopedGrantAccess()` 回傳的 `callerSessionId` 與 `dispatch()` 的第三個參數)。
  */
 function computeAllowedMethods(scope: McpBridgeTokenScope): ReadonlySet<ClientRequestMethod> {
   const methods = new Set<ClientRequestMethod>();
-  if (scope.subagent) {
-    methods.add("session.spawnChildForSubagent");
-    methods.add("session.sendToChild");
-    methods.add("session.listChildren");
-    methods.add("agent.listForSubagent");
+  if (scope.network) {
+    methods.add("agent.listForAgent");
+    methods.add("session.listForAgent");
+    methods.add("session.readForAgent");
+    methods.add("session.createFromAgent");
+    methods.add("session.sendFromAgent");
   }
   return methods;
 }
@@ -466,7 +472,7 @@ export class WsGateway {
   constructor(
     private readonly sessionManager: SessionManager,
     /** 2026-10-02(P2:移除 profile):取代原本的 `ProfileStore`——`env.detectAgents`(重新偵測)與
-     *  `agent.listForSubagent`(可用 agent 摘要)的資料來源。 */
+     *  `agent.listForAgent`(可用 agent 摘要)的資料來源。 */
     private readonly catalog: AgentCatalog,
     private readonly settingsStore: SettingsStore,
     /** S3b(CostGovernor)新增:`cost.getSummary` 的資料來源,見該 case 註解。 */
@@ -533,9 +539,11 @@ export class WsGateway {
     this.notifier.on("enforcement-notification", (payload: EnforcementNotificationPush) => {
       this.broadcast({ kind: "event", channel: "enforcement-notification", payload });
     });
-    // S12(session-subagent):child session completed 時推播結果給所有 client。
-    this.sessionManager.on("child-result", (payload: ChildResultPush) => {
-      this.broadcast({ kind: "event", channel: "child-result", payload });
+    // 2026-10-02(P3):別的 session 送來的訊息(`origin` 有值的 user 訊息)剛寫進某個 session 的歷史——
+    // 轉播給所有已認證 client,讓正在看那個 session 的 UI 即時顯示「來自 <title>」。
+    // (取代 S12 的 `child-result` push:「子完成 → 結果自動注入父」已整個移除。)
+    this.sessionManager.on("session-message", (payload: SessionMessagePush) => {
+      this.broadcast({ kind: "event", channel: "session-message", payload });
     });
   }
 
@@ -664,7 +672,7 @@ export class WsGateway {
     const grant: ScopedTokenGrant = {
       token,
       sessionId: scope.sessionId,
-      subagent: scope.subagent,
+      network: scope.network,
       allowedMethods: computeAllowedMethods(scope),
       expiresAt,
     };
@@ -746,7 +754,7 @@ export class WsGateway {
    * 拒絕回覆格式(`errorCode: ErrorCodes.GATEWAY_SCOPED_TOKEN_FORBIDDEN`,見
    * `handleMessage()` 的呼叫點),不另外發明一套。
    *
-   * 三層檢查:
+   * 四層檢查:
    *   1. **這個 token 是否仍然活著**——外部安全審查抓到的真實漏洞修正:早期
    *      實作這裡只檢查呼叫端傳進來的 `grant` 參數(連線 `auth` 成功當下快取
    *      在 `connState.scopedGrant` 的那個物件參照),`revokeMcpBridgeTokensFor
@@ -762,28 +770,29 @@ export class WsGateway {
    *      (已撤銷)」與「已過期」兩種情況,不需要在這裡重複一份 TTL 判斷,後續
    *      判斷一律用這次查到的、當下真正有效的 grant。
    *   2. 方法本身是否在這個 grant 的 `allowedMethods` 白名單內。
-   *   3. 白名單內的方法,參數是否真的操作它被核發時綁定的那個 session
-   *      ——**不能只信任 request.params 帶的 parentSessionId**(這條連線背後的
-   *      子行程理論上可能被動過手腳,送出跟自己 env 不一致的參數),一律拿
-   *      grant 記錄的值重新比對。
+   *   3. 白名單內的方法,**呼叫者身分只由 token 決定**:P3 的五個方法參數裡沒有任何 caller/parent 欄位,
+   *      這裡把 token 綁定的 `sessionId` 當成 `callerSessionId` 回傳,`dispatch()` 一律用它(不信任
+   *      request.params 帶的任何東西——即使這條連線背後的子行程被動過手腳、多送了 caller 欄位,
+   *      zod schema 也會把未知欄位丟掉)。
+   *   4. 未知方法 fail-closed:`allowedMethods` 只可能含下面 switch 列出的方法,沒列到的一律拒絕。
    */
-  private checkScopedGrantAccess(grant: ScopedTokenGrant, request: ClientRequest): { allowed: boolean; reason?: string } {
+  private checkScopedGrantAccess(
+    grant: ScopedTokenGrant,
+    request: ClientRequest,
+  ): { allowed: boolean; reason?: string; callerSessionId?: string } {
     const current = this.matchScopedToken(grant.token);
     if (!current) return { allowed: false, reason: "token 已撤銷或已過期" };
     if (!current.allowedMethods.has(request.method)) {
       return { allowed: false, reason: "不在此 token 的授權方法白名單內" };
     }
     switch (request.method) {
-      case "session.spawnChildForSubagent":
-      case "session.sendToChild":
-      case "session.listChildren":
-        if (!current.subagent || request.params.parentSessionId !== current.sessionId) {
-          return { allowed: false, reason: "parentSessionId 與此 token 綁定的 session 不符" };
-        }
-        return { allowed: true };
-      case "agent.listForSubagent":
-        if (!current.subagent) return { allowed: false, reason: "此 token 未授權 subagent 相關方法" };
-        return { allowed: true };
+      case "agent.listForAgent":
+      case "session.listForAgent":
+      case "session.readForAgent":
+      case "session.createFromAgent":
+      case "session.sendFromAgent":
+        if (!current.network) return { allowed: false, reason: "此 token 未授權 session 網路相關方法" };
+        return { allowed: true, callerSessionId: current.sessionId };
       default:
         // 不應該發生——allowedMethods 只可能含上面列出的方法(見
         // computeAllowedMethods()),這裡 fail-closed 而非假設安全。
@@ -988,8 +997,10 @@ export class WsGateway {
     // 只影響用 scoped token 認證的連線(`connState.scopedGrant` 有值)——一般
     // client(master token 或無認證模式)完全不受影響,見
     // `checkScopedGrantAccess()` 的完整說明與拒絕理由分類。
+    let callerSessionId: string | undefined;
     if (connState?.scopedGrant) {
       const access = this.checkScopedGrantAccess(connState.scopedGrant, parsed);
+      callerSessionId = access.callerSessionId;
       if (!access.allowed) {
         console.warn(
           `[gateway][security] 拒絕 scoped bridge token(session=${connState.scopedGrant.sessionId})呼叫 "${parsed.method}": ${access.reason}`,
@@ -1034,14 +1045,35 @@ export class WsGateway {
     // session-manager.ts 的 `resolvePermission()`)。
 
     try {
-      const result = await this.dispatch(parsed, connState?.isLocal ?? false);
+      const result = await this.dispatch(parsed, connState?.isLocal ?? false, callerSessionId);
       this.send(socket, { kind: "response", id: parsed.id, ok: true, result });
     } catch (err) {
       this.send(socket, toErrorResponse(parsed.id, err));
     }
   }
 
-  private async dispatch(request: ClientRequest, isLocal: boolean): Promise<unknown> {
+  /**
+   * session 網路五個 bridge 專用方法的呼叫者身分:只有 scoped MCP bridge token 的連線有(= token 綁定的 session)。
+   * 一般連線呼叫這些方法沒有「呼叫者」可言——若放行就等於讓任何 client 能自選一個 sessionId 冒名送訊息,
+   * 所以 fail-closed 直接拒絕(人類操作請用 `session.create`/`session.sendPrompt`/`session.forwardMessage`)。
+   */
+  private requireBridgeCaller(method: string, callerSessionId: string | undefined): string {
+    if (!callerSessionId) {
+      throw new DeskmonyError(
+        "gateway.bridgeTokenRequired",
+        { method },
+        `${method} 只給 MCP bridge token 使用(呼叫者身分由 token 決定)`,
+      );
+    }
+    return callerSessionId;
+  }
+
+  /**
+   * @param callerSessionId 只有用 scoped MCP bridge token 認證的連線才有值(= token 綁定的 session id,
+   *   見 `checkScopedGrantAccess()`);session 網路五個 `*ForAgent`/`*FromAgent` 方法靠它知道「是誰在呼叫」。
+   *   一般連線(master token/免認證)是 `undefined`,呼叫那五個方法一律被拒(fail-closed)。
+   */
+  private async dispatch(request: ClientRequest, isLocal: boolean, callerSessionId?: string): Promise<unknown> {
     switch (request.method) {
       case "auth":
         // 已在 handleMessage() 頂端的認證閘門處理完畢,不會走到這裡
@@ -1058,15 +1090,43 @@ export class WsGateway {
       case "gateway.capabilities":
         return { capabilities: this.buildCapabilities(isLocal) };
       /**
-       * Phase 2(ACP scoped MCP bridge token):`list_profiles` MCP 工具對應的
-       * gateway 入口,見 packages/shared/src/gateway.ts 對應 case 的完整說明
-       * ——只回傳決策需要的最小欄位。與 apps/core/src/index.ts 注入給
-       * `ClaudeAgentSdkAdapter.setSubagentPort()` 的 `listProfiles` 回呼共用
-       * `AgentCatalog.summarizeAvailable()`(結構上保證兩個 adapter 看到的結果一致)。
-       * 2026-10-02(P2):原名 `profile.listForSubagent`。
+       * 2026-10-02(P3:session 網路):五個 bridge 專用方法(`agent.listForAgent`、`session.listForAgent`、
+       * `session.readForAgent`、`session.createFromAgent`、`session.sendFromAgent`),見
+       * packages/shared/src/gateway.ts 對應 case 的完整說明。呼叫者 session 一律是 token 綁定的
+       * `callerSessionId`(`requireBridgeCaller()`),參數裡沒有任何 caller 欄位。`agent.listForAgent` 與
+       * in-process 的 `SessionNetworkPort.listAgents()` 共用 `AgentCatalog.summarizeAvailable()`
+       * (結構上保證兩個 adapter 看到的結果一致)。
        */
-      case "agent.listForSubagent":
+      case "agent.listForAgent":
+        this.requireBridgeCaller(request.method, callerSessionId);
         return { agents: await this.catalog.summarizeAvailable() };
+      case "session.listForAgent":
+        return { sessions: await this.sessionManager.listSessionsForAgent(this.requireBridgeCaller(request.method, callerSessionId)) };
+      case "session.readForAgent":
+        return await this.sessionManager.readSessionForAgent({
+          callerSessionId: this.requireBridgeCaller(request.method, callerSessionId),
+          sessionId: request.params.sessionId,
+          limit: request.params.limit,
+        });
+      case "session.createFromAgent":
+        return await this.sessionManager.createSessionFromAgent({
+          ...request.params,
+          // 放在展開之後:呼叫者身分只能是 token 綁定的那一個,不可能被 params 蓋掉。
+          callerSessionId: this.requireBridgeCaller(request.method, callerSessionId),
+        });
+      case "session.sendFromAgent":
+        await this.sessionManager.sendToSessionFromAgent({
+          callerSessionId: this.requireBridgeCaller(request.method, callerSessionId),
+          sessionId: request.params.sessionId,
+          message: request.params.message,
+        });
+        return { ok: true };
+      /**
+       * 2026-10-02(P3):UI 的「轉傳到…」——人類操作,見 packages/shared/src/gateway.ts 對應 case 的說明。
+       */
+      case "session.forwardMessage":
+        await this.sessionManager.forwardMessage(request.params);
+        return { ok: true };
       case "session.list":
         return { sessions: await this.sessionManager.listSessions() };
       case "session.create":
@@ -1147,35 +1207,6 @@ export class WsGateway {
        *  gateway.ts 對應 case 說明「為什麼不能改讀 config.getEffective」)。 */
       case "policy.listRules":
         return { rules: this.sessionManager.listPolicyRules() };
-      /**
-       * S12(session-subagent):從 parent session spawn child subagent session。
-       * child completed 時會自動透過 "child-result" push 回傳結果。
-       */
-      case "session.spawnChild":
-        return { session: await this.sessionManager.spawnChild(request.params) };
-      /**
-       * Phase 2(ACP scoped MCP bridge token):`spawn_subagent` MCP 工具對應的
-       * gateway 入口——見 packages/shared/src/gateway.ts 對應 case 的完整說明
-       * (為何不是直接放行上面的 `session.spawnChild`:可指定的參數不同)。呼叫
-       * `spawnChildFromTool()`(而非 `spawnChild()`)取得「省略 agent 時沿用父 session
-       * 自己的 agent 與 model」這個既有的預設值解析邏輯,與 in-process 的
-       * `subagent-mcp.ts` 走同一份實作。
-       */
-      case "session.spawnChildForSubagent":
-        return await this.sessionManager.spawnChildFromTool(request.params);
-      /**
-       * Phase 2:`send_to_subagent` MCP 工具對應的 gateway 入口——薄薄一層
-       * 委派給 `sendToChildFromTool()`(授權檢查——只能對呼叫端自己的直接子
-       * session 送訊息——完整邏輯都在該方法,見其註解)。
-       */
-      case "session.sendToChild":
-        await this.sessionManager.sendToChildFromTool(request.params);
-        return { ok: true };
-      /**
-       * Phase 2:`list_subagents` MCP 工具對應的 gateway 入口。
-       */
-      case "session.listChildren":
-        return { children: await this.sessionManager.listChildrenFromTool(request.params.parentSessionId) };
       case "adapter.capabilities":
         return { capabilities: this.sessionManager.getCapabilities(request.params.software) };
       case "env.detectAgents":

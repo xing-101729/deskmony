@@ -1640,14 +1640,17 @@ async function slashCommandSmokeTest(client, workspaceDir) {
 //       ACP→bridge→WS→gateway→SessionManager 管線,產生真實可見的 side effect
 //       (多出一個掛在呼叫者底下的子 session),不是紙上談兵。
 //
-// 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):token 的範圍只剩
-// subagent 系列(原本還有團隊訊息系列的五個方法與 teamId/memberId
-// 綁定檢查)。原 32e(沒有 team 的 session 拿不到團隊訊息方法)隨 team 一併移除;
-// 原 32g 改用 spawn_subagent 驗證端到端管線。
+// 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):原本還有團隊訊息系列的五個方法與
+// teamId/memberId 綁定檢查,原 32e(沒有 team 的 session 拿不到團隊訊息方法)隨 team 一併移除。
+// 2026-10-02(P3:session 網路):token 的範圍只剩 session 網路的五個方法
+// (agent.listForAgent/session.listForAgent/readForAgent/createFromAgent/sendFromAgent),
+// 呼叫者身分只由 token 決定(方法參數沒有任何 caller/parent 欄位);原 S12 的 subagent 四個方法已移除。
+// 32b 改驗五個方法、32c 擴充白名單外的拒絕清單(含「一般」方法如 session.list)、32d 改驗冒名防護
+// (多帶 caller 參數無效 + 沒有 token 的一般連線不能呼叫)、32g 改用 create_session 驗證端到端管線。
 // ---------------------------------------------------------------------
 
 /** 把 `REPORT_MCP_SERVERS_PREFIX` 回覆的 `"MCP_SERVERS:[...]"` 文字轉成
- *  `{token, gatewayUrl, sessionId, subagentEnabled}`。
+ *  `{token, gatewayUrl, sessionId, networkEnabled}`。
  *  沒有掛任何 MCP server 時(mcpServers 是空陣列)回傳 undefined。 */
 function parseBridgeEnvFromReport(fullText) {
   const marker = "MCP_SERVERS:";
@@ -1664,15 +1667,13 @@ function parseBridgeEnvFromReport(fullText) {
     token: env.DESKMONY_MCP_BRIDGE_TOKEN,
     gatewayUrl: env.DESKMONY_MCP_BRIDGE_GATEWAY_URL,
     sessionId: env.DESKMONY_MCP_BRIDGE_SESSION_ID,
-    teamId: env.DESKMONY_MCP_BRIDGE_TEAM_ID,
-    memberId: env.DESKMONY_MCP_BRIDGE_MEMBER_ID,
-    subagentEnabled: env.DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED === "1",
+    networkEnabled: env.DESKMONY_MCP_BRIDGE_NETWORK_ENABLED === "1",
   };
 }
 
 /** 建一個 ACP session(fake-acp-agent.mjs),送出 REPORT_MCP_SERVERS_PREFIX,
  *  回傳解析後的 bridge env(見上方)——`undefined` 代表這個 session 沒有掛
- *  任何 MCP server(不應該發生,除非 tokenMinter/subagentPort 都沒注入)。 */
+ *  任何 MCP server(不應該發生,除非 tokenMinter/sessionNetworkPort 都沒注入)。 */
 async function createAcpSessionAndGetBridgeEnv(client, providerId, workspaceDir, title) {
   const created = await client.rpc("session.create", { providerId, workingDir: workspaceDir, title }, 30_000);
   const sessionId = created.session.id;
@@ -1721,15 +1722,13 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
       Boolean(primaryBridgeEnv?.token) &&
       primaryBridgeEnv.token.startsWith("dmbt_") &&
       primaryBridgeEnv.sessionId === primarySessionId &&
-      primaryBridgeEnv.subagentEnabled === true &&
-      primaryBridgeEnv.teamId === undefined &&
-      primaryBridgeEnv.memberId === undefined &&
+      primaryBridgeEnv.networkEnabled === true &&
       Boolean(otherBridgeEnv?.token) &&
       otherBridgeEnv.token !== primaryBridgeEnv.token &&
       otherBridgeEnv.sessionId === otherSessionId &&
-      otherBridgeEnv.subagentEnabled === true;
+      otherBridgeEnv.networkEnabled === true;
     record(
-      "步驟32a 建立兩個 ACP session,AcpAdapter.spawn() 真的各自核發 scoped token(dmbt_ 前綴、彼此不同)且內容正確綁定各自的 session(不再帶任何 team/member 環境變數)",
+      "步驟32a 建立兩個 ACP session,AcpAdapter.spawn() 真的各自核發 scoped token(dmbt_ 前綴、彼此不同)且內容正確綁定各自的 session(DESKMONY_MCP_BRIDGE_NETWORK_ENABLED=1)",
       ok,
       `primary=${JSON.stringify({ ...primaryBridgeEnv, token: primaryBridgeEnv?.token ? "(redacted)" : undefined })}, other=${JSON.stringify({ ...otherBridgeEnv, token: otherBridgeEnv?.token ? "(redacted)" : undefined })}`,
     );
@@ -1738,34 +1737,57 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     return; // 後續子步驟都依賴這裡的結果,拿不到就整組略過。
   }
 
-  // ---- 32b: 白名單內的方法(subagent 系列)用 primary session 的 token 呼叫,
-  //           一律成功。----
+  // ---- 32b: 白名單內的五個方法(session 網路,P3)用 primary session 的 token 呼叫,
+  //           一律成功;呼叫者身分由 token 決定(結果裡 primary 的 isYou 為 true)。----
+  let netCreatedId;
   try {
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(primaryBridgeEnv.gatewayUrl, primaryBridgeEnv.token);
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
 
-    const listChildrenResult = await bridgeClient.rpc("session.listChildren", { parentSessionId: primarySessionId });
-    // 2026-10-02(P2:移除 profile):原 `profile.listForSubagent`,現在回傳 `AgentCatalog` 的可用 agent 摘要。
-    const listAgentsResult = await bridgeClient.rpc("agent.listForSubagent", {});
+    // 2026-10-02(P3):五個方法對應 list_agents/list_sessions/read_session/create_session/send_to_session。
+    const listAgentsResult = await bridgeClient.rpc("agent.listForAgent", {});
+    const listSessionsResult = await bridgeClient.rpc("session.listForAgent", {});
+    const readResult = await bridgeClient.rpc("session.readForAgent", { sessionId: primarySessionId, limit: 5 });
+    const createResult = await bridgeClient.rpc("session.createFromAgent", {
+      agent: FAKE_ACP,
+      prompt: "步驟32b createFromAgent",
+      title: "e2e-net-created",
+    });
+    netCreatedId = createResult?.sessionId;
+    const sendResult = await bridgeClient.rpc("session.sendFromAgent", { sessionId: otherSessionId, message: "步驟32b sendFromAgent" });
 
     bridgeClient.close();
 
     const agents = listAgentsResult?.agents;
     const fakeAcp = Array.isArray(agents) ? agents.find((a) => a.id === FAKE_ACP) : undefined;
-    // 最小揭露:摘要只有 id/label/software/models/defaultModelId,**不含** command/args/env。
-    const minimalFields = Array.isArray(agents) && agents.every((a) => Object.keys(a).every((k) => ["id", "label", "software", "models", "defaultModelId"].includes(k)));
-    const ok = Array.isArray(listChildrenResult?.children) && Boolean(fakeAcp) && fakeAcp.software === "acp" && minimalFields;
+    // 最小揭露:摘要只有 id/label/software/models/defaultModelId/canUseTools,**不含** command/args/env。
+    const allowedAgentKeys = ["id", "label", "software", "models", "defaultModelId", "canUseTools"];
+    const minimalFields = Array.isArray(agents) && agents.every((a) => Object.keys(a).every((k) => allowedAgentKeys.includes(k)));
+    const sessionsList = listSessionsResult?.sessions;
+    const meEntry = Array.isArray(sessionsList) ? sessionsList.find((s) => s.id === primarySessionId) : undefined;
+    const otherEntry = Array.isArray(sessionsList) ? sessionsList.find((s) => s.id === otherSessionId) : undefined;
+    const ok =
+      Boolean(fakeAcp) &&
+      fakeAcp.software === "acp" &&
+      fakeAcp.canUseTools === true &&
+      minimalFields &&
+      meEntry?.isYou === true &&
+      otherEntry?.isYou === false &&
+      Array.isArray(readResult?.messages) &&
+      typeof netCreatedId === "string" &&
+      sendResult?.ok === true;
     record(
-      "步驟32b scoped token 呼叫白名單內的方法(session.listChildren/agent.listForSubagent)全部成功,且 agent 摘要只含最小欄位(無 command/args/env)",
+      "步驟32b scoped token 呼叫白名單內的五個方法(agent.listForAgent/session.listForAgent/readForAgent/createFromAgent/sendFromAgent)全部成功,agent 摘要只含最小欄位(無 command/args/env),呼叫者身分(isYou)由 token 決定",
       ok,
-      `listChildren=${JSON.stringify(listChildrenResult)}, agents=${JSON.stringify(agents)}`,
+      `agents=${JSON.stringify(agents)}, me=${JSON.stringify(meEntry)}, other=${JSON.stringify(otherEntry)}, read=${JSON.stringify(readResult)}, created=${JSON.stringify(createResult)}, send=${JSON.stringify(sendResult)}`,
     );
   } catch (err) {
-    record("步驟32b scoped token 呼叫白名單內方法全部成功", false, String(err));
+    record("步驟32b scoped token 呼叫白名單內五個方法全部成功", false, String(err));
   }
 
   // ---- 32c: 白名單外的方法一律被拒絕(errorCode 對應
-  //           GATEWAY_SCOPED_TOKEN_FORBIDDEN,訊息含「無權呼叫」)。----
+  //           GATEWAY_SCOPED_TOKEN_FORBIDDEN,訊息含「無權呼叫」)。P3 起 token 只能呼叫那五個方法,
+  //           連 session.list/session.history/session.sendPrompt 這類「一般」方法也一律不行。----
   try {
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(primaryBridgeEnv.gatewayUrl, primaryBridgeEnv.token);
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
@@ -1775,6 +1797,11 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
       ["session.delete", { sessionId: otherSessionId }],
       ["config.setFile", { log: { level: "warn" } }],
       ["session.setPermissionMode", { sessionId: primarySessionId, mode: "auto-accept-all" }],
+      ["session.list", {}],
+      ["session.history", { sessionId: otherSessionId }],
+      ["session.sendPrompt", { sessionId: otherSessionId, prompt: { text: "冒名的人類輸入" } }],
+      ["session.forwardMessage", { sourceSessionId: primarySessionId, messageId: "x", targetSessionId: otherSessionId }],
+      ["env.detectAgents", {}],
     ];
     const rejections = [];
     for (const [method, params] of forbiddenMethods) {
@@ -1785,11 +1812,20 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
         rejections.push({ method, rejected: true, message: String(err) });
       }
     }
+    // 已移除的舊方法(S12 的 spawnChild 系列):不存在的方法,同樣一律被拒絕(不存在 → 無效請求)。
+    for (const method of ["session.spawnChild", "session.sendToChild", "session.listChildren"]) {
+      try {
+        await bridgeClient.rpc(method, { parentSessionId: primarySessionId, childSessionId: otherSessionId, prompt: "x", message: "x" });
+        rejections.push({ method, rejected: false });
+      } catch (err) {
+        rejections.push({ method, rejected: true, message: String(err), removed: true });
+      }
+    }
     bridgeClient.close();
 
-    const ok = rejections.every((r) => r.rejected && r.message.includes("無權呼叫"));
+    const ok = rejections.every((r) => r.rejected && (r.removed || r.message.includes("無權呼叫")));
     record(
-      "步驟32c scoped token 呼叫白名單外的方法(session.create/session.delete/config.setFile/session.setPermissionMode)全部被拒絕",
+      "步驟32c scoped token 呼叫白名單外的方法(session.create/delete/list/history/sendPrompt/forwardMessage、config.setFile、session.setPermissionMode、env.detectAgents,與已移除的 spawnChild 系列)全部被拒絕",
       ok,
       JSON.stringify(rejections),
     );
@@ -1797,37 +1833,63 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     record("步驟32c scoped token 呼叫白名單外方法全部被拒絕", false, String(err));
   }
 
-  // ---- 32d: 綁定範圍檢查——同樣是白名單內的方法,但參數指向別的
-  //           session 時一律被拒絕。----
+  // ---- 32d: 冒名防護——呼叫者身分只由 token 決定,方法參數裡夾帶任何 caller/parent 欄位都沒有作用
+  //           (被 zod 丟掉);而一般連線(沒有 token)呼叫這五個方法一律被拒(沒有「呼叫者」可言)。----
   try {
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(primaryBridgeEnv.gatewayUrl, primaryBridgeEnv.token);
     if (!authOk) throw new Error("scoped token 認證失敗,預期應該成功");
 
-    const cases = [
-      // parentSessionId 指向不是這個 token 綁定的 otherSessionId。
-      ["session.listChildren", { parentSessionId: otherSessionId }, "parentSessionId 不符"],
-      ["session.spawnChildForSubagent", { parentSessionId: otherSessionId, prompt: "冒名" }, "parentSessionId 不符(spawn)"],
-      ["session.sendToChild", { parentSessionId: otherSessionId, childSessionId: primarySessionId, message: "冒名" }, "parentSessionId 不符(sendToChild)"],
-    ];
-    const rejections = [];
-    for (const [method, params, label] of cases) {
-      try {
-        await bridgeClient.rpc(method, params);
-        rejections.push({ label, rejected: false });
-      } catch (err) {
-        rejections.push({ label, rejected: true, message: String(err) });
-      }
-    }
+    // primary 的 token 帶著「我是 other」的謊言參數送訊息給 other 自己以外的 session(用 netCreatedId 當目標)。
+    const forgedTarget = netCreatedId ?? otherSessionId;
+    await bridgeClient.rpc("session.sendFromAgent", {
+      sessionId: forgedTarget,
+      message: "步驟32d 冒名測試",
+      callerSessionId: otherSessionId,
+      parentSessionId: otherSessionId,
+    });
+    const forgedList = await bridgeClient.rpc("session.listForAgent", { callerSessionId: otherSessionId });
     bridgeClient.close();
 
-    const ok = rejections.every((r) => r.rejected && r.message.includes("不符"));
+    // 目標收到的訊息(排隊或立即送達都可能,輪詢等到出現)——origin.sessionId 必須是 token 綁定的 primary,不是謊稱的 other。
+    let forgedMsg;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && !forgedMsg) {
+      const { messages } = await client.rpc("session.history", { sessionId: forgedTarget });
+      forgedMsg = messages.find((m) => m.role === "user" && m.content === "步驟32d 冒名測試");
+      if (!forgedMsg) await sleep(300);
+    }
+    const youIds = (forgedList?.sessions ?? []).filter((s) => s.isYou).map((s) => s.id);
+
+    // 一般連線(此處是已經能呼叫其他一切方法的 client)呼叫五個 *ForAgent/*FromAgent 方法 → 被拒。
+    const plainRejections = [];
+    for (const [method, params] of [
+      ["agent.listForAgent", {}],
+      ["session.listForAgent", {}],
+      ["session.readForAgent", { sessionId: primarySessionId }],
+      ["session.createFromAgent", { agent: FAKE_ACP, prompt: "x" }],
+      ["session.sendFromAgent", { sessionId: otherSessionId, message: "x" }],
+    ]) {
+      try {
+        await client.rpc(method, params);
+        plainRejections.push({ method, rejected: false });
+      } catch (err) {
+        plainRejections.push({ method, rejected: true, errorCode: err.errorCode });
+      }
+    }
+
+    const ok =
+      forgedMsg?.origin?.sessionId === primarySessionId &&
+      forgedMsg.origin.kind === "session" &&
+      youIds.length === 1 &&
+      youIds[0] === primarySessionId &&
+      plainRejections.every((r) => r.rejected && r.errorCode === "gateway.bridgeTokenRequired");
     record(
-      "步驟32d scoped token 呼叫白名單內方法,但參數指向不屬於自己綁定的 session 時一律被拒絕(冒名防護)",
+      "步驟32d 冒名防護:token 綁定的 session 才是呼叫者(多帶 callerSessionId/parentSessionId 無效),且沒有 token 的一般連線呼叫五個 *ForAgent/*FromAgent 方法一律被拒",
       ok,
-      JSON.stringify(rejections),
+      `forgedMsgOrigin=${JSON.stringify(forgedMsg?.origin)}, youIds=${JSON.stringify(youIds)}, plain=${JSON.stringify(plainRejections)}`,
     );
   } catch (err) {
-    record("步驟32d scoped token 綁定範圍檢查(冒名防護)", false, String(err));
+    record("步驟32d scoped token 冒名防護", false, String(err));
   }
 
   // ---- 32f: session dispose 後,對應 token 立即失效(呼叫任何方法都被拒絕)。----
@@ -1844,7 +1906,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     // 先確認 token 一開始確實可用(排除「本來就核發失敗」這個混淆變因)。
     const { client: beforeClient, ok: beforeOk } = await connectAndAuth(disposableBridgeEnv.gatewayUrl, disposableBridgeEnv.token);
     if (!beforeOk) throw new Error("dispose 前 scoped token 認證失敗,預期應該成功");
-    await beforeClient.rpc("agent.listForSubagent", {});
+    await beforeClient.rpc("agent.listForAgent", {});
     beforeClient.close();
 
     await client.rpc("session.delete", { sessionId: disposableSessionId });
@@ -1890,7 +1952,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
 
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(disposableBridgeEnv2.gatewayUrl, disposableBridgeEnv2.token);
     if (!authOk) throw new Error("dispose 前 scoped token 認證失敗,預期應該成功");
-    await bridgeClient.rpc("agent.listForSubagent", {}); // dispose 前:確認這條連線本來就能正常呼叫。
+    await bridgeClient.rpc("agent.listForAgent", {}); // dispose 前:確認這條連線本來就能正常呼叫。
 
     await client.rpc("session.delete", { sessionId: disposableSessionId2 });
 
@@ -1899,7 +1961,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     let liveConnRejected = false;
     let liveConnMessage = "";
     try {
-      await bridgeClient.rpc("agent.listForSubagent", {});
+      await bridgeClient.rpc("agent.listForAgent", {});
     } catch (err) {
       liveConnRejected = true;
       liveConnMessage = String(err);
@@ -1917,13 +1979,16 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
   }
 
   // ---- 32g: 端到端——真的透過 mcp-bridge-server.ts 子行程呼叫 MCP 工具
-  //           (spawn_subagent),真的透過 WS 打回 gateway,真的觸發
-  //           SessionManager.spawnChildFromTool(),session.list 真的多出一個
-  //           掛在呼叫者(primary)底下的子 session。----
+  //           (create_session),真的透過 WS 打回 gateway,真的觸發
+  //           SessionManager.createSessionFromAgent(),session.list 真的多出一個
+  //           掛在呼叫者(primary)底下的 session,且它的第一則訊息帶 origin(來自 primary)。----
   let bridgeChildId;
   try {
     const childTitle = `e2e-bridge-child-${randomUUID().slice(0, 8)}`;
-    const callPayload = { tool: "spawn_subagent", args: { prompt: "步驟32g 端到端 bridge 工具呼叫", title: childTitle } };
+    const callPayload = {
+      tool: "create_session",
+      args: { agent: FAKE_ACP, prompt: "步驟32g 端到端 bridge 工具呼叫", title: childTitle },
+    };
     const prompt = `${CALL_BRIDGE_TOOL_PREFIX}${JSON.stringify(callPayload)}`;
     const { finalEvent, collected } = await client.drivePrompt(primarySessionId, prompt, {
       onPermission: async () => "deny",
@@ -1945,17 +2010,27 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
     }
     bridgeChildId = child?.id;
 
+    let firstMessage;
+    if (child) {
+      const { messages } = await client.rpc("session.history", { sessionId: child.id });
+      firstMessage = messages.find((m) => m.role === "user");
+    }
+
     record(
-      "步驟32g 端到端:fake-acp-agent 真的 spawn mcp-bridge-server.ts 子行程,用真正的 MCP client 呼叫 spawn_subagent 工具,經 WS 打回 gateway 後 session.list 真的出現掛在呼叫者底下(parentSessionId=primary)的子 session",
-      bridgeSucceeded && Boolean(child) && child.parentSessionId === primarySessionId,
-      `bridgeReply=${JSON.stringify(fullText)}, child=${JSON.stringify(child ? { id: child.id, parentSessionId: child.parentSessionId } : undefined)}`,
+      "步驟32g 端到端:fake-acp-agent 真的 spawn mcp-bridge-server.ts 子行程,用真正的 MCP client 呼叫 create_session 工具,經 WS 打回 gateway 後 session.list 真的出現掛在呼叫者底下(parentSessionId=primary)的 session,且第一則訊息帶 origin(來自 primary)",
+      bridgeSucceeded &&
+        Boolean(child) &&
+        child.parentSessionId === primarySessionId &&
+        firstMessage?.origin?.sessionId === primarySessionId &&
+        firstMessage.content === "步驟32g 端到端 bridge 工具呼叫",
+      `bridgeReply=${JSON.stringify(fullText)}, child=${JSON.stringify(child ? { id: child.id, parentSessionId: child.parentSessionId } : undefined)}, firstMessage=${JSON.stringify(firstMessage)}`,
     );
   } catch (err) {
     record("步驟32g 端到端 mcp-bridge-server.ts 子行程真實呼叫", false, String(err));
   }
 
   // ---- 清理 ----
-  for (const sessionId of [bridgeChildId, primarySessionId, otherSessionId]) {
+  for (const sessionId of [bridgeChildId, netCreatedId, primarySessionId, otherSessionId]) {
     if (!sessionId) continue;
     try {
       await client.rpc("session.delete", { sessionId });
@@ -2005,7 +2080,7 @@ async function scopedTokenTtlSmokeTest() {
     // ---- 33a: 過期前,一條已認證的連線正常可用。----
     const { client: bridgeClient, ok: authOk } = await connectAndAuth(bridgeEnv.gatewayUrl, bridgeEnv.token);
     if (!authOk) throw new Error("過期前 scoped token 認證失敗,預期應該成功");
-    await bridgeClient.rpc("agent.listForSubagent", {});
+    await bridgeClient.rpc("agent.listForAgent", {});
     record("步驟33a scoped token 在 TTL 過期前,認證與方法呼叫皆正常", true);
 
     await sleep(6_000); // TTL 5000ms,睡到肯定已過期。
@@ -2016,7 +2091,7 @@ async function scopedTokenTtlSmokeTest() {
     let existingConnRejected = false;
     let existingConnMessage = "";
     try {
-      await bridgeClient.rpc("agent.listForSubagent", {});
+      await bridgeClient.rpc("agent.listForAgent", {});
     } catch (err) {
       existingConnRejected = true;
       existingConnMessage = String(err);
@@ -2088,7 +2163,7 @@ async function scopedTokenAuthInterplaySmokeTest() {
       let createRejected = false;
       if (authOk) {
         try {
-          const r = await bridgeClient.rpc("agent.listForSubagent", {});
+          const r = await bridgeClient.rpc("agent.listForAgent", {});
           listOk = Array.isArray(r?.agents);
         } catch {
           // listOk 維持 false
@@ -2582,7 +2657,7 @@ async function providerCatalogSmokeTest(client, workspaceDir) {
   // ---- 36c ----
   try {
     const outcomes = [];
-    for (const method of ["profile.list", "profile.create", "profile.delete", "profile.listForSubagent"]) {
+    for (const method of ["profile.list", "profile.create", "profile.delete"]) {
       try {
         await client.rpc(method, method === "profile.delete" ? { id: "x" } : {});
         outcomes.push({ method, rejected: false });
@@ -2591,7 +2666,7 @@ async function providerCatalogSmokeTest(client, workspaceDir) {
       }
     }
     record(
-      "步驟36c gateway 上 profile.list/create/delete/listForSubagent 已不存在(一律回 gateway.invalidRequest,即 unknown method)",
+      "步驟36c gateway 上 profile.list/create/delete 已不存在(一律回 gateway.invalidRequest,即 unknown method)",
       outcomes.every((o) => o.rejected && o.errorCode === "gateway.invalidRequest"),
       JSON.stringify(outcomes),
     );

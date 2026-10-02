@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, access, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NexusDb } from "@deskmony/db";
 import { sessions as sessionsTable, messages as messagesTable } from "@deskmony/db";
 import type { AdapterRegistry, AgentAdapter, AgentHandle } from "@deskmony/adapters";
@@ -15,21 +15,28 @@ import {
   type CreateSessionInput,
   type DialogAnswer,
   type EffortLevel,
+  type MessageBudgetConfig,
+  type MessageOrigin,
   type MessageRecord,
+  type NetworkSessionSummary,
   type PermissionResolvedPush,
   type PolicyAddRuleInput,
   type PolicyRule,
   type PolicyUpdatedPush,
   type PromptAttachment,
   type PromptInput,
+  type ReadSessionResult,
   type Session,
   type SessionEventEnvelope,
   type SessionPermissionMode,
   type SessionStatus,
   type SlashCommandInfo,
-  type SpawnChildSessionInput,
-  type SubagentChildSummary,
   type UserDialogResolvedPush,
+  MessageOriginSchema,
+  READ_SESSION_DEFAULT_LIMIT,
+  READ_SESSION_MAX_CONTENT_CHARS,
+  READ_SESSION_MAX_LIMIT,
+  softwareCanUseTools,
 } from "@deskmony/shared";
 import { storedLaunchFromSpec, type AgentCatalog, type StoredLaunchInfo } from "../agents/agent-catalog.js";
 import type { PermissionGateway } from "../permissions/permission-gateway.js";
@@ -40,6 +47,8 @@ import type { Notifier } from "../enforcement/notifier.js";
 import { appendPolicyRule, removePolicyRule as removePolicyRuleFile } from "../config/config-file-writer.js";
 import type { TurnLimiter } from "../cost/turn-limiter.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
+import { MessageChainBudget } from "./message-chain-budget.js";
+import { buildEnvelopeForOrigin } from "./session-envelope.js";
 import {
   DEFAULT_YOLO_DURATION_MS as YOLO_DEFAULT,
   SessionPermissionCoordinator,
@@ -137,6 +146,25 @@ function withNotesPointer(existingSystemPrompt: string | undefined, displayName:
     : block;
 }
 
+/**
+ * 排在某個 session 身上、等它下一次 idle 才送的跨 session 訊息(見 `SessionManager.pendingIdleInjection`)。
+ * `text` 是原始 message 本體(不含信封);`origin` 決定信封樣板與 UI 的「來自 <title>」標籤。
+ */
+interface PendingNetworkMessage {
+  text: string;
+  origin: MessageOrigin;
+  chainId: string;
+}
+
+/** 一次 prompt 投遞帶的鏈/來源資訊(人類輸入只有 `chainId`;跨 session 訊息另帶 `origin` 與原始本體)。 */
+interface PromptDelivery {
+  chainId: string;
+  /** 有值 = 這是別的 session 送來的(或使用者轉傳的)訊息,持久化時存在 `messages.origin`。 */
+  origin?: MessageOrigin;
+  /** 持久化用的原始 message 本體(送給 adapter 的是信封包裝後的 `prompt.text`)。省略時存 `prompt.text`。 */
+  persistedText?: string;
+}
+
 interface RuntimeState {
   handle: AgentHandle;
   /** 這個 session 建立時依 spec.software 從 AdapterRegistry 選出的 adapter 實例。
@@ -158,9 +186,12 @@ interface RuntimeState {
   /** S6(crash-recovery)L4 §4.1:這條 session 的後端持久化 session 識別碼
    *  (捕捉到之前是 undefined)——見 `persistBackendSessionId()`。 */
   backendSessionId?: string;
-  /** S12(session-subagent):若這個 session 是 child subagent,記錄 parent
-   *  session id——child session completed 時用來向上回傳結果。 */
-  parentSessionId?: string;
+  /**
+   * 2026-10-02(P3:session 網路):這個 session **目前這一輪**是被哪條訊息鏈觸發的(見
+   * `message-chain-budget.ts`)。人類 prompt 開始處理時換成新鏈;收到帶 chain 的跨 session 訊息開始處理時設成
+   * 那條鏈。agent 這一輪經 create_session/send_to_session 送出的訊息沿用它。只存記憶體,不落地。
+   */
+  currentChainId?: string;
   /**
    * 這輪(slash command)新增:這個 session 目前已知的 "/" 指令清單快取(見
    * `consumeEvents()` 的 `"available-commands"` case、`getSlashCommands()`)。
@@ -234,9 +265,10 @@ interface OpenToolCall {
  *
  * ---- 剩餘的縫,依「介面寬度 ÷ 價值」排序 --------------------------------------
  *
- * 1. **SubagentOrchestrator**:`spawnChild` / `spawnChildFromTool` /
- *    `sendToChildFromTool` / `listChildrenFromTool` / `pendingIdleInjection`
- *    佇列與 flush。介面中等寬(需要 createSession/sendPrompt/runtime 查詢),
+ * 1. **SessionNetwork**(原 SubagentOrchestrator,2026-10-02 P3 起):`listSessionsForAgent` /
+ *    `readSessionForAgent` / `createSessionFromAgent` / `sendToSessionFromAgent` / `forwardMessage` /
+ *    `pendingIdleInjection` 佇列與 flush / 訊息鏈追蹤(鏈預算與信封已各自抽成 `message-chain-budget.ts`、
+ *    `session-envelope.ts`)。介面中等寬(需要 spawnNewSession/sendPrompt/runtime 查詢),
  *    但職責邊界清楚,是下一個最值得動的。
  *
  * 2. **PTY 活動量測**:`scheduleIdleIfTerminal` / `clearPtyIdleTimer`。
@@ -285,17 +317,18 @@ export class SessionManager extends EventEmitter {
   private readonly waitingSince = new Map<string, number>();
 
   /**
-   * S12 Phase2 R1+R4:任一 session 正忙(busy/waiting)時,暫存要在它下一次
-   * `completed` 空檔送達的訊息文字,等到那個空檔才真正送出(見
-   * `deliverPromptWhenIdle()` 與 consumeEvents 的 completed case)——同一個
-   * session 可累積多筆,每次 flush 只送一筆。這個 Map 的 key 只是「目前要
-   * 送訊息的目標 session」,不特別區分父/子,兩個方向共用同一套機制:
-   *   - R1:子完成時把結果注入父(key = 父 sessionId)。
-   *   - R4:`send_to_subagent` 工具把父的追加訊息送給子(key = 子 sessionId)。
-   * 清理慣例:session 結束/重啟時清除(見 deleteSession/shutdownAll/
-   * reclaimSession,經 `clearPerSessionState()`),避免無限增長。
+   * 目標 session 正忙(busy/waiting)時,暫存要在它下一次 `completed` 空檔送達的跨 session 訊息
+   * (`send_to_session`/`create_session`/UI 轉傳),等到那個空檔才真正送出(見 `deliverNetworkMessage()` 與
+   * consumeEvents 的 completed case)——同一個 session 可累積多筆,每次 flush 只送一筆。
+   * 元素是 `{text, origin, chainId}`:`text` 是**原始 message 本體**,信封在送進 adapter 那一刻才由
+   * `session-envelope.ts` 依 `origin` 組裝;`chainId` 讓這則訊息被處理時沿用它所屬的訊息鏈。
+   * 純記憶體——core 重啟即遺失(D4 Mailbox 持久化已撤銷,見 docs/DECISIONS.md §H)。
+   * 清理慣例:session 結束/重啟時清除(見 deleteSession/shutdownAll/reclaimSession,經
+   * `clearPerSessionState()`),避免無限增長。
    */
-  private readonly pendingIdleInjection = new Map<string, string[]>();
+  private readonly pendingIdleInjection = new Map<string, PendingNetworkMessage[]>();
+  /** 訊息鏈預算(第三條斷路器),見 `message-chain-budget.ts`。 */
+  private readonly chainBudget: MessageChainBudget;
 
   constructor(
     private readonly adapters: AdapterRegistry,
@@ -344,10 +377,16 @@ export class SessionManager extends EventEmitter {
      * `recordUsage()`。
      */
     private readonly costGovernor: CostGovernor,
+    /**
+     * 2026-10-02(P3):訊息鏈預算設定(`config.messageBudget`,見 `MessageBudgetConfigSchema`——鍵名沿用,
+     * 意義改成「每條訊息鏈」的訊息數上限)。
+     */
+    messageBudget: MessageBudgetConfig,
     /** S7:YOLO 存活時間,見上方 `DEFAULT_YOLO_DURATION_MS` 註解。 */
     private readonly yoloDurationMs: number = YOLO_DEFAULT,
   ) {
     super();
+    this.chainBudget = new MessageChainBudget(messageBudget, auditLog, notifier, () => this.referencedChainIds());
     this.permissions = new SessionPermissionCoordinator({
       policyEngine,
       auditLog,
@@ -428,6 +467,7 @@ export class SessionManager extends EventEmitter {
         attachments: row.attachments
           ? (JSON.parse(row.attachments) as NonNullable<MessageRecord["attachments"]>)
           : undefined,
+        origin: parseOrigin(row.origin),
       }));
   }
 
@@ -449,7 +489,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * 真正 spawn 一個新 adapter handle、寫 DB、登記 runtime 的共用路徑——`createSession()`、
-   * `spawnChild()`(從父 session 自己的資料重建)、`takeoverWithSummary()` 都走這裡。
+   * `createSessionFromAgent()`、`takeoverWithSummary()` 都走這裡。
    */
   private async spawnNewSession(
     spec: AgentLaunchSpec,
@@ -479,7 +519,7 @@ export class SessionManager extends EventEmitter {
       // claude-agent-sdk 有意義」的規則),不臆測任何預設值。
       model: spec.model,
       effort: spec.effort,
-      // S9:建立子 session 時帶入 parent id
+      // 從哪個 session 底下開出來的(只用於 UI 巢狀顯示與溯源)
       parentSessionId: opts.parentSessionId,
     };
 
@@ -490,7 +530,6 @@ export class SessionManager extends EventEmitter {
       streamingText: "",
       providerId,
       workingDir: opts.workingDir,
-      parentSessionId: opts.parentSessionId,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
     });
@@ -509,16 +548,30 @@ export class SessionManager extends EventEmitter {
    * `sendPrompt()` 內部是「檢查預算 → await 持久化 → await 設狀態 → 起算回合
    * → 送給 adapter」,中間有多個 await 缺口,而三條路徑會併發打進來:
    * 使用者連點兩次送出、兩個 client 同時操作同一個 session、以及
-   * 程式化的訊息注入撞上手動輸入(`deliverPromptWhenIdle()` 本身就是
+   * 程式化的訊息注入撞上手動輸入(`deliverNetworkMessage()` 本身就是
    * 「先讀狀態、再送」的 check-then-act)。兩次呼叫都會通過各自的預算檢查、
    * 都 persist、都呼叫 `adapter.sendPrompt()`,底層收到兩個幾乎同時的 prompt,
-   * 行為未定義。鎖收斂在 `sendPrompt()` 這個**唯一的共同入口**。
+   * 行為未定義。鎖收斂在 `sendPromptSerialized()` 這個**唯一的共同入口**(人類輸入與跨 session 投遞都經過它)。
    */
   private readonly sendPromptLocks = new Map<string, Promise<unknown>>();
 
+  /**
+   * **人類輸入**(gateway 的 `session.sendPrompt`、recovery 接手的第一則摘要等):開啟一條**新的訊息鏈**。
+   *
+   * 2026-10-02(P3):人類輸入與跨 session 投遞(`deliverNetworkMessage()`)在這裡分流——兩者共用同一個
+   * 序列化入口(`sendPromptSerialized()`,per-session 鎖),差別只在帶進去的 `PromptDelivery`:
+   *   - 人類輸入:`chainId` = **新產生**的 uuid,沒有 `origin`。gateway 的 client 不能指定 chainId/origin
+   *     (`session.sendPrompt` 的 schema 根本不收這兩個欄位),所以人類輸入不可能被偽造成「別的 session 送來的」,
+   *     也不可能挑一條現成的鏈來繞過鏈預算。
+   *   - 跨 session 投遞:沿用訊息自己帶的 `chainId` 與 `origin`(只有 core 內部能組出來)。
+   */
   async sendPrompt(sessionId: string, prompt: PromptInput): Promise<void> {
+    return this.sendPromptSerialized(sessionId, prompt, { chainId: randomUUID() });
+  }
+
+  private async sendPromptSerialized(sessionId: string, prompt: PromptInput, delivery: PromptDelivery): Promise<void> {
     const previous = this.sendPromptLocks.get(sessionId) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => this.sendPromptInner(sessionId, prompt));
+    const run = previous.catch(() => undefined).then(() => this.sendPromptInner(sessionId, prompt, delivery));
     this.sendPromptLocks.set(
       sessionId,
       run.catch(() => undefined),
@@ -530,7 +583,7 @@ export class SessionManager extends EventEmitter {
     return (await run) as void;
   }
 
-  private async sendPromptInner(sessionId: string, prompt: PromptInput): Promise<void> {
+  private async sendPromptInner(sessionId: string, prompt: PromptInput, delivery: PromptDelivery): Promise<void> {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) {
       throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
@@ -538,7 +591,7 @@ export class SessionManager extends EventEmitter {
 
     // S3b(CostGovernor)L4 §2/§3.3:每日 kill-switch 越線後,只擋
     // 「後續 prompt」——這裡是唯一的送出前檢查點(gateway 的 `session.
-    // sendPrompt` 與程式化的訊息注入都走這個方法,見 cost-governor.ts
+    // sendPrompt` 與跨 session 的訊息投遞都走這個方法,見 cost-governor.ts
     // 頂端「halt 粒度」說明)。**不擋已經在跑的回合**,故意不在這裡呼叫
     // `interrupt()`。
     const budgetCheck = await this.costGovernor.checkSendPromptAllowed();
@@ -555,7 +608,20 @@ export class SessionManager extends EventEmitter {
       throw new DeskmonyError("sessionManager.promptBlockedByBudget", { reason }, reason);
     }
 
-    await this.persistMessage(sessionId, "user", prompt.text, prompt.attachments);
+    // 這一輪屬於哪條訊息鏈:人類輸入 = 剛產生的新鏈;跨 session 訊息 = 訊息自己帶的鏈(見 `PromptDelivery`)。
+    // agent 這一輪經 create_session/send_to_session 送出的訊息會沿用它(`chainOfCaller()`)。
+    runtime.currentChainId = delivery.chainId;
+
+    const persisted = await this.persistMessageRow(
+      sessionId,
+      "user",
+      delivery.persistedText ?? prompt.text,
+      prompt.attachments,
+      delivery.origin,
+    );
+    // 別的 session 送來的訊息:通知所有 client(讓正在看這條 session 的 UI 即時顯示「來自 <title>」)。
+    // 人類自己輸入的不推播——桌面端是樂觀回顯。
+    if (delivery.origin) this.emit("session-message", { sessionId, message: persisted });
     await this.setStatus(sessionId, "busy");
     // S3b:回合開始,見 turn-limiter.ts 的 `startTurn()` 註解——不依賴 usage,
     // 對所有 adapter 種類(含 pty)一律起算。
@@ -841,125 +907,274 @@ export class SessionManager extends EventEmitter {
     return session;
   }
 
-  /**
-   * S12(session-subagent):在一個既有 session 底下 spawn 一個子 session,
-   * 並立即送出第一段 prompt。子 session 跑完(completed)時,會把結果回報
-   * 回父 session(見 consumeEvents 的 completed case)。父 session 必須
-   * 目前正在跑(runtime 有對應 handle)。
-   *
-   * 2026-10-02(P2):`providerId` 省略時沿用父 session 自己的 agent 與 model/effort(從父
-   * session 自己存的資料重建,父的 provider 已不在偵測清單時退回它的 `launch_*`);有指定
-   * `providerId` 時走一般的 `AgentCatalog.buildLaunch()`,model/effort 只取輸入給的值。
-   */
-  async spawnChild(input: SpawnChildSessionInput): Promise<Session> {
-    const parent = await this.getSession(input.parentSessionId);
-    if (!parent) {
-      throw new DeskmonyError(
-        ErrorCodes.ENTITY_NOT_FOUND,
-        { entityType: "session", id: input.parentSessionId },
-        `找不到父 session: ${input.parentSessionId}`,
-      );
-    }
-    const { spec, label } =
-      input.providerId === undefined
-        ? await this.catalog.buildLaunchSpecForSession(
-            { providerId: parent.providerId, adapterType: parent.adapterType, model: input.model ?? parent.model, effort: input.effort ?? parent.effort },
-            await this.getStoredLaunch(parent.id),
-          )
-        : await this.catalog.buildLaunch(input.providerId, input.model, input.effort);
-    const child = await this.spawnNewSession(spec, label, {
-      title: input.title ?? `子 agent（${parent.title}）`,
-      workingDir: input.workingDir ?? parent.workingDir,
-      parentSessionId: input.parentSessionId,
-    });
-    await this.sendPrompt(child.id, { text: input.prompt });
-    return child;
-  }
+  // ==========================================================================================
+  // 2026-10-02(P3:session 網路)——取代 S12 的 spawnChild / spawnChildFromTool / sendToChildFromTool /
+  // listChildrenFromTool 與「子 completed → 結果注入父」(見 docs/DECISIONS.md §H、
+  // docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md §P3)。
+  //
+  // 下面六個方法是 session 網路的 core 端實作,**呼叫者身分一律由呼叫端(adapter 閉包 / gateway 的 bridge token)
+  // 提供,不是 agent 能填的參數**:
+  //   list_agents → (AgentCatalog.summarizeAvailable)   list_sessions → listSessionsForAgent
+  //   read_session → readSessionForAgent                create_session → createSessionFromAgent
+  //   send_to_session → sendToSessionFromAgent          UI 轉傳 → forwardMessage
+  //
+  // **沒有任何自動回送**(使用者定案):B 收到 A 的訊息、這輪結束後,系統不會把 B 的回答送回 A。
+  // 要回覆,B 必須自己呼叫 send_to_session。所以 consumeEvents 的 `completed` 案例裡不再有任何
+  // 「把結果注入別的 session」的程式碼——那裡只剩「flush 排在自己身上的待送訊息」。
+  // ==========================================================================================
 
-  /** S12 Phase2 R2:給 `spawn_subagent` MCP 工具用——預設沿用父 session 自己的 agent 與
-   *  model spawn 子 session;agent 也可以透過 `list_profiles` 查詢後,自行指定 `agent`
-   *  (providerId)與 `model` 改用別的(讓 agent 能自己決定要不要換一個 agent,而不是永遠被迫
-   *  繼承父 session)。2026-10-02(P2):原本的 `agentProfileId` 參數改成 `agent`+`model`。
-   *  `agent` 若指定但不存在/未安裝/已停用,沿用 `AgentCatalog.buildLaunch()` 既有的驗證,
-   *  直接拋錯讓 agent 看到明確訊息(不在這裡重複驗證)。找不到父 session 時也拋錯(工具端會把
-   *  錯誤回給 agent)。 */
-  async spawnChildFromTool(input: {
-    parentSessionId: string;
-    prompt: string;
-    title?: string;
-    agent?: string;
-    model?: string;
-  }): Promise<{ childSessionId: string }> {
-    const child = await this.spawnChild({
-      parentSessionId: input.parentSessionId,
-      providerId: input.agent,
-      model: input.model,
-      prompt: input.prompt,
-      title: input.title,
-    });
-    return { childSessionId: child.id };
+  /** providerId → 顯示名稱(含使用者在偏好裡改的 label);查不到的 providerId 就用它本身。 */
+  private async agentLabelOf(providerId: string, labels?: Map<string, string>): Promise<string> {
+    const map = labels ?? (await this.catalog.labelsById());
+    return map.get(providerId) ?? providerId;
   }
 
   /**
-   * S12 Phase2 R4:給 `send_to_subagent` MCP 工具用——對一個「已經是這個
-   * parentSessionId 的子 session」送出後續訊息(追加指示,不是開新的子任務)。
-   * 兩層檢查,順序刻意如下:
-   *   1. 找不到 childSessionId 對應的 session → 明確報錯(可能打錯 id,或那個
-   *      session 早就被 `deleteSession()` 硬刪了)。
-   *   2. 那個 session 存在,但 `parentSessionId` 不等於呼叫端帶入的
-   *      parentSessionId → 拒絕(**授權檢查**:防止父 agent 對不是自己開的
-   *      子 session 下指令——不管是完全無關的 session,還是自己的祖父/兄弟
-   *      session,一律只認「直接子」這一層關係,同 `spawnChildFromTool()` 的
-   *      冒名防護精神)。
-   *   3. 通過授權檢查,但那個子 session 目前沒有在跑(`this.runtime` 沒有它
-   *      ——可能已被 S3b 的 72 小時資源回收站起)
-   *      → 明確報錯,而不是讓 `deliverPromptWhenIdle()` 靜默丟棄訊息卻讓這個
-   *      工具呼叫看起來像成功了(那樣 agent 會誤以為訊息真的送到了)。
-   * 通過三層檢查後才真的呼叫 `deliverPromptWhenIdle()`——子忙碌中會排隊,
-   * 不會打斷它正在處理的回合;結果一樣經由既有的 completed → child-result
-   * 機制自動回報給父,這裡不需要回傳值。
+   * `list_sessions`:**所有** session(不限父子、不限工作目錄)的摘要,不含對話內容。
+   * `isYou` 標出呼叫者自己;`canUseTools` = 對方能不能主動回話(只有 claude-agent-sdk 與 acp 能)。
    */
-  async sendToChildFromTool(input: { parentSessionId: string; childSessionId: string; message: string }): Promise<void> {
-    const child = await this.getSession(input.childSessionId);
-    if (!child) {
+  async listSessionsForAgent(callerSessionId: string): Promise<NetworkSessionSummary[]> {
+    const [all, labels] = await Promise.all([this.listSessions(), this.catalog.labelsById()]);
+    return all.map((s) => ({
+      id: s.id,
+      title: s.title,
+      providerId: s.providerId,
+      agentLabel: labels.get(s.providerId) ?? s.providerId,
+      model: s.model,
+      status: s.status,
+      workingDir: s.workingDir,
+      parentSessionId: s.parentSessionId,
+      isYou: s.id === callerSessionId,
+      canUseTools: softwareCanUseTools(s.adapterType),
+    }));
+  }
+
+  /**
+   * `read_session`:目標 session 最近 `limit` 則對話訊息(預設 20、上限 100),每則 content 截斷到
+   * 4000 字元並標註。
+   *   - 只回 `user`/`assistant` 兩種角色:`tool` 訊息是工具呼叫/結果的原始 JSON(可能很大、與「這個 session
+   *     在聊什麼」無關),`system` 是內部事件 JSON(切換 model、權限逾時…)——都不是 agent 想讀的對話。
+   *   - **不回傳附件的二進位內容**,只標示 `hasAttachments`(SQL 只問 `attachments IS NOT NULL`,
+   *     連附件的 base64 都不讀進記憶體)。
+   *   - 任何 session 都能讀(所有 session 互相可見,Q4 定案),包含呼叫者自己。
+   */
+  async readSessionForAgent(input: { callerSessionId: string; sessionId: string; limit?: number }): Promise<ReadSessionResult> {
+    const target = await this.getSession(input.sessionId);
+    if (!target) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.sessionId }, `找不到 session: ${input.sessionId}`);
+    }
+    const limit = Math.min(Math.max(Math.trunc(input.limit ?? READ_SESSION_DEFAULT_LIMIT), 1), READ_SESSION_MAX_LIMIT);
+    const rows = await this.db
+      .select({
+        role: messagesTable.role,
+        content: messagesTable.content,
+        createdAt: messagesTable.createdAt,
+        origin: messagesTable.origin,
+        hasAttachments: sql<number>`(${messagesTable.attachments} IS NOT NULL)`,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.sessionId, input.sessionId), inArray(messagesTable.role, ["user", "assistant"])))
+      .orderBy(desc(messagesTable.createdAt))
+      .limit(limit)
+      .all();
+    const messages = rows.reverse().map((row) => {
+      const truncated = truncateForNetwork(row.content);
+      const origin = parseOrigin(row.origin);
+      return {
+        role: row.role as MessageRecord["role"],
+        content: truncated.content,
+        createdAt: row.createdAt,
+        ...(origin ? { origin } : {}),
+        ...(truncated.truncated ? { truncated: true } : {}),
+        ...(row.hasAttachments ? { hasAttachments: true } : {}),
+      };
+    });
+    return { sessionId: target.id, title: target.title, messages };
+  }
+
+  /**
+   * 目標 session 現在能不能收訊息?`closed`/`error`/`interrupted`(含 runtime 已不在)→ 明確報錯,
+   * **不假裝成功**(否則送訊息的 agent 會誤以為對方收到了)。
+   */
+  private assertDeliverable(target: Session): void {
+    if (target.status === "closed" || target.status === "error" || target.status === "interrupted") {
       throw new DeskmonyError(
-        ErrorCodes.ENTITY_NOT_FOUND,
-        { entityType: "session", id: input.childSessionId },
-        `找不到子 session: ${input.childSessionId}`,
+        "sessionNetwork.targetUnavailable",
+        { sessionId: target.id, title: target.title, status: target.status },
+        `session ${target.id}(「${target.title}」)目前狀態是「${target.status}」,收不到訊息`,
       );
     }
-    if (child.parentSessionId !== input.parentSessionId) {
-      throw new DeskmonyError(
-        "sessionManager.notYourChild",
-        { sessionId: input.childSessionId, parentSessionId: input.parentSessionId },
-        `session ${input.childSessionId} 不是你的子 session,無法送出訊息`,
-      );
-    }
-    if (!this.runtime.has(input.childSessionId)) {
+    if (!this.runtime.has(target.id)) {
       throw new DeskmonyError(
         ErrorCodes.SESSION_NOT_RUNNING,
-        { sessionId: input.childSessionId },
-        `子 session ${input.childSessionId} 目前沒有在執行中(可能已被回收或關閉),無法送出訊息`,
+        { sessionId: target.id },
+        `session ${target.id}(「${target.title}」)目前沒有在執行中(可能已被回收或關閉),無法送出訊息`,
       );
     }
-    await this.deliverPromptWhenIdle(input.childSessionId, input.message);
   }
 
   /**
-   * S12 Phase2 R5:給 `list_subagents` MCP 工具用——回傳這個 parentSessionId
-   * 自己名下的子 session(不管是 agent 自己呼叫 spawn_subagent 開的,還是
-   * 使用者透過 UI「開子 agent」手動開的——後者 agent 完全沒有被告知,這個
-   * 查詢是它唯一能發現「自己名下其實有一個子」的方式)。直接複用
-   * `listSessions()`(R3 UI 的 SessionList 巢狀顯示本身就是同一份資料的
-   * client 端 filter,見 apps/desktop/src/views/SessionList.tsx),避免另開
-   * 一條 DB 查詢路徑。只回傳決策/回答問題需要的最小欄位,不含 workingDir/
-   * providerId 等內部細節(同 `listProfiles()` 的最小揭露原則)。
+   * 呼叫者**這一輪**所屬的訊息鏈 id(agent 經 create_session/send_to_session 送出的訊息沿用它)。
+   * 每一輪都由 `sendPrompt*` 起頭並設定 `currentChainId`,所以正常情況一定有值;萬一沒有(不應該發生),
+   * 當場開一條新鏈並記下來,而不是讓鏈追蹤出現缺口。
    */
-  async listChildrenFromTool(parentSessionId: string): Promise<SubagentChildSummary[]> {
-    const all = await this.listSessions();
-    return all
-      .filter((s) => s.parentSessionId === parentSessionId)
-      .map((s) => ({ id: s.id, title: s.title, status: s.status, software: s.adapterType, model: s.model }));
+  private chainOfCaller(callerSessionId: string): string {
+    const runtime = this.runtime.get(callerSessionId);
+    if (!runtime) {
+      throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId: callerSessionId }, `呼叫者 session 目前沒有在執行中: ${callerSessionId}`);
+    }
+    if (!runtime.currentChainId) runtime.currentChainId = randomUUID();
+    return runtime.currentChainId;
+  }
+
+  /** 鏈預算被擋下時丟給 agent 的錯誤——訊息要講明「已熔斷、需要使用者介入」,agent 才知道該停手。 */
+  private chainBudgetError(limit: number): DeskmonyError {
+    return new DeskmonyError(
+      "sessionNetwork.chainBudgetExceeded",
+      { limit },
+      `這條對話鏈已達訊息上限 ${limit}(messageBudget.maxMessagesPerContext),已熔斷,需要使用者介入——` +
+        "請不要再用 send_to_session / create_session 繼續這條對話鏈,把目前狀況告訴使用者並等他的指示" +
+        "(使用者在畫面上輸入新訊息就會開啟新的對話鏈)。",
+    );
+  }
+
+  /**
+   * `send_to_session`:對任一 session(不能是自己)送訊息。驗證順序刻意如下:
+   *   1. 目標是呼叫者自己 → 明確報錯(自己對自己傳訊息只會造成無限迴圈)。
+   *   2. 找不到目標 → 明確報錯(打錯 id,或已被刪除)。
+   *   3. 目標 closed/error/interrupted/runtime 不在 → 明確報錯,不假裝成功。
+   *   4. 鏈預算(`MessageChainBudget.admit()`)——達上限 → 錯誤回給 agent + `enforcementTrip()`。
+   * 全部通過才真的投遞:目標 idle 立刻送、busy/waiting 排進 `pendingIdleInjection` 等它這輪結束。
+   * **投遞之後什麼都不會自動回來**。
+   */
+  async sendToSessionFromAgent(input: { callerSessionId: string; sessionId: string; message: string }): Promise<void> {
+    if (input.sessionId === input.callerSessionId) {
+      throw new DeskmonyError(
+        "sessionNetwork.cannotSendToSelf",
+        { sessionId: input.sessionId },
+        "不能用 send_to_session 傳訊息給自己(要找其他 session 請先 list_sessions)",
+      );
+    }
+    const target = await this.getSession(input.sessionId);
+    if (!target) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.sessionId }, `找不到 session: ${input.sessionId}(請先 list_sessions 確認 id)`);
+    }
+    this.assertDeliverable(target);
+    const caller = await this.getSession(input.callerSessionId);
+    if (!caller) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.callerSessionId }, `找不到呼叫者 session: ${input.callerSessionId}`);
+    }
+
+    const chainId = this.chainOfCaller(input.callerSessionId);
+    const admission = await this.chainBudget.admit(chainId, [input.callerSessionId, input.sessionId]);
+    if (!admission.ok) throw this.chainBudgetError(admission.limit);
+
+    await this.deliverNetworkMessage(input.sessionId, {
+      text: input.message,
+      origin: { kind: "session", sessionId: caller.id, title: caller.title, chainId },
+      chainId,
+    });
+  }
+
+  /**
+   * `create_session`:建一個新 session(`parentSessionId` = 呼叫者,只為 UI 巢狀顯示與溯源——不代表任何權限或回報
+   * 關係),並把 `prompt` 以信封當第一則訊息送出(它從信封就知道是誰開的)。`workingDir` 省略時沿用呼叫者的。
+   * 順序:先驗證 agent(`buildLaunch()` 找不到/未安裝/已停用就丟錯,不佔鏈預算、不 spawn 任何東西)→ 鏈預算 →
+   * spawn → 送第一則訊息。鏈預算已達上限時**不會**開出新 session(否則失控的 agent 會不斷 spawn 行程)。
+   */
+  async createSessionFromAgent(input: {
+    callerSessionId: string;
+    agent: string;
+    prompt: string;
+    model?: string;
+    title?: string;
+    workingDir?: string;
+  }): Promise<{ sessionId: string }> {
+    const caller = await this.getSession(input.callerSessionId);
+    if (!caller) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.callerSessionId }, `找不到呼叫者 session: ${input.callerSessionId}`);
+    }
+    const { spec, label } = await this.catalog.buildLaunch(input.agent, input.model);
+
+    const chainId = this.chainOfCaller(input.callerSessionId);
+    const admission = await this.chainBudget.admit(chainId, [input.callerSessionId]);
+    if (!admission.ok) throw this.chainBudgetError(admission.limit);
+
+    const created = await this.spawnNewSession(spec, label, {
+      title: input.title ?? `「${caller.title}」開的 session`,
+      workingDir: input.workingDir ?? caller.workingDir,
+      parentSessionId: caller.id,
+    });
+    try {
+      await this.deliverNetworkMessage(created.id, {
+        text: input.prompt,
+        origin: { kind: "session", sessionId: caller.id, title: caller.title, chainId },
+        chainId,
+      });
+    } catch (err) {
+      throw new DeskmonyError(
+        "sessionNetwork.createdButNotDelivered",
+        { sessionId: created.id, detail: err instanceof Error ? err.message : String(err) },
+        `已建立 session ${created.id},但第一則訊息送出失敗: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return { sessionId: created.id };
+  }
+
+  /**
+   * UI「轉傳到…」(`session.forwardMessage`):使用者把 `sourceSessionId` 的一則 assistant 訊息轉給任一個
+   * 其他 session。**人類操作**:開一條**新的訊息鏈**(`origin.kind === "forward"`),不計入鏈預算、不會被先前
+   * agent 間的鏈熔斷擋下。`note`(使用者選填的附註)接在被轉傳內容前面,一起當成這則訊息的本體。
+   */
+  async forwardMessage(input: {
+    sourceSessionId: string;
+    messageId: string;
+    targetSessionId: string;
+    note?: string;
+  }): Promise<void> {
+    if (input.sourceSessionId === input.targetSessionId) {
+      throw new DeskmonyError("sessionNetwork.cannotForwardToSelf", { sessionId: input.sourceSessionId }, "不能把訊息轉傳給來源 session 自己");
+    }
+    const [source, target] = await Promise.all([this.getSession(input.sourceSessionId), this.getSession(input.targetSessionId)]);
+    if (!source) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.sourceSessionId }, `找不到來源 session: ${input.sourceSessionId}`);
+    }
+    if (!target) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.targetSessionId }, `找不到目標 session: ${input.targetSessionId}`);
+    }
+    const rows = await this.db.select().from(messagesTable).where(eq(messagesTable.id, input.messageId)).all();
+    const message = rows[0];
+    if (!message || message.sessionId !== source.id || message.role !== "assistant") {
+      throw new DeskmonyError(
+        "sessionNetwork.forwardMessageNotFound",
+        { sessionId: source.id, messageId: input.messageId },
+        `在 session ${source.id} 底下找不到這則可轉傳的 assistant 訊息(${input.messageId})`,
+      );
+    }
+    this.assertDeliverable(target);
+
+    const note = input.note?.trim();
+    const chainId = randomUUID();
+    await this.deliverNetworkMessage(target.id, {
+      text: note ? `${note}\n\n${message.content}` : message.content,
+      origin: { kind: "forward", sessionId: source.id, title: source.title, chainId },
+      chainId,
+    });
+  }
+
+  /**
+   * 目前**還被引用**的訊息鏈 id:某個 session runtime 的 `currentChainId`,或某筆待送佇列訊息帶的 chainId。
+   * `MessageChainBudget` 用它丟掉已經沒有任何 session 在上面的鏈(避免計數無限增長)。
+   */
+  private referencedChainIds(): ReadonlySet<string> {
+    const ids = new Set<string>();
+    for (const runtime of this.runtime.values()) {
+      if (runtime.currentChainId) ids.add(runtime.currentChainId);
+    }
+    for (const queue of this.pendingIdleInjection.values()) {
+      for (const item of queue) ids.add(item.chainId);
+    }
+    return ids;
   }
 
   async deleteSession(sessionId: string): Promise<void> {
@@ -973,8 +1188,7 @@ export class SessionManager extends EventEmitter {
     await this.db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId)).run();
     this.permissions.clear(sessionId); // S7:避免 Map 隨 session 生命週期無限增長。
     this.waitingSince.delete(sessionId); // S3b:同上,避免無限增長。
-    this.clearPerSessionState(sessionId); // 同上,避免無限增長。
-    this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
+    this.clearPerSessionState(sessionId); // 同上,避免無限增長(含待送佇列與訊息鏈狀態)。
     this.emit("session-list-updated");
   }
 
@@ -1013,8 +1227,7 @@ export class SessionManager extends EventEmitter {
     await runtime.adapter.dispose(runtime.handle);
     this.runtime.delete(sessionId);
     this.turnLimiter.endTurn(sessionId);
-    this.clearPerSessionState(sessionId); // 避免無限增長。
-    this.pendingIdleInjection.delete(sessionId); // S12 Phase2:同上,避免無限增長。
+    this.clearPerSessionState(sessionId); // 避免無限增長(含待送佇列與訊息鏈狀態)。
     await this.setStatus(
       sessionId,
       "error",
@@ -1092,8 +1305,7 @@ export class SessionManager extends EventEmitter {
         }
         this.runtime.delete(id);
         this.turnLimiter.endTurn(id);
-        this.clearPerSessionState(id); // 避免無限增長。
-        this.pendingIdleInjection.delete(id); // S12 Phase2:同上,避免無限增長。
+        this.clearPerSessionState(id); // 避免無限增長(含待送佇列與訊息鏈狀態)。
         try {
           await this.setStatus(id, "closed");
         } catch (err) {
@@ -1145,8 +1357,11 @@ export class SessionManager extends EventEmitter {
     const effectiveSpec = await this.prepareSpawnSpec(spec, session.workingDir, toNoteFileName(label));
 
     const adapter = this.adapters.get(spec.software);
+    // `sessionId`:沿用既有的 DB session id 當 handle.id(見 `ResumeOptions.sessionId`)——session 網路工具的
+    // 呼叫者身分是 adapter 以 handle.id 閉包捕捉的,必須等於這條 session 的 id。
     const handle = await adapter.spawn(effectiveSpec, { path: session.workingDir }, {
       backendSessionId: session.backendSessionId,
+      sessionId,
     });
 
     this.runtime.set(sessionId, {
@@ -1537,37 +1752,13 @@ export class SessionManager extends EventEmitter {
           this.turnLimiter.endTurn(sessionId);
           runtime.openToolCalls.clear();
 
-          // S12(session-subagent):若這是子 session,把這一輪的最終結果
-          // 回報回父 session: (1) emit "child-result" 讓所有 client 即時看到
-          // (UI 用,payload 形狀不變) (2) 取代原本 persist 一則 system 歷史
-          // 訊息——把結果當 prompt 注入父 session(sendPrompt 本身會 persist
-          // 一則 user 訊息,父歷史一樣看得到)。
-          if (runtime.parentSessionId && finalText) {
-            const parentId = runtime.parentSessionId;
-            const childTitle = (await this.getSession(sessionId))?.title ?? sessionId;
-            this.emit("child-result", {
-              parentSessionId: parentId,
-              childSessionId: sessionId,
-              childTitle,
-              finalText,
-              ts: Date.now(),
-            });
-            const injectText = `[子 agent「${childTitle}」完成回報]\n${finalText}\n\n請根據以上子 agent 的結果繼續你的工作。`;
-            await this.deliverPromptWhenIdle(parentId, injectText);
-          }
-
-          // S12 Phase2 R1+R4:這個 session 自己這一輪結束(回到 idle),flush
-          // 排在它身上待送的訊息(R1:子回報給父的注入;R4:send_to_subagent
-          // 排隊等它有空的訊息)——一次只送一筆(其餘等下一輪 completed,避免
-          // 把多筆塞成一個回合)。
-          {
-            const pendingInjection = this.pendingIdleInjection.get(sessionId);
-            if (pendingInjection && pendingInjection.length > 0) {
-              const injectText = pendingInjection.shift()!;
-              if (pendingInjection.length === 0) this.pendingIdleInjection.delete(sessionId);
-              void this.deliverPromptWhenIdle(sessionId, injectText);
-            }
-          }
+          // 2026-10-02(P3):**沒有任何自動回送**——這一輪結束後,系統不會把結果送給任何別的 session
+          // (S12 的「子 completed → 結果注入父」與 `child-result` push 已整個移除,見 docs/DECISIONS.md §H)。
+          // 要回覆誰由 agent 自己用 send_to_session 決定。
+          //
+          // 這裡只做一件事:flush 排在**自己**身上的待送跨 session 訊息(它正忙時別人送來、排隊等它有空的)
+          // ——一次只送一筆(其餘等下一輪 completed,避免把多筆塞成一個回合)。
+          this.flushPendingNetworkMessage(sessionId);
           break;
         }
         case "error": {
@@ -1633,9 +1824,6 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  // S12: no disposeChildSession — child sessions remain idle after completed,
-  // runtime stays alive for further conversation (Phase 2 may add dispose).
-
   /**
    * session 結束/重啟時清除 per-session 暫態,避免 Map 隨 session 生命週期無限增長
    * (比照既有 `permissionState`/`waitingSince` 的清理慣例)。
@@ -1644,39 +1832,57 @@ export class SessionManager extends EventEmitter {
    * 由所有 dispose/delete/重啟路徑共用同一個清理點,不必各自記得。
    * (2026-10-02:原本同一個方法還清 context checkpoint 的三組暫態,
    * 該機制已隨 team 一併移除。)
+   * 2026-10-02(P3):一併清掉這個 session 的**待送跨 session 佇列**,並重算還被引用的訊息鏈、丟掉其餘鏈的
+   * 計數(這個 session 可能是某條鏈上最後一個還在的參與者)。呼叫時機:`this.runtime` 已經刪掉這條 session。
    */
   private clearPerSessionState(sessionId: string): void {
     this.sendPromptLocks.delete(sessionId);
+    this.pendingIdleInjection.delete(sessionId);
+    this.chainBudget.prune(this.referencedChainIds());
   }
 
   /**
-   * S12 Phase2 R1+R4:把一段文字當作下一則 prompt 投遞給某個 session ——
-   * 目標 idle 就立刻 `sendPrompt`,busy/waiting 就排進 `pendingIdleInjection`
-   * 等它下一次 completed 空檔 flush(見 consumeEvents 的 completed case);
-   * 目標 runtime 已不存在(已刪/已 dispose)時丟棄,不報錯。`sendPrompt`
-   * 內建的成本斷路器可能拒絕 → try/catch 吞掉只 console.warn,不讓它炸掉
-   * 呼叫端(子的 completed 事件迴圈,或 `send_to_subagent` 工具的呼叫鏈)。
+   * 把一則**跨 session 訊息**(`send_to_session`/`create_session` 的第一則/UI 轉傳)投遞給某個 session:
+   * 目標 idle 就立刻送(此刻才用 `session-envelope.ts` 組信封——持久化的 content 存原始本體),
+   * busy/waiting 就排進 `pendingIdleInjection` 等它下一次 completed 空檔 flush(見 consumeEvents 的 completed case)。
    *
-   * R1(子完成後把結果注入父)與 R4(`send_to_subagent` 把父的追加訊息送給
-   * 已存在的子)共用這個方法 —— 差別只在呼叫端傳入的 sessionId 是父還是子,
-   * 對這個方法而言兩者是同一種操作:「送一則 prompt 給某個 session,尊重它
-   * 目前是否忙碌」。
+   * 與舊的 `deliverPromptWhenIdle()` 的差異:
+   *   - 目標 runtime 已不存在 → **丟錯誤**,不再靜默丟棄(呼叫端要能據此回報「沒送到」,不得假裝成功)。
+   *   - 立即送出時 `sendPrompt` 內建的成本斷路器可能拒絕 → 同樣往外丟,讓 agent 看到明確原因;
+   *     排隊後由 flush 路徑投遞時失敗,則由 flush 呼叫端 catch + `console.warn`(那時已經沒有人能接這個錯誤)。
    */
-  private async deliverPromptWhenIdle(sessionId: string, text: string): Promise<void> {
-    const targetRuntime = this.runtime.get(sessionId);
-    if (!targetRuntime) return; // 目標已結束,丟棄
+  private async deliverNetworkMessage(sessionId: string, item: PendingNetworkMessage): Promise<void> {
+    if (!this.runtime.has(sessionId)) {
+      throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
+    }
     const target = await this.getSession(sessionId);
     if (target?.status === "idle") {
-      try {
-        await this.sendPrompt(sessionId, { text });
-      } catch (err) {
-        console.warn(`[session-subagent] 投遞訊息給 session ${sessionId} 失敗(忽略): ${String(err)}`);
-      }
-    } else {
-      const q = this.pendingIdleInjection.get(sessionId) ?? [];
-      q.push(text);
-      this.pendingIdleInjection.set(sessionId, q);
+      const sender = await this.getSession(item.origin.sessionId);
+      const agentLabel = sender ? await this.agentLabelOf(sender.providerId) : "unknown";
+      await this.sendPromptSerialized(
+        sessionId,
+        { text: buildEnvelopeForOrigin(item.origin, agentLabel, item.text) },
+        { chainId: item.chainId, origin: item.origin, persistedText: item.text },
+      );
+      return;
     }
+    const queue = this.pendingIdleInjection.get(sessionId) ?? [];
+    queue.push(item);
+    this.pendingIdleInjection.set(sessionId, queue);
+  }
+
+  /**
+   * 這個 session 剛回到 idle(`completed` 事件,或 pty 的靜止計時器):把排在它身上的下一筆待送跨 session 訊息
+   * 投遞出去(一次一筆)。投遞失敗(例如每日成本斷路器擋下)時沒有人能接這個錯誤——只記警告。
+   */
+  private flushPendingNetworkMessage(sessionId: string): void {
+    const queue = this.pendingIdleInjection.get(sessionId);
+    if (!queue || queue.length === 0) return;
+    const item = queue.shift()!;
+    if (queue.length === 0) this.pendingIdleInjection.delete(sessionId);
+    void this.deliverNetworkMessage(sessionId, item).catch((err) => {
+      console.warn(`[session-network] 投遞排隊中的訊息給 session ${sessionId} 失敗(忽略): ${String(err)}`);
+    });
   }
 
   /**
@@ -1690,7 +1896,9 @@ export class SessionManager extends EventEmitter {
     this.clearPtyIdleTimer(runtime);
     runtime.ptyIdleTimer = setTimeout(() => {
       runtime.ptyIdleTimer = undefined;
-      void this.setStatus(sessionId, "idle");
+      // 2026-10-02(P3):pty 沒有 "completed" 事件,轉回 idle 之後就是它「有空」的時刻——flush 排在它身上的
+      // 待送跨 session 訊息(pty 只能收訊息、不能主動傳,見 simplify-agents-sessions_detail.md §P3.6)。
+      void this.setStatus(sessionId, "idle").then(() => this.flushPendingNetworkMessage(sessionId));
       // S3b:pty 沒有 "completed"/"error" 事件標誌回合結束(見檔案頂端
       // PTY_IDLE_TIMEOUT_MS 說明——靜止判定是這類 adapter 唯一的「回合結束」
       // 訊號),這裡是 pty 版本的 `turnLimiter.endTurn()` 呼叫點。
@@ -1756,25 +1964,49 @@ export class SessionManager extends EventEmitter {
    * 呼叫點(tool-call/tool-result/system/assistant 訊息)維持不變,`undefined`
    * 時存 `null`,對齊 `messages.attachments` 的 nullable 語意(見
    * packages/db/src/schema.ts 的欄位註解)。
+   *
+   * 2026-10-02(P3):第五個選填參數 `origin`——只有跨 session 訊息(`send_to_session`/`create_session`/
+   * UI 轉傳)才會有值,存 `messages.origin`(JSON);`content` 存的是**原始 message 本體**,信封不落地。
    */
   private async persistMessage(
     sessionId: string,
     role: MessageRecord["role"],
     content: string,
     attachments?: PromptAttachment[],
+    origin?: MessageOrigin,
   ): Promise<string> {
+    // 2026-09-17:回傳 row id——`"tool-call"` case 補資訊時要就地更新同一筆
+    // (見 `updateMessageContent()`),其餘呼叫點照舊忽略回傳值。
+    return (await this.persistMessageRow(sessionId, role, content, attachments, origin)).id;
+  }
+
+  /** 同 `persistMessage()`,但回傳完整的 `MessageRecord`(`session-message` push 要把這筆原樣推給 client)。 */
+  private async persistMessageRow(
+    sessionId: string,
+    role: MessageRecord["role"],
+    content: string,
+    attachments?: PromptAttachment[],
+    origin?: MessageOrigin,
+  ): Promise<MessageRecord> {
     const row = {
       id: randomUUID(),
       sessionId,
       role,
       content,
       attachments: attachments && attachments.length > 0 ? JSON.stringify(attachments) : null,
+      origin: origin ? JSON.stringify(origin) : null,
       createdAt: Date.now(),
     };
     await this.db.insert(messagesTable).values(row).run();
-    // 2026-09-17:回傳 row id——`"tool-call"` case 補資訊時要就地更新同一筆
-    // (見 `updateMessageContent()`),其餘呼叫點照舊忽略回傳值。
-    return row.id;
+    return {
+      id: row.id,
+      sessionId,
+      role,
+      content,
+      createdAt: row.createdAt,
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      ...(origin ? { origin } : {}),
+    };
   }
 
   /**
@@ -1787,6 +2019,32 @@ export class SessionManager extends EventEmitter {
   private async updateMessageContent(messageId: string, content: string): Promise<void> {
     await this.db.update(messagesTable).set({ content }).where(eq(messagesTable.id, messageId)).run();
   }
+}
+
+/** `messages.origin` 欄位(JSON 字串或 NULL)→ `MessageOrigin`;壞掉的資料當作沒有來源,不讓讀歷史因此失敗。 */
+function parseOrigin(raw: string | null | undefined): MessageOrigin | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = MessageOriginSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `read_session` 的單則內容截斷:超過 `READ_SESSION_MAX_CONTENT_CHARS` 就只留前面那段並**標註**(內文結尾 +
+ * `truncated: true`)。不切在 surrogate pair 中間(否則會留下一個壞掉的半個字元)。
+ */
+function truncateForNetwork(content: string): { content: string; truncated: boolean } {
+  if (content.length <= READ_SESSION_MAX_CONTENT_CHARS) return { content, truncated: false };
+  let end = READ_SESSION_MAX_CONTENT_CHARS;
+  const last = content.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return {
+    content: `${content.slice(0, end)}\n…(內容已截斷:原長 ${content.length} 字元,只顯示前 ${end} 字元)`,
+    truncated: true,
+  };
 }
 
 function rowToSession(row: typeof sessionsTable.$inferSelect): Session {

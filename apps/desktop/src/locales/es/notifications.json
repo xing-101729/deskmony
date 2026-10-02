@@ -3,7 +3,8 @@
     "daily-limit": "Límite de coste diario",
     "waiting-ttl": "Límite de tiempo de espera",
     "message-budget": "Límite de número de mensajes",
-    "turn-limit": "Límite de tiempo de turno / llamadas a herramientas"
+    "turn-limit": "Límite de tiempo de turno / llamadas a herramientas",
+    "message-chain-budget": "Una cadena de mensajes entre sesiones alcanzó su límite — la entrega entre agentes se ha detenido y requiere tu intervención"
   },
   "trip": {
     "reasonFallback": "Detenido por el disyuntor",
@@ -14,6 +15,10 @@
     "budgetWarning": {
       "title": "Deskmony: presupuesto casi agotado",
       "body": "{{who}}: el coste/uso de tokens ha alcanzado el umbral de aviso. Aún no se ha detenido — considera revisar o ajustar el límite de presupuesto"
+    },
+    "messageChainWarning": {
+      "title": "Deskmony: cadena de mensajes cerca del límite",
+      "body": "{{who}}: una cadena de mensajes entre agentes ha alcanzado el umbral de aviso. Aún no se ha detenido — comprueba que no estén conversando en círculos"
     },
     "idle": {
       "title": "Deskmony: recordatorio de tarea inactiva",
