@@ -974,7 +974,10 @@ export class SessionManager extends EventEmitter {
       })
       .from(messagesTable)
       .where(and(eq(messagesTable.sessionId, input.sessionId), inArray(messagesTable.role, ["user", "assistant"])))
-      .orderBy(desc(messagesTable.createdAt))
+      // 同一毫秒寫入的訊息(假 agent 或很快的回覆,user 與 assistant 常常同一個 createdAt)
+      // 只靠 createdAt 排序時 SQLite 不保證先後,會讀出「先回答、後提問」。用寫入順序 rowid
+      // (messages 是 TEXT 主鍵表,仍有隱含 rowid)當次排序,與 getHistory() 的穩定排序結果一致。
+      .orderBy(desc(messagesTable.createdAt), sql`rowid DESC`)
       .limit(limit)
       .all();
     const messages = rows.reverse().map((row) => {
