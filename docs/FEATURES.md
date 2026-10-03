@@ -51,8 +51,8 @@ Deskmony 是一個桌面控制室,讓 AI coding agent(不是單一聊天視窗)�
 ### 1.2 每個 session 的五個工具
 
 能掛工具的 session(`claude-agent-sdk` in-process;ACP agent——Codex、Gemini CLI、
-走 `opencode acp` 的 OpenCode——經 scoped MCP-bridge token)會從 MCP server
-`deskmony` 拿到五個工具(Claude 裡的完整名稱是 `mcp__deskmony__<name>`):
+走 `opencode acp` 的 OpenCode——與走 HTTP 的 OpenCode,後兩者經 scoped MCP-bridge
+token)會從 MCP server `deskmony` 拿到五個工具(Claude 裡的完整名稱是 `mcp__deskmony__<name>`):
 
 | 工具 | 做什麼 | 權限 |
 |---|---|---|
@@ -78,9 +78,12 @@ Deskmony 是一個桌面控制室,讓 AI coding agent(不是單一聊天視窗)�
 - **投遞**:對方 idle 就立刻送;busy / waiting 則排進**記憶體佇列**,等它這一輪
   結束才送(PTY 沒有完成事件,靜止轉回 idle 時才送)。對方已關閉、出錯、不存在
   或沒在執行,都是明確錯誤,不假裝成功;core 重啟時排隊中的訊息會遺失。
-- **誰能主動傳**:`claude-agent-sdk` 與所有走 ACP 的 agent。走 HTTP 的 OpenCode
-  與 PTY 類(Claude Code CLI、Aider)能**接收**但不能主動傳;`list_agents` /
-  `list_sessions` 的 `canUseTools: false` 讓寄件者知道對方回不了話。
+- **誰能主動傳**:`claude-agent-sdk`、所有走 ACP 的 agent,以及走 HTTP 的 OpenCode
+  (2026-10-03 起:同一個 bridge 子行程,寫進 OpenCode 的 `mcp.deskmony` 設定
+  掛載;`create_session` / `send_to_session` 在 always-ask 下照一般工具呼叫跳權限
+  確認,三個查詢工具預先放行)。PTY 類(Claude Code CLI、Aider)能**接收**但不能
+  主動傳;`list_agents` / `list_sessions` 的 `canUseTools: false` 讓寄件者知道對方
+  回不了話。
 
 ### 1.3 訊息鏈預算(第二條斷路器)
 
@@ -103,8 +106,8 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
 | Claude Code CLI | PTY 原始直通 | 相容層,無權限事件 |
 | Codex | ACP(經 `@agentclientprotocol/codex-acp` 橋接套件) | 結構化事件 |
 | Gemini CLI | ACP | 結構化事件 |
-| OpenCode | HTTP + SSE(原生 server) | 結構化事件,可遠端;只能收訊息、不能主動傳 |
-| OpenCode(ACP) | `opencode acp`,ACP | 結構化事件;能用 session 工具、主動傳訊息 |
+| OpenCode(HTTP) | HTTP + SSE(原生 server) | 結構化事件,可遠端;能用 session 工具、主動傳訊息 |
+| OpenCode(ACP) | `opencode acp`,ACP | 結構化事件;能用 session 工具、主動傳訊息(subagent 工具停用) |
 | Aider | PTY | 相容層,無權限事件 |
 
 - **能力探測誠實分級**:每個 adapter 回報 streaming / 工具事件 / 權限請求 /
@@ -299,9 +302,9 @@ session、agent、model 等技術詞)依詞彙表刻意保留原文,不強行本
 - **PTY 沒有執行沙箱**——這類後端因此結構上無法自主運作,一律唯讀。
 - **沒有 mid-turn 成本熔斷**——目前唯一會回報 usage 的後端都是在回合結束時
   才發送一次。
-- **OpenCode(HTTP)、PTY 沒有掛載 session 網路的 MCP 工具**——這類 session 能
-  **接收**訊息,但不能主動傳(`canUseTools: false`)。要讓 OpenCode 主動傳,請改用
-  「OpenCode(ACP)」。
+- **PTY 沒有掛載 session 網路的 MCP 工具**——這類 session 能**接收**訊息,但不能
+  主動傳(`canUseTools: false`)。(OpenCode(HTTP)原本也在這裡,2026-10-03 起掛上了
+  同一個 bridge,與 OpenCode(ACP)的差別只剩對接方式。)
 - **排給忙碌 session 的訊息只存在記憶體**,core 重啟會遺失;訊息鏈計數也一樣。
 - **偵測清單是固定的**(Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、
   Codex、Aider)。手動輸入 command 的入口已移除;支援其他 ACP-native CLI(如

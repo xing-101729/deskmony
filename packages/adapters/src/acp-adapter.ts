@@ -172,6 +172,8 @@ export class AcpAdapter implements AgentAdapter {
     // ... }` 沿用同一個值。
     const handleId = randomUUID();
 
+    const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
+
     // Phase 2:this.sessionNetworkPort(已注入)存在時,核發 scoped token 並算出
     // 要掛載的 mcp-bridge-server.ts 設定——ACP 只有一個統一的 bridge
     // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是
@@ -185,7 +187,6 @@ export class AcpAdapter implements AgentAdapter {
       "acp-adapter",
     );
 
-    const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
     // `launch.env`(provider 層級 env,由 SessionManager.prepareSpawnSpec() 從
     // settings 讀出併好)疊在 process.env 之上,`acpConfig.env`(既有欄位)最優先
     // ——維持這個既有欄位一直以來的「最終覆寫」語意不變。

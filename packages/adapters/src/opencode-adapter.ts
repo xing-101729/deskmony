@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import path from "node:path";
-import type { AgentEvent, AgentLaunchSpec, DialogAnswer, PromptInput, SlashCommandInfo } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { waitForChildExit } from "./child-process.js";
+import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
 import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
 
 /**
@@ -182,6 +183,21 @@ type OpencodeChildProcess = ChildProcessByStdio<null, Readable, Readable>;
 export class OpenCodeAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
 
+  // 2026-10-03:掛載 session 網路 MCP 工具(`list_agents`/`list_sessions`/`read_session`/`create_session`/
+  // `send_to_session`),讓 OpenCode(HTTP)session 也能主動傳訊息。**完全比照 `AcpAdapter`**(同一個 bridge 子行程
+  // `mcp-bridge-server.ts`、同樣的 scoped token 與環境變數,見 mcp-bridge-launch.ts),差別只在掛法:ACP 經
+  // `session/new` 的 `mcpServers`,這裡寫進 `OPENCODE_CONFIG_CONTENT` 的 `mcp.deskmony`(type "local")。
+  // 兩個依賴都由 apps/core 事後注入(adapter 建構時 SessionManager/WsGateway 還不存在,見 acp-adapter.ts 同名欄位的說明);
+  // **缺一就不掛載**(不核發 token、不多一個子行程),行為與這個欄位出現之前完全相同。
+  private sessionNetworkPort?: SessionNetworkPort;
+  setSessionNetworkPort(port: SessionNetworkPort): void {
+    this.sessionNetworkPort = port;
+  }
+  private tokenMinter?: McpBridgeTokenPort;
+  setTokenMinter(minter: McpBridgeTokenPort): void {
+    this.tokenMinter = minter;
+  }
+
   capabilities(): AdapterCapabilities {
     return {
       streaming: true,
@@ -221,6 +237,20 @@ export class OpenCodeAdapter implements AgentAdapter {
     const rawArgs = config.args && config.args.length > 0 ? config.args : defaultServeArgs;
     const { command, args, useShell } = resolveWindowsSpawnCommand(config.command, rawArgs);
 
+    // `AgentHandle.id` 提前在這裡生成(同 acp-adapter.ts 的做法):scoped token 要綁定「這一個 session」,而核發必須在
+    // spawn 子程序之前(token 要放進子程序的 OPENCODE_CONFIG_CONTENT)。session 網路工具的**呼叫者身分**由 token 綁定的
+    // 這個 id 決定,不是任何工具參數——所以它必須等於 SessionManager 登記的 session id(= handle.id)。
+    const handleId = randomUUID();
+    const bridgeLaunch = mintMcpBridgeLaunch(
+      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
+      handleId,
+      "opencode-adapter",
+    );
+    // 核發之後的任何一步失敗都要撤銷,不留孤兒 token(24 小時 TTL 只是保底)。
+    const revokeBridgeToken = (): void => {
+      if (bridgeLaunch) this.tokenMinter?.revokeForSession(handleId);
+    };
+
     // launch.env(provider 層級 env)疊在 process.env 之上,config.env(既有欄位)
     // 最優先——同 acp-adapter.ts 的合併順序說明。
     const childEnv: NodeJS.ProcessEnv = { ...process.env, ...launch.env, ...config.env };
@@ -229,13 +259,26 @@ export class OpenCodeAdapter implements AgentAdapter {
     // (default-deny、hard-deny 四類、auto/YOLO 全部失效)。這裡一律注入「所有工具都 ask」的設定,
     // 與使用者既有的 OPENCODE_CONFIG_CONTENT 深度合併(Deskmony 優先)。完整理由與實測見 opencode-config.ts。
     // 這個 adapter 就是 opencode(software="opencode"),不需要看 launch.family。
-    childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV]);
-    const child: OpencodeChildProcess = spawn(command, args, {
-      cwd: workspace.path,
-      env: childEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: useShell,
+    // 掛了 bridge 時:session 網路 MCP server(名稱 `deskmony`,工具全名 `deskmony_<name>`)寫進同一份設定,
+    // 三個唯讀查詢工具預先放行。token 只放 `environment`,**不放 command**(命令列在行程列表看得到)。
+    childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
+      sessionNetwork: bridgeLaunch
+        ? { localMcpServer: { command: [bridgeLaunch.command, ...bridgeLaunch.args], environment: bridgeLaunch.env } }
+        : undefined,
     });
+    let child: OpencodeChildProcess;
+    try {
+      child = spawn(command, args, {
+        cwd: workspace.path,
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: useShell,
+      });
+    } catch (err) {
+      // spawn 本身同步丟例外(例如 Windows 上 `.cmd` 沒走 shell 的 EINVAL):token 已核發,不能留成孤兒。
+      revokeBridgeToken();
+      throw err;
+    }
     // 2026-09-04(稽核修補):見 child-registry.ts。
     registerChild(child.pid, `opencode:${command}`);
 
@@ -282,6 +325,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       ]);
     } catch (err) {
       this.killChild(child);
+      revokeBridgeToken();
       throw err;
     }
 
@@ -300,6 +344,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       opencodeSessionId = created.id;
     } catch (err) {
       this.killChild(child);
+      revokeBridgeToken();
       throw new DeskmonyError(
         "opencode.sessionCreateFailed",
         { detail: err instanceof Error ? err.message : String(err) },
@@ -341,7 +386,7 @@ export class OpenCodeAdapter implements AgentAdapter {
             "否則 completed 事件永遠進不來,session 會卡在 busy。",
         ),
     });
-    const handle: AgentHandle = { id: randomUUID(), launch, workspace };
+    const handle: AgentHandle = { id: handleId, launch, workspace };
     const sseController = new AbortController();
 
     const internal: InternalSession = {
@@ -477,6 +522,9 @@ export class OpenCodeAdapter implements AgentAdapter {
   async dispose(handle: AgentHandle): Promise<void> {
     const internal = this.sessions.get(handle.id);
     if (!internal) return;
+    // 這個 session 若曾核發過 scoped MCP bridge token(見 spawn()),結束時必須讓它立即失效——不能變成孤兒憑證
+    // 一直有效到 24 小時 TTL 才過期。對「沒核發過」是安全的 no-op(見 ws-gateway.ts 的 revokeMcpBridgeTokensForSession)。
+    this.tokenMinter?.revokeForSession(handle.id);
     // 懸置的權限請求(opencode 端 `permission.asked` 呼叫)若放著不管會讓
     // opencode 卡住等回覆——一律以「拒絕」收場後再清空(比照
     // AcpAdapter.dispose() 的既有做法)。

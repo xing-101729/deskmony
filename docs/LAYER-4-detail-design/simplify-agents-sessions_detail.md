@@ -227,7 +227,8 @@ MCP server 名稱改為 `deskmony`(工具全名 `mcp__deskmony__<name>`)。
 
 - `McpBridgeTokenScope` 只剩 `{ sessionId, network: true }`;`computeAllowedMethods()` 對應五個新 gateway 方法,呼叫者 session 從 token 取(不收參數):`agent.listForAgent`、`session.listForAgent`、`session.readForAgent`、`session.createFromAgent`、`session.sendFromAgent`。刪除 `session.spawnChildForSubagent` / `session.sendToChild` / `session.listChildren` / `profile.listForSubagent`。
 - `mcp-bridge-server.ts` 的工具名稱、參數、描述與 in-process 版本**逐字一致**(檔案頂端既有的「刻意複製文字」原則照舊)。
-- OpenCode(HTTP adapter)與 PTY 沒有工具:可以**收**訊息(`send_to_session` 照送),但不能主動傳。`list_agents`/`list_sessions` 的 `canUseTools:false` 讓 agent 知道對方回不了話。
+- PTY 沒有工具:可以**收**訊息(`send_to_session` 照送),但不能主動傳。`list_agents`/`list_sessions` 的 `canUseTools:false` 讓 agent 知道對方回不了話。
+- (2026-10-03 更新)OpenCode(HTTP adapter)原本也在這裡,現在掛上了同一個 bridge——見 DECISIONS §I;「不做」清單裡對應那一項已移除。
 
 ### P3.7 驗收
 
@@ -264,6 +265,5 @@ MCP server 名稱改為 `deskmony`(工具全名 `mcp__deskmony__<name>`)。
 
 ## 不做(記為後續)
 
-- OpenCode HTTP adapter 掛 MCP(讓 opencode 也能主動傳訊息)——目前請改用「OpenCode(ACP)」provider。
 - 擴充偵測清單(qwen-code、goose、kimi、copilot 等原生 ACP CLI)——這台機器沒裝,無法依「以實際觀察為準」紀律逐一實測旗標;目錄加一筆就能支援,之後有裝再加。
 - 同步「等對方回覆」的 send 語意(Q3 定案不做)。

@@ -461,8 +461,8 @@ acp / pty / opencode 的 `command` / `args` 設定。它由 `AgentCatalog.buildL
 | `claude-agent-sdk` | `claude-agent-sdk` | 內嵌,能力最完整 |
 | `claude-cli` | `pty` | 本機安裝的 `claude` CLI |
 | `gemini` | `acp` | 固定帶 `--acp` |
-| `opencode` | `opencode` | HTTP + SSE;只能收訊息、不能主動傳 |
-| `opencode-acp` | `acp` | 同一個 opencode 執行檔,改走 `opencode acp`;會掛 session 網路工具,能主動傳訊息 |
+| `opencode` | `opencode` | HTTP + SSE;會掛 session 網路工具(bridge 寫進 `OPENCODE_CONFIG_CONTENT` 的 `mcp.deskmony`),能主動傳訊息 |
+| `opencode-acp` | `acp` | 同一個 opencode 執行檔,改走 `opencode acp`;會掛 session 網路工具,能主動傳訊息(subagent `task` 工具停用) |
 | `codex` | `acp` | 經 `@agentclientprotocol/codex-acp` 橋接套件(非本機 codex CLI 原生支援) |
 | `aider` | `pty` | |
 
@@ -619,13 +619,20 @@ session,經 gateway 打回 core)掛進 `session/new`。**兩邊的 MCP server �
 用 MCP client 分別連 in-process server 與真的 spawn 出來的 bridge 子行程,比對 `tools/list`
 與 `instructions`,漂移會被抓到)。
 
-**`opencode`(HTTP server API)與 `pty`(純終端位元組直通)沒有掛。** `pty`
-是架構上不可能——它沒有任何工具通道;`opencode` 則有一條現成的替代路:
-provider 目錄的「OpenCode(ACP,可主動傳訊息)」(`opencode-acp`)改用 `opencode acp` 走
-`software: "acp"`,即可沿用上面那條已經掛好的橋(2026-08-28 對 opencode
-1.18.7 實測:它以 stdio 說 ACP,且確實會啟動 stdio 型 MCP server)。這兩類 session
-只能**收**訊息,`list_agents` / `list_sessions` 的 `canUseTools`(`softwareCanUseTools()`:
-只有 `claude-agent-sdk` 與 `acp` 為 true)讓寄件者知道對方回不了話。
+**`pty`(純終端位元組直通)沒有掛**——架構上不可能,它沒有任何工具通道;這類 session 只能**收**訊息,
+`list_agents` / `list_sessions` 的 `canUseTools`(`softwareCanUseTools()`:`claude-agent-sdk`、`acp`、`opencode`
+為 true)讓寄件者知道對方回不了話。
+
+**`opencode`(HTTP server API)2026-10-03 起也掛了**(原本是「只能收」,要主動傳得改用 `opencode-acp`)。
+掛法與 ACP 共用 `packages/adapters/src/mcp-bridge-launch.ts` 的 `mintMcpBridgeLaunch()`(同一個 bridge 子行程、
+同樣的 scoped token 與環境變數,token 由 `OpenCodeAdapter.dispose()` 撤銷),差別只在怎麼告訴 opencode:ACP 經
+`session/new` 的 `mcpServers`,HTTP 則寫進啟動 `opencode serve` 時注入的 `OPENCODE_CONFIG_CONTENT`
+(`mcp.deskmony`,`type: "local"`,token 只放 `environment`、不放 `command`)。同一份設定也把**所有工具權限改成 ask**
+(opencode 預設全 allow,見 `packages/adapters/src/opencode-config.ts` 檔頭的實測與理由),所以 `create_session` /
+`send_to_session` 自然走 Deskmony 的權限流程;三個查詢工具(`deskmony_list_agents` / `deskmony_list_sessions` /
+`deskmony_read_session`)在同一份設定裡預先 `allow`,語意等同 Claude SDK 的 `allowedTools`。provider 目錄的
+「OpenCode(ACP)」(`opencode-acp`)走 `opencode acp`、經 `software: "acp"` 沿用 ACP 那條橋(2026-08-28 對
+opencode 1.18.7 實測:它以 stdio 說 ACP,且確實會啟動 stdio 型 MCP server),兩者差別只剩對接方式。
 
 | MCP server | 工具 | 進 `allowedTools`(自動放行)? |
 |---|---|---|
@@ -861,7 +868,7 @@ e2e 套件切分成 `deterministic` / `model-behavior` 兩組,前者可無條件
 |---|---|---|
 | **PTY 執行沙箱** | 未實作 | PTY tier 結構上無法執行權限政策,因此一律唯讀、不給無人值守自主權(DECISIONS C7) |
 | **mid-turn 成本熔斷** | 未實作 | 目前唯一會發 `usage` 的 adapter 在回合結束前才發一次,沒有可觀測的「回合進行中收到 usage」情境可驗證,強行分岔只是憑空編造行為 |
-| **OpenCode(HTTP)/ PTY 掛載 MCP** | 未實作 | 只有 Claude SDK session 與 ACP session(Codex / Gemini / `opencode-acp`,經 `packages/adapters/src/mcp-bridge-server.ts` 橋接子行程 + scoped token,見 `AcpAdapter.spawn()`)能**主動**呼叫 session 網路工具;但**接收端是跨 software 的**(`send_to_session` 對任何 session 都能送達,只是 HTTP OpenCode 與 PTY 回不了話,`canUseTools: false`)。規格「不做」清單的後續項目:讓 OpenCode HTTP adapter 也掛 MCP |
+| **PTY 掛載 MCP** | 未實作 | 只有 Claude SDK session、ACP session(Codex / Gemini / `opencode-acp`)與 OpenCode(HTTP)session(後兩者經 `packages/adapters/src/mcp-bridge-server.ts` 橋接子行程 + scoped token,見 `AcpAdapter.spawn()`/`OpenCodeAdapter.spawn()`)能**主動**呼叫 session 網路工具;但**接收端是跨 software 的**(`send_to_session` 對任何 session 都能送達,只是 HTTP OpenCode 與 PTY 回不了話,`canUseTools: false`)。規格「不做」清單的後續項目:讓 OpenCode HTTP adapter 也掛 MCP |
 | **遠端能力矩陣的細粒度版本** | 部分 | `LOCAL_ONLY_METHODS` 現在只擋一般設定(`config.setFile`)與 provider env(`settings.setProviderPrefs`)兩項(profile 管理已隨 profile 移除);2026-08-25 起 auto/YOLO 切換與 policy allowlist 編輯已開放遠端,另加一層本機遠端皆可用、但需先處於 YOLO 才能開的「真.無限制」層(見 [`DECISIONS.md` §G](./DECISIONS.md))。DECISIONS F3 列的其餘項目(改預算上限、改綁定介面)尚未有對應的可遠端呼叫方法,因此暫時無需額外閘門 |
 | **跨 session 待送佇列與訊息鏈計數不持久** | 刻意(DECISIONS §H) | 排給忙碌 session 的訊息只在記憶體(core 重啟即遺失,不再有 Mailbox);每條鏈的計數也只在記憶體(重啟歸零,舊鏈本來就該結束) |
 | **偵測清單是固定的** | 刻意 | 只偵測 Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider;手動輸入 command 的入口(`custom-pty`)已移除。支援其他原生 ACP CLI(qwen-code、goose、kimi、copilot 等)只要在 `BUILTIN_PROVIDERS` 與偵測 allowlist 各加一筆,但需要先在實機驗證啟動旗標(本機沒裝,無法依「以實際觀察為準」紀律實測) |

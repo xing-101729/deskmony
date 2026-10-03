@@ -233,7 +233,7 @@ export class AgentCatalog {
    * `list_agents` 工具與 `agent.listForAgent` gateway 方法共用的最小摘要:只含 agent 做決策
    * 需要的欄位(id/label/software/models/defaultModelId/canUseTools),**不含 command/args/env**(本機路徑與
    * 可能的密鑰不該進 agent 的對話 context)。兩個入口共用這個函式,結構上保證回傳一致。
-   * `canUseTools`:只有 claude-agent-sdk 與 acp 能掛工具、主動傳訊息(見 `softwareCanUseTools()`)。
+   * `canUseTools`:claude-agent-sdk、acp 與 opencode 能掛工具、主動傳訊息(見 `softwareCanUseTools()`)。
    */
   async summarizeAvailable(): Promise<NetworkAgentSummary[]> {
     return (await this.listAvailable()).map((p) => ({

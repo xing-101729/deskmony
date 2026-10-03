@@ -195,7 +195,7 @@ flowchart TB
 - **所有 session 互相可見。** 沒有父子限制、沒有工作資料夾限制。用 `create_session` 開出來的 session 會巢狀顯示在建立者底下 —— 只為顯示與溯源,它其實跟其他 session 平等。你也可以手動在任何 session 底下開新 session。
 - **不做任何自動回送。** 訊息送達時會包一層信封,寫明是誰送的、以及「除非收到的人自己決定要回,否則不會得到回覆」。要不要回、回給誰(不一定是寄件者),是收到訊息的 agent 自己用 `send_to_session` 決定。以前「子 agent 完成、結果自動注入父 session」的行為已經不存在。
 - **身分無法冒名。** 呼叫者是誰,來自 adapter(in-process)或橋接 token(ACP),絕不是工具參數。信封只在訊息送到 agent 的那一刻才加;存進歷史的是原始文字加上來源標記。
-- **不是每個 agent 都能主動傳。** Claude Agent SDK(in-process)與所有走 ACP 的 agent —— Codex、Gemini CLI、走 `opencode-acp` provider 的 OpenCode —— 能呼叫這些工具。走 HTTP 的 OpenCode 與 PTY agent(Claude Code CLI、Aider)可以**接收**訊息、但不能傳;`list_agents` 與 `list_sessions` 會回報 `canUseTools: false`,讓寄件者知道對方回不了話。
+- **不是每個 agent 都能主動傳。** Claude Agent SDK(in-process)、所有走 ACP 的 agent —— Codex、Gemini CLI、走 `opencode-acp` provider 的 OpenCode —— 以及走 HTTP 的 OpenCode(`opencode` provider)都能呼叫這些工具;後兩者是透過一個持有 scoped、逐 session token 的橋接子行程(走 HTTP 的 OpenCode 是寫進 OpenCode 自己的 `mcp` 設定來掛載,它的權限確認與其他工具呼叫一樣)。PTY agent(Claude Code CLI、Aider)可以**接收**訊息、但不能傳;`list_agents` 與 `list_sessions` 會回報 `canUseTools: false`,讓寄件者知道對方回不了話。
 
 在桌面 app 裡,收到的訊息會顯示「來自 <session>」(或「轉傳自 <session>」)標籤,每則 assistant 訊息也都有「轉傳到…」動作:選任何其他 session、附上選填的附註,對方就會收到一則來自你的訊息。agent 之間的流量由上面的斷路器二把關。
 
@@ -373,7 +373,7 @@ pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會�
 
 - **PTY 層沒有執行沙箱。** 在做出來之前,PTY agent 就是唯讀 —— 這是誠實的後果,不是疏忽。
 - **沒有回合中途的成本熔斷。** 唯一會發 usage 的 adapter 是在回合結束時才發,根本沒有可觀測的「回合進行中收到 usage」情境可以對著做。硬分岔只是憑空編造行為。
-- **只有部分 agent 能主動傳訊息。** Claude Agent SDK 的 session(in-process)與所有走 ACP 的 agent(Codex、Gemini CLI、走 `opencode-acp` provider 的 OpenCode —— 透過一個持有 scoped、逐 session token 的橋接子行程)能拿到那五個 session 工具。`opencode` 這個 provider(bespoke HTTP/SSE)與 PTY agent(Claude Code CLI、Aider)沒有掛載任何工具:它們可以**接收**訊息,但不能呼叫 `send_to_session` 或 `create_session`,所以除非有人替它們轉傳,否則自己回不了話。
+- **只有部分 agent 能主動傳訊息。** Claude Agent SDK 的 session(in-process)、所有走 ACP 的 agent(Codex、Gemini CLI、走 `opencode-acp` provider 的 OpenCode)與走 HTTP 的 OpenCode(`opencode` provider)能拿到那五個 session 工具 —— 後兩者透過一個持有 scoped、逐 session token 的橋接子行程。PTY agent(Claude Code CLI、Aider)沒有掛載任何工具:它們可以**接收**訊息,但不能呼叫 `send_to_session` 或 `create_session`,所以除非有人替它們轉傳,否則自己回不了話。
 - **排給忙碌 session 的訊息只存在記憶體。** 若 core 在對方這一輪結束前重啟,排隊中的訊息就遺失了(寄件者當時只被告知「已排隊」,並不是「已讀」)。
 - **agent 清單是固定的。** 偵測範圍是 Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider。手動輸入 command 的入口是刻意移除的;要支援別的 agent,就得在目錄裡加一項。
 - **provider 的密鑰對外遮罩,本機是明文儲存**,與 Paseo 對它的設定檔採取同一種取捨。

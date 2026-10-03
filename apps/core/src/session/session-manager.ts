@@ -931,7 +931,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * `list_sessions`:**所有** session(不限父子、不限工作目錄)的摘要,不含對話內容。
-   * `isYou` 標出呼叫者自己;`canUseTools` = 對方能不能主動回話(只有 claude-agent-sdk 與 acp 能)。
+   * `isYou` 標出呼叫者自己;`canUseTools` = 對方能不能主動回話(claude-agent-sdk、acp 與 opencode 能,PTY 不能)。
    */
   async listSessionsForAgent(callerSessionId: string): Promise<NetworkSessionSummary[]> {
     const [all, labels] = await Promise.all([this.listSessions(), this.catalog.labelsById()]);

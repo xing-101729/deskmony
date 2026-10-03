@@ -157,11 +157,14 @@ async function main(): Promise<void> {
   // `WsGateway.mintMcpBridgeToken()`/`revokeMcpBridgeTokensForSession()`)注入
   // 給它,理由同 `claudeAdapter` 的既有先例(見下方注入處的完整說明)。
   const acpAdapter = new AcpAdapter();
+  // 2026-10-03:OpenCode(HTTP)也掛 session 網路 MCP 工具(同一個 bridge、同一套 scoped token),所以同樣要保留具名參考,
+  // 事後注入 `setSessionNetworkPort()`/`setTokenMinter()`(理由同上面兩個 adapter)。
+  const openCodeAdapter = new OpenCodeAdapter();
   const adapters = new AdapterRegistry()
     .register("claude-agent-sdk", claudeAdapter)
     .register("acp", acpAdapter)
     .register("pty", new GenericPtyAdapter())
-    .register("opencode", new OpenCodeAdapter());
+    .register("opencode", openCodeAdapter);
   const permissionGateway = new PermissionGateway(config.daemon.permissionTimeoutMs);
   // S1(PolicyEngine + Enforcement 底座):policy.rules/allowedHosts 只吃啟動時
   // 合併好的設定(見 packages/shared/src/core-config.ts 的 `ConfigSetFilePatchSchema`
@@ -313,6 +316,8 @@ async function main(): Promise<void> {
   };
   claudeAdapter.setSessionNetworkPort(sessionNetworkPort);
   acpAdapter.setSessionNetworkPort(sessionNetworkPort);
+  // 2026-10-03:OpenCode(HTTP)同樣——**同一個 port 實例**,五個工具的行為與另外兩個 adapter 逐字一致。
+  openCodeAdapter.setSessionNetworkPort(sessionNetworkPort);
 
   // S6(crash-recovery):純組合層,不擁有任何狀態,見 recovery-service.ts 頂端
   // 說明。放在這裡是因為它需要 sessionManager/catalog 建構完成。
@@ -346,10 +351,13 @@ async function main(): Promise<void> {
   // `revokeMcpBridgeTokensForSession()`)——與上面 `setClientPresence()` 同一
   // 個解耦手法:`AcpAdapter` 建構時 `WsGateway` 還不存在,`WsGateway` 的建構子
   // 又需要 `SessionManager`,只能在 `WsGateway` 建好之後用 setter 事後注入。
-  acpAdapter.setTokenMinter({
-    mint: (scope) => gateway.mintMcpBridgeToken(scope),
-    revokeForSession: (sessionId) => gateway.revokeMcpBridgeTokensForSession(sessionId),
-  });
+  const tokenMinter = {
+    mint: (scope: Parameters<typeof gateway.mintMcpBridgeToken>[0]) => gateway.mintMcpBridgeToken(scope),
+    revokeForSession: (sessionId: string) => gateway.revokeMcpBridgeTokensForSession(sessionId),
+  };
+  acpAdapter.setTokenMinter(tokenMinter);
+  // 2026-10-03:OpenCode(HTTP)共用同一個 token 核發/撤銷實作(session dispose 時撤銷)。
+  openCodeAdapter.setTokenMinter(tokenMinter);
 
   // M5 Round B 任務1:apps/desktop 的 Vite build 產物(dist/),與 WS 共用
   // 同一個 port。`config.features.staticDir` 已經是 load-config.ts 算好的最終值

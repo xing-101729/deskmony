@@ -240,8 +240,12 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
   },
   {
     id: "opencode",
-    label: "OpenCode",
-    description: "OpenCode 的 HTTP + SSE headless server API。",
+    label: "OpenCode(HTTP)",
+    description:
+      "OpenCode 的 HTTP + SSE headless server API,事件即時、可遠端。" +
+      "與下面的「OpenCode(ACP)」一樣能用 session 網路工具(list_sessions / create_session / send_to_session 等)," +
+      "看到其他 session 並主動傳訊息——兩者差別只剩對接方式(HTTP + SSE 或 ACP),不是能力。" +
+      "所有工具呼叫(含 bash / edit / MCP)都會經過 Deskmony 的權限引擎。",
     software: "opencode",
     family: "opencode",
     detectKey: "opencode-cli",
@@ -259,12 +263,12 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
   },
   {
     id: "opencode-acp",
-    label: "OpenCode(ACP,可主動傳訊息)",
+    label: "OpenCode(ACP)",
     description:
       "同一個 opencode 執行檔,但改用它內建的 `opencode acp` 子命令以 ACP 對接。" +
-      "與上面的「OpenCode」項目差別只有一個、但很關鍵:ACP 這條路會掛載 session 網路 MCP 工具," +
-      "所以這個 provider 建立的 session **能自己呼叫 list_sessions / create_session / send_to_session 等工具," +
-      "看到其他 session 並主動傳訊息**;走 HTTP server API 的那個只能收訊息、不能主動傳(adapter 內沒有任何 MCP 掛載)。" +
+      "與上面的「OpenCode(HTTP)」一樣能自己呼叫 list_sessions / create_session / send_to_session 等工具," +
+      "看到其他 session 並主動傳訊息,所有工具呼叫也都經過 Deskmony 的權限引擎;差別只剩對接方式。" +
+      "ACP 這條路的 subagent(task 工具)會被停用——opencode acp 不會轉發 subagent 的權限請求,subagent 會卡死。" +
       "單機使用兩者差異不大。",
     software: "acp",
     family: "opencode",

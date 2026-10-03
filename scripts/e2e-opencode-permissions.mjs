@@ -32,6 +32,13 @@
  *        裁決(否則 opencode 永遠等一個沒人回的權限,subagent 卡死);子 session 的文字不混進本 session 的對話;
  *        **不相干的陌生 session** 的權限請求不轉發、不替它作答。
  *
+ *   PM9  (2026-10-03,第二項改動)HTTP 也掛 session 網路 MCP 工具:`OPENCODE_CONFIG_CONTENT` 多一個 `mcp.deskmony`
+ *        (type local、command = [node, mcp-bridge-server.js]、environment 帶 scoped token / gateway 位址 / session id /
+ *        NETWORK_ENABLED);**token 只在 environment、不在 command**;使用者自己寫的同名 `mcp.deskmony` 被取代;
+ *        三個唯讀查詢工具預先放行、`task` 不停用(HTTP 轉發子 session 的權限)。
+ *   PM10 那個 token 真的能用且身分由 token 綁定(`session.listForAgent` 的 isYou 是這個 session、`agent.listForAgent` 報
+ *        opencode 的 canUseTools=true),不能呼叫白名單外的方法;session 刪除之後同一個 token 被撤銷(再拿來認證被拒)。
+ *
  * 全程走 scripts/fake-opencode-server.mjs / fake-acp-agent.mjs(決定性、不呼叫任何模型)。只啟動一個 core,
  * DESKMONY_HOME/DATA_DIR/WORKSPACE/CORE_PORT 四個都指向暫存目錄,並在繼續之前確認 core 印出的 SQLite 路徑真的在
  * 暫存目錄底下——漏設任何一個都可能連到使用者真實的 ~/.deskmony/deskmony.db。
@@ -41,7 +48,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
@@ -68,6 +75,8 @@ const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const PORT = 4745;
 
 const QUERY_TOOLS = ["deskmony_list_agents", "deskmony_list_sessions", "deskmony_read_session"];
+/** HTTP(opencode)session 的預期 permission:所有工具 ask + 三個唯讀查詢工具預先放行(bridge 掛上了)。 */
+const HTTP_EXPECTED_PERMISSION = { "*": "ask", "**": "ask", ...Object.fromEntries(QUERY_TOOLS.map((t) => [t, "allow"])) };
 
 const results = [];
 function record(name, ok, detail) {
@@ -260,11 +269,15 @@ async function killProcessTree(proc) {
 }
 
 // =======================================================================
-/** 建 session → 請 fake 後端回顯 OPENCODE_CONFIG_CONTENT → 刪 session。回傳 `null`(子行程沒收到這個變數)或 `{ raw, config }`。 */
-async function reportOpencodeConfig(client, providerId, workspaceDir, reportPrefix, title) {
+/**
+ * 建 session → 請 fake 後端回顯 OPENCODE_CONFIG_CONTENT → 刪 session(`keep: true` 則留著,由呼叫端自己刪)。
+ * 回傳 `{ sessionId, raw, config }`;子行程沒收到這個變數時 `raw`/`config` 是 `null`。
+ */
+async function reportOpencodeConfig(client, providerId, workspaceDir, reportPrefix, title, { keep = false } = {}) {
   const {
     session: { id: sessionId },
   } = await client.rpc("session.create", { providerId, workingDir: workspaceDir, title }, 30_000);
+  let keepSession = false;
   try {
     const from = client.timeline.length;
     await client.rpc("session.sendPrompt", { sessionId, prompt: { text: reportPrefix } });
@@ -274,9 +287,10 @@ async function reportOpencodeConfig(client, providerId, workspaceDir, reportPref
     const m = /ENV:(\{.*\})/s.exec(text);
     if (!m) throw new Error(`回覆裡找不到 ENV:{...}: ${text.slice(0, 200)}`);
     const raw = JSON.parse(m[1]).OPENCODE_CONFIG_CONTENT;
-    return raw === null ? null : { raw, config: JSON.parse(raw) };
+    keepSession = keep;
+    return raw === null ? { sessionId, raw: null, config: null } : { sessionId, raw, config: JSON.parse(raw) };
   } finally {
-    await client.rpc("session.delete", { sessionId }, 15_000).catch(() => undefined);
+    if (!keepSession) await client.rpc("session.delete", { sessionId }, 15_000).catch(() => undefined);
   }
 }
 
@@ -295,39 +309,38 @@ const USER_CONFIG = {
 // =======================================================================
 async function testHttpDefault(client, workspaceDir) {
   const got = await reportOpencodeConfig(client, FAKE_OPENCODE, workspaceDir, OPENCODE_REPORT_ENV, "pm1");
-  const keys = got ? Object.keys(got.config.permission ?? {}) : [];
   record(
-    "PM1 HTTP:沒有使用者設定時,opencode 子行程收到的 OPENCODE_CONFIG_CONTENT 是「所有工具 ask」(`*` 與 `**` 都是 ask,沒有任何 allow)",
-    got !== null &&
-      isDeepStrictEqual(got.config.permission, { "*": "ask", "**": "ask" }) &&
-      keys.length === 2,
-    got ? got.raw : "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
+    "PM1 HTTP:沒有使用者設定時,opencode 子行程收到的 OPENCODE_CONFIG_CONTENT 是「所有工具 ask」(`*` 與 `**` 都是 ask),唯一的 allow 是三個唯讀查詢工具(bridge 掛上了),且排在 `**` 之後",
+    got.config !== null &&
+      isDeepStrictEqual(got.config.permission, HTTP_EXPECTED_PERMISSION) &&
+      isDeepStrictEqual(Object.keys(got.config.permission), Object.keys(HTTP_EXPECTED_PERMISSION)),
+    got.raw ? got.raw.replace(/dmbt_[A-Za-z0-9_-]+/g, "dmbt_<token>") : "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
   );
 }
 
 async function testHttpMerge(client, workspaceDir) {
   await setProviderEnv(client, FAKE_OPENCODE, JSON.stringify(USER_CONFIG));
   const got = await reportOpencodeConfig(client, FAKE_OPENCODE, workspaceDir, OPENCODE_REPORT_ENV, "pm2");
-  const perm = got?.config.permission ?? {};
+  const perm = got.config?.permission ?? {};
   const keys = Object.keys(perm);
-  const lastKey = keys[keys.length - 1];
   const ok =
-    got !== null &&
+    got.config !== null &&
     got.config.model === USER_CONFIG.model &&
     isDeepStrictEqual(got.config.plugin, USER_CONFIG.plugin) &&
     isDeepStrictEqual(got.config.mcp?.mine, USER_CONFIG.mcp.mine) &&
-    // 使用者的鍵還在(不丟資訊),而且都排在 Deskmony 的 `**` 之前;`*` 被 Deskmony 的 ask 取代。
+    // 使用者的鍵還在(不丟資訊),而且都排在 Deskmony 的 `*` 之前;`*` 被 Deskmony 的 ask 取代;
+    // Deskmony 自己的鍵(`*`、`**`、預先放行的查詢工具)是最後的,所以最後符合者永遠是 Deskmony 的。
     perm.bash === "allow" &&
     isDeepStrictEqual(perm.edit, { "src/*": "allow" }) &&
     perm["*"] === "ask" &&
     perm["**"] === "ask" &&
-    lastKey === "**" &&
-    keys.indexOf("bash") < keys.indexOf("**") &&
-    keys.indexOf("edit") < keys.indexOf("**");
+    keys.indexOf("bash") < keys.indexOf("*") &&
+    keys.indexOf("edit") < keys.indexOf("*") &&
+    isDeepStrictEqual(keys.slice(keys.indexOf("*")), Object.keys(HTTP_EXPECTED_PERMISSION));
   record(
-    "PM2 HTTP:使用者在 provider 環境變數給的 OPENCODE_CONFIG_CONTENT 深度合併(model/plugin/mcp.mine 保留),Deskmony 的 permission 優先(使用者的 allow 排在 Deskmony 的 `**` ask 之前、`*` 被取代)",
+    "PM2 HTTP:使用者在 provider 環境變數給的 OPENCODE_CONFIG_CONTENT 深度合併(model/plugin/mcp.mine 保留),Deskmony 的 permission 優先(使用者的 allow 排在 Deskmony 的 ask 之前、`*` 被取代)",
     ok,
-    got ? `permission keys=${JSON.stringify(keys)}, raw=${got.raw}` : "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
+    got.raw ? `permission keys=${JSON.stringify(keys)}` : "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
   );
 }
 
@@ -337,19 +350,19 @@ async function testHttpBrokenJson(client, workspaceDir) {
   const got = await reportOpencodeConfig(client, FAKE_OPENCODE, workspaceDir, OPENCODE_REPORT_ENV, "pm3");
   const warned = coreOutput.slice(before).includes("不是合法的 JSON");
   record(
-    "PM3 HTTP:使用者的 OPENCODE_CONFIG_CONTENT 不是合法 JSON → console.warn 並只用 Deskmony 的設定(所有工具 ask),session 照常起得來",
-    got !== null && isDeepStrictEqual(got.config, { permission: { "*": "ask", "**": "ask" } }) && warned,
-    `warned=${warned}, raw=${got?.raw}`,
+    "PM3 HTTP:使用者的 OPENCODE_CONFIG_CONTENT 不是合法 JSON → console.warn 並只用 Deskmony 的設定(所有工具 ask,沒有任何使用者的鍵),session 照常起得來",
+    got.config !== null && isDeepStrictEqual(got.config.permission, HTTP_EXPECTED_PERMISSION) && warned,
+    `warned=${warned}`,
   );
 }
 
 async function testAcpFamily(client, workspaceDir) {
   // 先沒有使用者設定
   const plain = await reportOpencodeConfig(client, FAKE_ACP_OPENCODE, workspaceDir, ACP_REPORT_ENV, "pm4a");
-  const plainPerm = plain?.config.permission ?? {};
+  const plainPerm = plain.config?.permission ?? {};
   const plainKeys = Object.keys(plainPerm);
   const okPlain =
-    plain !== null &&
+    plain.config !== null &&
     plainPerm["*"] === "ask" &&
     plainPerm["**"] === "ask" &&
     QUERY_TOOLS.every((t) => plainPerm[t] === "allow" && plainKeys.indexOf(t) > plainKeys.indexOf("**")) &&
@@ -363,16 +376,16 @@ async function testAcpFamily(client, workspaceDir) {
   record(
     "PM4a ACP(family=opencode):注入所有工具 ask;三個唯讀查詢工具(list_agents/list_sessions/read_session)預先放行且排在 `**` 之後;task(subagent)停用;create_session/send_to_session 不放行;mcp 不寫進設定",
     okPlain,
-    plain ? plain.raw : "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
+    plain.raw ?? "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
   );
 
   // 再加使用者設定
   await setProviderEnv(client, FAKE_ACP_OPENCODE, JSON.stringify(USER_CONFIG));
   const merged = await reportOpencodeConfig(client, FAKE_ACP_OPENCODE, workspaceDir, ACP_REPORT_ENV, "pm4b");
-  const perm = merged?.config.permission ?? {};
+  const perm = merged.config?.permission ?? {};
   const keys = Object.keys(perm);
   const okMerged =
-    merged !== null &&
+    merged.config !== null &&
     merged.config.model === USER_CONFIG.model &&
     isDeepStrictEqual(merged.config.mcp?.mine, USER_CONFIG.mcp.mine) &&
     perm.bash === "allow" &&
@@ -385,7 +398,7 @@ async function testAcpFamily(client, workspaceDir) {
   record(
     "PM4b ACP(family=opencode):使用者既有的 OPENCODE_CONFIG_CONTENT 同樣深度合併,Deskmony 的 permission 優先",
     okMerged,
-    merged ? `permission keys=${JSON.stringify(keys)}` : "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
+    merged.raw ? `permission keys=${JSON.stringify(keys)}` : "子行程沒有收到 OPENCODE_CONFIG_CONTENT",
   );
 }
 
@@ -393,9 +406,112 @@ async function testAcpControl(client, workspaceDir) {
   const got = await reportOpencodeConfig(client, FAKE_ACP, workspaceDir, ACP_REPORT_ENV, "pm5");
   record(
     "PM5 ACP 對照組:沒有宣告 family 的 ACP agent 不會被注入 OPENCODE_CONFIG_CONTENT(其他 agent 的環境不受影響)",
-    got === null,
-    got ? got.raw : "(沒有注入)",
+    got.config === null,
+    got.raw ?? "(沒有注入)",
   );
+}
+
+// =======================================================================
+const BRIDGE_ENV_KEYS = ["DESKMONY_MCP_BRIDGE_TOKEN", "DESKMONY_MCP_BRIDGE_GATEWAY_URL", "DESKMONY_MCP_BRIDGE_SESSION_ID", "DESKMONY_MCP_BRIDGE_NETWORK_ENABLED"];
+
+async function testHttpSessionNetwork(client, workspaceDir) {
+  // 使用者自己寫了一個同名的 mcp.deskmony(想把 command 換成別的東西)——必須被 Deskmony 的取代。
+  await setProviderEnv(
+    client,
+    FAKE_OPENCODE,
+    JSON.stringify({ mcp: { deskmony: { type: "local", command: ["evil-command"], environment: { EVIL: "1" } }, mine: USER_CONFIG.mcp.mine } }),
+  );
+  const got = await reportOpencodeConfig(client, FAKE_OPENCODE, workspaceDir, OPENCODE_REPORT_ENV, "pm9", { keep: true });
+  let sessionId = got.sessionId;
+  try {
+    const mcp = got.config?.mcp?.deskmony;
+    const token = mcp?.environment?.DESKMONY_MCP_BRIDGE_TOKEN;
+    const perm = got.config?.permission ?? {};
+    const ok =
+      got.config !== null &&
+      mcp?.type === "local" &&
+      mcp.enabled === true &&
+      Array.isArray(mcp.command) &&
+      mcp.command.length === 2 &&
+      mcp.command[0] === process.execPath &&
+      path.basename(mcp.command[1]) === "mcp-bridge-server.js" &&
+      existsSync(mcp.command[1]) &&
+      // token 只在 environment,不在 command(命令列在行程列表看得到)
+      typeof token === "string" &&
+      token.startsWith("dmbt_") &&
+      !mcp.command.some((part) => String(part).includes(token)) &&
+      isDeepStrictEqual(Object.keys(mcp.environment).sort(), [...BRIDGE_ENV_KEYS].sort()) &&
+      mcp.environment.DESKMONY_MCP_BRIDGE_GATEWAY_URL === `ws://127.0.0.1:${PORT}` &&
+      mcp.environment.DESKMONY_MCP_BRIDGE_SESSION_ID === sessionId &&
+      mcp.environment.DESKMONY_MCP_BRIDGE_NETWORK_ENABLED === "1" &&
+      !("EVIL" in mcp.environment) &&
+      // 使用者其他的 MCP server 還在
+      isDeepStrictEqual(got.config.mcp.mine, USER_CONFIG.mcp.mine) &&
+      // 三個查詢工具預先放行,create_session/send_to_session 不放行;HTTP 不停用 task(它轉發子 session 的權限)
+      isDeepStrictEqual(perm, HTTP_EXPECTED_PERMISSION) &&
+      perm.deskmony_create_session === undefined &&
+      perm.deskmony_send_to_session === undefined &&
+      perm.task === undefined;
+    record(
+      "PM9 HTTP:OPENCODE_CONFIG_CONTENT 多一個 mcp.deskmony(local;command=[node, mcp-bridge-server.js];environment 帶 scoped token/gateway 位址/session id/NETWORK_ENABLED);token 只在 environment、不在 command;使用者同名的 mcp.deskmony 被取代、其他 MCP 保留;三個查詢工具預先放行、create/send 不放行、task 不停用",
+      ok,
+      mcp ? `command=${JSON.stringify(mcp.command)}, envKeys=${JSON.stringify(Object.keys(mcp.environment ?? {}))}` : "沒有 mcp.deskmony",
+    );
+
+    // ---- PM10:token 的能力與撤銷 ----
+    const gatewayUrl = mcp?.environment?.DESKMONY_MCP_BRIDGE_GATEWAY_URL ?? `ws://127.0.0.1:${PORT}`;
+    const bridge = new TimelineClient(gatewayUrl);
+    await bridge.connect();
+    let aliveOk = false;
+    let detail = "";
+    try {
+      await bridge.rpc("auth", { token });
+      const agents = (await bridge.rpc("agent.listForAgent", {})).agents;
+      const sessions = (await bridge.rpc("session.listForAgent", {})).sessions;
+      const me = sessions.filter((entry) => entry.isYou);
+      const opencodeAgent = agents.find((a) => a.id === FAKE_OPENCODE);
+      let forbidden;
+      try {
+        await bridge.rpc("session.list", {});
+      } catch (err) {
+        forbidden = String(err.message);
+      }
+      aliveOk =
+        me.length === 1 &&
+        me[0].id === sessionId &&
+        opencodeAgent?.software === "opencode" &&
+        opencodeAgent?.canUseTools === true &&
+        typeof forbidden === "string" &&
+        forbidden.includes("無權呼叫");
+      detail = `me=${JSON.stringify(me.map((m) => m.id))}, opencodeAgent=${JSON.stringify(opencodeAgent)}, forbidden=${forbidden}`;
+    } catch (err) {
+      detail = String(err);
+    } finally {
+      bridge.close();
+    }
+
+    await client.rpc("session.delete", { sessionId }, 15_000);
+    sessionId = undefined;
+    const afterClose = new TimelineClient(gatewayUrl);
+    await afterClose.connect();
+    let revoked = false;
+    let afterError = "";
+    try {
+      await afterClose.rpc("auth", { token });
+    } catch (err) {
+      revoked = true;
+      afterError = String(err.message);
+    } finally {
+      afterClose.close();
+    }
+    record(
+      "PM10 HTTP session 的 scoped token:能呼叫白名單方法且身分由 token 綁定(session.listForAgent 的 isYou 就是這個 session、agent.listForAgent 報 opencode 的 canUseTools=true)、白名單外的方法被拒;session 刪除(dispose)之後同一個 token 被撤銷(再拿來認證被拒)",
+      aliveOk && revoked,
+      `${detail}; revokedAfterDelete=${revoked} (${afterError})`,
+    );
+  } finally {
+    if (sessionId) await client.rpc("session.delete", { sessionId }, 15_000).catch(() => undefined);
+  }
 }
 
 // =======================================================================
@@ -492,10 +608,11 @@ async function main() {
     client = new TimelineClient(`ws://127.0.0.1:${PORT}`);
     await client.connect();
 
-    console.log("=== PM1-PM3:HTTP(opencode)啟動時注入的設定 ===");
+    console.log("=== PM1-PM3、PM9-PM10:HTTP(opencode)啟動時注入的設定與 session 網路 MCP ===");
     await testHttpDefault(client, workspaceDir);
     await testHttpMerge(client, workspaceDir);
     await testHttpBrokenJson(client, workspaceDir);
+    await testHttpSessionNetwork(client, workspaceDir);
 
     console.log("\n=== PM4-PM5:ACP(family=opencode)與對照組 ===");
     await testAcpFamily(client, workspaceDir);

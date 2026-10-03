@@ -258,7 +258,7 @@ function registerSessionNetworkTools(server: McpServer, client: BridgeGatewayCli
     {
       description:
         "查詢目前可用的 agent(id/label/software/models/defaultModelId/canUseTools),決定 create_session 要用哪一個。" +
-        "id 就是 create_session 的 agent 參數。canUseTools=false 的 agent(OpenCode HTTP、終端機型)收得到訊息," +
+        "id 就是 create_session 的 agent 參數。canUseTools=false 的 agent(終端機型,例如 Claude Code CLI、Aider)收得到訊息," +
         "但不能主動傳訊息,所以不會回覆你。",
       inputSchema: {},
     },

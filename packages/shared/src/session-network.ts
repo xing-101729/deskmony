@@ -49,12 +49,15 @@ export interface SessionNetworkPort {
 }
 
 /**
- * 這個 software 的 session 能不能掛 MCP 工具、主動傳訊息?只有 `claude-agent-sdk`(in-process MCP)與 `acp`
- * (mcp-bridge 子行程)能;OpenCode(HTTP adapter 沒有掛 MCP,見 simplify-agents-sessions_detail.md「不做」)與 PTY 只能**收**。
- * `list_agents`/`list_sessions` 的 `canUseTools` 就是這個值。
+ * 這個 software 的 session 能不能掛 MCP 工具、主動傳訊息?`claude-agent-sdk`(in-process MCP)、`acp` 與 `opencode`
+ * (這兩個都是 mcp-bridge 子行程 + scoped token,差別只在掛法:ACP 經 `session/new`,OpenCode 寫進 `mcp.deskmony` 設定)
+ * 能;PTY 只能**收**。`list_agents`/`list_sessions` 的 `canUseTools` 就是這個值。
+ *
+ * (2026-10-03:`opencode` 從 false 改成 true——`OpenCodeAdapter` 現在會掛 bridge,見 opencode-adapter.ts 的
+ * `setSessionNetworkPort()`。原本 simplify-agents-sessions_detail.md 把「OpenCode HTTP 掛 MCP」列在「不做」。)
  */
 export function softwareCanUseTools(software: string): boolean {
-  return software === "claude-agent-sdk" || software === "acp";
+  return software === "claude-agent-sdk" || software === "acp" || software === "opencode";
 }
 
 /** `read_session` 的預設/上限則數,與每則 content 的字元上限。in-process 與 gateway 兩條路徑共用。 */
@@ -63,8 +66,8 @@ export const READ_SESSION_MAX_LIMIT = 100;
 export const READ_SESSION_MAX_CONTENT_CHARS = 4000;
 
 /**
- * `list_agents` 的一筆。`canUseTools` = software 是 `claude-agent-sdk` 或 `acp`(只有這兩種能掛 MCP 工具、
- * 能主動傳訊息;OpenCode(HTTP)與 PTY 只能**收**訊息,回不了話——agent 看到 false 就知道對方不會主動回覆)。
+ * `list_agents` 的一筆。`canUseTools` = software 是 `claude-agent-sdk`、`acp` 或 `opencode`(只有這幾種能掛 MCP 工具、
+ * 能主動傳訊息;PTY 只能**收**訊息,回不了話——agent 看到 false 就知道對方不會主動回覆)。
  */
 export const NetworkAgentSummarySchema = z.object({
   /** providerId——`create_session` 的 `agent` 參數就是填這個值。 */

@@ -187,3 +187,31 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 - 跨 session 工具 `create_session` / `send_to_session` 走既有權限流程(default-deny 不變);`list_agents` / `list_sessions` / `read_session` 純查詢,自動放行。
 
 **沒改什麼**:§C 權限斷路器全部規則、§E1/E3、§F 其餘項、§G。
+
+
+---
+
+## I. 2026-10-03 修訂:OpenCode 也走政策引擎、HTTP 版也掛 session 工具
+
+> 在簡化重構(§H)之後的兩個相關修補。§C 的規則本身一條都沒改——補的是「OpenCode 對這些規則形同虛設」的洞。
+
+**1. OpenCode 的工具呼叫一律經過 PolicyEngine(C2 / C5 / C6 對它補上)。** opencode **預設所有工具權限都是 allow**,
+只有它自己設定裡標成 `"ask"` 的才會發 `permission.asked`(HTTP)/ `session/request_permission`(ACP);使用者的 opencode
+設定通常沒有 `permission` 段,所以過去 OpenCode session 的 bash / edit / webfetch / MCP 呼叫大多**根本到不了**政策引擎
+——default-deny、hard-deny 四類、auto/YOLO 對它全部失效。現在 Deskmony 啟動 opencode 子行程時(`opencode` 與
+`opencode-acp` 兩個 provider)用環境變數 `OPENCODE_CONFIG_CONTENT` 注入「所有工具都 ask」的設定,與使用者既有的值
+深度合併(Deskmony 的 `permission` 優先)。寫法、實測依據與已知邊界見 `packages/adapters/src/opencode-config.ts` 檔頭。
+
+- **使用者可見的改變**:`always-ask` 下的 OpenCode session 原本靜默執行的操作,現在會跳權限確認;auto/YOLO 照常放行。
+- **為了讓它真的有效而一併補的**:(a) `permission-request` 帶上工具參數(沒有 input,hard-deny 與 allowlist 規則只能「猜不到 →
+  不命中」,YOLO 下 `git push --force` 會被當成未分類操作自動放行);(b) HTTP 轉發 subagent 子 session 的權限請求(否則全 ask 後
+  subagent 會永遠等一個沒人回的權限);(c) `opencode-acp` 停用 `task`(subagent)工具——`opencode acp` 不會轉發子 session 的
+  權限請求,實測 subagent 卡死;(d) 三個唯讀查詢工具預先放行(語意等同 Claude SDK 的 `allowedTools`)。
+- **已知邊界**:`agent.<name>.permission`(使用者自己在 opencode 設定檔針對某個 agent 寫的)是 opencode 在全域 `permission`
+  **之後**才疊的,這裡管不到;另外 ACP 對接下,MCP 工具的 `permission-request.input` 只有 opencode 在請求當下給的
+  (實測是 `{}`,真參數稍後才到),政策引擎對它們只能依工具名判斷。
+
+**2. OpenCode(HTTP)也掛 session 網路工具(推翻 §H「不做」清單的一項)。** 同一個 `mcp-bridge-server` 子行程、同一套
+scoped token(`mintMcpBridgeLaunch()`,核發/撤銷沿用 ACP 那條),寫進 opencode 設定的 `mcp.deskmony`;token 只放
+`environment`、不放 `command`,呼叫者身分仍由 token 綁定。`create_session` / `send_to_session` 因為上一項自然走權限流程。
+`softwareCanUseTools("opencode")` 改為 true;provider 目錄的 OpenCode 兩項差別只剩對接方式(HTTP + SSE / ACP)。
