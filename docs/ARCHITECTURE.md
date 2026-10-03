@@ -669,9 +669,11 @@ session」都會設它,後者走一般的 `session.create`)。
   送成功了;全過才投遞(§9.2)。**`create_session`** 先驗 agent(`buildLaunch()`:找不到 /
   未安裝 / 已停用就報錯,不佔預算、不 spawn)→ 鏈預算 → spawn(`parentSessionId` =
   呼叫者,workingDir 預設沿用呼叫者的,一律從 `always-ask` 開始)→ 以信封送出第一則訊息。
-- **UI 轉傳**(`session.forwardMessage`):使用者把某 session 的一則 **assistant** 訊息轉給
-  任一其他 session(附註併進本體);人類操作,開新鏈、不計預算。桌面端的串流訊息 id
-  對不上 DB 那一筆,所以 UI 先用 `session.history` 找出對應的持久化訊息。
+- **UI 轉傳**(`session.forwardMessage({sourceSessionId, targetSessionId, text, note?})`):
+  使用者把某 session 畫面上一個氣泡的文字(`text`)轉給任一其他 session(附註併進本體);人類操作,
+  開新鏈、不計預算。`text` 等同使用者自己貼上,core 只驗證來源/目標存在、目標可送達、不是轉給自己,
+  不回頭查原訊息(桌面端的串流訊息 id 對不上 DB 那一筆,過去靠內容比對去猜,ACP 一輪有多個氣泡時會
+  轉錯);`text` 上限 100,000 字元,超過由 schema 直接拒絕。
 - **權限**:`create_session` / `send_to_session` 不在自動放行清單,走 PolicyEngine 的權限
   階梯(見 §9.1);開了 Auto / YOLO 的 session 它們和其他「未分類」操作一樣會被自動放行,
   那時由 §5.2 的訊息鏈預算兜底。

@@ -398,7 +398,7 @@ function AssistantActions({ item }: { item: Extract<ChatItem, { kind: "assistant
       {forwarding && (
         <ForwardMessageDialog
           source={sourceSession}
-          item={{ id: item.id, content: item.content }}
+          item={{ content: item.content }}
           onClose={() => setForwarding(false)}
         />
       )}

@@ -11,7 +11,6 @@
     "targetUnavailable": "Session {{sessionId}}(「{{title}}」)目前狀態是「{{status}}」,收不到訊息",
     "chainBudgetExceeded": "這條對話鏈已達訊息上限 {{limit}},已熔斷,需要使用者介入(在畫面上輸入新訊息就會開啟新的對話鏈)",
     "createdButNotDelivered": "已建立 session {{sessionId}},但第一則訊息送出失敗:{{detail}}",
-    "cannotForwardToSelf": "不能把訊息轉傳給來源 session 自己",
-    "forwardMessageNotFound": "找不到這則可轉傳的 assistant 訊息(可能還沒完成存檔,請稍後再試)"
+    "cannotForwardToSelf": "不能把訊息轉傳給來源 session 自己"
   }
 }

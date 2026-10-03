@@ -1801,7 +1801,7 @@ async function scopedMcpBridgeTokenSmokeTest(client, workspaceDir) {
       ["session.list", {}],
       ["session.history", { sessionId: otherSessionId }],
       ["session.sendPrompt", { sessionId: otherSessionId, prompt: { text: "冒名的人類輸入" } }],
-      ["session.forwardMessage", { sourceSessionId: primarySessionId, messageId: "x", targetSessionId: otherSessionId }],
+      ["session.forwardMessage", { sourceSessionId: primarySessionId, targetSessionId: otherSessionId, text: "x" }],
       ["env.detectAgents", {}],
     ];
     const rejections = [];

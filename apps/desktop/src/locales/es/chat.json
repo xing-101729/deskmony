@@ -93,6 +93,7 @@
     "noteLabel": "Nota (opcional)",
     "notePlaceholder": "p. ej.: Corrige tu implementación a partir de este resultado",
     "submit": "Reenviar",
-    "sending": "Reenviando…"
+    "sending": "Reenviando…",
+    "tooLong": "Este mensaje es demasiado largo para reenviarlo (el límite es de {{max}} caracteres)"
   }
 }

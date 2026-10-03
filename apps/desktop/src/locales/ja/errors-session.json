@@ -11,7 +11,6 @@
     "targetUnavailable": "セッション {{sessionId}}(「{{title}}」)は現在「{{status}}」の状態で、メッセージを受け取れません",
     "chainBudgetExceeded": "この会話チェーンはメッセージ上限 {{limit}} に達して停止されました。ユーザーの介入が必要です(画面で新しいメッセージを入力すると新しいチェーンが始まります)",
     "createdButNotDelivered": "セッション {{sessionId}} は作成されましたが、最初のメッセージの送信に失敗しました:{{detail}}",
-    "cannotForwardToSelf": "転送元のセッション自身にメッセージを転送することはできません",
-    "forwardMessageNotFound": "転送対象のアシスタントメッセージが見つかりません(まだ保存されていない可能性があります。少し待って再試行してください)"
+    "cannotForwardToSelf": "転送元のセッション自身にメッセージを転送することはできません"
   }
 }

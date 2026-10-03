@@ -11,7 +11,6 @@
     "targetUnavailable": "La sesión {{sessionId}} («{{title}}») está actualmente en estado «{{status}}» y no puede recibir mensajes",
     "chainBudgetExceeded": "Esta cadena de conversación alcanzó su límite de {{limit}} mensajes y se detuvo — hace falta la intervención del usuario (escribir un mensaje nuevo en la interfaz inicia una cadena nueva)",
     "createdButNotDelivered": "Se creó la sesión {{sessionId}}, pero falló el envío de su primer mensaje: {{detail}}",
-    "cannotForwardToSelf": "No se puede reenviar un mensaje a su propia sesión de origen",
-    "forwardMessageNotFound": "No se encontró ese mensaje del asistente para reenviar (puede que aún no se haya guardado — inténtalo de nuevo en un momento)"
+    "cannotForwardToSelf": "No se puede reenviar un mensaje a su propia sesión de origen"
   }
 }

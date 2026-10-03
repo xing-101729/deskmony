@@ -1122,14 +1122,20 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * UI「轉傳到…」(`session.forwardMessage`):使用者把 `sourceSessionId` 的一則 assistant 訊息轉給任一個
-   * 其他 session。**人類操作**:開一條**新的訊息鏈**(`origin.kind === "forward"`),不計入鏈預算、不會被先前
-   * agent 間的鏈熔斷擋下。`note`(使用者選填的附註)接在被轉傳內容前面,一起當成這則訊息的本體。
+   * UI「轉傳到…」(`session.forwardMessage`):使用者把 `sourceSessionId` 畫面上某個氣泡的文字(`text`)轉給
+   * 任一個其他 session。**人類操作**:開一條**新的訊息鏈**(`origin.kind === "forward"`),不計入鏈預算、不會
+   * 被先前 agent 間的鏈熔斷擋下。`note`(使用者選填的附註)接在被轉傳內容前面,一起當成這則訊息的本體。
+   *
+   * 不回頭查原訊息:`text` 是使用者在畫面上看到並按下轉傳的那段文字,等同使用者自己複製貼上——core 只驗證
+   * source/target 存在、target 可送達、不是轉給自己,不去核對 `text` 是不是 source 真的說過的話。過去用
+   * messageId 回查持久化訊息,但串流中的訊息 id 是 adapter 的 messageId、對不上 DB 那一筆,只能靠內容比對
+   * 去猜,ACP 一輪有多個氣泡(多個 assistant 訊息)時會猜錯、轉成整輪文字。長度上限由 gateway 的 schema 把關
+   * (`FORWARD_MESSAGE_MAX_CHARS`)。
    */
   async forwardMessage(input: {
     sourceSessionId: string;
-    messageId: string;
     targetSessionId: string;
+    text: string;
     note?: string;
   }): Promise<void> {
     if (input.sourceSessionId === input.targetSessionId) {
@@ -1142,21 +1148,12 @@ export class SessionManager extends EventEmitter {
     if (!target) {
       throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.targetSessionId }, `找不到目標 session: ${input.targetSessionId}`);
     }
-    const rows = await this.db.select().from(messagesTable).where(eq(messagesTable.id, input.messageId)).all();
-    const message = rows[0];
-    if (!message || message.sessionId !== source.id || message.role !== "assistant") {
-      throw new DeskmonyError(
-        "sessionNetwork.forwardMessageNotFound",
-        { sessionId: source.id, messageId: input.messageId },
-        `在 session ${source.id} 底下找不到這則可轉傳的 assistant 訊息(${input.messageId})`,
-      );
-    }
     this.assertDeliverable(target);
 
     const note = input.note?.trim();
     const chainId = randomUUID();
     await this.deliverNetworkMessage(target.id, {
-      text: note ? `${note}\n\n${message.content}` : message.content,
+      text: note ? `${note}\n\n${input.text}` : input.text,
       origin: { kind: "forward", sessionId: source.id, title: source.title, chainId },
       chainId,
     });

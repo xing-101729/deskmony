@@ -25,6 +25,9 @@
  *   P3.7-7  `read_session` 回最近 N 則、超長內容被截斷。
  *   P3.7-8  ACP bridge token 只能呼叫那五個方法;拿 token 呼叫 `session.setPermissionMode` 被拒。
  *   P3.7-9  `session.forwardMessage` 轉傳後目標收到 `origin.kind === "forward"`,且開了新鏈。
+ *           (2026-10-03:參數改成 `{sourceSessionId, targetSessionId, text, note?}`——`text` 是畫面上氣泡的文字,
+ *           core 不回頭查原訊息;9d 釘住「只轉氣泡片段就剛好送那一段」與「來源沒有對應訊息也能轉」,9c 釘住
+ *           自己/不存在/空白/超長的錯誤。)
  * 另外加了(不在規格九條裡、但同一輪該釘住的)三組:`P3.1`(in-process 工具的呼叫者身分由閉包捕捉、allowedTools
  * 只放查詢類)、`P3.3`(沒有任何 S12 的子結果 push、`session.spawnChild` 已移除)、`P3.6`(in-process 與 ACP bridge
  * 的工具名稱/參數/描述/instructions 逐字一致)。
@@ -68,6 +71,8 @@ const PERMISSION_TIMEOUT_MS = 10_000;
 const MAX_MESSAGES_PER_CHAIN = 3;
 const WARN_AT_PERCENT = 66;
 const ENVELOPE_AGENT_LABEL = "E2E Fake ACP";
+/** `session.forwardMessage` 的 `text` 上限——刻意寫死、與 packages/shared/src/gateway.ts 的 FORWARD_MESSAGE_MAX_CHARS 對照(改了那邊要同步改這裡)。 */
+const FORWARD_MESSAGE_MAX_CHARS = 100_000;
 /** 1x1 透明 PNG,給 read_session 的「只標示有附件、不回傳二進位內容」斷言用。 */
 const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -940,7 +945,7 @@ async function main() {
         ["session.history", { sessionId: B }],
         ["session.create", { providerId: FAKE_ACP, workingDir: wsA }],
         ["session.delete", { sessionId: B }],
-        ["session.forwardMessage", { sourceSessionId: A, messageId: "x", targetSessionId: B }],
+        ["session.forwardMessage", { sourceSessionId: A, targetSessionId: B, text: "x" }],
         ["policy.listRules", {}],
         ["config.getEffective", {}],
       ]) {
@@ -985,10 +990,11 @@ async function main() {
       );
       const srcUser = srcMessages.find((m) => m.role === "user");
       const note = "請處理這個";
+      // 2026-10-03:轉傳的是畫面上氣泡的文字(`text`),core 不回頭查 SRC 的原訊息(沒有 messageId 參數了)。
       await client.rpc("session.forwardMessage", {
         sourceSessionId: SRC,
-        messageId: srcAssistant.id,
         targetSessionId: DST,
+        text: sayText,
         note,
       });
       const { hit: fwd, messages: dstMessages } = await waitForHistory(
@@ -1032,19 +1038,69 @@ async function main() {
           srcUser?.origin === undefined,
         `forwardChain=${forwardChain}, followed=${JSON.stringify(followed?.origin)}`,
       );
-      // 錯誤情境:轉給自己、轉不是 assistant 的訊息
-      const selfForward = await client.rpc("session.forwardMessage", { sourceSessionId: SRC, messageId: srcAssistant.id, targetSessionId: SRC }).then(
-        () => ({ rejected: false }),
-        (err) => ({ rejected: true, code: err.errorCode }),
+      // 9d:轉傳的是畫面上氣泡的文字,core 不回頭查原訊息——ACP 一輪有多個氣泡時,使用者按的那個氣泡只是整輪
+      // 文字的一部分,送出去的必須剛好是那一部分(而不是比對到整輪文字);來源 session 甚至不必有任何對應的
+      // 持久化訊息(內容完全由使用者畫面上的文字決定,等同使用者自己貼上)。
+      {
+        const DST3 = (await createSession(client, wsB, "net-dst3")).id;
+        const EMPTY_SRC = (await createSession(client, wsA, "net-empty-src")).id;
+        const bubbleFragment = "轉傳內容"; // sayText 的開頭那一段,其餘(含標記)不該跟著送出
+        const freeText = "這段文字沒有出現在任何一個 session 的歷史裡";
+        const sourceHasFullText = srcAssistant?.content === sayText && sayText.length > bubbleFragment.length;
+        await client.rpc("session.forwardMessage", { sourceSessionId: SRC, targetSessionId: DST3, text: bubbleFragment });
+        await client.rpc("session.forwardMessage", { sourceSessionId: EMPTY_SRC, targetSessionId: DST3, text: freeText, note: "  補充  " });
+        const { hit: fragmentMsg, messages: dst3Messages } = await waitForHistory(
+          client,
+          DST3,
+          (ms) => ms.find((m) => m.role === "user" && m.origin?.kind === "forward" && m.content === bubbleFragment),
+          30_000,
+        );
+        const { hit: freeMsg } = await waitForHistory(
+          client,
+          DST3,
+          (ms) => ms.find((m) => m.role === "user" && m.origin?.kind === "forward" && m.origin.sessionId === EMPTY_SRC),
+          60_000,
+        );
+        noteChain(dst3Messages);
+        record(
+          "P3.7-9d 轉傳的 text 原樣送出、core 不回頭查原訊息:只轉氣泡片段 → 目標收到的剛好是那個片段(不是來源的整段文字);來源 session 沒有任何訊息也能轉,note 前後空白被修剪、接在 text 前面",
+          sourceHasFullText &&
+            fragmentMsg?.origin.sessionId === SRC &&
+            freeMsg?.content === `補充\n\n${freeText}` &&
+            freeMsg.origin.title === "net-empty-src",
+          `fragment=${JSON.stringify(fragmentMsg)}, free=${JSON.stringify(freeMsg)}, sourceHasFullText=${sourceHasFullText}`,
+        );
+      }
+      // 錯誤情境:轉給自己、來源/目標不存在、text 空白 / 超過上限
+      const asOutcome = (promise) =>
+        promise.then(
+          () => ({ rejected: false }),
+          (err) => ({ rejected: true, code: err.errorCode }),
+        );
+      const selfForward = await asOutcome(client.rpc("session.forwardMessage", { sourceSessionId: SRC, targetSessionId: SRC, text: "x" }));
+      const missingTarget = await asOutcome(
+        client.rpc("session.forwardMessage", { sourceSessionId: SRC, targetSessionId: randomUUID(), text: "x" }),
       );
-      const userForward = await client.rpc("session.forwardMessage", { sourceSessionId: SRC, messageId: srcUser.id, targetSessionId: DST }).then(
-        () => ({ rejected: false }),
-        (err) => ({ rejected: true, code: err.errorCode }),
+      const missingSource = await asOutcome(
+        client.rpc("session.forwardMessage", { sourceSessionId: randomUUID(), targetSessionId: DST, text: "x" }),
+      );
+      const emptyText = await asOutcome(client.rpc("session.forwardMessage", { sourceSessionId: SRC, targetSessionId: DST, text: "" }));
+      const tooLongText = await asOutcome(
+        client.rpc("session.forwardMessage", { sourceSessionId: SRC, targetSessionId: DST, text: "a".repeat(FORWARD_MESSAGE_MAX_CHARS + 1) }),
       );
       record(
-        "P3.7-9c session.forwardMessage 轉給來源自己、或轉不是 assistant 的訊息 → 明確錯誤",
-        selfForward.rejected && selfForward.code === "sessionNetwork.cannotForwardToSelf" && userForward.rejected && userForward.code === "sessionNetwork.forwardMessageNotFound",
-        `self=${JSON.stringify(selfForward)}, user=${JSON.stringify(userForward)}`,
+        `P3.7-9c session.forwardMessage 轉給來源自己 → cannotForwardToSelf;來源/目標不存在 → entity.notFound;text 空字串、超過 ${FORWARD_MESSAGE_MAX_CHARS} 字元 → gateway.invalidRequest(明確拒絕,不會截斷後送出)`,
+        selfForward.rejected &&
+          selfForward.code === "sessionNetwork.cannotForwardToSelf" &&
+          missingTarget.rejected &&
+          missingTarget.code === "entity.notFound" &&
+          missingSource.rejected &&
+          missingSource.code === "entity.notFound" &&
+          emptyText.rejected &&
+          emptyText.code === "gateway.invalidRequest" &&
+          tooLongText.rejected &&
+          tooLongText.code === "gateway.invalidRequest",
+        `self=${JSON.stringify(selfForward)}, missingTarget=${JSON.stringify(missingTarget)}, missingSource=${JSON.stringify(missingSource)}, empty=${JSON.stringify(emptyText)}, tooLong=${JSON.stringify(tooLongText)}`,
       );
     } catch (err) {
       record("P3.7-9 session.forwardMessage", false, String(err?.stack ?? err));

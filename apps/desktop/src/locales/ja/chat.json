@@ -93,6 +93,7 @@
     "noteLabel": "メモ(任意)",
     "notePlaceholder": "例:この結果をもとに実装を修正してください",
     "submit": "転送",
-    "sending": "転送中…"
+    "sending": "転送中…",
+    "tooLong": "このメッセージは長すぎて転送できません(上限は {{max}} 文字です)"
   }
 }

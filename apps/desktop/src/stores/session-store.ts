@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import {
-  DeskmonyError,
   type AdapterCapabilities,
   type AgentDetectionEntry,
   type AgentSoftware,
@@ -302,17 +301,12 @@ interface SessionStoreState {
     title?: string,
   ) => Promise<void>;
   /**
-   * 「轉傳到…」:把 `sourceSessionId` 的一則 assistant 訊息轉給 `targetSessionId`(`session.forwardMessage`)。
-   * gateway 要的是**持久化的訊息 id**,但即時串流中的訊息項目 id 是 adapter 的 messageId(對不上 DB 那一筆),
-   * 所以這裡先用 `session.history` 找出對應的持久化 assistant 訊息(id 相同 → 內容相同 → 內容包含,
-   * 由新到舊);找不到就丟 `sessionNetwork.forwardMessageNotFound`(UI 顯示翻譯後的訊息)。
+   * 「轉傳到…」:把 `sourceSessionId` 畫面上某個氣泡的文字(`text`)轉給 `targetSessionId`
+   * (`session.forwardMessage`)。轉傳是人類操作、等同使用者自己貼上這段文字,所以直接把使用者按下轉傳的
+   * 那個氣泡的內容送出,不回頭用 id/內容去比對持久化的原訊息(即時串流中的訊息 id 是 adapter 的
+   * messageId、對不上 DB 那一筆,比對會在 ACP 一輪有多個氣泡時轉錯)。
    */
-  forwardMessage: (
-    sourceSessionId: string,
-    item: { id: string; content: string },
-    targetSessionId: string,
-    note?: string,
-  ) => Promise<void>;
+  forwardMessage: (sourceSessionId: string, text: string, targetSessionId: string, note?: string) => Promise<void>;
   /** Phase 6:`attachments` 選填——composer 沒有待送附件時省略/傳空陣列皆可,
    *  action 內部一律正規化成「非空才附加」,樂觀回顯與 wire payload 兩處共用
    *  同一份判斷(見下方實作)。 */
@@ -975,25 +969,11 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     await client.call("session.sendPrompt", { sessionId: session.id, prompt: { text: prompt } });
   },
 
-  forwardMessage: async (sourceSessionId, item, targetSessionId, note) => {
-    const raw = await client.call("session.history", { sessionId: sourceSessionId });
-    const { messages } = SessionHistoryResultSchema.parse(raw);
-    const assistants = messages.filter((m) => m.role === "assistant");
-    const match =
-      assistants.find((m) => m.id === item.id) ??
-      [...assistants].reverse().find((m) => m.content === item.content) ??
-      [...assistants].reverse().find((m) => m.content.includes(item.content));
-    if (!match) {
-      throw new DeskmonyError(
-        "sessionNetwork.forwardMessageNotFound",
-        { sessionId: sourceSessionId, messageId: item.id },
-        `找不到可轉傳的訊息(${item.id})`,
-      );
-    }
+  forwardMessage: async (sourceSessionId, text, targetSessionId, note) => {
     await client.call("session.forwardMessage", {
       sourceSessionId,
-      messageId: match.id,
       targetSessionId,
+      text,
       ...(note && note.trim() ? { note: note.trim() } : {}),
     });
   },

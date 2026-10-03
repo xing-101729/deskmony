@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { Session } from "@deskmony/shared";
+import { FORWARD_MESSAGE_MAX_CHARS, type Session } from "@deskmony/shared";
 import { providerLabelOf, useSessionStore } from "../../stores/session-store.js";
 import { Button } from "../../ui/Button.js";
 import { Dialog } from "../../ui/Dialog.js";
@@ -24,7 +24,8 @@ export function ForwardMessageDialog({
 }: {
   /** 訊息所在的 session(也就是「來源」,不能選自己當目標)。 */
   source: Session;
-  item: { id: string; content: string };
+  /** 使用者按下轉傳的那個氣泡——`content` 就是要轉傳的文字(畫面上看到什麼就送什麼)。 */
+  item: { content: string };
   onClose: () => void;
 }): JSX.Element {
   const { t } = useTranslation(["chat", "common"]);
@@ -38,13 +39,15 @@ export function ForwardMessageDialog({
   const [error, setError] = useState<string | null>(null);
 
   const targets = useMemo(() => sessions.filter((s) => s.id !== source.id), [sessions, source.id]);
+  // gateway 對 `text` 有字元上限;超過就在這裡明講,而不是等 gateway 回一個「無效的請求格式」。
+  const tooLong = item.content.length > FORWARD_MESSAGE_MAX_CHARS;
 
   const handleSubmit = async (): Promise<void> => {
-    if (!targetId) return;
+    if (!targetId || tooLong) return;
     setError(null);
     setSubmitting(true);
     try {
-      await forwardMessage(source.id, item, targetId, note);
+      await forwardMessage(source.id, item.content, targetId, note);
       onClose();
     } catch (err) {
       setError(translateError(err, t));
@@ -65,7 +68,7 @@ export function ForwardMessageDialog({
           <Button variant="secondary" disabled={submitting} onClick={onClose}>
             {t("common:cancel")}
           </Button>
-          <Button variant="primary" disabled={!targetId || submitting} loading={submitting} onClick={() => void handleSubmit()}>
+          <Button variant="primary" disabled={!targetId || submitting || tooLong} loading={submitting} onClick={() => void handleSubmit()}>
             {submitting ? t("chat:forward.sending") : t("chat:forward.submit")}
           </Button>
         </div>
@@ -104,6 +107,7 @@ export function ForwardMessageDialog({
             placeholder={t("chat:forward.notePlaceholder")}
           />
         </Field>
+        {tooLong && <Alert tone="danger">{t("chat:forward.tooLong", { max: FORWARD_MESSAGE_MAX_CHARS.toLocaleString() })}</Alert>}
         {error && <Alert tone="danger">{error}</Alert>}
       </div>
     </Dialog>

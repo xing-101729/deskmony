@@ -93,6 +93,7 @@
     "noteLabel": "Note (optional)",
     "notePlaceholder": "e.g. Please fix your implementation based on this result",
     "submit": "Forward",
-    "sending": "Forwarding…"
+    "sending": "Forwarding…",
+    "tooLong": "This message is too long to forward (the limit is {{max}} characters)"
   }
 }

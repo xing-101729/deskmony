@@ -93,6 +93,7 @@
     "noteLabel": "附註(選填)",
     "notePlaceholder": "例如:請根據這份結果修正你那邊的實作",
     "submit": "轉傳",
-    "sending": "轉傳中…"
+    "sending": "轉傳中…",
+    "tooLong": "這則訊息太長,無法轉傳(上限為 {{max}} 個字元)"
   }
 }

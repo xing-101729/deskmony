@@ -22,6 +22,9 @@ import { RecoveryListResultSchema } from "./recovery.js";
 
 const baseRequest = { id: z.string() };
 
+/** `session.forwardMessage` 的 `text` 字元上限(UI 轉傳的是畫面上單一氣泡的文字,實務上遠小於此)。 */
+export const FORWARD_MESSAGE_MAX_CHARS = 100_000;
+
 export const ClientRequestSchema = z.discriminatedUnion("method", [
   /**
    * M5 Round A 新增:token-based 認證(見 apps/core/src/gateway/ws-gateway.ts
@@ -298,18 +301,24 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   }),
   /**
    * 2026-10-02(P3):UI 的「轉傳到…」——使用者把某個 session 的一則 assistant 訊息轉給另一個 session
-   * (任一 session,不限父子)。`messageId` 是 `session.history` 回傳的持久化訊息 id,且必須是
-   * `sourceSessionId` 底下 `role === "assistant"` 的訊息;`note` 是使用者選填的附註。目標收到的信封標明
-   * 「使用者從 session X 轉來」,持久化訊息的 `origin.kind === "forward"`。這是**人類操作**:開一條新的訊息鏈
-   * (見 SessionManager 的鏈預算說明),不受先前 agent 間鏈熔斷的影響。
+   * (任一 session,不限父子)。目標收到的信封標明「使用者從 session X 轉來」,持久化訊息的
+   * `origin.kind === "forward"`。這是**人類操作**:開一條新的訊息鏈(見 SessionManager 的鏈預算說明),
+   * 不受先前 agent 間鏈熔斷的影響。
+   *
+   * 2026-10-03:`text` 就是使用者按下轉傳的那個氣泡**當下畫面上的文字**,core 不再回頭查原訊息(原本的
+   * `messageId` 要對上 DB 那一筆,但桌面端串流中的訊息 id 是 adapter 的 messageId、對不上,只能靠內容
+   * 比對去猜,ACP 一輪有多個氣泡時會猜錯而轉成整輪文字)。轉傳等同人類自己打字——使用者本來就能複製貼上
+   * 任何文字給另一個 session,所以 core 只驗證 source/target 存在、target 可送達、不是轉給自己;不驗證
+   * `text` 是不是 `sourceSessionId` 真的說過的話。`note` 是使用者選填的附註,接在 `text` 前面。
+   * `text` 上限 `FORWARD_MESSAGE_MAX_CHARS`,超過由 schema 驗證直接拒絕(無效的請求格式)。
    */
   z.object({
     ...baseRequest,
     method: z.literal("session.forwardMessage"),
     params: z.object({
       sourceSessionId: z.string().min(1),
-      messageId: z.string().min(1),
       targetSessionId: z.string().min(1),
+      text: z.string().min(1).max(FORWARD_MESSAGE_MAX_CHARS),
       note: z.string().optional(),
     }),
   }),

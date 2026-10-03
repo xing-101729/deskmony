@@ -219,7 +219,7 @@ MCP server 名稱改為 `deskmony`(工具全名 `mcp__deskmony__<name>`)。
 
 ### P3.5 UI
 
-- 每則 assistant 訊息的動作列加「轉傳到…」:選目標 session(所有 session,排除自己)+ 選填附註 → gateway `session.forwardMessage({sourceSessionId, messageId, targetSessionId, note?})`。目標收到的信封標明「使用者從 session X 轉來」。
+- 每則 assistant 訊息的動作列加「轉傳到…」:選目標 session(所有 session,排除自己)+ 選填附註 → gateway `session.forwardMessage({sourceSessionId, targetSessionId, text, note?})`(`text` 是按下轉傳的那個氣泡的文字;原本是 `messageId`,見下方 P3 實作回報的修正)。目標收到的信封標明「使用者從 session X 轉來」。
 - 收到的跨 session 訊息依 §P3.2 顯示來源標籤。
 - `SessionList` 父子巢狀顯示保留(由 `create_session` 建出的 session 掛在建立者底下)。
 
@@ -254,7 +254,8 @@ MCP server 名稱改為 `deskmony`(工具全名 `mcp__deskmony__<name>`)。
 - **鏈預算語意**:計數在送出**之前**判斷(第 `max` 則放行、第 `max+1` 則起被拒);`create_session` 在鏈已熔斷時不會 spawn 新 session;新 session 的 agent 先驗證(`buildLaunch()`)再佔預算。第一次越線才走 `enforcementTrip()`(audit + 通知,`interrupt:false`),同一條鏈之後再被拒只回錯誤、不重複通知。達 `warnAtPercent` 發一次軟警告(audit + 通知,`reminder`/`message`/`message-chain-warning`)。UI 轉傳是人類操作,開新鏈、**不計數、不會被擋**。鏈的計數只存記憶體,且只保留「還有 session 的 `currentChainId` 或待送佇列指向」的鏈(新建鏈時與 session 刪除/關閉/回收時修剪,另有 10,000 條硬上限當最後防線)。
 - **新增事件型別**:`TripEnforcementEvent.reason` 為自由字串,通知分類 `NotificationTripReasonSchema` 新增 `"message-chain-budget"`(舊的 `"message-budget"` 保留只為相容舊 payload);`ReminderEnforcementEvent` 的 `source` 加 `"message"`、`reason` 加 `"message-chain-warning"`;通知文案四語系已補。
 - **新增 push channel `session-message`**(規格沒寫):別的 session 送來的訊息(`origin` 有值的 user 訊息)寫進歷史時推播 `{sessionId, message}`,讓正在看那個 session 的 UI(桌面、TUI)即時顯示「來自 <title>」;取代 S12 的 `child-result`。
-- **`session.forwardMessage` 的附註**併進訊息本體(`附註\n\n被轉傳內容`),因為 `origin` 的形狀是固定的;來源訊息必須是 `sourceSessionId` 底下 `role === "assistant"` 的持久化訊息。桌面端即時串流中的訊息項目 id 是 adapter 的 messageId、對不上 DB 那一筆,所以 UI 先用 `session.history` 找出對應的持久化訊息(id → 內容相同 → 內容包含,由新到舊),找不到就顯示 `sessionNetwork.forwardMessageNotFound`。
+- **`session.forwardMessage` 的附註**併進訊息本體(`附註\n\n被轉傳內容`),因為 `origin` 的形狀是固定的。
+- **`session.forwardMessage` 的參數(2026-10-03 修正)**:一開始實作成 `{sourceSessionId, messageId, targetSessionId, note?}`,core 要求 `messageId` 是 `sourceSessionId` 底下 `role === "assistant"` 的持久化訊息;但桌面端即時串流中的訊息項目 id 是 adapter 的 messageId、對不上 DB 那一筆,UI 只好先用 `session.history` 依「id → 內容相同 → 內容包含」去猜,ACP 一輪有多個氣泡時會猜錯、轉成整輪文字,猜不到又報 `sessionNetwork.forwardMessageNotFound`。轉傳是人類操作(等同使用者自己複製貼上),沒有必要回頭查原訊息,所以改成 `{sourceSessionId, targetSessionId, text, note?}`:`text` 就是使用者按下轉傳的那個氣泡的文字(min 1、max 100,000 字元,由 gateway schema 把關,超過回 `gateway.invalidRequest`,桌面端的對話框會先擋下並顯示 `chat:forward.tooLong`);core 只驗證來源/目標存在、目標可送達、不是轉給自己,不核對 `text` 是不是來源真的說過的話。`sessionNetwork.forwardMessageNotFound` 錯誤碼與四語系文案已刪除。
 - **gateway 的五個 bridge 方法呼叫者身分**:`checkScopedGrantAccess()` 回傳 token 綁定的 `sessionId`,`dispatch()` 以第三個參數接收;沒有 token 的一般連線呼叫這五個方法回 `gateway.bridgeTokenRequired`(fail-closed)。
 - **pty 的待送佇列**:pty 沒有 `completed` 事件,靜止計時器把它轉回 idle 時也 flush 待送訊息(否則排隊的訊息永遠送不到)。
 - **e2e 手法**:`scripts/fake-acp-agent.mjs` 新增 `[[E2E_BRIDGE_ON_PROMPT:<base64>]]` 標記(收到含標記的 prompt 就自己呼叫指定的 bridge 工具,用來模擬「agent 收到訊息後自己決定回覆」,A↔B 互傳的鏈就靠它推進)與 `ACP_SAY <文字>`;呼叫 bridge 工具的三條路徑排在 prompt 比對的最前面。`closed` 的 session 由序幕 core 造出(強制終止 → 重啟對帳成 `interrupted` → `recovery.abandon` 成 `closed`)。

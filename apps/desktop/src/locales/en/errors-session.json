@@ -11,7 +11,6 @@
     "targetUnavailable": "Session {{sessionId}} (\"{{title}}\") is currently \"{{status}}\" and cannot receive messages",
     "chainBudgetExceeded": "This conversation chain has reached its message limit of {{limit}} and was halted — user intervention is needed (typing a new message in the UI starts a new chain)",
     "createdButNotDelivered": "Session {{sessionId}} was created, but sending its first message failed: {{detail}}",
-    "cannotForwardToSelf": "A message cannot be forwarded to its own source session",
-    "forwardMessageNotFound": "Could not find that assistant message to forward (it may not be saved yet — try again shortly)"
+    "cannotForwardToSelf": "A message cannot be forwarded to its own source session"
   }
 }
