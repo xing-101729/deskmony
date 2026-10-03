@@ -375,7 +375,19 @@ function OriginTag({ origin }: { origin: MessageOrigin }): JSX.Element {
 
 /**
  * 每則 assistant 訊息的動作列(串流完才出現):「轉傳到…」→ `ForwardMessageDialog`。滑過整則訊息才顯示
- * (`group-hover`),鍵盤聚焦時也會顯示(`focus-visible`),比照 SessionList 列上動作鈕的既有作法。
+ * (`group-hover`),鍵盤聚焦(`focus-visible`)時也會顯示。
+ *
+ * **疊加式、不佔版面**:這個元件要渲染在氣泡外層的 `relative` 容器裡(見 `ChatBubble`),動作鈕是跨在氣泡
+ * 左下角邊緣的絕對定位浮動鈕。過去它是氣泡下方的一個獨立 `div`(隱藏時 `opacity-0`),不論有沒有 hover
+ * 都佔一行高度,所以 assistant 訊息和下一則訊息之間永遠多了約 20px 的空隙(user 接 assistant 只有 4px,
+ * assistant 接 user 卻是 24px)。現在它不參與排版,hover 前後整串訊息的位置完全不變。
+ * 錨在**左**下角(`left-2`)而不是右下角:assistant 氣泡靠左,很短的氣泡(例如「OK」)比按鈕還窄,錨在右邊
+ * 的話按鈕會往左凸出氣泡、被捲動容器的左邊界切掉;錨在左邊則是往右凸出到空白處。按鈕要 `whitespace-nowrap`:
+ * 絕對定位元素的寬度上限是「氣泡寬度 − left」,不加的話短氣泡上的標籤會被擠成好幾行。
+ * `-bottom-1` 刻意只伸出氣泡外 4px——剛好是相鄰訊息間 `my-1` 疊出的間距,不蓋到下一則;伸進氣泡內的部分
+ * 落在 `py-2.5` 的底部留白裡。隱藏時 `pointer-events-none`,免得看不見的按鈕擋住氣泡左下角的選字。
+ * 鍵盤聚焦用 `has-[:focus-visible]` 而不是 `focus-within`:滑鼠點擊後(對話框關閉、焦點回到按鈕)不會讓它
+ * 一直停在顯示狀態。
  */
 function AssistantActions({ item }: { item: Extract<ChatItem, { kind: "assistant" }> }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
@@ -384,12 +396,12 @@ function AssistantActions({ item }: { item: Extract<ChatItem, { kind: "assistant
   if (!sourceSession) return null;
   return (
     <>
-      <div className="mt-0.5 flex justify-start opacity-0 transition focus-within:opacity-100 group-hover:opacity-100">
+      <div className="pointer-events-none absolute -bottom-1 left-2 z-10 flex opacity-0 transition has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
         <button
           type="button"
           onClick={() => setForwarding(true)}
           title={t("chat:forward.buttonTitle")}
-          className="focus-ring inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-2xs text-fg-faint transition hover:bg-surface hover:text-fg-muted"
+          className="focus-ring inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-line-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-fg-muted shadow-sm transition hover:bg-surface hover:text-fg"
         >
           <Icon name="forward" size={11} />
           {t("chat:forward.button")}
@@ -480,44 +492,49 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
 
   const isUser = item.kind === "user";
   return (
-    <div className={`group my-1 ${isUser ? "" : "flex flex-col items-start"}`}>
+    <div className="group my-1">
       <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
-        <div
-          className={`max-w-[75%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
-            isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
-          }`}
-        >
-          {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片/檔案——
-              樂觀回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後
-              的 history(messageRecordsToItems())兩條路徑都會填
-              item.attachments,這裡不需要區分來源。 */}
-          {item.kind === "user" && item.attachments && item.attachments.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-1.5">
-              {item.attachments.map((att, index) =>
-                att.type === "image" ? (
-                  <img
-                    key={index}
-                    src={`data:${att.mediaType};base64,${att.data}`}
-                    alt={t("chat:composer.attachmentAltText")}
-                    className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
-                  />
-                ) : (
-                  <AttachmentFileChip
-                    key={index}
-                    name={att.name}
-                    className="rounded-md border border-accent-fg/20 bg-accent-fg/10 px-2 py-1 text-2xs"
-                  />
-                ),
-              )}
-            </div>
-          )}
-          {isUser ? item.content : <MarkdownMessage content={item.content} />}
-          {item.kind === "assistant" && item.streaming && (
-            <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-fg-muted align-middle" />
-          )}
+        {/* 外層 `relative` 容器是 `AssistantActions` 浮動鈕的定位基準。浮動鈕刻意放在氣泡 div 的**外面**
+            (而不是氣泡內容的最後一個子元素):`MarkdownMessage` 的段落靠 `last:mb-0` 去掉最後一段的下邊距,
+            氣泡裡多一個兄弟節點會讓它失效、氣泡平白變高。 */}
+        <div className="relative max-w-[75%]">
+          <div
+            className={`rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
+              isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
+            }`}
+          >
+            {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片/檔案——
+                樂觀回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後
+                的 history(messageRecordsToItems())兩條路徑都會填
+                item.attachments,這裡不需要區分來源。 */}
+            {item.kind === "user" && item.attachments && item.attachments.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {item.attachments.map((att, index) =>
+                  att.type === "image" ? (
+                    <img
+                      key={index}
+                      src={`data:${att.mediaType};base64,${att.data}`}
+                      alt={t("chat:composer.attachmentAltText")}
+                      className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
+                    />
+                  ) : (
+                    <AttachmentFileChip
+                      key={index}
+                      name={att.name}
+                      className="rounded-md border border-accent-fg/20 bg-accent-fg/10 px-2 py-1 text-2xs"
+                    />
+                  ),
+                )}
+              </div>
+            )}
+            {isUser ? item.content : <MarkdownMessage content={item.content} />}
+            {item.kind === "assistant" && item.streaming && (
+              <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-fg-muted align-middle" />
+            )}
+          </div>
+          {item.kind === "assistant" && !item.streaming && item.content.trim() !== "" && <AssistantActions item={item} />}
         </div>
       </div>
-      {item.kind === "assistant" && !item.streaming && item.content.trim() !== "" && <AssistantActions item={item} />}
     </div>
   );
 });
