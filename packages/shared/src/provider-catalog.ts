@@ -52,6 +52,23 @@ export type ProviderModel = z.infer<typeof ProviderModelSchema>;
 export const RegisteredAgentSoftwareSchema = z.enum(["claude-agent-sdk", "acp", "pty", "opencode"]);
 export type RegisteredAgentSoftware = z.infer<typeof RegisteredAgentSoftwareSchema>;
 
+/**
+ * 「agent 家族」:這個 provider 底下跑的是哪一個**有自己的預設權限策略、Deskmony 必須在啟動時介入**的
+ * 外部 agent,與 `software`(Deskmony 用哪個 adapter 對接)是**正交**的兩件事。
+ *
+ * 目前只有 `"opencode"`:opencode **預設所有工具權限都是 allow**,只有它自己設定檔裡標成 `"ask"`
+ * 的工具才會發權限請求——使用者的 opencode 設定通常沒有 `permission` 段,所以不處理的話,
+ * OpenCode session 跑 bash/edit/webfetch/MCP 工具時**完全不經過** Deskmony 的政策引擎
+ * (docs/DECISIONS.md §C 的 default-deny、hard-deny 四類、auto/YOLO 對它全部失效)。
+ * Deskmony 啟動這一家的子行程時,會透過環境變數 `OPENCODE_CONFIG_CONTENT` 注入「所有工具都 ask」
+ * 的設定(見 packages/adapters/src/opencode-config.ts)——`opencode`(HTTP,`software: "opencode"`)與
+ * `opencode-acp`(`software: "acp"`)兩種對接方式都是這一家,所以不能只靠 `software` 判斷。
+ *
+ * 未來若有別的 agent 也有「預設放行、要靠啟動設定改成逐項詢問」的行為,在這裡加一個成員即可。
+ */
+export const AgentFamilySchema = z.enum(["opencode"]);
+export type AgentFamily = z.infer<typeof AgentFamilySchema>;
+
 export const ProviderCatalogEntrySchema = z.object({
   /** 穩定識別碼(例如 "claude-agent-sdk"、"gemini"),使用者偏好(settings 的
    *  per-provider prefs)以這個 id 為 key 覆寫。 */
@@ -59,6 +76,9 @@ export const ProviderCatalogEntrySchema = z.object({
   label: z.string().min(1),
   description: z.string().optional(),
   software: RegisteredAgentSoftwareSchema,
+  /** 見 `AgentFamilySchema`。省略 = 沒有需要 Deskmony 在啟動時介入的預設權限策略。
+   *  e2e 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入的測試 provider 也可以宣告它,測試才走得到注入邏輯。 */
+  family: AgentFamilySchema.optional(),
   /**
    * 對應 `AgentDetectionEntry.key`(見 detect.ts),`resolveProviders()` 依此
    * 帶入安裝狀態與解析出的執行檔路徑。省略代表這個 provider 沒有對應的自動
@@ -223,6 +243,7 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     label: "OpenCode",
     description: "OpenCode 的 HTTP + SSE headless server API。",
     software: "opencode",
+    family: "opencode",
     detectKey: "opencode-cli",
     // 這輪起:目錄本身的靜態清單仍是空的(這裡不臆測任何固定 model
     // 清單——opencode 支援的 provider/model 組合完全依使用者本機安裝/設定
@@ -246,6 +267,7 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
       "看到其他 session 並主動傳訊息**;走 HTTP server API 的那個只能收訊息、不能主動傳(adapter 內沒有任何 MCP 掛載)。" +
       "單機使用兩者差異不大。",
     software: "acp",
+    family: "opencode",
     detectKey: "opencode-cli",
     // `opencode acp`——2026-08-28 對本機實際安裝的 opencode 1.18.7 實測驗證
     // (比照本 repo「以實際觀察到的行為為準,不臆測」的一貫紀律):

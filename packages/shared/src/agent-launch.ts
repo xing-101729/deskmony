@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentFamily } from "./provider-catalog.js";
 
 /**
  * agent-launch.ts:原本的 `agent-profile.ts`(2026-10-02 P2「移除 profile」改名,見
@@ -155,6 +156,12 @@ export interface AgentLaunchSpec {
    *  provider 層級 env 的查找 key,不影響怎麼 spawn(`software`/`*Config` 才是權威)。
    *  退回舊資料時可能是 `"legacy-<software>"` 這種沒有目錄項目對應的值。 */
   providerId?: string;
+  /**
+   * 這個 agent 的「家族」(見 provider-catalog.ts 的 `AgentFamilySchema`):由 `AgentCatalog` 依 provider 目錄項目
+   * 帶入(退回 session 自己存的啟動資訊時,依 providerId 反查目錄)。adapter 靠它決定要不要在啟動子程序時
+   * 介入該家族的預設權限策略——對 `software: "acp"` 這是**唯一**能分辨「這是 opencode acp」的資訊。
+   */
+  family?: AgentFamily;
   model?: string;
   effort?: EffortLevel;
   /** 會與 process.env 合併傳給子程序(claude-agent-sdk 併入 SDK `Options.env`)。 */

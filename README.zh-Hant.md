@@ -70,6 +70,7 @@ flowchart TB
 
 - **YOLO 跟 auto 的差別只有一個**:YOLO 額外跳過 config 的 `deny` 規則。**兩者都絕不跳過 hard-deny。** YOLO 還會在 30 分鐘後過期。
 - **引擎判不出來的一律 escalate**,絕不 allow。這是 `decide()` 的最後一行。
+- **OpenCode 也被強制走同一條階梯。** OpenCode 預設放行所有工具,只有它自己設定檔標成 `"ask"` 的才會詢問 —— 而多數人的設定一個都沒標,所以放著不管的話,它的 bash/edit/webfetch/MCP 呼叫根本到不了引擎。Deskmony 啟動 OpenCode(`opencode` 與 `opencode-acp` 兩個 provider)時,會注入一段 `OPENCODE_CONFIG_CONTENT`,把每個工具都設成 `ask`,並與你原本的設定合併(你的設定保留,但權限規則以 Deskmony 的為準)。看得到的影響:`always-ask` 下的 OpenCode session 現在會停下來問,以前是靜默執行;auto/YOLO 照舊。一個限制:`opencode-acp` provider 的 `task`(subagent)工具會被停用,因為 `opencode acp` 不會轉發 subagent 的權限請求,subagent 會永遠卡住。
 - **逾時語意取決於現場有沒有人。** 有人看著 → 待決請求逾時後轉成 deny。沒人看著 → **完全不設計時器**,session 停在 `waiting` 等人回答。把「沒人回應」解讀成「拒絕」,等於把整晚的工作丟掉。真正防止它無限期懸著的是成本斷路器。
 - **「永遠允許」有三條紀律**:寫最窄的規則(`commandEquals` / `pathUnder`);同時寫進設定檔與記憶體,讓重啟前後行為一致;hard-deny 升級來的請求**永遠**不符資格 —— 就算 client 硬塞 `rememberRule`,core 也會把它拔掉。
 - **規則可以限定到某個 agent**(`providerId`,例如只對 Codex 的 session 生效)。舊 profile 時代遺留的規則 —— 在舊版 `config.json` 裡限定 profile id 或角色的 —— 已經對不到任何 session,所以一律往安全的方向收:這類 `allow` 規則不再匹配(該次呼叫改成升級給人),這類 `deny` 規則改成套用到**所有** session,避免被限定範圍的 deny 靜默失效、在 auto 模式下變成自動放行。core 啟動時會逐條記錄受影響的規則。

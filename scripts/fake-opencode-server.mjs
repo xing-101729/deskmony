@@ -43,6 +43,10 @@
  *         文字,最後 idle。
  *       - reply === "reject":不送 tool-result,只送一段「已拒絕」文字,
  *         直接 idle(語意比照 fake-acp-agent.mjs 的 deny 路徑)。
+ *     2026-10-03:prompt 內含 `[command:<指令>]` 時,TOOL_CALL_PREFIX 流程的 bash 指令改用它(預設
+ *     TOOL_CALL_INPUT.command)——給 e2e-opencode-permissions.mjs 送出 `git push --force` 這類會被 hard-deny
+ *     擋下的指令,驗證 permission-request 帶著工具參數進政策引擎。`permission.asked` 的 `patterns`/`metadata`
+ *     照真實 opencode 1.18.7 實測的形狀(bash:`patterns:[指令]`、`metadata:{command}`)。
  *   - 若 prompt 文字以 MANY_TOOL_CALLS_PREFIX 開頭(2026-09-17 新增):其後接
  *     JSON `{"count": number, "delayMs"?: number}`,連續送出 `count` 個不需要
  *     權限的工具呼叫,每個都是 pending → running(input 為
@@ -68,6 +72,14 @@
  *       - `POST /session/{id}/abort`:**不送** `question.rejected`,只送 part
  *         (error,「Tool execution aborted」)+ 帶 `MessageAbortedError` 的
  *         `message.updated`,再 idle——與真實 opencode 的 abort 行為一致。
+ *   - 若 prompt 文字以 REPORT_ENV_PREFIX 開頭(2026-10-03,給 e2e-opencode-permissions.mjs):回覆
+ *     `ENV:` + JSON(`{ OPENCODE_CONFIG_CONTENT: <子行程環境變數原始字串,沒有則 null> }`)——讓 e2e 斷言
+ *     Deskmony 啟動 opencode 子行程時注入的設定(所有工具 ask、與使用者既有值的合併、session 網路 MCP 設定)。
+ *   - 若 prompt 文字以 SUBAGENT_PERMISSION_PREFIX 開頭(2026-10-03):模擬 `task` 工具建立的 subagent 子 session——
+ *     先送一個「不相干的陌生 session」的 `permission.asked`(Deskmony 不能轉發,否則等於替別人的 session 作答),
+ *     再送 `session.created`(`info.parentID` = 本 session)、子 session 的一段文字(不能混進本 session 的對話)、
+ *     子 session 的 bash `permission.asked`(`sessionID` 是子 session,真實 opencode 實測就是這樣),等
+ *     `POST /permission/{id}/reply`,最後回覆 `[child-reply:<reply>]` 與 `[stranger-reply:<有沒有被回覆>]`。
  *   - 這輪(slash command)新增:`GET /command` 回傳 TEST_COMMANDS(固定測試
  *     清單,形狀比照本機真實 `opencode serve`(1.18.7)`GET /command` 的
  *     `Command[]`,見 packages/adapters/src/opencode-adapter.ts 檔案頂端查證
@@ -88,6 +100,14 @@ export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
 export const TOOL_CALL_INPUT = { command: "echo hello-fake-opencode" };
 /** prompt 內含這段文字時,`permission.asked` 排在 `running` 之前(見檔頭協定說明)。 */
 export const TOOL_CALL_ASK_FIRST_MARKER = "[ask-before-running]";
+/** prompt 內含 `[command:<指令>]` 時覆寫 TOOL_CALL_PREFIX 流程的 bash 指令,見檔頭。 */
+export const TOOL_CALL_COMMAND_PATTERN = /\[command:([^\]]+)\]/;
+export const REPORT_ENV_PREFIX = "OPENCODE_REPORT_ENV";
+export const SUBAGENT_PERMISSION_PREFIX = "OPENCODE_SUBAGENT_PERMISSION";
+/** SUBAGENT_PERMISSION_PREFIX 流程裡子 session 說的話(e2e 斷言它**不會**出現在本 session 的對話)。 */
+export const SUBAGENT_CHILD_TEXT = "CHILD-SESSION-SECRET-TEXT";
+/** 子 session 的 bash 指令(permission-request 要帶著它進政策引擎)。 */
+export const SUBAGENT_CHILD_COMMAND = "echo from-subagent";
 export const MANY_TOOL_CALLS_PREFIX = "OPENCODE_MANY_TOOL_CALLS";
 /** MANY_TOOL_CALLS_PREFIX 流程第 i 個工具的完整參數——e2e 用同一個函式算預期值。 */
 export function manyToolCallInput(index) {
@@ -248,20 +268,24 @@ async function handlePrompt(sessionId, text, model) {
     const partId = `prt_${randomUUID()}`;
     const toolPart = (state) => ({ id: partId, messageID: assistantMessageId, sessionID: sessionId, type: "tool", callID: callId, tool: "bash", state });
     const start = Date.now();
+    // 2026-10-03:`[command:<指令>]` 覆寫指令(見檔頭)。沒有時就是原本的 TOOL_CALL_INPUT,既有 e2e 不受影響。
+    const commandOverride = TOOL_CALL_COMMAND_PATTERN.exec(text)?.[1];
+    const toolInput = commandOverride ? { command: commandOverride } : TOOL_CALL_INPUT;
     broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "pending", input: {}, raw: "" }) });
     const requestId = `per_${randomUUID()}`;
     const replyPromise = new Promise((resolve) => {
       session.pendingPermission.set(requestId, resolve);
     });
     const sendRunning = () =>
-      broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "running", input: TOOL_CALL_INPUT, time: { start } }) });
+      broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "running", input: toolInput, time: { start } }) });
     const askPermission = () =>
       broadcast("permission.asked", {
         id: requestId,
         sessionID: sessionId,
         permission: "bash",
-        patterns: ["echo *"],
-        metadata: {},
+        // 真實 opencode 1.18.7 實測形狀:bash 的 patterns 是指令本身,metadata 是 {command}。
+        patterns: [toolInput.command],
+        metadata: { command: toolInput.command },
         always: [],
         tool: { messageID: assistantMessageId, callID: callId },
       });
@@ -277,11 +301,11 @@ async function handlePrompt(sessionId, text, model) {
       const output = "hello-fake-opencode\n";
       broadcast("message.part.updated", {
         sessionID: sessionId,
-        part: toolPart({ status: "running", input: TOOL_CALL_INPUT, metadata: { output, description: "" }, time: { start } }),
+        part: toolPart({ status: "running", input: toolInput, metadata: { output, description: "" }, time: { start } }),
       });
       broadcast("message.part.updated", {
         sessionID: sessionId,
-        part: toolPart({ status: "completed", input: TOOL_CALL_INPUT, output, metadata: { output, exit: 0 }, title: "echo", time: { start, end: Date.now() } }),
+        part: toolPart({ status: "completed", input: toolInput, output, metadata: { output, exit: 0 }, title: "echo", time: { start, end: Date.now() } }),
       });
       await streamTextReply(sessionId, assistantMessageId, ["Done", " running", " the", " command."]);
     } else {
@@ -344,6 +368,51 @@ async function handlePrompt(sessionId, text, model) {
         info: { id: assistantMessageId, role: "assistant", sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
       });
     }
+  } else if (text.startsWith(REPORT_ENV_PREFIX)) {
+    // 2026-10-03:回顯子行程收到的 OPENCODE_CONFIG_CONTENT(原始字串),見檔頭。
+    const raw = process.env.OPENCODE_CONFIG_CONTENT;
+    await streamTextReply(sessionId, assistantMessageId, [`ENV:${JSON.stringify({ OPENCODE_CONFIG_CONTENT: raw ?? null })}`]);
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+  } else if (text.startsWith(SUBAGENT_PERMISSION_PREFIX)) {
+    // 2026-10-03:subagent 子 session 的權限請求,見檔頭。
+    const strangerSessionId = `ses_${randomUUID()}`;
+    const childSessionId = `ses_${randomUUID()}`;
+    const strangerRequestId = `per_${randomUUID()}`;
+    const childRequestId = `per_${randomUUID()}`;
+    const strangerReply = new Promise((resolve) => session.pendingPermission.set(strangerRequestId, resolve));
+    const childReply = new Promise((resolve) => session.pendingPermission.set(childRequestId, resolve));
+    // 1) 陌生 session(不是本 session、也不是它的子孫)的權限請求——不能被轉發。
+    broadcast("permission.asked", {
+      id: strangerRequestId,
+      sessionID: strangerSessionId,
+      permission: "bash",
+      patterns: ["echo stranger"],
+      metadata: { command: "echo stranger" },
+      always: [],
+      tool: { messageID: `msg_${randomUUID()}`, callID: `call_${randomUUID()}` },
+    });
+    // 2) 子 session 建立(parentID 指向本 session),以及它說的一段話(不能混進本 session 的對話)。
+    broadcast("session.created", { sessionID: childSessionId, info: { id: childSessionId, parentID: sessionId, title: "subagent" } });
+    broadcast("message.part.updated", {
+      sessionID: childSessionId,
+      part: { id: `prt_${randomUUID()}`, messageID: `msg_${randomUUID()}`, sessionID: childSessionId, type: "text", text: SUBAGENT_CHILD_TEXT, time: { start: Date.now(), end: Date.now() } },
+    });
+    // 3) 子 session 的 bash 權限請求(sessionID 是子 session;它的 tool part 不會轉發,所以 Deskmony 只能靠 metadata 知道指令)。
+    broadcast("permission.asked", {
+      id: childRequestId,
+      sessionID: childSessionId,
+      permission: "bash",
+      patterns: [SUBAGENT_CHILD_COMMAND],
+      metadata: { command: SUBAGENT_CHILD_COMMAND },
+      always: [],
+      tool: { messageID: `msg_${randomUUID()}`, callID: `call_${randomUUID()}` },
+    });
+    const reply = await childReply;
+    // 給陌生請求一點時間——若 Deskmony 錯誤地轉發並回覆了它,`strangerReply` 會在這段期間 resolve。
+    const strangerGotReply = await Promise.race([strangerReply.then(() => true), delay(1500).then(() => false)]);
+    session.pendingPermission.delete(strangerRequestId);
+    await streamTextReply(sessionId, assistantMessageId, [`[child-reply:${reply}] [stranger-reply:${strangerGotReply}]`]);
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   } else if (text.startsWith(MANY_TOOL_CALLS_PREFIX)) {
     const { count, delayMs = 0 } = JSON.parse(text.slice(MANY_TOOL_CALLS_PREFIX.length));
     session.aborted = false;

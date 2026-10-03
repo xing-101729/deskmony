@@ -127,6 +127,16 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
 - **四類硬性禁止(hard-deny),config 永遠關不掉**:worktree 外寫入/刪除、讀
   秘密路徑(`~/.ssh`、`~/.aws`、`.env*`、`id_rsa*`、`credentials`)、危險
   git(force-push、砍遠端分支、`branch -D`)、對非白名單主機的網路連線。
+- **OpenCode 也走同一套引擎**(2026-10-03):OpenCode 預設放行所有工具,只有它自己
+  設定裡標成 `ask` 的才會詢問,所以過去 OpenCode session 的 bash/edit/webfetch/
+  MCP 呼叫大多**不經過**政策引擎(hard-deny 形同虛設)。現在 Deskmony 啟動
+  OpenCode(`opencode` 與 `opencode-acp` 兩個 provider)時,用環境變數
+  `OPENCODE_CONFIG_CONTENT` 注入「所有工具都 ask」的設定,與使用者既有的值深度
+  合併(Deskmony 的權限規則優先)。**使用者可見的改變**:`always-ask` 下的
+  OpenCode session 原本靜默執行的操作,現在會跳出權限確認;auto/YOLO 照常
+  放行。`opencode-acp` 的 `task`(subagent)工具會被停用——`opencode acp` 不會
+  轉發 subagent 子 session 的權限請求,subagent 會永遠卡住;`opencode`(HTTP)
+  則會轉發,不受影響。
 - **每 session 的 Auto / YOLO 開關**:Auto 只把「未分類中間地帶」變自動放行;
   YOLO 額外跳過 config 裡的 deny 規則。**兩者都絕不跳過 hard-deny**。YOLO
   30 分鐘後自動失效。

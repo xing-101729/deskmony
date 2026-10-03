@@ -1,5 +1,5 @@
 import type { AgentDetectionEntry } from "./detect.js";
-import type { ProviderCatalogEntry, ProviderModel, ProviderPrefs, RegisteredAgentSoftware } from "./provider-catalog.js";
+import type { AgentFamily, ProviderCatalogEntry, ProviderModel, ProviderPrefs, RegisteredAgentSoftware } from "./provider-catalog.js";
 
 /**
  * resolve-providers.ts(這輪新增):`resolveProviders()` 是「內建 provider 目錄
@@ -30,6 +30,8 @@ export interface ResolvedProvider {
    *  ProviderCatalogEntry.software 保證,見 provider-catalog.ts 的
    *  RegisteredAgentSoftwareSchema),絕不會是 "codex" 這種建不起來的值。 */
   software: RegisteredAgentSoftware;
+  /** 見 `AgentFamilySchema`(provider-catalog.ts):有需要 Deskmony 在啟動時介入的預設權限策略的 agent 家族。 */
+  family?: AgentFamily;
   /** claude-agent-sdk 不需要;其餘 provider 若偵測到路徑就帶入;沒有 detectKey 的項目
    *  (只有 e2e 注入的測試 provider,見 AgentCatalog)一律 undefined。 */
   command?: string;
@@ -108,6 +110,7 @@ export function resolveProviders(
       order: pref?.order ?? entry.order,
       enabled: pref?.enabled ?? true,
       software: entry.software,
+      family: entry.family,
       command,
       // 這輪(Codex ACP 橋接):偵測階段的 `args`(見 detect.ts 的
       // AgentDetectionEntrySchema.args 註解)優先於目錄靜態的 defaultArgs——

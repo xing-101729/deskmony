@@ -469,6 +469,62 @@ async function catalogUnitTests() {
   } catch (err) {
     record("A6 buildLaunchSpecForSession", false, String(err));
   }
+
+  // ---- A7:agent 家族(2026-10-03,見 provider-catalog.ts 的 AgentFamilySchema) ----
+  // opencode 預設所有工具權限都是 allow,Deskmony 必須在啟動子行程時改成全部 ask——adapter 靠 launch.family 分辨
+  // 「這是 opencode acp」(software 同樣是 acp 的 gemini/codex 不能被注入)。
+  try {
+    const c = catalogWith();
+    const families = {};
+    for (const id of ["opencode", "opencode-acp", "gemini", "codex", "claude-agent-sdk", "claude-cli", "aider"]) {
+      families[id] = (await c.buildLaunchSpec(id)).family;
+    }
+    // 續接/接手的退路(provider 在目錄裡但目前沒偵測到 opencode → 退回 session 存的啟動資訊)也要帶 family,
+    // 不然 opencode ACP session 重新啟動後會悄悄變回預設全 allow。
+    const noOpencode = catalogWith({ detection: detection.filter((d) => d.key !== "opencode-cli") });
+    const fallbackAcp = await noOpencode.buildLaunchSpecForSession(
+      { providerId: "opencode-acp", adapterType: "acp" },
+      { command: "C:\\old\\opencode.exe", args: ["acp"] },
+    );
+    const fallbackHttp = await noOpencode.buildLaunchSpecForSession(
+      { providerId: "opencode", adapterType: "opencode" },
+      { command: "C:\\old\\opencode.exe" },
+    );
+    const fallbackGemini = await catalogWith({ detection: detection.filter((d) => d.key !== "gemini-cli") }).buildLaunchSpecForSession(
+      { providerId: "gemini", adapterType: "acp" },
+      { command: "C:\\old\\gemini.exe", args: ["--acp"] },
+    );
+    // e2e extras 可以宣告 family(測試才走得到注入邏輯);不合法的 family 值被略過
+    const errors = [];
+    const originalError = console.error;
+    console.error = (...args) => errors.push(args.join(" "));
+    let parsed;
+    try {
+      parsed = parseExtraProviders(
+        JSON.stringify([
+          { id: "e2e-oc", label: "OC", software: "acp", family: "opencode", command: "node" },
+          { id: "e2e-badfamily", label: "B", software: "acp", family: "evil", command: "node" },
+        ]),
+      );
+    } finally {
+      console.error = originalError;
+    }
+    const extraSpec = await catalogWith({ extra: JSON.stringify([{ id: "e2e-oc", label: "OC", software: "acp", family: "opencode", command: "node" }]) }).buildLaunchSpec("e2e-oc");
+    record(
+      "A7 agent 家族:opencode 與 opencode-acp 的啟動規格帶 family=\"opencode\",其他 provider(含同為 acp 的 gemini/codex)沒有;續接/接手的退路(provider 暫時偵測不到 → 用 session 存的 command/args)同樣帶上;e2e extras 能宣告 family、不合法的值被略過",
+      families.opencode === "opencode" && families["opencode-acp"] === "opencode" &&
+        families.gemini === undefined && families.codex === undefined && families["claude-agent-sdk"] === undefined &&
+        families["claude-cli"] === undefined && families.aider === undefined &&
+        fallbackAcp.spec.family === "opencode" && fallbackAcp.spec.acpConfig?.command === "C:\\old\\opencode.exe" &&
+        fallbackHttp.spec.family === "opencode" && fallbackHttp.spec.opencodeConfig?.command === "C:\\old\\opencode.exe" &&
+        fallbackGemini.spec.family === undefined &&
+        parsed.length === 1 && parsed[0].entry.family === "opencode" && errors.length >= 1 &&
+        extraSpec.family === "opencode",
+      JSON.stringify({ families, fallbackAcp: fallbackAcp.spec.family, fallbackHttp: fallbackHttp.spec.family, fallbackGemini: fallbackGemini.spec.family, extra: extraSpec.family }),
+    );
+  } catch (err) {
+    record("A7 agent 家族", false, String(err));
+  }
 }
 
 // =======================================================================

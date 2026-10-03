@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { Readable, Writable } from "node:stream";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
-import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
+import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
+import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
 
 /**
  * AcpAdapter — 對接 [Agent Client Protocol](https://agentclientprotocol.com)
@@ -172,16 +172,46 @@ export class AcpAdapter implements AgentAdapter {
     // ... }` 沿用同一個值。
     const handleId = randomUUID();
 
+    // Phase 2:this.sessionNetworkPort(已注入)存在時,核發 scoped token 並算出
+    // 要掛載的 mcp-bridge-server.ts 設定——ACP 只有一個統一的 bridge
+    // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是
+    // in-process 的 MCP server。沒有 sessionNetworkPort 時直接回傳 undefined,
+    // 不核發任何 token、不掛任何 MCP server。
+    // 2026-10-03:**提前到 spawn 子程序之前**——opencode 家族要在子程序的環境變數裡預先放行三個查詢工具,
+    // 必須先知道 bridge 有沒有掛上。核發之後任何一步失敗都要撤銷(見下方 spawn 例外與 catch)。
+    const bridgeLaunch = mintMcpBridgeLaunch(
+      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
+      handleId,
+      "acp-adapter",
+    );
+
     const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
     // `launch.env`(provider 層級 env,由 SessionManager.prepareSpawnSpec() 從
     // settings 讀出併好)疊在 process.env 之上,`acpConfig.env`(既有欄位)最優先
     // ——維持這個既有欄位一直以來的「最終覆寫」語意不變。
-    const child = spawn(command, args, {
-      cwd: workspace.path,
-      env: { ...process.env, ...launch.env, ...acpConfig.env },
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: useShell,
-    });
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...launch.env, ...acpConfig.env };
+    if (launch.family === "opencode") {
+      // opencode 預設所有工具權限都是 allow、不經過 Deskmony 的政策引擎——一律改成全部 ask(default-deny)。
+      // 完整理由、設定寫法與實測依據見 opencode-config.ts。掛了 bridge 時三個唯讀查詢工具預先放行。
+      childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
+        sessionNetwork: bridgeLaunch ? {} : undefined,
+        // opencode acp 不會轉發 subagent 子 session 的權限請求 → 子 session 卡死,只能不讓它用 subagent(見該選項註解)。
+        denySubagents: true,
+      });
+    }
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(command, args, {
+        cwd: workspace.path,
+        env: childEnv,
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: useShell,
+      });
+    } catch (err) {
+      // spawn 本身同步丟例外(例如 Windows 上 `.cmd` 沒走 shell 的 EINVAL):token 已核發,不能留成孤兒。
+      if (bridgeLaunch) this.tokenMinter?.revokeForSession(handleId);
+      throw err;
+    }
     // 2026-09-04(稽核修補):登記 pid,讓 core 若非正常終止,下次啟動時能回收
     // 這個孤兒。見 packages/adapters/src/child-registry.ts。
     registerChild(child.pid, `acp:${command}`);
@@ -243,12 +273,15 @@ export class AcpAdapter implements AgentAdapter {
 
     const connection = clientApp.connect(stream);
 
-    // Phase 2:this.sessionNetworkPort(已注入)存在時,核發 scoped token 並算出
-    // 要掛載的 mcp-bridge-server.ts 設定——ACP 只有一個統一的 bridge
-    // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是
-    // in-process 的 MCP server。沒有 sessionNetworkPort 時 `buildMcpBridgeServer()`
-    // 直接回傳 undefined,不核發任何 token、不掛任何 MCP server。
-    const bridgeMcpServer = this.buildMcpBridgeServer(handleId);
+    // MCP server 名稱與 in-process 版一致(`deskmony`),agent 看到的工具全名才會是 `mcp__deskmony__<name>`。
+    const bridgeMcpServer: acp.McpServer | undefined = bridgeLaunch
+      ? {
+          name: "deskmony",
+          command: bridgeLaunch.command,
+          args: bridgeLaunch.args,
+          env: Object.entries(bridgeLaunch.env).map(([name, value]) => ({ name, value })),
+        }
+      : undefined;
 
     try {
       await Promise.race([
@@ -325,53 +358,6 @@ export class AcpAdapter implements AgentAdapter {
     }
   }
 
-  /**
-   * Phase 2:算出這個 session 要不要掛載 mcp-bridge-server.ts,以及要掛的話
-   * 需要的完整 `McpServerStdio` 設定(含核發好的 scoped token)。回傳
-   * `undefined` 代表不掛載(沒有 `sessionNetworkPort`,或缺少
-   * `tokenMinter`/找不到已編譯的 bridge server 進入點這兩種**優雅降級**的
-   * 情況——後兩者理論上不該發生,但寧可略過掛載、印警告,也不要讓整個
-   * session 建立失敗:session 網路工具是加分項,不是這個 session 能不
-   * 能建立的前提)。
-   */
-  private buildMcpBridgeServer(sessionId: string): acp.McpServer | undefined {
-    if (!this.sessionNetworkPort) return undefined;
-    if (!this.tokenMinter) {
-      console.warn(
-        `[acp-adapter] session ${sessionId}: sessionNetworkPort 存在但尚未注入 tokenMinter,略過掛載 session 網路 MCP 工具`,
-      );
-      return undefined;
-    }
-    const entryPath = resolveMcpBridgeServerEntry();
-    if (!entryPath || !existsSync(entryPath)) {
-      console.warn(
-        `[acp-adapter] session ${sessionId}: 找不到 mcp-bridge-server.js(${entryPath ?? "無法解析路徑"}),` +
-          "略過掛載 session 網路 MCP 工具——請確認 packages/adapters 已執行過 pnpm build。",
-      );
-      return undefined;
-    }
-
-    const grant: McpBridgeTokenGrant = this.tokenMinter.mint({
-      sessionId,
-      network: Boolean(this.sessionNetworkPort),
-    });
-
-    // 見 mcp-bridge-server.ts 檔頭「環境變數」段落——一律透過 env(不是 CLI
-    // args)傳遞,避免 token 出現在行程列表裡(尤其是 Windows 的
-    // tasklist/工作管理員預設就會顯示完整命令列,見這輪的核心安全設計)。
-    const env: acp.EnvVariable[] = [
-      { name: "DESKMONY_MCP_BRIDGE_TOKEN", value: grant.token },
-      { name: "DESKMONY_MCP_BRIDGE_GATEWAY_URL", value: grant.gatewayUrl },
-      { name: "DESKMONY_MCP_BRIDGE_SESSION_ID", value: sessionId },
-    ];
-    if (this.sessionNetworkPort) {
-      env.push({ name: "DESKMONY_MCP_BRIDGE_NETWORK_ENABLED", value: "1" });
-    }
-
-    // MCP server 名稱與 in-process 版一致(`deskmony`),agent 看到的工具全名才會是 `mcp__deskmony__<name>`。
-    return { name: "deskmony", command: process.execPath, args: [entryPath], env };
-  }
-
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void {
     const internal = this.mustGet(handle);
     void internal.session.prompt(prompt.text).catch((err: unknown) => {
@@ -411,7 +397,7 @@ export class AcpAdapter implements AgentAdapter {
     const internal = this.sessions.get(handle.id);
     if (!internal) return;
     // Phase 2:這個 session 若曾核發過 scoped MCP bridge token(見 spawn() 的
-    // `buildMcpBridgeServer()`),session 結束時必須讓它立即失效——不能變成
+    // `mintMcpBridgeLaunch()`),session 結束時必須讓它立即失效——不能變成
     // 孤兒憑證一直有效到 24 小時 TTL 才過期。`revokeMcpBridgeTokensForSession()`
     // 對「這個 session 根本沒核發過 token」是安全的 no-op(見
     // apps/core/src/gateway/ws-gateway.ts 的實作),不需要先判斷有沒有核發過。
@@ -996,25 +982,6 @@ function mapAvailableCommands(commands: acp.AvailableCommand[]): SlashCommandInf
     description: c.description || undefined,
     argumentHint: c.input?.hint || undefined,
   }));
-}
-
-/**
- * Phase 2:算出 `packages/adapters/src/mcp-bridge-server.ts` 編譯後的路徑。
- *
- * **不用** `require.resolve()`(對照 `codex-acp-locator.ts` 的
- * `resolveCodexAcpBridge()`)——那是給*外部* npm 套件用的解法(套件的
- * `main`/`bin` 欄位理論上可能隨版本改變檔名/位置,交給 Node 的模組解析機制
- * 比自己組字串路徑可靠)。`mcp-bridge-server.ts` 是**這個套件自己的檔案**,
- * `tsc`(見 `packages/adapters/tsconfig.json` 的 `outDir: "dist"`)把
- * `src/` 底下每個檔案原樣編譯成 `dist/` 底下同名的 `.js`,所以
- * `mcp-bridge-server.js` 永遠跟這個檔案編譯後的 `acp-adapter.js` 在**同一個
- * 目錄**——用 `import.meta.url`(這個模組自己的路徑)算出所在目錄,取同目錄
- * 下的檔名即可,不需要、也不應該假設它是一個可以被 `require.resolve()`
- * 查到的獨立套件。
- */
-function resolveMcpBridgeServerEntry(): string {
-  const thisFile = fileURLToPath(import.meta.url);
-  return path.join(path.dirname(thisFile), "mcp-bridge-server.js");
 }
 
 /**

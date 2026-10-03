@@ -8,6 +8,7 @@ import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { waitForChildExit } from "./child-process.js";
+import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
 
 /**
  * OpenCodeAdapter — 對接 opencode 的 headless server API(ARCHITECTURE.md
@@ -222,9 +223,16 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     // launch.env(provider 層級 env)疊在 process.env 之上,config.env(既有欄位)
     // 最優先——同 acp-adapter.ts 的合併順序說明。
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...launch.env, ...config.env };
+    // 2026-10-03(安全):opencode 預設所有工具權限都是 allow,只有它自己設定裡標成 "ask" 的才會發
+    // `permission.asked`——不處理的話 bash/edit/webfetch/MCP 工具**完全不經過** Deskmony 的政策引擎
+    // (default-deny、hard-deny 四類、auto/YOLO 全部失效)。這裡一律注入「所有工具都 ask」的設定,
+    // 與使用者既有的 OPENCODE_CONFIG_CONTENT 深度合併(Deskmony 優先)。完整理由與實測見 opencode-config.ts。
+    // 這個 adapter 就是 opencode(software="opencode"),不需要看 launch.family。
+    childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV]);
     const child: OpencodeChildProcess = spawn(command, args, {
       cwd: workspace.path,
-      env: { ...process.env, ...launch.env, ...config.env },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       shell: useShell,
     });
@@ -341,6 +349,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       child,
       baseUrl,
       opencodeSessionId,
+      childSessionIds: new Set(),
       outputQueue,
       partMeta: new Map(),
       toolMeta: new Map(),
@@ -666,8 +675,26 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   private handleEvent(internal: InternalSession, evt: OpencodeEvent): void {
     const properties = evt.properties as Record<string, unknown> | undefined;
+
+    // 2026-10-03:追蹤這個 session 底下的 **subagent 子 session**(`task` 工具會建立
+    // `parentID` 指向呼叫者的子 session,實測 `session.created` 一定先於子 session 的任何事件)。
+    // 為什麼要管:所有工具現在都是 ask,subagent 裡的 bash/edit 一樣會發 `permission.asked`,但 `sessionID` 是
+    // **子 session 的**——下面的 sessionID 過濾若直接丟掉,opencode 會永遠等一個沒人回的權限,subagent 就卡死
+    // (改成全 ask 之前這些操作靜默放行,不會碰到這個問題)。
+    if (evt.type === "session.created" || evt.type === "session.updated") {
+      const info = properties?.info as { id?: string; parentID?: string } | undefined;
+      if (info?.id && info.parentID && (info.parentID === internal.opencodeSessionId || internal.childSessionIds.has(info.parentID))) {
+        internal.childSessionIds.add(info.id);
+      }
+    }
+
     const sessionID = properties?.sessionID;
-    if (sessionID !== undefined && sessionID !== internal.opencodeSessionId) return;
+    if (sessionID !== undefined && sessionID !== internal.opencodeSessionId) {
+      // 子 session 只轉發**權限請求**——它們的文字/工具事件不該混進這個 session 的對話串。
+      const isChildPermission =
+        evt.type === "permission.asked" && typeof sessionID === "string" && internal.childSessionIds.has(sessionID);
+      if (!isChildPermission) return;
+    }
 
     switch (evt.type) {
       case "session.status": {
@@ -729,11 +756,20 @@ export class OpenCodeAdapter implements AgentAdapter {
         const tool = properties?.tool as { callID?: string } | undefined;
         const toolMeta = tool?.callID ? internal.toolMeta.get(tool.callID) : undefined;
         const patterns = properties?.patterns as string[] | undefined;
+        // 2026-10-03:**帶上工具參數**。PolicyEngine 的 hard-deny(worktree 外寫入、讀秘密路徑、危險 git、
+        // 非白名單外連)與 allowlist 規則全靠 `input` 判斷——沒有 input 它們只能「猜不到 → 不命中」,
+        // auto/YOLO 模式下 `git push --force` 就會被當成未分類操作自動放行。優先用工具 part 的完整 input
+        // (`running` 帶的,bash 是 {command}、edit/read 是 {filePath,...}、webfetch 是 {url,...});
+        // 還沒收到(running 排在 permission.asked 之後)或是 subagent 子 session 的工具(它們的 part 不轉發)時,
+        // 退而用 `permission.asked` 自己的 metadata(實測 bash 是 {command}、edit 是 {filepath, diff})。
+        const metadata = properties?.metadata as Record<string, unknown> | undefined;
+        const input = toolMeta?.input ?? (metadata && Object.keys(metadata).length > 0 ? metadata : undefined);
         internal.pendingPermissions.set(requestId, { toolCallId: tool?.callID });
         internal.outputQueue.push({
           type: "permission-request",
           requestId,
           toolName: toolMeta?.toolName ?? (properties?.permission as string | undefined) ?? "unknown",
+          input,
           description: patterns && patterns.length > 0 ? `patterns: ${patterns.join(", ")}` : undefined,
         });
         break;
@@ -851,7 +887,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       const inputKnown = part.state.status === "running" || part.state.status === "completed";
       let meta = internal.toolMeta.get(part.callID);
       if (!meta) {
-        meta = { toolName: part.tool, inputEmitted: inputKnown, emittedResult: false };
+        meta = { toolName: part.tool, inputEmitted: inputKnown, emittedResult: false, input: inputKnown ? part.state.input : undefined };
         internal.toolMeta.set(part.callID, meta);
         internal.outputQueue.push({
           type: "tool-call",
@@ -865,6 +901,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         // (讀原始碼的推論,例如無效呼叫被修補成別的工具;實測的 bash 沒有改名)。
         // 沒改名時這行是 no-op;有改名時 permission.asked 查到的名稱才會跟著對。
         meta.toolName = part.tool;
+        meta.input = part.state.input;
         internal.outputQueue.push({
           type: "tool-call",
           toolCallId: part.callID,
@@ -971,6 +1008,8 @@ interface ToolMeta {
   /** 已經送過帶完整 input 的 tool-call(見 handlePartUpdated() 的兩段式說明)。 */
   inputEmitted: boolean;
   emittedResult: boolean;
+  /** 已知的完整 input(`running`/`completed` 帶的);`permission.asked` 轉成 permission-request 時要一起帶上。 */
+  input?: unknown;
 }
 
 interface PartMeta {
@@ -1013,6 +1052,8 @@ interface InternalSession {
   child: OpencodeChildProcess;
   baseUrl: string;
   opencodeSessionId: string;
+  /** `task` 工具(subagent)建立的子 session id(含孫 session),見 handleEvent() 開頭的說明。 */
+  childSessionIds: Set<string>;
   outputQueue: AsyncQueue<AgentEvent>;
   partMeta: Map<string, PartMeta>;
   toolMeta: Map<string, ToolMeta>;

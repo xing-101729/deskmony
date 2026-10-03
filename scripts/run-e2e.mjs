@@ -60,6 +60,9 @@ const SUITES = [
   // core + fake-opencode-server,十幾秒跑完。放在 e2e-cost-governor 之後:它驗的
   // 是同一個斷路器,底層的回合上限若本身就壞了,應該先在那支看到訊號。
   "e2e-opencode-tool-input",
+  // 2026-10-03:OpenCode 的工具呼叫一律經過 Deskmony 權限引擎(啟動時注入「所有工具 ask」的 OPENCODE_CONFIG_CONTENT)——
+  // 一個 core + fake-opencode-server/fake-acp-agent,十幾秒跑完。
+  "e2e-opencode-permissions",
   "e2e-notification",
   "e2e-policy-engine",
   "e2e-agent-lifecycle",

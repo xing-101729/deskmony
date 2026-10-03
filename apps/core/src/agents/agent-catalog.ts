@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   BUILTIN_PROVIDERS,
   DeskmonyError,
+  type AgentFamily,
   ProviderCatalogEntrySchema,
   resolveProviders,
   type AgentDetectionEntry,
@@ -296,6 +297,9 @@ export class AgentCatalog {
     const base: AgentLaunchSpec = {
       software: provider.software,
       providerId: provider.id,
+      // 見 provider-catalog.ts 的 `AgentFamilySchema`:adapter 靠它在啟動子程序時介入該家族的預設權限策略
+      // (opencode 預設全 allow,必須改成全 ask 才會經過 PolicyEngine)。
+      family: provider.family,
       model: effectiveModel,
       effort: provider.software === "claude-agent-sdk" ? effort : undefined,
     };
@@ -346,7 +350,10 @@ export class AgentCatalog {
     } catch (err) {
       if (!(err instanceof DeskmonyError) || !FALLBACK_ERROR_CODES.has(err.code)) throw err;
     }
-    return { spec: launchSpecFromStored(session, stored), label: session.providerId };
+    // 退路也要帶 `family`:否則 provider 目錄對不上(例如目錄版本間 software 改過)的 opencode ACP session,
+    // 續接/接手時會悄悄少了「所有工具都 ask」的注入,變回預設全 allow、繞過 PolicyEngine。
+    const family = this.allEntries().find((p) => p.id === session.providerId)?.family;
+    return { spec: launchSpecFromStored(session, stored, family), label: session.providerId };
   }
 }
 
@@ -358,10 +365,11 @@ function nonEmpty(args: string[]): string[] | undefined {
 }
 
 /** 從 session 存的 `adapterType + launch_command + launch_args` 組啟動規格(provider 已不存在時的退路)。 */
-function launchSpecFromStored(session: SessionLaunchSource, stored: StoredLaunchInfo): AgentLaunchSpec {
+function launchSpecFromStored(session: SessionLaunchSource, stored: StoredLaunchInfo, family: AgentFamily | undefined): AgentLaunchSpec {
   const base: AgentLaunchSpec = {
     software: session.adapterType,
     providerId: session.providerId,
+    family,
     model: session.model,
     effort: session.adapterType === "claude-agent-sdk" ? session.effort : undefined,
   };

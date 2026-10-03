@@ -25,6 +25,24 @@ export const FAKE_ACP = "e2e-fake-acp";
 export const FAKE_OPENCODE = "e2e-fake-opencode";
 export const FAKE_PTY = "e2e-fake-pty";
 
+/**
+ * 2026-10-03:宣告 `family: "opencode"` 的 fake ACP provider(**不在** `standardFakeProviders()` 裡,需要的測試用
+ * `e2eProvidersEnv([fakeAcpOpencodeProvider()])` 明確加入)。真實的 `opencode-acp` provider 會被 core 當成已偵測到的
+ * opencode 執行檔——e2e 沒有真的 opencode,這個 provider 讓測試走得到「opencode 家族的 ACP 子行程啟動時注入
+ * `OPENCODE_CONFIG_CONTENT`」的邏輯(見 packages/adapters/src/acp-adapter.ts、opencode-config.ts)。
+ */
+export const FAKE_ACP_OPENCODE = "e2e-fake-acp-opencode";
+export function fakeAcpOpencodeProvider() {
+  return {
+    id: FAKE_ACP_OPENCODE,
+    label: "E2E Fake ACP (opencode family)",
+    software: "acp",
+    family: "opencode",
+    command: process.execPath,
+    args: [path.join(SCRIPTS_DIR, "fake-acp-agent.mjs")],
+  };
+}
+
 /** fake opencode 的 model 清單(給需要 `session.setModel`/model 選單的測試用,沒有它 supportsModelSelection 為 false)。 */
 export const FAKE_OPENCODE_MODELS = [
   { id: "fake/model-a", label: "Fake Model A" },

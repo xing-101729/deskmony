@@ -220,6 +220,12 @@ export const CALL_BRIDGE_TOOL_PREFIX = "ACP_CALL_BRIDGE_TOOL ";
  * MCP 管線」兩個不同的斷言面向。
  */
 export const REPORT_MCP_SERVERS_PREFIX = "ACP_REPORT_MCP_SERVERS";
+/**
+ * 2026-10-03 e2e 用(不接受任何參數,純字面比對):回覆 `ENV:` + JSON(`{ OPENCODE_CONFIG_CONTENT: <這個子行程收到的原始
+ * 字串,沒有則 null> }`)。給 scripts/e2e-opencode-permissions.mjs 斷言 Deskmony 啟動 `opencode acp` 這一家(provider 目錄
+ * 的 `family: "opencode"`)時注入的「所有工具 ask」設定,以及其他 ACP agent **沒有**被注入(對照組)。
+ */
+export const REPORT_ENV_PREFIX = "ACP_REPORT_ENV";
 /** P3(session 網路)e2e 用,見檔頭註解:把其後的文字原樣當成這一輪的回覆。 */
 export const SAY_PREFIX = "ACP_SAY ";
 /** P3(session 網路)e2e 用,見檔頭註解:prompt 任何位置含這個標記就自己呼叫 bridge 工具。 */
@@ -334,6 +340,8 @@ class FakeAcpAgent {
         await this.handleEmptyResultToolName(params.sessionId, cx);
       } else if (text === REPORT_MCP_SERVERS_PREFIX) {
         await this.handleReportMcpServers(params.sessionId, cx);
+      } else if (text === REPORT_ENV_PREFIX) {
+        await this.handleReportEnv(params.sessionId, cx);
       } else {
         await this.handleEcho(params.sessionId, cx);
       }
@@ -555,6 +563,19 @@ class FakeAcpAgent {
         sessionUpdate: "agent_message_chunk",
         messageId,
         content: { type: "text", text: resultText },
+      },
+    });
+  }
+
+  /** 2026-10-03 e2e 用,見 REPORT_ENV_PREFIX 的常數註解。 */
+  async handleReportEnv(sessionId, cx) {
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId,
+        content: { type: "text", text: `ENV:${JSON.stringify({ OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null })}` },
       },
     });
   }
