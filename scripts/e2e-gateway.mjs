@@ -29,6 +29,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import http from "node:http";
 import path from "node:path";
 import os from "node:os";
@@ -4878,21 +4879,73 @@ async function staticServerAndSecuritySmokeTest() {
   }
 }
 
-async function electronSmokeTest() {
-  const electronExe = path.join(
-    REPO_ROOT,
-    "node_modules",
-    ".pnpm",
-    "electron@33.4.11",
-    "node_modules",
-    "electron",
-    "dist",
-    "electron.exe",
-  );
-  const desktopDir = path.join(REPO_ROOT, "apps", "desktop");
+/**
+ * 解析 apps/desktop 實際會用的 Electron 執行檔路徑。
+ *
+ * 過去這裡把路徑寫死成 `node_modules/.pnpm/electron@33.4.11/...`,Electron 升版後(目前
+ * lockfile 是 44.x)就永遠找不到檔案、這項永遠 FAIL。現在從 `apps/desktop` 解析 `electron`
+ * 套件(桌面端實際依賴的那一份),再照 `electron` 套件自己的規則組路徑:`path.txt` 記的是
+ * 執行檔相對於 `dist/` 的位置(win32 是 `electron.exe`,macOS/Linux 各自不同),
+ * 另外尊重 Electron 官方的 `ELECTRON_OVERRIDE_DIST_PATH`。
+ *
+ * ⚠️ 刻意**不**用 `require("electron")` 取預設匯出(那正是套件的 `getElectronPath()`):
+ * Electron 44 的 index.js 在找不到執行檔時會自己跑 `install.js` 下載/解壓一份,測試腳本不該有
+ * 「為了找路徑而改動 node_modules」的副作用,也會讓「沒有執行檔」這個該 FAIL 的狀況被悄悄
+ * 修好。所以這裡只讀 package.json 與 path.txt,不執行套件本身。
+ *
+ * @returns `{ electronExe, packageDir, version }`;`electronExe` 找不到時為 `undefined`。
+ */
+function resolveElectronExecutable(desktopDir) {
+  const requireFromDesktop = createRequire(path.join(desktopDir, "package.json"));
+  let packageDir;
+  try {
+    packageDir = path.dirname(requireFromDesktop.resolve("electron/package.json"));
+  } catch (err) {
+    return { electronExe: undefined, packageDir: undefined, version: undefined, error: String(err) };
+  }
+  let version;
+  try {
+    version = JSON.parse(readFileSync(path.join(packageDir, "package.json"), "utf8")).version;
+  } catch {
+    // 讀不到版本只影響訊息,不影響能不能啟動
+  }
+  const pathFile = path.join(packageDir, "path.txt");
+  const relativeExe = existsSync(pathFile) ? readFileSync(pathFile, "utf8").trim() : undefined;
+  const override = process.env.ELECTRON_OVERRIDE_DIST_PATH;
+  const electronExe = override
+    ? path.join(override, relativeExe || "electron")
+    : relativeExe
+      ? path.join(packageDir, "dist", relativeExe)
+      : undefined;
+  return { electronExe, packageDir, version };
+}
 
-  if (!existsSync(electronExe)) {
-    record("步驟8 Electron 啟動冒煙測試", false, `找不到 electron.exe: ${electronExe}`);
+async function electronSmokeTest() {
+  const desktopDir = path.join(REPO_ROOT, "apps", "desktop");
+  const { electronExe, packageDir, version, error } = resolveElectronExecutable(desktopDir);
+  log(`[electron] 解析到的 electron 套件: ${packageDir ?? "(解析失敗)"}${version ? ` (v${version})` : ""}`);
+  log(`[electron] 解析到的執行檔路徑: ${electronExe ?? "(沒有 path.txt,尚未安裝執行檔)"}`);
+
+  if (!packageDir) {
+    record(
+      "步驟8 Electron 啟動冒煙測試",
+      false,
+      `從 apps/desktop 解析不到 electron 套件(${error})。請先在 repo 根目錄執行 pnpm install。`,
+    );
+    return;
+  }
+  if (!electronExe || !existsSync(electronExe)) {
+    // 常見原因:這個 checkout 安裝時設了 ELECTRON_SKIP_BINARY_DOWNLOAD=1(例如 CI 或拋棄式 worktree),
+    // 套件有裝、但 dist/ 與 path.txt 沒有。測試不自己下載(下載約 100MB,而且是測試腳本不該有的副作用)。
+    record(
+      "步驟8 Electron 啟動冒煙測試",
+      false,
+      `找不到 Electron 執行檔(electron v${version ?? "?"},預期在 ${electronExe ?? path.join(packageDir, "dist")})。` +
+        `這個 checkout 大概是用 ELECTRON_SKIP_BINARY_DOWNLOAD=1 安裝的。` +
+        `要安裝執行檔,執行:node "${path.join(packageDir, "install.js")}"` +
+        `(會下載/解壓 Electron 執行檔;已有快取就不會重新下載),` +
+        `或不帶 ELECTRON_SKIP_BINARY_DOWNLOAD 重新 pnpm install 後再跑這項。`,
+    );
     return;
   }
   if (!existsSync(path.join(desktopDir, "dist-electron", "main.js"))) {
