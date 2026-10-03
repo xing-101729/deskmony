@@ -131,12 +131,12 @@
  *          個 adapter 之後「參數齊了再送一次」的那一次),最後一則
  *          `tool_call_update`(completed)。
  *          ⚠️ 送兩則 `tool_call`(而不是用 `tool_call_update` 更新)**不是**
- *          標準 ACP 的用法——`AcpAdapter.handleSessionUpdate()` 把
- *          `tool_call_update` 轉成 `tool-result`,不是第二個 `tool-call`
- *          事件,所以唯一能在 ACP 這一層產生「同一個 toolCallId 的兩個
- *          `tool-call` **AgentEvent**」的方法就是送兩則 `tool_call`。要驗的
- *          是 AgentEvent 層的 upsert(那是 claude-sdk/opencode 原生就會產生
- *          的形狀),這裡刻意用這個方式把它在假 ACP agent 上重現出來。
+ *          標準 ACP 的用法——標準做法(真實 OpenCode 就是這樣)是第二次改用
+ *          帶 `rawInput` 的 `tool_call_update`,`AcpAdapter.handleSessionUpdate()`
+ *          也會把它補送成第二個 `tool-call` 事件,那條路徑由下面的
+ *          OPENCODE_TOOL_CALLS_PREFIX 涵蓋。這裡保留送兩則 `tool_call` 的寫法,
+ *          是因為 CLI/TUI 的 e2e 要驗的是 AgentEvent 層的 upsert 規則,兩種 ACP
+ *          寫法在 AgentEvent 層長得一樣,維持原樣就不必改動既有斷言。
  *       2. `NoInputTool`:只送一則不帶 `rawInput` 的 `tool_call`,接著直接
  *          `tool_call_update`(completed)——**永遠等不到 input** 的工具
  *          (被中斷的工具,或 `tool_call` 本來就沒帶 `rawInput` 的真實 ACP
@@ -145,6 +145,18 @@
  *     兩個工具都是 `kind: "other"` 且不帶 `locations`,確保不會意外命中
  *     `resolveEditSnapshotPath()` 的檔案快照路徑(那是 diff 顯示路徑 B,與
  *     這個情境無關)。
+ *   - 若 prompt 文字以 OPENCODE_TOOL_CALLS_PREFIX("ACP_OPENCODE_TOOL_CALLS ")
+ *     開頭,其後接一段 JSON `{"count": number}`(2026-10-03,e2e-opencode-tool-input.mjs
+ *     的 E 組用):在同一輪裡送出 `count` 個**照真實 OpenCode(1.18.7)順序**的
+ *     工具呼叫——先 `tool_call`(`pending`,`rawInput: {}` 佔位),再
+ *     `tool_call_update`(`in_progress`,**第一次帶真正的參數**,同時帶一個和
+ *     `tool_call` 不同的 title),再一則 `in_progress` 把同一份參數原樣重報
+ *     (adapter 不能因此多送事件),最後 `tool_call_update`(`completed`,`rawInput`
+ *     再帶一次同一份)。每個工具的參數是 `opencodeToolInput(i)`、title 分別是
+ *     `OPENCODE_TOOL_PENDING_TITLE` / `opencodeToolRunningTitle(i)`,e2e 直接 import,
+ *     不在兩邊各寫一份字面值。用來決定性地驗證 AcpAdapter 會把 `tool_call_update`
+ *     帶來的參數補送成同一個 toolCallId 的第二個 `tool-call` 事件,而 core 不重複
+ *     計數(`count` 個工具只計 `count` 次)。
  *   - 若 prompt 文字等於 EMPTY_RESULT_TOOL_NAME_PREFIX
  *     ("ACP_EMPTY_RESULT_TOOL_NAME",不接受任何參數)(CLI/TUI「工具失敗那
  *     一行要有工具名稱」的 e2e 用,見 scripts/e2e-cli.mjs 的案例 12 與
@@ -223,6 +235,12 @@ export const UPSERT_TOOL_TITLE = "UpsertTool";
 export const NO_INPUT_TOOL_TITLE = "NoInputTool";
 export const UPSERT_TOOL_COMMAND = "echo upsert-input-arrived";
 export const UPSERT_DONE_TEXT = "upsert tool calls sent";
+/** e2e-opencode-tool-input.mjs E 組用:照真實 OpenCode 的 ACP 通知順序送工具呼叫,見檔頭註解。 */
+export const OPENCODE_TOOL_CALLS_PREFIX = "ACP_OPENCODE_TOOL_CALLS ";
+/** 上面那一輪用到的固定字串/參數——e2e 直接 import,不在兩邊各寫一份字面值。 */
+export const OPENCODE_TOOL_PENDING_TITLE = "opencode_tool";
+export const opencodeToolRunningTitle = (index) => `opencode_tool_running_${index}`;
+export const opencodeToolInput = (index) => ({ message: `opencode-style-input-${index}`, limit: index + 10 });
 /** CLI/TUI「工具失敗那一行要有工具名稱」e2e 用(不接受參數),見檔頭註解。 */
 export const EMPTY_RESULT_TOOL_NAME_PREFIX = "ACP_EMPTY_RESULT_TOOL_NAME";
 /** 上面那一輪用到的固定字串——e2e 直接 import,不在兩邊各寫一份字面值。 */
@@ -308,6 +326,8 @@ class FakeAcpAgent {
         await this.handleAvailableCommands(params.sessionId, text.slice(AVAILABLE_COMMANDS_PREFIX.length), cx);
       } else if (text.startsWith(DIFF_CONTENT_PREFIX)) {
         await this.handleDiffContent(params.sessionId, text.slice(DIFF_CONTENT_PREFIX.length), cx);
+      } else if (text.startsWith(OPENCODE_TOOL_CALLS_PREFIX)) {
+        await this.handleOpencodeToolCalls(params.sessionId, text.slice(OPENCODE_TOOL_CALLS_PREFIX.length), cx);
       } else if (text === UPSERT_TOOL_CALLS_PREFIX) {
         await this.handleUpsertToolCalls(params.sessionId, cx);
       } else if (text === EMPTY_RESULT_TOOL_NAME_PREFIX) {
@@ -601,6 +621,63 @@ class FakeAcpAgent {
     await cx.notify(acp.methods.client.session.update, {
       sessionId,
       update: { sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: UPSERT_DONE_TEXT } },
+    });
+  }
+
+  /**
+   * 見檔頭註解的 OPENCODE_TOOL_CALLS_PREFIX:`count` 個照真實 OpenCode ACP 順序的工具呼叫
+   * (`tool_call` 帶 `{}` 佔位 → `tool_call_update` in_progress 才帶真參數 → 重報同一份 →
+   * completed 再帶一次)。`kind: "other"` 且不帶 `locations`,不會碰到 diff 的檔案快照路徑。
+   */
+  async handleOpencodeToolCalls(sessionId, rawJson, cx) {
+    const { count } = JSON.parse(rawJson);
+    for (let i = 0; i < count; i++) {
+      const toolCallId = `opencode-style-${i}-${randomUUID()}`;
+      const input = opencodeToolInput(i);
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId,
+          title: OPENCODE_TOOL_PENDING_TITLE,
+          kind: "other",
+          status: "pending",
+          rawInput: {},
+        },
+      });
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          title: opencodeToolRunningTitle(i),
+          status: "in_progress",
+          rawInput: input,
+        },
+      });
+      // 同一份參數原樣重報:adapter 不能因此再多送一個 tool-call 事件。
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "tool_call_update", toolCallId, status: "in_progress", rawInput: input },
+      });
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "completed",
+          rawInput: input,
+          rawOutput: { ok: true, index: i },
+        },
+      });
+    }
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: { type: "text", text: `opencode-style tool calls sent: ${count}` },
+      },
     });
   }
 

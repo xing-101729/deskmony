@@ -30,6 +30,17 @@
  * core 同一段程式碼;沒有不需要真實憑證的 Claude 假後端,由這裡的 OpenCode 流程
  * 代為涵蓋。
  *
+ *   E. (2026-10-03)OpenCode 經 ACP(`opencode acp`,provider `opencode-acp`)的同一個問題:
+ *      ACP 的 `tool_call`(`pending`)給的 `rawInput` 是 `{}` 佔位,真參數要到後續的
+ *      `tool_call_update`(`in_progress`)才帶,而 `AcpAdapter` 過去完全不讀 update 的
+ *      `rawInput`,於是 MCP 工具(例如 `deskmony_send_to_session`)明明收到了參數,歷史與 UI
+ *      裡那筆呼叫卻是 `"input":{}`。這組用 fake ACP agent 照真實 OpenCode 的通知順序送工具
+ *      呼叫(scripts/fake-acp-agent.mjs 的 `ACP_OPENCODE_TOOL_CALLS`):
+ *        E1  live:同一個 toolCallId 兩次 tool-call(`{}` → 真參數,title 跟著更新),後面
+ *            重報同一份參數的 update 不再多送事件;歷史每個工具一筆 call、帶真參數,
+ *            `maxToolCalls = 3` 送 3 個不 trip(每個工具只計一次)。
+ *        E2  同一個上限送 4 個 → 必須 trip(補送不能把真的呼叫吃掉)。
+ *
  * 全程走 scripts/fake-opencode-server.mjs(決定性、不呼叫任何模型)。只啟動一個
  * core,DESKMONY_HOME/DATA_DIR/WORKSPACE/CORE_PORT 四個都指向暫存目錄,並在繼續
  * 之前確認 core 印出的 SQLite 路徑真的在暫存目錄底下——漏設任何一個都可能連到
@@ -53,8 +64,14 @@ import {
   MANY_TOOL_CALLS_PREFIX,
   manyToolCallInput,
 } from "./fake-opencode-server.mjs";
+import {
+  OPENCODE_TOOL_CALLS_PREFIX,
+  OPENCODE_TOOL_PENDING_TITLE,
+  opencodeToolRunningTitle,
+  opencodeToolInput,
+} from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
-import { e2eProvidersEnv, FAKE_OPENCODE } from "./lib/e2e-providers.mjs";
+import { e2eProvidersEnv, FAKE_OPENCODE, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
 
@@ -427,6 +444,77 @@ async function testTurnLimitCountsEachToolOnce(client, sessionId) {
 }
 
 // =======================================================================
+// E:OpenCode 經 ACP——`tool_call` 帶 `{}`、真參數在 `tool_call_update` 才到。
+// =======================================================================
+async function runOpencodeStyleToolCalls(client, sessionId, count) {
+  const from = client.timeline.length;
+  await client.rpc("session.sendPrompt", {
+    sessionId,
+    prompt: { text: `${OPENCODE_TOOL_CALLS_PREFIX}${JSON.stringify({ count })}` },
+  });
+  return from;
+}
+
+async function testAcpToolInputFromUpdate(client, sessionId) {
+  // ---- E1:剛好 maxToolCalls 個工具 → 不 trip,每個工具的真參數都落地 ----
+  {
+    const from = await runOpencodeStyleToolCalls(client, sessionId, TURN_MAX_TOOL_CALLS);
+    const end = await client.waitFor((e) => isTurnEnd(e, sessionId), 15_000, from);
+    await sleep(NO_TRIP_SETTLE_MS);
+    const tripped = client.timeline.slice(from).some((e) => isTurnLimitTrip(e, sessionId));
+    const byId = toolCallEventsById(client, sessionId, from, end.index);
+    const ids = [...byId.keys()];
+
+    // live:每個工具剛好兩次 tool-call——`{}` 佔位 + 補送的真參數(title 跟著 update 走);
+    // 兩則重報同一份參數的 update(in_progress、completed)不能讓事件變多。
+    const liveOk =
+      ids.length === TURN_MAX_TOOL_CALLS &&
+      ids.every((id, i) => {
+        const events = byId.get(id);
+        return (
+          events.length === 2 &&
+          events[0].toolName === OPENCODE_TOOL_PENDING_TITLE &&
+          isDeepStrictEqual(events[0].input, {}) &&
+          events[1].toolName === opencodeToolRunningTitle(i) &&
+          isDeepStrictEqual(events[1].input, opencodeToolInput(i))
+        );
+      });
+
+    // 歷史:每個工具一筆 call(就地更新、不是多插一筆)、input 是真參數、toolName 是新 title,
+    // 一筆 result。
+    let historyOk = ids.length > 0;
+    const historyDetail = [];
+    for (const [i, id] of ids.entries()) {
+      const { calls, results: resultRows } = await historyRowsFor(client, sessionId, id);
+      const ok =
+        calls.length === 1 &&
+        isDeepStrictEqual(calls[0].input, opencodeToolInput(i)) &&
+        calls[0].toolName === opencodeToolRunningTitle(i) &&
+        resultRows.length === 1;
+      historyOk = historyOk && ok;
+      historyDetail.push(`#${i}: calls=${calls.length}, input=${JSON.stringify(calls[0]?.input)}, results=${resultRows.length}`);
+    }
+
+    record(
+      `E1(ACP,OpenCode 順序)live:每個工具兩次 tool-call({} → 真參數,重報同一份不再多送);歷史每個工具一筆 call 帶真實參數;maxToolCalls=${TURN_MAX_TOOL_CALLS} 送 ${TURN_MAX_TOOL_CALLS} 個不 trip(每個工具只計一次)`,
+      !tripped && end.entry.payload.event.type === "completed" && liveOk && historyOk,
+      `tripped=${tripped}, 回合結束=${end.entry.payload.event.type}, 工具數=${ids.length}, live=${liveOk} ${JSON.stringify(ids.map((id) => byId.get(id).map((e) => e.input)))}, 歷史=${historyDetail.join(" | ")}`,
+    );
+  }
+
+  // ---- E2:多一個 → 必須 trip ----
+  {
+    const from = await runOpencodeStyleToolCalls(client, sessionId, TURN_MAX_TOOL_CALLS + 1);
+    const trip = await client.waitFor((e) => isTurnLimitTrip(e, sessionId), 10_000, from).catch(() => undefined);
+    record(
+      `E2(ACP,OpenCode 順序)同一個上限送 ${TURN_MAX_TOOL_CALLS + 1} 個工具 → 收到 turn-limit trip 通知(補送沒有把真的呼叫吃掉)`,
+      Boolean(trip),
+      `trip=${trip ? JSON.stringify(trip.entry.payload) : "(沒收到)"}`,
+    );
+  }
+}
+
+// =======================================================================
 async function main() {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-oc-input-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-oc-input-home-"));
@@ -445,6 +533,7 @@ async function main() {
   let core;
   let client;
   let sessionId;
+  let acpSessionId;
   try {
     core = startCore({ dataDir, homeDir, workspaceDir });
     const dbPath = await Promise.race([core.dbPathPromise, sleep(20_000).then(() => undefined)]);
@@ -471,12 +560,24 @@ async function main() {
     await testRunningBeforeAsk(client, sessionId);
     console.log("\n=== C / D:回合硬上限每個工具只計一次 ===");
     await testTurnLimitCountsEachToolOnce(client, sessionId);
+
+    // E 用另一個 session(D 已經讓上面那個 session 被回合上限中斷了)。
+    console.log("\n=== E:OpenCode 經 ACP——真參數在 tool_call_update 才到 ===");
+    ({ session: { id: acpSessionId } } = await client.rpc(
+      "session.create",
+      { providerId: FAKE_ACP, workingDir: workspaceDir, title: "e2e-opencode-tool-input-acp" },
+      30_000,
+    ));
+    await testAcpToolInputFromUpdate(client, acpSessionId);
   } catch (err) {
     record("執行過程發生未預期錯誤", false, err instanceof Error ? err.stack : String(err));
   } finally {
     // 先讓 adapter 正常收掉 fake server 子程序,再停 core。
     if (client && sessionId) {
       await client.rpc("session.delete", { sessionId }, 15_000).catch(() => undefined);
+    }
+    if (client && acpSessionId) {
+      await client.rpc("session.delete", { sessionId: acpSessionId }, 15_000).catch(() => undefined);
     }
     client?.close();
     await killProcessTree(core?.proc);

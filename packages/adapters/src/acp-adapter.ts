@@ -30,7 +30,9 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
  *    prompt 結束的 `stop` 訊息)。
  *  - `session/update` 的 `agent_message_chunk` → `message-delta`;
  *    `tool_call` → `tool-call`;`tool_call_update`(status 為 completed/
- *    failed 時)→ `tool-result`。ACP 明確帶 `messageId`(不像 Claude SDK
+ *    failed 時)→ `tool-result`;`tool_call_update` 帶來新的非空 `rawInput`
+ *    (OpenCode 在 `tool_call` 只給 `{}`,真參數隨後才到)時,先對同一個
+ *    toolCallId 補送一次 `tool-call`(見 handleSessionUpdate())。ACP 明確帶 `messageId`(不像 Claude SDK
  *    需要自行從 `message_start`/`message_stop` 推斷邊界),但仍比照
  *    ClaudeAgentSdkAdapter 的作法,在 messageId 切換或該輪 `stop` 時補送
  *    一次 `done:true` 的空 delta,確保串流分組規則一致。
@@ -283,6 +285,7 @@ export class AcpAdapter implements AgentAdapter {
         outputQueue,
         pendingPermissions,
         toolTitles: new Map(),
+        toolInputs: new Map(),
         currentMessageId: null,
       };
       this.sessions.set(handle.id, internal);
@@ -552,6 +555,9 @@ export class AcpAdapter implements AgentAdapter {
         break;
       case "tool_call": {
         internal.toolTitles.set(update.toolCallId, update.title);
+        // 記下這次送出的 input,`tool_call_update` 補送參數時才分得出「帶來新資訊」
+        // 還是「只是把同一份再報一次」(見下方 "tool_call_update" case 的註解)。
+        internal.toolInputs.set(update.toolCallId, serializeToolInput(update.rawInput));
         internal.outputQueue.push({
           type: "tool-call",
           toolCallId: update.toolCallId,
@@ -578,7 +584,45 @@ export class AcpAdapter implements AgentAdapter {
         break;
       }
       case "tool_call_update": {
-        if (update.status === "completed" || update.status === "failed") {
+        const terminal = update.status === "completed" || update.status === "failed";
+        // 補送工具參數。OpenCode(1.18.7 實測)的 `tool_call`(`pending`)帶的
+        // `rawInput` 是空物件 `{}` 佔位,真正的參數要到後續的 `tool_call_update`
+        // (`in_progress`,完成時的 `completed` 也會再帶一次)才有。過去只在
+        // `tool_call` 送一次 `tool-call`、`tool_call_update` 完全不讀 `rawInput`,
+        // 所以工具確實收到參數(例如 `send_to_session` 的訊息真的送達),歷史與 UI
+        // 卻都記成 `"input":{}`。
+        //
+        // 修法是同一個 toolCallId 再送一次 `tool-call`(補資訊,語意見
+        // `ToolCallEventSchema` 註解):core 依 toolCallId 就地更新那筆 call 且不
+        // 重複計入回合硬上限,桌面端以 toolCallId upsert。條件刻意用「input 有內容
+        // 且與上次送出的不同」而不看 status——`in_progress` 的 update 帶參數也要送,
+        // 而 codex 之類每次 update 都把同一份 `rawInput` 原樣再報的 agent 不會因此
+        // 每則 update 多一個事件。必須排在同一個呼叫的 `tool-result` 之前
+        // (core 在收到 result 後就把 toolCallId 視為已結束,之後再來一個 `tool-call`
+        // 會被當成新的呼叫重複計數),所以終態之後 `toolInputs` 記成 `null`、不再補送。
+        const lastInput = internal.toolInputs.get(update.toolCallId);
+        if (lastInput !== null && isInformativeToolInput(update.rawInput)) {
+          const serialized = serializeToolInput(update.rawInput);
+          if (serialized !== lastInput) {
+            // update 帶了新 title 就更新記下的 title(tool-result 的 toolName 也會跟著用它),
+            // 否則沿用 `tool_call` 時記下的。
+            const toolName = update.title || internal.toolTitles.get(update.toolCallId) || "";
+            if (toolName) internal.toolTitles.set(update.toolCallId, toolName);
+            internal.toolInputs.set(update.toolCallId, serialized);
+            internal.outputQueue.push({
+              type: "tool-call",
+              toolCallId: update.toolCallId,
+              toolName,
+              input: update.rawInput,
+            });
+          }
+        }
+        if (terminal) {
+          // 終態:同一個 toolCallId 之後不會再有合法的 update(見
+          // `resolveDiffStructuredResult()` 註解)。改記成 `null` 而不是刪除——
+          // 刪掉的話,萬一後端終態之後又送一則帶 `rawInput` 的 update,會被當成「從沒
+          // 送過」而補送,在 core 變成一次多餘的新呼叫。順手把可能很大的參數字串釋放掉。
+          internal.toolInputs.set(update.toolCallId, null);
           const structuredResult = await this.resolveDiffStructuredResult(internal, update);
           internal.outputQueue.push({
             type: "tool-result",
@@ -732,6 +776,12 @@ interface InternalSession {
   pendingPermissions: Map<string, PendingPermission>;
   /** toolCallId -> 建立時的 title,tool_call_update 有時不會重複帶 title。 */
   toolTitles: Map<string, string>;
+  /**
+   * toolCallId -> 最近一次送出 `tool-call` 事件時的 input(JSON 字串),
+   * `tool_call_update` 靠它判斷要不要補送參數(見 handleSessionUpdate() 的註解)。
+   * 呼叫進入終態(completed/failed)後記成 `null`:不再補送。
+   */
+  toolInputs: Map<string, string | null>;
   currentMessageId: string | null;
   /**
    * S3a(usage-metering)L4 §2:最近一次從 `usage_update` 拿到的累計花費
@@ -786,6 +836,24 @@ interface DiffStructuredResult {
  * `ToolResultEvent.structuredResult` 的既有形狀只能表達單一檔案的 diff,取
  * 第一個命中的 `type:"diff"` 區塊即可,不嘗試合併多個。
  */
+/**
+ * `rawInput` 是否帶有實際內容:`undefined`/`null`/空物件/空陣列/空字串都是「還不知道
+ * 參數」的佔位(OpenCode 的 `tool_call` 就是送 `{}`),不值得補送一次 `tool-call`。
+ * 一個真的不帶參數的工具,input 停在第一次送的 `{}` 即可,不受影響。
+ */
+function isInformativeToolInput(input: unknown): boolean {
+  if (input === undefined || input === null) return false;
+  if (typeof input === "string") return input.length > 0;
+  if (Array.isArray(input)) return input.length > 0;
+  if (typeof input === "object") return Object.keys(input).length > 0;
+  return true;
+}
+
+/** 供「這次的 input 和上次送出的一樣嗎」比對用;`rawInput` 來自 JSON-RPC,必定可序列化。 */
+function serializeToolInput(input: unknown): string {
+  return JSON.stringify(input) ?? "undefined";
+}
+
 function findDiffBlock(content: acp.ToolCallContent[] | null | undefined): acp.Diff | undefined {
   return content?.find((c): c is acp.Diff & { type: "diff" } => c.type === "diff");
 }
