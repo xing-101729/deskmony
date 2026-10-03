@@ -837,7 +837,7 @@ apps/desktop/src/
 | `pnpm start:core` | headless 正式啟動 |
 | `pnpm package` / `package:dir` | `bundle-core.mjs`(含 `@electron/rebuild`)→ vite build → electron-builder NSIS |
 
-**15 支 e2e 腳本**(`scripts/e2e-*.mjs`;`pnpm test` 的 `run-e2e.mjs` 跑其中 14 支
+**16 支 e2e 腳本**(`scripts/e2e-*.mjs`;`pnpm test` 的 `run-e2e.mjs` 跑其中 15 支
 決定性的,`gateway` 需要真實憑證、只留給人工執行),全部直接對獨立的 core process
 打 WS RPC,**從不經過 Electron**:`gateway`(主套件,決定性測試加上少數
 model-behavior 檢查點)、`hard-deny`、`policy-engine`(含 `providerId` 範圍與舊
@@ -848,7 +848,9 @@ profile 範圍規則的處理)、`auto-mode-yolo`、
 adapter、舊 schema 的 `agent_profiles` 遷移)、
 `session-network`(五個工具、信封與來源標記、佇列、訊息鏈預算熔斷、UI 轉傳、
 bridge token 方法白名單、in-process 與 bridge 的工具描述逐字比對)、
-`opencode-question`、`opencode-tool-input`、`child-registry`、
+`opencode-question`、`opencode-tool-input`、`opencode-permissions`(OpenCode 的工具呼叫一律進政策引擎:
+啟動時注入的 `OPENCODE_CONFIG_CONTENT`、與使用者設定的合併、session 網路 MCP 與 token 撤銷、
+subagent 子 session 的權限、hard-deny 端到端)、`child-registry`、
 `cli`、`cli-tui`。(2026-10-02 移除 `message-budget` 與 `lead-gate` 兩支;
 `session-subagents` 改寫成 `session-network`。)
 

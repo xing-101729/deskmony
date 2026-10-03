@@ -21,7 +21,7 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十四支是**決定性**
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十五支是**決定性**
  * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。

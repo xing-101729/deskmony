@@ -331,20 +331,20 @@ Deskmony/
 │  ├─ adapters/         # 4 個 adapter + `deskmony` session 網路 MCP server
 │  ├─ db/               # Drizzle schema、冪等遷移
 │  └─ shared/           # 型別、gateway 協議、zod schema
-├─ scripts/             # 15 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
-├─ .github/workflows/   # CI(build → typecheck → 14 支決定性測試)
+├─ scripts/             # 16 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
+├─ .github/workflows/   # CI(build → typecheck → 15 支決定性測試)
 └─ docs/                # 架構、設計定案、分層設計、開發日誌
 ```
 
 ## 🧪 測試
 
 ```bash
-pnpm test          # typecheck + build + 14 支決定性測試
+pnpm test          # typecheck + build + 15 支決定性測試
 pnpm test:e2e      # 只跑測試(需要 pnpm build 已是最新)
 pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會實際消耗額度
 ```
 
-**十五支端到端測試。** 其中十四支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十四支:**228 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180;之後新增 `e2e-agent-catalog.mjs` 與取代子 agent 測試的 `e2e-session-network.mjs`,斷言數又升上來。)session 網路那支測試也會斷言:in-process server 與 ACP 橋接子行程的工具名稱、描述、參數 schema 逐字一致。
+**十六支端到端測試。** 其中十五支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十五支:**243 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180;之後新增 `e2e-agent-catalog.mjs` 與取代子 agent 測試的 `e2e-session-network.mjs`,斷言數又升上來;2026-10-03 再加上 `e2e-opencode-permissions.mjs`,釘住每個 OpenCode 工具呼叫都會進政策引擎。)session 網路那支測試也會斷言:in-process server 與 ACP 橋接子行程的工具名稱、描述、參數 schema 逐字一致。
 
 `e2e-gateway.mjs` 刻意不在預設範圍內。它需要真實 Claude Code 憑證、會花真的錢,而且有一組 *model-behavior* 斷言依賴模型當輪自由選擇怎麼講 —— 檔案自己標註為已知 flake。一個會因為模型換句話說就變紅的 CI,很快就會被所有人忽略。
 

@@ -331,20 +331,20 @@ Deskmony/
 │  ├─ adapters/         # 4 adapters + the `deskmony` session-network MCP server
 │  ├─ db/               # Drizzle schema, idempotent migrations
 │  └─ shared/           # types, gateway protocol, zod schemas
-├─ scripts/             # 15 e2e suites, the runner, the build-freshness guard, fake backends, packaging
-├─ .github/workflows/   # CI (build → typecheck → the 14 deterministic suites)
+├─ scripts/             # 16 e2e suites, the runner, the build-freshness guard, fake backends, packaging
+├─ .github/workflows/   # CI (build → typecheck → the 15 deterministic suites)
 └─ docs/                # architecture, decisions, layered design, dev log
 ```
 
 ## 🧪 Testing
 
 ```bash
-pnpm test          # typecheck + build + the 14 deterministic suites
+pnpm test          # typecheck + build + the 15 deterministic suites
 pnpm test:e2e      # just the suites (requires a current pnpm build)
 pnpm test:e2e:live # e2e-gateway.mjs — needs real Claude Code credentials, spends real tokens
 ```
 
-**Fifteen end-to-end suites.** Fourteen of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those fourteen are what `pnpm test` and CI run: **228 assertions, all of which must pass.** (The count fell from 221 to 180 on 2026-10-02 when the team, task and message-bus suites were removed along with the features, then rose as `e2e-agent-catalog.mjs` and `e2e-session-network.mjs` — which replaced the sub-agent suite — were added.) The session-network suite also asserts that the tool names, descriptions and parameter schemas of the in-process server and the ACP bridge subprocess are word-for-word identical.
+**Sixteen end-to-end suites.** Fifteen of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those fifteen are what `pnpm test` and CI run: **243 assertions, all of which must pass.** (The count fell from 221 to 180 on 2026-10-02 when the team, task and message-bus suites were removed along with the features, then rose as `e2e-agent-catalog.mjs` and `e2e-session-network.mjs` — which replaced the sub-agent suite — were added; 2026-10-03 added `e2e-opencode-permissions.mjs`, which pins that every OpenCode tool call reaches the permission engine.) The session-network suite also asserts that the tool names, descriptions and parameter schemas of the in-process server and the ACP bridge subprocess are word-for-word identical.
 
 `e2e-gateway.mjs` is excluded from the default run on purpose. It needs real Claude Code credentials, costs real money, and carries a *model-behavior* group whose assertions depend on what a model chose to say that run — the file marks those as known-flaky. A CI that goes red because a model rephrased itself is a CI people learn to ignore.
 
