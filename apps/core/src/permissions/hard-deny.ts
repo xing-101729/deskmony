@@ -13,7 +13,7 @@ import {
  *
  * 對應 docs/LAYER-4-detail-design/policy-engine_detail.md §3。四類:
  *   1. worktree 外寫入/刪除
- *   2. 讀秘密路徑(~/.ssh、~/.aws、~/.deskmony、`**​/.env*`、`**​/id_rsa*`、`**​/credentials`)
+ *   2. 讀秘密路徑(~/.ssh、~/.aws、~/.deskmony、桌面殼的 Electron userData(含加密保存的遠端存取 token)、`**​/.env*`、`**​/id_rsa*`、`**​/credentials`)
  *   3. force-push / 危險 git
  *   4. 非白名單外連
  *
@@ -60,14 +60,44 @@ function isMutatingToolName(toolName: string): boolean {
   return MUTATING_TOOL_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
-/** ~/.ssh、~/.aws、~/.deskmony(整個目錄樹)+ `**​/.env*`、`**​/id_rsa*`、
+/**
+ * 桌面殼(Electron)的 userData 目錄樹——2026-10-05 納入秘密路徑。
+ *
+ * 桌面殼把「遠端存取 token」用 Electron `safeStorage`(Windows DPAPI/macOS Keychain/Linux Secret Service)加密存在
+ * `<userData>/auth-token.enc`(apps/desktop/electron/main.ts 的 `authTokenFilePath()`)。**同一個作業系統使用者底下的任何程序都能
+ * 解密它**(DPAPI 以使用者身分解密)——agent 若能讀到這個檔案再解密,就拿到主認證 token(= 能自己核准權限/切 YOLO)。把整個目錄樹
+ * 列為秘密路徑,讓「讀這個檔案」的工具呼叫一律升級給使用者(hard-deny 不可學習、auto/YOLO 也擋)。
+ *
+ * core 不知道 Electron 實際的 userData 路徑(core 是獨立程序,可能 headless、也可能被 CLI 啟動),所以這裡依 Electron 的**平台慣例**
+ * 推算(`app.getPath("userData")` = appData 基底 + app 名稱),兩個名稱都納入:
+ *  - `Deskmony`:打包後的 app(electron-builder 的 `productName`,2026-10-05 在 Windows 實測對應 `%APPDATA%\Deskmony`);
+ *  - `@deskmony`:開發模式(`electron .`,app 名稱是 package.json 的 `@deskmony/desktop`,實測落在 `%APPDATA%\@deskmony\desktop`)。
+ * appData 基底:Windows `%APPDATA%`(沒有就 `~/AppData/Roaming`)、macOS `~/Library/Application Support`、Linux `$XDG_CONFIG_HOME`(沒有就 `~/.config`)。
+ *
+ * **只擋「工具 input 裡結構化的路徑欄位」**(同其他秘密路徑規則,見 policy-engine_detail.md §2「shell 的誠實限制」):agent 在 bash 裡
+ * `cat` 這個檔案是一串指令字串,這裡看不到——所以這條只是縱深防禦的一層,**不是**擋住「同使用者程序解密本機檔案」的機制;那屬於
+ * 沙箱/作業系統隔離的範疇(docs/DECISIONS.md §J)。
+ */
+function electronUserDataDirs(): string[] {
+  const home = os.homedir();
+  let appData: string;
+  if (process.platform === "win32") appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+  else if (process.platform === "darwin") appData = path.join(home, "Library", "Application Support");
+  else appData = process.env.XDG_CONFIG_HOME || path.join(home, ".config");
+  return [path.join(appData, "Deskmony"), path.join(appData, "@deskmony")];
+}
+
+/** ~/.ssh、~/.aws、~/.deskmony、桌面殼的 Electron userData(整個目錄樹)+ `**​/.env*`、`**​/id_rsa*`、
  *  `**​/credentials`(任何深度)。 */
 function isSecretPath(rawPath: string, baseDir: string): boolean {
   const resolved = resolveRealpathBestEffort(rawPath, baseDir);
   const home = os.homedir();
 
-  for (const dirName of [".ssh", ".aws", ".deskmony"]) {
-    const boundary = resolveRealpathBestEffort(path.join(home, dirName));
+  for (const boundaryPath of [
+    ...[".ssh", ".aws", ".deskmony"].map((dirName) => path.join(home, dirName)),
+    ...electronUserDataDirs(),
+  ]) {
+    const boundary = resolveRealpathBestEffort(boundaryPath);
     if (isPathUnder(resolved, boundary)) return true;
   }
 
@@ -138,7 +168,7 @@ export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
       return {
         matched: true,
         category: "secret-path",
-        reason: `工具 ${req.toolName} 的目標路徑 "${rawPath}" 命中秘密路徑規則(~/.ssh、~/.aws、~/.deskmony、.env*、id_rsa*、credentials)`,
+        reason: `工具 ${req.toolName} 的目標路徑 "${rawPath}" 命中秘密路徑規則(~/.ssh、~/.aws、~/.deskmony、桌面殼的 userData、.env*、id_rsa*、credentials)`,
       };
     }
   }

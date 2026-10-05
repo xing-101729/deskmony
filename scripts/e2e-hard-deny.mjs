@@ -10,7 +10,7 @@
  * mode 也一律升級」,是使用者放心按下 auto 的唯一理由。它有四個判定面:
  *
  *   1. worktree-escape          (路徑邊界)
- *   2. secret-path              (~/.ssh、~/.aws、~/.deskmony、.env*、id_rsa*、credentials)
+ *   2. secret-path              (~/.ssh、~/.aws、~/.deskmony、桌面殼的 Electron userData(含加密保存的遠端存取 token)、.env*、id_rsa*、credentials)
  *   3. dangerous-git            (force-push / --delete / branch -D 的 regex)
  *   4. non-allowlisted-network  (host 允許清單)
  *
@@ -108,6 +108,38 @@ console.log("\n=== 第 2 類:secret-path(稽核前零覆蓋)===\n");
     "2b secret-path 對檔名大小寫不敏感(.ENV / ID_RSA 一樣擋)",
     upper.matched && idRsaUpper.matched,
     `.ENV=${upper.matched}, ID_RSA=${idRsaUpper.matched}`,
+  );
+}
+
+{
+  // 2026-10-05:桌面殼用 Electron safeStorage(DPAPI)把遠端存取 token 加密存在 `<userData>/auth-token.enc`;同一個 OS 使用者的程序能解密它,
+  // 所以整個 userData 目錄樹是秘密路徑。core 依 Electron 的平台慣例推算(打包後 `Deskmony`、開發模式 `@deskmony/desktop`),見 hard-deny.ts。
+  const appData =
+    process.platform === "win32"
+      ? process.env.APPDATA || path.join(HOME, "AppData", "Roaming")
+      : process.platform === "darwin"
+        ? path.join(HOME, "Library", "Application Support")
+        : process.env.XDG_CONFIG_HOME || path.join(HOME, ".config");
+  const hit = [
+    ["打包後 app 的加密 token 檔", path.join(appData, "Deskmony", "auth-token.enc")],
+    ["開發模式 app 的加密 token 檔(@deskmony/desktop)", path.join(appData, "@deskmony", "desktop", "auth-token.enc")],
+    ["userData 底下的其他檔(整個目錄樹)", path.join(appData, "Deskmony", "Local State")],
+  ];
+  const lookalike = [
+    ["名稱只是前綴相像的別的 app 目錄", path.join(appData, "Deskmony-notes", "readme.md")],
+    ["appData 底下別的 app", path.join(appData, "SomeOtherApp", "auth-token.enc")],
+  ];
+  const missed = hit.filter(([, p]) => {
+    const r = check({ toolName: "Read file", input: { file_path: p } });
+    return !(r.matched && r.category === "secret-path");
+  });
+  const wrongly = lookalike.filter(([, p]) => check({ toolName: "Read file", input: { file_path: p } }).matched);
+  record(
+    "2d secret-path 涵蓋桌面殼的 Electron userData(打包後 Deskmony、開發模式 @deskmony/desktop,含加密保存的遠端存取 token 檔),不誤擋名稱相像的別的目錄",
+    missed.length === 0 && wrongly.length === 0,
+    missed.length === 0 && wrongly.length === 0
+      ? `命中 ${hit.length} 種、不誤擋 ${lookalike.length} 種(appData=${appData})`
+      : `未命中:${missed.map(([l]) => l).join("、")};被誤擋:${wrongly.map(([l]) => l).join("、")}`,
   );
 }
 
