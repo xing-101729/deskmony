@@ -13,6 +13,7 @@ import { registerChild, registerChildDescendants, unregisterChild } from "./chil
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
 import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
+import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
 
 /**
  * AcpAdapter — 對接 [Agent Client Protocol](https://agentclientprotocol.com)
@@ -199,6 +200,11 @@ export class AcpAdapter implements AgentAdapter {
         // opencode acp 不會轉發 subagent 子 session 的權限請求 → 子 session 卡死,只能不讓它用 subagent(見該選項註解)。
         denySubagents: true,
       });
+      // 2026-10-03(安全):**`opencode acp` 也會在 loopback 開 HTTP 伺服器**(實測 1.18.7:聽 `127.0.0.1:4096`——opencode 的
+      // 預設 port,被占用才改隨機;預設無認證,不帶標頭 `GET /config` 回 200)——本機其他程序可以替它核准權限請求、讀設定裡的 token。ACP 這條路
+      // Deskmony 不需要打它的 HTTP API(全走 stdio),所以只要設一組隨機密碼讓別人進不去,回傳的標頭值用不到、直接丟棄。
+      // 實測帶了密碼 `opencode acp` 照常運作(initialize/session/new/session/prompt 都正常)。理由與覆蓋規則見 opencode-server-auth.ts。
+      applyOpencodeServerAuth(childEnv);
     }
     let child: ChildProcessWithoutNullStreams;
     try {

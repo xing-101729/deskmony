@@ -10,6 +10,7 @@ import { registerChild, registerChildDescendants, unregisterChild } from "./chil
 import { waitForChildExit } from "./child-process.js";
 import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
 import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
+import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
 
 /**
  * OpenCodeAdapter — 對接 opencode 的 headless server API(ARCHITECTURE.md
@@ -20,7 +21,8 @@ import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./openc
  * 與本機起一個真實 `opencode serve` process 觀察到的行為為準,不臆測**)----
  *
  *  - `opencode`(本機驗證版本 1.18.4)有一個原生子命令 `opencode serve`
- *    (`--port`/`--hostname`,預設 `--port 0` 隨機取一個 port、
+ *    (`--port`/`--hostname`,預設 `--port 0`——**不是純隨機**:2026-10-03 用 1.18.7 實測,它先試 opencode 的預設 port
+ *    4096,被占用才改隨機,所以第一個伺服器的位址是可預測的(見下方「認證」段落)、
  *    `--hostname 127.0.0.1`),啟動後會在 **stdout** 印出一行
  *    `opencode server listening on http://<host>:<port>`——這裡 spawn 子
  *    程序時固定帶 `serve --port 0 --hostname 127.0.0.1`(除非
@@ -108,6 +110,18 @@ import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./openc
  *    `{reply:"once"|"always"|"reject"}`——`resolvePermission()` 的
  *    `allow`/`deny` 分別對應 `"once"`/`"reject"`(`"always"` 是「記住這個
  *    決定」的進階選項,目前 UI 沒有對應的操作,不使用)。
+ *  - **認證(2026-10-03,安全;理由與實測見 `opencode-server-auth.ts` 檔頭)**:`opencode serve` 預設**沒有任何認證**,
+ *    本機任何程序掃到 loopback port 就能 `POST /permission/{id}/reply` 替它核准權限(繞過政策引擎)、`GET /config` 讀到
+ *    `mcp.deskmony.environment` 裡的 scoped bridge token、對 session 送 prompt。所以 `spawn()` 每次都產生一組新的隨機密碼,
+ *    以 `OPENCODE_SERVER_PASSWORD`(+ 明確的 `OPENCODE_SERVER_USERNAME`)**環境變數**交給子行程(不放 command args;
+ *    覆蓋使用者設的同名變數),opencode 的 basic auth 就會對所有端點(含 SSE `/event`、`/global/health`)要求
+ *    `Authorization: Basic ...`——實測無標頭或密碼錯一律 401。這個 adapter 打 opencode 的每一個請求都帶這個標頭:
+ *    `waitForHealthy()`(`/global/health`)、`postJson()`(`/session`、`/session/{id}/message|command|abort`、
+ *    `/permission/{id}/reply`、`/question/{id}/reply|reject`,含 `dispose()` 的清理呼叫)、`getJson()`(`/command`)、
+ *    `consumeEvents()`(`GET /event` SSE)——全都經過 `authHeaders()`,`authorization` 是這些函式的必填參數(漏帶 = 編譯錯誤)。
+ *    密碼只留在記憶體(`InternalSession.authorization`),不寫 log、不寫 DB、不進任何 AgentEvent。`spawn()` 在就緒後另外
+ *    不帶標頭探測一次,伺服器仍回 2xx(= 這個 opencode 版本不認那個環境變數)就 `console.warn`,不拒絕啟動
+ *    (見 `warnIfServerUnsecured()`)。`opencode acp` 那條路同理(它也開 HTTP 伺服器),見 acp-adapter.ts。
  *  - 提問(2026-09-17 用本機 opencode 1.18.7 + `opencode/big-pickle` 真實跑過
  *    「回答 / 空答案 / reject / abort」四種情境確認,不是讀文件猜的):
  *      - 事件順序:tool part(`tool:"question"`,`status:"pending"`,input `{}`)
@@ -266,6 +280,11 @@ export class OpenCodeAdapter implements AgentAdapter {
         ? { localMcpServer: { command: [bridgeLaunch.command, ...bridgeLaunch.args], environment: bridgeLaunch.env } }
         : undefined,
     });
+    // 2026-10-03(安全):**這個 opencode 伺服器要有認證**。`opencode serve` 預設完全不鎖,本機任何程序掃到 loopback port 就能
+    // 替它核准權限請求(繞過政策引擎)、`GET /config` 讀到上面的 scoped bridge token。這裡每次 spawn 產生一組新的隨機密碼,
+    // 以環境變數(不是 command args)交給子行程——**在所有使用者 env 合併完之後才設,所以覆蓋**使用者自己設的同名變數。
+    // 回傳值是之後每個請求要帶的 `Authorization: Basic ...`,只留在記憶體(InternalSession.authorization)。完整理由見 opencode-server-auth.ts。
+    const authorization = applyOpencodeServerAuth(childEnv);
     let child: OpencodeChildProcess;
     try {
       child = spawn(command, args, {
@@ -314,7 +333,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         ),
       ]);
       await Promise.race([
-        waitForHealthy(baseUrl),
+        waitForHealthy(baseUrl, authorization),
         spawnFailure,
         rejectAfter(
           HEALTH_POLL_TIMEOUT_MS,
@@ -323,6 +342,9 @@ export class OpenCodeAdapter implements AgentAdapter {
           "等待 OpenCode server /global/health 就緒逾時",
         ),
       ]);
+      // 認證有沒有真的生效:不帶標頭打一次,仍回 2xx 就是這個 opencode 版本不認 OPENCODE_SERVER_PASSWORD(或改了名稱)。
+      // 只警告、不拒絕啟動——見 warnIfServerUnsecured() 的取捨說明。
+      await warnIfServerUnsecured(baseUrl, agentLabel);
     } catch (err) {
       this.killChild(child);
       revokeBridgeToken();
@@ -340,7 +362,7 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     let opencodeSessionId: string;
     try {
-      const created = await postJson<{ id: string }>(`${baseUrl}/session`, {});
+      const created = await postJson<{ id: string }>(`${baseUrl}/session`, {}, authorization);
       opencodeSessionId = created.id;
     } catch (err) {
       this.killChild(child);
@@ -367,7 +389,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     let availableCommands = new Map<string, OpencodeCommand>();
     let availableCommandsFetched = false;
     try {
-      const commands = await getJson<OpencodeCommand[]>(`${baseUrl}/command`);
+      const commands = await getJson<OpencodeCommand[]>(`${baseUrl}/command`, authorization);
       availableCommands = new Map(commands.map((c) => [c.name, c]));
       availableCommandsFetched = true;
     } catch (err) {
@@ -393,6 +415,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       handle,
       child,
       baseUrl,
+      authorization,
       opencodeSessionId,
       childSessionIds: new Set(),
       outputQueue,
@@ -464,10 +487,11 @@ export class OpenCodeAdapter implements AgentAdapter {
       // 物件形狀不同,這輪沒有機會實測這支端點真正接受的字串格式(對接策略
       // 一貫要求「以實際觀察到的行為為準,不臆測」)——setModel() 覆寫對
       // 指令呼叫暫不生效,是刻意縮小的範圍,不是遺漏。
-      void postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/command`, {
-        command: commandName,
-        arguments: commandMatch?.[2] ?? "",
-      }).catch((err: unknown) => {
+      void postJson(
+        `${internal.baseUrl}/session/${internal.opencodeSessionId}/command`,
+        { command: commandName, arguments: commandMatch?.[2] ?? "" },
+        internal.authorization,
+      ).catch((err: unknown) => {
         internal.outputQueue.push({
           type: "error",
           message: "OpenCode session/command 送出失敗",
@@ -486,10 +510,14 @@ export class OpenCodeAdapter implements AgentAdapter {
     // API(沒有對應的端點),真正「生效」永遠是靠這裡讀到覆寫值的下一次
     // sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
     const modelField = internal.modelOverride ?? parseModelString(handle.launch.model);
-    void postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/message`, {
-      parts: [{ type: "text", text: prompt.text }],
-      ...(modelField ? { model: modelField } : {}),
-    }).catch((err: unknown) => {
+    void postJson(
+      `${internal.baseUrl}/session/${internal.opencodeSessionId}/message`,
+      {
+        parts: [{ type: "text", text: prompt.text }],
+        ...(modelField ? { model: modelField } : {}),
+      },
+      internal.authorization,
+    ).catch((err: unknown) => {
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode session/message 送出失敗",
@@ -512,7 +540,7 @@ export class OpenCodeAdapter implements AgentAdapter {
   async interrupt(handle: AgentHandle): Promise<void> {
     const internal = this.mustGet(handle);
     try {
-      await postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/abort`, {});
+      await postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/abort`, {}, internal.authorization);
     } catch {
       // 伺服器可能已經結束或本來就沒有進行中的回合,忽略。
     }
@@ -530,7 +558,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     // AcpAdapter.dispose() 的既有做法)。
     for (const requestId of internal.pendingPermissions.keys()) {
       try {
-        await postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply: "reject" });
+        await postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply: "reject" }, internal.authorization);
       } catch {
         // 伺服器即將被關閉,忽略。
       }
@@ -540,7 +568,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 而不是空答案——session 都要關了,沒有「讓模型繼續下一步」的必要。
     for (const requestId of internal.pendingQuestions.keys()) {
       try {
-        await postJson(`${internal.baseUrl}/question/${requestId}/reject`, {});
+        await postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}, internal.authorization);
       } catch {
         // 伺服器即將被關閉,忽略。
       }
@@ -577,7 +605,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (!internal.pendingPermissions.has(requestId)) return;
     internal.pendingPermissions.delete(requestId);
     const reply = decision === "allow" ? "once" : "reject";
-    void postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply }).catch((err: unknown) => {
+    void postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply }, internal.authorization).catch((err: unknown) => {
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode permission/reply 送出失敗",
@@ -601,7 +629,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     const answers = pending.questions.map((q) =>
       result.behavior === "completed" ? toOpencodeAnswer(q, result.result.answers[q.question]) : [],
     );
-    void postJson(`${internal.baseUrl}/question/${requestId}/reply`, { answers }).catch((err: unknown) => {
+    void postJson(`${internal.baseUrl}/question/${requestId}/reply`, { answers }, internal.authorization).catch((err: unknown) => {
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode question/reply 送出失敗",
@@ -690,7 +718,18 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   /** 持續讀取 `GET /event` 這條 SSE 連線,轉譯成 AgentEvent 並 push 進 outputQueue。 */
   private async consumeEvents(internal: InternalSession): Promise<void> {
-    const res = await fetch(`${internal.baseUrl}/event`, { signal: internal.sseController.signal });
+    const res = await fetch(`${internal.baseUrl}/event`, {
+      headers: authHeaders(internal.authorization),
+      signal: internal.sseController.signal,
+    });
+    if (!res.ok) {
+      // 認證被拒(401)或其他錯誤:不能把一個錯誤回應當成 SSE 串流讀(會靜靜地讀到 EOF、session 卡在永遠收不到事件)。
+      throw new DeskmonyError(
+        "opencode.requestFailed",
+        { url: `${internal.baseUrl}/event`, status: res.status },
+        `GET ${internal.baseUrl}/event 失敗(status=${res.status})`,
+      );
+    }
     if (!res.body) {
       throw new DeskmonyError(
         "opencode.eventStreamMissingBody",
@@ -831,7 +870,7 @@ export class OpenCodeAdapter implements AgentAdapter {
           // 形狀變了,寧可 reject 讓這一輪結束(對話串會看到工具失敗),也不要
           // 發一個 UI 畫不出來的請求、讓回合無聲無息地卡住。
           console.error(`[opencode-adapter] question.asked 的 questions 形狀無法辨識,已 reject: ${JSON.stringify(properties?.questions)}`);
-          void postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}).catch(() => {});
+          void postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}, internal.authorization).catch(() => {});
           break;
         }
         const tool = properties?.tool as { callID?: string } | undefined;
@@ -1099,6 +1138,11 @@ interface InternalSession {
   handle: AgentHandle;
   child: OpencodeChildProcess;
   baseUrl: string;
+  /**
+   * 呼叫這個 session 的 opencode 伺服器要帶的 `Authorization` 標頭值(`Basic ...`),見 opencode-server-auth.ts。
+   * **秘密**:只留在記憶體,不寫 log、不進 DB、不進任何 AgentEvent;所有請求都必須經過下面的 postJson/getJson/authHeaders。
+   */
+  authorization: string;
   opencodeSessionId: string;
   /** `task` 工具(subagent)建立的子 session id(含孫 session),見 handleEvent() 開頭的說明。 */
   childSessionIds: Set<string>;
@@ -1291,12 +1335,23 @@ function waitForListeningLine(child: OpencodeChildProcess): Promise<string> {
   });
 }
 
+/**
+ * 對 opencode 伺服器發的**每一個**請求都要帶的標頭(2026-10-03:伺服器有 basic auth,見 opencode-server-auth.ts)。
+ * 這個檔案裡所有打 opencode 伺服器的 `fetch` 只有四處——waitForHealthy()、postJson()、getJson()、SSE 的 consumeEvents()——
+ * 全都經過這個函式;`authorization` 在這幾個函式都是**必填參數**,漏帶會是編譯錯誤。
+ * (warnIfServerUnsecured() 刻意不帶:它就是要驗證「不帶標頭會被擋」。)
+ */
+function authHeaders(authorization: string, extra?: Record<string, string>): Record<string, string> {
+  return { ...extra, authorization };
+}
+
 /** 輪詢 `/global/health` 直到回應 200(或逾時,由呼叫端的 Promise.race 把關)。 */
-async function waitForHealthy(baseUrl: string): Promise<void> {
+async function waitForHealthy(baseUrl: string, authorization: string): Promise<void> {
   for (;;) {
     try {
-      const res = await fetch(`${baseUrl}/global/health`);
+      const res = await fetch(`${baseUrl}/global/health`, { headers: authHeaders(authorization) });
       if (res.ok) return;
+      // 401 = 密碼對不上(例如這個 opencode 版本改了認證方式),重試也不會好,但讓呼叫端的逾時去收尾(錯誤訊息一致)。
     } catch {
       // 尚未接受連線,稍後重試。
     }
@@ -1304,10 +1359,32 @@ async function waitForHealthy(baseUrl: string): Promise<void> {
   }
 }
 
-async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
+/**
+ * 不帶認證打一次 `/global/health`,確認 `OPENCODE_SERVER_PASSWORD` 真的有生效(實測 1.18.7:帶了密碼之後無標頭 → 401)。
+ * 仍回 2xx 代表這個 opencode 版本不認那個環境變數(或將來改了名稱),伺服器是**沒鎖**的——`console.warn` 讓它在 log 裡看得見。
+ *
+ * 為什麼只警告、不拒絕啟動:拒絕等於舊版 opencode 的使用者整個 OpenCode 功能壞掉,而 Deskmony 又沒辦法替 opencode 補上認證;
+ * 但靜默放過是更糟的選項——這道鎖原本就是為了擋「本機其他程序繞過權限引擎」,失效時至少要有跡可循。連線錯誤一律忽略
+ * (這只是事後的健全性檢查,不能讓它的任何失敗影響 session 建立)。
+ */
+async function warnIfServerUnsecured(baseUrl: string, agentLabel: string): Promise<void> {
+  try {
+    const res = await fetch(`${baseUrl}/global/health`);
+    if (res.ok) {
+      console.warn(
+        `[opencode-adapter] 警告:${agentLabel} 的 OpenCode server 沒有要求認證(不帶認證的請求得到 ${res.status})——這個 opencode 版本` +
+          "可能不支援 OPENCODE_SERVER_PASSWORD。本機其他程序可以直接呼叫它:替它核准權限請求(繞過政策引擎)、讀取設定裡的 session 網路 token。請升級 opencode。",
+      );
+    }
+  } catch {
+    // 只是健全性檢查,忽略。
+  }
+}
+
+async function postJson<T = unknown>(url: string, body: unknown, authorization: string): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: authHeaders(authorization, { "content-type": "application/json" }),
     body: JSON.stringify(body),
   });
   const text = await res.text();
@@ -1322,8 +1399,8 @@ async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
 }
 
 /** 這輪(slash command)新增:比照上面 postJson() 的既有錯誤處理風格,補一個 GET 版本。 */
-async function getJson<T = unknown>(url: string): Promise<T> {
-  const res = await fetch(url);
+async function getJson<T = unknown>(url: string, authorization: string): Promise<T> {
+  const res = await fetch(url, { headers: authHeaders(authorization) });
   const text = await res.text();
   if (!res.ok) {
     throw new DeskmonyError(
