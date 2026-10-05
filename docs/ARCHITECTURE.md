@@ -856,7 +856,7 @@ apps/desktop/src/
 | `pnpm start:core` | headless 正式啟動 |
 | `pnpm package` / `package:dir` | `bundle-core.mjs`(含 `@electron/rebuild`)→ vite build → electron-builder NSIS |
 
-**17 支 e2e 腳本**(`scripts/e2e-*.mjs`;`pnpm test` 的 `run-e2e.mjs` 跑其中 16 支
+**18 支 e2e 腳本**(`scripts/e2e-*.mjs`;`pnpm test` 的 `run-e2e.mjs` 跑其中 17 支
 決定性的,`gateway` 需要真實憑證、只留給人工執行),全部直接對獨立的 core process
 打 WS RPC,**從不經過 Electron**:`gateway`(主套件,決定性測試加上少數
 model-behavior 檢查點)、`hard-deny`、`policy-engine`(含 `providerId` 範圍與舊
@@ -867,7 +867,9 @@ profile 範圍規則的處理)、`auto-mode-yolo`、
 adapter、舊 schema 的 `agent_profiles` 遷移)、
 `session-network`(五個工具、信封與來源標記、佇列、訊息鏈預算熔斷、UI 轉傳、
 bridge token 方法白名單、in-process 與 bridge 的工具描述逐字比對)、
-`opencode-question`、`opencode-tool-input`、`opencode-permissions`(OpenCode 的工具呼叫一律進政策引擎:
+`opencode-question`、`opencode-tool-input`、`opencode-long-turn`(2026-10-05:OpenCode 一輪超過約 5 分鐘不得跳出假的「送出失敗」——
+prompt 改走立即回 204 的 `prompt_async`;fake 伺服器的 `/message`、`/command` 永遠不回應來模擬長回合,不用真的等 300 秒;
+舊版 opencode(`prompt_async` 404)退回 `/message`、undici 等待逾時的分類、`session.error` 只走 SSE 時仍回報恰好一個 `error`)、`opencode-permissions`(OpenCode 的工具呼叫一律進政策引擎:
 啟動時注入的 `OPENCODE_CONFIG_CONTENT`、與使用者設定的合併、session 網路 MCP 與 token 撤銷、
 subagent 子 session 的權限、hard-deny 端到端、opencode 本機伺服器的 basic auth:fake 伺服器真的檢查認證,
 斷言每次 spawn 的隨機密碼、無認證/錯認證一律 401、密碼不外洩、使用者設的同名變數被覆蓋、adapter 的每個請求都帶認證;

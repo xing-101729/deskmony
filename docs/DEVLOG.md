@@ -1188,6 +1188,14 @@ opencode` 與 `opencode.cmd`,版本 `1.18.4`)。依序執行並記錄實際輸�
   這支 API 會阻塞到整輪真正完成才回應,但同一時間常駐訂閱的 `GET /event`
   SSE 連線已經即時推播中間過程,真正的串流顯示與回合邊界完全交給 SSE
   處理)。
+  **2026-10-05 更新:改優先用 `POST /session/{id}/prompt_async`。**阻塞的 `/message` 在一輪超過約 5 分鐘時,會被
+  Node 內建 `fetch`(undici)預設 300 秒的 `headersTimeout` 以 `fetch failed`(`cause.code` 為
+  `UND_ERR_HEADERS_TIMEOUT`)打斷,adapter 因此在回合還正常進行時送出假的「送出失敗」錯誤(真實 opencode 1.18.7 實測:
+  330 秒的 bash 工具,錯誤在約 304 秒冒出、回合約 342 秒才完成)。`prompt_async` 的 body 與 `/message` 相同、立即回 204,
+  事件照常走 SSE。舊版 opencode(`prompt_async` 回 404)退回 `/message`,退路上 undici 的等待逾時不算錯誤;斜線指令的
+  `/command` 同樣阻塞、也沒有非阻塞版本,同樣把等待逾時當成正常。因為 `prompt_async` 一律 204,「回合跑不起來」(例如 model
+  不存在)的錯誤只剩 SSE `session.error` 一條路,adapter 因此新增了 `session.error` 的處理(一輪只回報一個 `error`)。
+  細節見 `opencode-adapter.ts` 的 `submitPrompt()` 與 `scripts/e2e-opencode-long-turn.mjs`。
 - 事件轉換(對應 ARCHITECTURE.md 4.3 節 `AgentEvent` 型別):
   - `message.part.delta`(`field:"text"`)與 `message.part.updated`
     (`type:"text"`,帶完整累積文字)兩種事件來源統一用「已知長度」追蹤
@@ -1262,7 +1270,9 @@ updated`/`message.part.delta`/`session.status`/`session.idle`/
 `OpenCodeAdapter` 的 port 探測邏輯不需要區分真假伺服器。透過固定的 prompt
 前綴(`OPENCODE_TOOL_CALL`/`OPENCODE_SLOW`)分別驅動一般回覆、工具呼叫+
 權限請求、以及可被中斷的長回覆三種情境,對應 e2e 步驟24。詳見上方「端到端
-冒煙測試」步驟24的說明。
+冒煙測試」步驟24的說明。2026-10-05 起它也支援 `POST /session/{id}/prompt_async`(立即回 204),並有幾個只給 e2e 用的
+旁路(`FAKE_OPENCODE_NO_PROMPT_ASYNC`、`FAKE_OPENCODE_MESSAGE_HANG`、`FAKE_OPENCODE_PROMPT_HTTP_STATUS`、
+`FAKE_OPENCODE_REQUEST_LOG_FILE`,見該檔案檔頭)與壞 model 的 `session.error` 情境,給 `e2e-opencode-long-turn.mjs` 用。
 
 ### 已知限制 / TODO
 

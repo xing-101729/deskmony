@@ -689,7 +689,7 @@ async function createFakeOpencodeSession(client, workspaceDir, title) {
   return { sessionId, start: fresh.length === 1 ? fresh[0] : undefined, freshCount: fresh.length };
 }
 
-/** 送一則一般 prompt,回傳這一輪最後一則 assistant 訊息(經過 `/session/{id}/message` + SSE `/event` 才收得到,兩者都要帶認證)。 */
+/** 送一則一般 prompt,回傳這一輪最後一則 assistant 訊息(經過 `/session/{id}/prompt_async`(2026-10-05 起;舊版退路是 `/message`)+ SSE `/event` 才收得到,兩者都要帶認證)。 */
 async function chatOnce(client, sessionId, text) {
   const from = client.timeline.length;
   await client.rpc("session.sendPrompt", { sessionId, prompt: { text } });
@@ -761,7 +761,7 @@ async function testOpencodeServerAuth(client, workspaceDir, dbPath, otherLiveSes
       `${JSON.stringify(statuses)}; 帶對認證 GET /config → ${authed.status}(含 bridge token: ${tokenReadable})`,
     );
 
-    // ---- 讓 PM16/PM17 有真實流量可看:a 走完整的 /message + SSE 流程 ----
+    // ---- 讓 PM16/PM17 有真實流量可看:a 走完整的 prompt_async + SSE 流程 ----
     const replyA = await chatOnce(client, a.sessionId, "hello over an authenticated server");
 
     // ---- PM13:使用者(provider env)與啟動 core 的 shell 環境給的密碼被覆蓋 ----
@@ -865,7 +865,7 @@ async function testOpencodeServerAuth(client, workspaceDir, dbPath, otherLiveSes
       .map((r) => `${r.pid} ${r.method} ${r.path}`)
       .sort();
     record(
-      "PM17 adapter 的每個真實請求都帶了認證:整支測試期間(session 建立、/message、SSE /event、權限回覆、dispose 清理……)fake 擋下的請求只有 adapter 每次 spawn 的一次無認證健全性探測(GET /global/health)與 PM12 的刻意探測,零筆其他",
+      "PM17 adapter 的每個真實請求都帶了認證:整支測試期間(session 建立、prompt_async、SSE /event、權限回覆、dispose 清理……)fake 擋下的請求只有 adapter 每次 spawn 的一次無認證健全性探測(GET /global/health)與 PM12 的刻意探測,零筆其他",
       actualRejected.length > 0 && isDeepStrictEqual(actualRejected, expectedRejected),
       `被擋下 ${actualRejected.length} 筆,預期 ${expectedRejected.length} 筆(spawn 探測 ${report.filter((r) => r.kind === "start" && r.enforced).length} + 刻意探測 ${deliberateRejections.length})`,
     );

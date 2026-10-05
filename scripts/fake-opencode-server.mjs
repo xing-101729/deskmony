@@ -92,6 +92,25 @@
  *         給 e2e 驗證 adapter 的「伺服器沒鎖」警告。
  *     `GET /config` 回傳子行程收到的 `OPENCODE_CONFIG_CONTENT`(解析後),模擬真實 opencode 會把含 scoped bridge token 的
  *     設定吐給任何讀得到它的人——e2e 用它證明「不帶認證讀不到」。
+ *   - 2026-10-05(長回合不誤報錯誤):送 prompt 的端點有兩個,行為照真實 opencode 1.18.7 實測——
+ *       - `POST /session/{id}/prompt_async`(adapter 優先用,見 opencode-adapter.ts `submitPrompt()`):body 與 `/message` 相同,
+ *         **立即回 `204 No Content`**,之後該輪照常在背景跑、事件走 SSE。
+ *       - `POST /session/{id}/message`:**阻塞到整輪結束才回應**(回完整最終訊息)。
+ *     另有四個只給 e2e 用的旁路(由測試經 provider 環境變數/啟動 core 的環境設定,不是 gateway 能設的):
+ *       - `FAKE_OPENCODE_NO_PROMPT_ASYNC=1`:`prompt_async` 回 404(路由不存在),模擬沒有這個端點的舊版 opencode,
+ *         讓 adapter 的退路(退回 `/message`)有東西可驗。
+ *       - `FAKE_OPENCODE_MESSAGE_HANG=1`:`/message` 與 `/command` 照常執行該輪(事件正常走 SSE)但**永遠不回應**——
+ *         模擬「超過 undici 300 秒逾時才會回」的長回合,不用真的等 5 分鐘。若 adapter 還用這兩個端點送 prompt,e2e 會看到
+ *         它卡住(prompt_async 不受影響,因為已經立即回應)。
+ *       - `FAKE_OPENCODE_PROMPT_HTTP_STATUS=<狀態碼>`:`prompt_async` 與 `/message` 一律回這個 HTTP 狀態碼(JSON 錯誤 body)、
+ *         **不**執行該輪——模擬 opencode 拒絕請求(例如 500),讓 e2e 驗證 adapter 只對 404 走退路、其他錯誤照舊送 `error`。
+ *       - `FAKE_OPENCODE_REQUEST_LOG_FILE`:每個 `POST /session/{id}/(prompt_async|message|command)` 附加一行
+ *         JSON `{kind:"request", pid, endpoint}`(`NO_PROMPT_ASYNC` 時 `prompt_async` 的紀錄是 `prompt_async-404`),
+ *         讓 e2e 斷言 adapter 實際打了哪個端點。
+ *   - 2026-10-05:prompt 文字以 SESSION_ERROR_PREFIX 開頭:模擬「回合根本跑不起來」(例如 model 不存在)——照真實 opencode 1.18.7
+ *     壞 model 的實測順序送 `session.status busy` → `session.error`(`UnknownError`,`Model not found: …`)→
+ *     `session.status idle`/`session.idle` → **idle 之後**第二個訊息更長的 `session.error`(實測就是這樣,adapter 不能報兩次)。
+ *     沒有任何 assistant 訊息。`prompt_async` 對這種情況仍回 204(錯誤只走 SSE),舊的 `/message` 則回 HTTP 500。
  *   - 這輪(slash command)新增:`GET /command` 回傳 TEST_COMMANDS(固定測試
  *     清單,形狀比照本機真實 `opencode serve`(1.18.7)`GET /command` 的
  *     `Command[]`,見 packages/adapters/src/opencode-adapter.ts 檔案頂端查證
@@ -144,6 +163,10 @@ export function manyToolCallInput(index) {
   return { command: `echo many-tool-${index}` };
 }
 export const SLOW_PREFIX = "OPENCODE_SLOW";
+/** 2026-10-05:模擬回合跑不起來(壞 model),見檔頭。 */
+export const SESSION_ERROR_PREFIX = "OPENCODE_SESSION_ERROR";
+/** SESSION_ERROR_PREFIX 流程第一個 `session.error` 的訊息(e2e 斷言 adapter 報的是這個,不是 idle 後那個)。 */
+export const SESSION_ERROR_MESSAGE = "Model not found: fake-provider/nope.";
 export const SLOW_CHUNK_COUNT = 20;
 export const SLOW_CHUNK_INTERVAL_MS = 300;
 export const QUESTION_PREFIX = "OPENCODE_QUESTION";
@@ -219,6 +242,15 @@ function readJsonBody(req) {
   });
 }
 
+/** prompt 請求 body(`{parts:[{type:"text", text}], model?}`)裡所有 text part 串起來的文字。 */
+function textOfParts(body) {
+  const parts = Array.isArray(body.parts) ? body.parts : [];
+  return parts
+    .filter((p) => p && p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
 /** 送出一則 assistant 訊息的 text part(先建立空字串 part,再逐段 delta,最後標記 time.end)。 */
 async function streamTextReply(sessionId, messageId, chunks, { chunkDelayMs = 5 } = {}) {
   const partId = `prt_${randomUUID()}`;
@@ -291,6 +323,9 @@ async function handlePrompt(sessionId, text, model) {
       broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
     }
     session.slowPartId = undefined;
+  } else if (text.startsWith(SESSION_ERROR_PREFIX)) {
+    // 2026-10-05:壞 model——沒有 assistant 訊息,只有 session.error(下面共同的結尾會接著送 idle,再送 idle 之後的第二個 session.error)。
+    broadcast("session.error", { sessionID: sessionId, error: { name: "UnknownError", data: { message: SESSION_ERROR_MESSAGE } } });
   } else if (text.startsWith(TOOL_CALL_PREFIX)) {
     const callId = `call_${randomUUID()}`;
     // 真實 opencode 整個工具生命週期共用同一個 part.id(2026-09-17 實測;在這之前
@@ -505,6 +540,13 @@ async function handlePrompt(sessionId, text, model) {
 
   broadcast("session.status", { sessionID: sessionId, status: { type: "idle" } });
   broadcast("session.idle", { sessionID: sessionId });
+  if (text.startsWith(SESSION_ERROR_PREFIX)) {
+    // 實測:壞 model 時第二個、訊息更長的 session.error 在 idle 之後才到。
+    broadcast("session.error", {
+      sessionID: sessionId,
+      error: { name: "UnknownError", data: { message: `ProviderModelNotFoundError: ${SESSION_ERROR_MESSAGE}\n    at <anonymous> (fake)` } },
+    });
+  }
   return { info: { id: assistantMessageId, role: "assistant", sessionID: sessionId }, parts: [] };
 }
 
@@ -534,6 +576,20 @@ const SERVER_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD || undefined;
 const SERVER_USERNAME = process.env.OPENCODE_SERVER_USERNAME || "opencode";
 const AUTH_ENFORCED = SERVER_PASSWORD !== undefined && process.env.FAKE_OPENCODE_DISABLE_AUTH !== "1";
 const AUTH_REPORT_FILE = process.env.FAKE_OPENCODE_AUTH_REPORT_FILE || undefined;
+/** 2026-10-05:四個只給 e2e 用的旁路,見檔頭。 */
+const NO_PROMPT_ASYNC = process.env.FAKE_OPENCODE_NO_PROMPT_ASYNC === "1";
+const MESSAGE_HANG = process.env.FAKE_OPENCODE_MESSAGE_HANG === "1";
+const PROMPT_HTTP_STATUS = Number(process.env.FAKE_OPENCODE_PROMPT_HTTP_STATUS) || undefined;
+const REQUEST_LOG_FILE = process.env.FAKE_OPENCODE_REQUEST_LOG_FILE || undefined;
+
+function appendRequestLog(endpoint) {
+  if (!REQUEST_LOG_FILE) return;
+  try {
+    appendFileSync(REQUEST_LOG_FILE, `${JSON.stringify({ kind: "request", pid: process.pid, endpoint })}\n`);
+  } catch {
+    // 測試專用旁路,寫不進去就算了(e2e 會從缺少紀錄看出來)。
+  }
+}
 
 function sha256(text) {
   return createHash("sha256").update(text).digest();
@@ -618,20 +674,50 @@ async function route(req, res, url) {
     return;
   }
 
+  // 2026-10-05:`prompt_async`——body 與 /message 相同,立即回 204,該輪在背景跑(事件走 SSE)。NO_PROMPT_ASYNC 時
+  // 回 404「路由不存在」,模擬沒有這個端點的舊版 opencode。
+  const promptAsyncMatch = url.pathname.match(/^\/session\/([^/]+)\/prompt_async$/);
+  if (req.method === "POST" && promptAsyncMatch) {
+    const sessionId = promptAsyncMatch[1];
+    appendRequestLog(NO_PROMPT_ASYNC ? "prompt_async-404" : "prompt_async");
+    if (NO_PROMPT_ASYNC) {
+      sendJson(res, 404, { error: `no such route: ${req.method} ${url.pathname}` });
+      return;
+    }
+    if (PROMPT_HTTP_STATUS) {
+      sendJson(res, PROMPT_HTTP_STATUS, { name: "UnknownError", data: { message: `fake: prompt_async rejected with ${PROMPT_HTTP_STATUS}` } });
+      return;
+    }
+    if (!sessions.has(sessionId)) {
+      sendJson(res, 404, { name: "NotFoundError", data: { message: `Session not found: ${sessionId}` } });
+      return;
+    }
+    const body = await readJsonBody(req);
+    res.writeHead(204);
+    res.end();
+    void handlePrompt(sessionId, textOfParts(body), body.model).catch((err) => console.error("[fake-opencode] prompt_async 回合失敗:", err));
+    return;
+  }
+
   const messageMatch = url.pathname.match(/^\/session\/([^/]+)\/message$/);
   if (req.method === "POST" && messageMatch) {
     const sessionId = messageMatch[1];
+    appendRequestLog("message");
+    if (PROMPT_HTTP_STATUS) {
+      sendJson(res, PROMPT_HTTP_STATUS, { name: "UnknownError", data: { message: `fake: message rejected with ${PROMPT_HTTP_STATUS}` } });
+      return;
+    }
     if (!sessions.has(sessionId)) {
       sendJson(res, 404, { error: "session not found" });
       return;
     }
     const body = await readJsonBody(req);
-    const parts = Array.isArray(body.parts) ? body.parts : [];
-    const text = parts
-      .filter((p) => p && p.type === "text")
-      .map((p) => p.text)
-      .join("");
-    const result = await handlePrompt(sessionId, text, body.model);
+    if (MESSAGE_HANG) {
+      // 回合照跑(事件走 SSE),HTTP 回應永遠不送——模擬「超過 undici 300 秒逾時才會回」的長回合。
+      void handlePrompt(sessionId, textOfParts(body), body.model).catch((err) => console.error("[fake-opencode] message 回合失敗:", err));
+      return;
+    }
+    const result = await handlePrompt(sessionId, textOfParts(body), body.model);
     sendJson(res, 200, result);
     return;
   }
@@ -639,6 +725,7 @@ async function route(req, res, url) {
   const commandMatch = url.pathname.match(/^\/session\/([^/]+)\/command$/);
   if (req.method === "POST" && commandMatch) {
     const sessionId = commandMatch[1];
+    appendRequestLog("command");
     if (!sessions.has(sessionId)) {
       sendJson(res, 404, { error: "session not found" });
       return;
@@ -646,6 +733,10 @@ async function route(req, res, url) {
     const body = await readJsonBody(req);
     if (typeof body.command !== "string" || typeof body.arguments !== "string") {
       sendJson(res, 400, { error: "command/arguments required" });
+      return;
+    }
+    if (MESSAGE_HANG) {
+      void handleCommand(sessionId, body.command, body.arguments).catch((err) => console.error("[fake-opencode] command 回合失敗:", err));
       return;
     }
     const result = await handleCommand(sessionId, body.command, body.arguments);

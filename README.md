@@ -332,20 +332,20 @@ Deskmony/
 │  ├─ adapters/         # 4 adapters + the `deskmony` session-network MCP server
 │  ├─ db/               # Drizzle schema, idempotent migrations
 │  └─ shared/           # types, gateway protocol, zod schemas
-├─ scripts/             # 17 e2e suites, the runner, the build-freshness guard, fake backends, packaging
-├─ .github/workflows/   # CI (build → typecheck → the 16 deterministic suites)
+├─ scripts/             # 18 e2e suites, the runner, the build-freshness guard, fake backends, packaging
+├─ .github/workflows/   # CI (build → typecheck → the 17 deterministic suites)
 └─ docs/                # architecture, decisions, layered design, dev log
 ```
 
 ## 🧪 Testing
 
 ```bash
-pnpm test          # typecheck + build + the 16 deterministic suites
+pnpm test          # typecheck + build + the 17 deterministic suites
 pnpm test:e2e      # just the suites (requires a current pnpm build)
 pnpm test:e2e:live # e2e-gateway.mjs — needs real Claude Code credentials, spends real tokens
 ```
 
-**Seventeen end-to-end suites.** Sixteen of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those sixteen are what `pnpm test` and CI run: **266 assertions, all of which must pass.** (The count fell from 221 to 180 on 2026-10-02 when the team, task and message-bus suites were removed along with the features, then rose as `e2e-agent-catalog.mjs` and `e2e-session-network.mjs` — which replaced the sub-agent suite — were added; 2026-10-03 added `e2e-opencode-permissions.mjs`, which pins that every OpenCode tool call reaches the permission engine, and grew by seven assertions pinning the password on OpenCode's local servers; 2026-10-05 added `e2e-agent-env.mjs`, which starts core with `DESKMONY_AUTH_TOKEN` set and pins that none of Deskmony's own credentials reach an agent's environment, extended the OpenCode permissions suite to cover the OpenCode plugin that hides the server password from the agent's shell, and added one hard-deny assertion for the desktop app's local data folder.) The session-network suite also asserts that the tool names, descriptions and parameter schemas of the in-process server and the ACP bridge subprocess are word-for-word identical.
+**Eighteen end-to-end suites.** Seventeen of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those seventeen are what `pnpm test` and CI run: **279 assertions, all of which must pass.** (The count fell from 221 to 180 on 2026-10-02 when the team, task and message-bus suites were removed along with the features, then rose as `e2e-agent-catalog.mjs` and `e2e-session-network.mjs` — which replaced the sub-agent suite — were added; 2026-10-03 added `e2e-opencode-permissions.mjs`, which pins that every OpenCode tool call reaches the permission engine, and grew by seven assertions pinning the password on OpenCode's local servers; 2026-10-05 added `e2e-agent-env.mjs`, which starts core with `DESKMONY_AUTH_TOKEN` set and pins that none of Deskmony's own credentials reach an agent's environment, extended the OpenCode permissions suite to cover the OpenCode plugin that hides the server password from the agent's shell, and added one hard-deny assertion for the desktop app's local data folder; also 2026-10-05, `e2e-opencode-long-turn.mjs` pins that an OpenCode turn running past five minutes no longer surfaces a false "send failed" error — prompts now go through OpenCode's non-blocking `prompt_async` endpoint, with a fallback for older OpenCode versions.) The session-network suite also asserts that the tool names, descriptions and parameter schemas of the in-process server and the ACP bridge subprocess are word-for-word identical.
 
 `e2e-gateway.mjs` is excluded from the default run on purpose. It needs real Claude Code credentials, costs real money, and carries a *model-behavior* group whose assertions depend on what a model chose to say that run — the file marks those as known-flaky. A CI that goes red because a model rephrased itself is a CI people learn to ignore.
 

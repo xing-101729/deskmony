@@ -42,14 +42,24 @@ import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, wat
  *    實測驗證),因此這裡 spawn 子程序時把 `cwd` 設成 `workspace.path`
  *    (與 AcpAdapter/GenericPtyAdapter 的既有慣例一致),不需要額外在
  *    `POST /session` 帶查詢參數。
- *  - 送出訊息:`POST /session/{id}/message`,body
- *    `{parts:[{type:"text", text}]}`——這支 API 會**阻塞直到該輪真正完成**
- *    才回應(本機實測:回應內容是完整的最終 assistant 訊息 + parts),但
- *    同一時間 `GET /event` 這條 SSE 連線會即時推播該輪的中間過程事件
- *    (見下方事件轉換說明)。這裡的策略是:`sendPrompt()` 不等待這個 POST
- *    resolve(它本身回傳 void,呼叫端也不需要等),真正的串流顯示與回合
- *    邊界完全交給已經常駐訂閱的 SSE 連線處理;POST 失敗時才轉成 `error`
- *    AgentEvent。
+ *  - 送出訊息:**優先用 `POST /session/{id}/prompt_async`**(2026-10-05 起),body
+ *    `{parts:[{type:"text", text}], model?}`——**立即回應 `204 No Content`**(1.18.7 實測約 70ms),該輪在背景執行、
+ *    事件走 SSE `/event`。舊的 `POST /session/{id}/message`(同樣的 body)會**阻塞直到該輪真正完成**才回應
+ *    (本機實測:回應內容是完整的最終 assistant 訊息 + parts),而 Node 內建 `fetch`(undici)的 `headersTimeout`
+ *    預設 300 秒——一輪超過約 5 分鐘(寫程式、跑測試很常見),這個懸著的 POST 就以 `fetch failed`
+ *    (`cause.code === "UND_ERR_HEADERS_TIMEOUT"`)失敗,舊版因此在回合還在正常進行時送出**假的** `error` 事件
+ *    (實測:330 秒的 bash 工具,錯誤在約 304 秒冒出、回合約 342 秒才 completed)。`sendPrompt()` 不等待 POST resolve
+ *    (它本身回傳 void,呼叫端也不需要等),真正的串流顯示與回合邊界完全交給已經常駐訂閱的 SSE 連線處理——所以換成
+ *    立即回應的端點對事件處理零影響。細節、兩個要補的洞(舊版 opencode 的 404 退路、失敗只走 SSE `session.error`)見
+ *    `submitPrompt()`:
+ *      - `prompt_async` 回 404(舊版 opencode 沒有這個路由)→ 退回 `/message`;退路上 undici 的等待逾時
+ *        (`isUndiciWaitTimeout()`)不算錯誤、不送 `error`(回合狀態以 SSE 為準),其他錯誤照舊送 `error`。
+ *      - `prompt_async` 對「回合根本跑不起來」(例如 model 不存在)也回 204,錯誤只出現在 SSE `session.error`
+ *        (實測:`session.status busy` → `session.error {name:"UnknownError", data:{message:"Model not found: …"}}` →
+ *        `session.status idle`;舊的 `/message` 則回 HTTP 500「Unexpected server error」)——`handleEvent()` 因此處理
+ *        `session.error`(一輪只回報一個 `error`)。
+ *      - 斜線指令的 `POST /session/{id}/command` 同樣阻塞到整輪結束(實測:自訂指令跑 20 秒的 bash,POST 約 26.6 秒才回),
+ *        而且 OpenAPI 文件裡**沒有**非阻塞版本(沒有 `command_async`),所以只能維持原端點、把 undici 等待逾時當成正常。
  *  - 事件串流:`GET /event`(全域,不分 session)是一個 SSE 端點,每個
  *    frame 是 `data: {"id":"evt_...","type":"...","properties":{...}}`。
  *    本機用一個不觸發任何工具呼叫的簡單 prompt、以及一個觸發 `bash` 工具的
@@ -118,7 +128,7 @@ import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, wat
  *    以 `OPENCODE_SERVER_PASSWORD`(+ 明確的 `OPENCODE_SERVER_USERNAME`)**環境變數**交給子行程(不放 command args;
  *    覆蓋使用者設的同名變數),opencode 的 basic auth 就會對所有端點(含 SSE `/event`、`/global/health`)要求
  *    `Authorization: Basic ...`——實測無標頭或密碼錯一律 401。這個 adapter 打 opencode 的每一個請求都帶這個標頭:
- *    `waitForHealthy()`(`/global/health`)、`postJson()`(`/session`、`/session/{id}/message|command|abort`、
+ *    `waitForHealthy()`(`/global/health`)、`postJson()`(`/session`、`/session/{id}/prompt_async|message|command|abort`、
  *    `/permission/{id}/reply`、`/question/{id}/reply|reject`,含 `dispose()` 的清理呼叫)、`getJson()`(`/command`)、
  *    `consumeEvents()`(`GET /event` SSE)——全都經過 `authHeaders()`,`authorization` 是這些函式的必填參數(漏帶 = 編譯錯誤)。
  *    密碼只留在記憶體(`InternalSession.authorization`),不寫 log、不寫 DB、不進任何 AgentEvent。`spawn()` 在就緒後另外
@@ -438,6 +448,8 @@ export class OpenCodeAdapter implements AgentAdapter {
       messageRoles: new Map(),
       busy: false,
       turnErrored: false,
+      turnErrorReported: false,
+      promptAsyncUnsupported: false,
       idleWaiters: [],
       sseController,
       availableCommands,
@@ -487,6 +499,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     const internal = this.mustGet(handle);
     internal.busy = true;
     internal.turnErrored = false;
+    internal.turnErrorReported = false;
 
     // 這輪(slash command)新增:偵測開頭 "/已知指令名稱"——**完整比對整個
     // 第一個 token,不是 prefix**(例如已知指令 "review" 不可誤配到使用者
@@ -507,11 +520,17 @@ export class OpenCodeAdapter implements AgentAdapter {
       // 物件形狀不同,這輪沒有機會實測這支端點真正接受的字串格式(對接策略
       // 一貫要求「以實際觀察到的行為為準,不臆測」)——setModel() 覆寫對
       // 指令呼叫暫不生效,是刻意縮小的範圍,不是遺漏。
+      //
+      // 2026-10-05:`/command` 與 `/message` 一樣**阻塞到整輪結束才回應**(真實 opencode 1.18.7 實測:自訂指令請 bash
+      // 跑 20 秒,POST 在約 26.6 秒才回、SSE 的 tool part 在 29.7 秒才 completed——回應晚於工具完成),而且 OpenAPI 文件裡
+      // **沒有**對應的非阻塞端點(只有 `prompt_async`,沒有 `command_async`)。所以這條路沒辦法像一般 prompt 那樣改走
+      // 非阻塞端點,只能把「undici 等回應等太久」(見 `isUndiciWaitTimeout()`)當成正常:回合狀態以 SSE 為準,不是這個 POST。
       void postJson(
         `${internal.baseUrl}/session/${internal.opencodeSessionId}/command`,
         { command: commandName, arguments: commandMatch?.[2] ?? "" },
         internal.authorization,
       ).catch((err: unknown) => {
+        if (isUndiciWaitTimeout(err)) return;
         internal.outputQueue.push({
           type: "error",
           message: "OpenCode session/command 送出失敗",
@@ -525,25 +544,72 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 設定,見該方法)> `handle.launch.model`(建立 session 時挑選的
     // "providerID/modelID" 組合字串,來自 `opencode models` 偵測清單)。
     // 兩者都用同一個 parseModelString() 從第一個 "/" 拆成 opencode 要求的
-    // {providerID, modelID} 兩個欄位,隨 POST /session/{id}/message 一起送
-    // 出——setModel() 本身只是把覆寫記在記憶體裡,並不會呼叫任何 opencode
-    // API(沒有對應的端點),真正「生效」永遠是靠這裡讀到覆寫值的下一次
-    // sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
+    // {providerID, modelID} 兩個欄位,隨 prompt 請求(`prompt_async`,舊版 opencode 退回
+    // `/message`,兩者 body 相同,見 `submitPrompt()`)一起送出——setModel() 本身只是把覆寫
+    // 記在記憶體裡,並不會呼叫任何 opencode API(沒有對應的端點),真正「生效」永遠是靠這裡
+    // 讀到覆寫值的下一次 sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
     const modelField = internal.modelOverride ?? parseModelString(handle.launch.model);
-    void postJson(
-      `${internal.baseUrl}/session/${internal.opencodeSessionId}/message`,
-      {
-        parts: [{ type: "text", text: prompt.text }],
-        ...(modelField ? { model: modelField } : {}),
-      },
-      internal.authorization,
-    ).catch((err: unknown) => {
+    void this.submitPrompt(internal, {
+      parts: [{ type: "text", text: prompt.text }],
+      ...(modelField ? { model: modelField } : {}),
+    });
+  }
+
+  /**
+   * 送出一輪的 prompt。**永遠不會 reject**(失敗一律轉成 `error` AgentEvent 或有理由地吞掉),呼叫端用 `void` 丟著不管。
+   *
+   * ## 為什麼優先用 `POST /session/{id}/prompt_async`,不是 `/message`(2026-10-05)
+   *
+   * `/message` 會**阻塞到整輪結束才回應**(檔頭「送出訊息」段落)。Node 內建 `fetch`(undici)預設 `headersTimeout` 與
+   * `bodyTimeout` 都是 300 秒,所以一輪工作超過約 5 分鐘(寫程式、跑測試這類任務很常見),這個還沒回應的 POST 就會以
+   * `fetch failed`(`cause.code === "UND_ERR_HEADERS_TIMEOUT"`)失敗——舊版 adapter 因此送出一個**假的** `error` 事件
+   * (「送出失敗: fetch failed」),但 opencode 其實還在跑、SSE 也照常送事件,使用者看到的是「出錯了」,回合卻接著正常完成。
+   * 真實 opencode 1.18.7 實測:一個要跑 330 秒的 bash 工具,錯誤在約 304 秒出現、回合在約 342 秒才 completed。
+   *
+   * `prompt_async`(OpenAPI `session.prompt_async`,1.18.7 實測)的請求 body 與 `/message` 完全相同(`parts`、`model`……),
+   * 但**立即回應 `204 No Content`**(實測約 70ms),之後該輪照常在背景執行、事件照常走 SSE `/event`——而這個 adapter
+   * 本來就是「不等 POST 回應,回合邊界完全交給 SSE」(檔頭),所以換端點對事件處理零影響,只是不再有一條長時間懸著的
+   * HTTP 請求去撞逾時。
+   *
+   * ## 兩個要補的洞
+   *
+   *  1. **舊版 opencode 沒有 `prompt_async`**(路由不存在 → 404):退回 `/message`,並記在 `promptAsyncUnsupported`
+   *     (這個 session 之後不再試)。退路上 undici 的等待逾時(`isUndiciWaitTimeout()`)**不是錯誤**——POST 等太久不代表
+   *     送出失敗,回合狀態以 SSE 為準;其他錯誤(連線被拒、4xx/5xx……)照舊送 `error`。
+   *  2. **失敗的回報管道變了**:`/message` 在「模型不存在」這類回合根本跑不起來的情況會直接回 HTTP 500(也就是舊版靠這個
+   *     POST 失敗才看得到錯誤),`prompt_async` 則一律 204,錯誤**只**透過 SSE `session.error` 出現(實測:壞 model →
+   *     `session.status busy` → `session.error` → `session.status idle`)。所以 `handleEvent()` 必須處理 `session.error`
+   *     (見 `reportTurnError()`),否則這種失敗會變成「靜默地 completed」。
+   */
+  private async submitPrompt(internal: InternalSession, body: unknown): Promise<void> {
+    const sessionUrl = `${internal.baseUrl}/session/${internal.opencodeSessionId}`;
+    if (!internal.promptAsyncUnsupported) {
+      try {
+        await postJson(`${sessionUrl}/prompt_async`, body, internal.authorization);
+        return;
+      } catch (err) {
+        if (!isHttpNotFound(err)) {
+          internal.outputQueue.push({
+            type: "error",
+            message: "OpenCode session/prompt_async 送出失敗",
+            detail: err instanceof Error ? err.message : String(err),
+          });
+          return;
+        }
+        internal.promptAsyncUnsupported = true;
+        // 落到下面的 /message 退路。
+      }
+    }
+    try {
+      await postJson(`${sessionUrl}/message`, body, internal.authorization);
+    } catch (err) {
+      if (isUndiciWaitTimeout(err)) return; // POST 等太久 ≠ 送出失敗,見上面的說明。
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode session/message 送出失敗",
         detail: err instanceof Error ? err.message : String(err),
       });
-    });
+    }
   }
 
   events(handle: AgentHandle): AsyncIterable<AgentEvent> {
@@ -834,12 +900,18 @@ export class OpenCodeAdapter implements AgentAdapter {
           !internal.erroredMessageIds.has(info.id)
         ) {
           internal.erroredMessageIds.add(info.id);
-          internal.turnErrored = true;
-          internal.outputQueue.push({
-            type: "error",
-            message: `OpenCode 回合失敗: ${info.error.name ?? "未知錯誤"}`,
-            detail: info.error.data?.message,
-          });
+          this.reportTurnError(internal, info.error);
+        }
+        break;
+      }
+      case "session.error": {
+        // 2026-10-05:`prompt_async`(見 `submitPrompt()`)一律回 204,回合根本跑不起來的失敗(實測:壞 model →
+        // `Model not found: …`)**只**透過這個事件回報,不處理的話會變成靜默的 completed。global SSE 的這個事件
+        // 可能沒有 sessionID(與別的 session 無關的錯誤),上面的過濾放行了 undefined——這裡明確要求就是本 session。
+        // `MessageAbortedError` 是 `interrupt()` 的預期結果(同 message.updated),不報。
+        const error = properties?.error as { name?: string; data?: { message?: string } } | undefined;
+        if (sessionID === internal.opencodeSessionId && error && error.name !== "MessageAbortedError") {
+          this.reportTurnError(internal, error);
         }
         break;
       }
@@ -1090,6 +1162,23 @@ export class OpenCodeAdapter implements AgentAdapter {
     meta.text += delta;
   }
 
+  /**
+   * 把 SSE 帶來的回合失敗(`message.updated` 的 assistant error、`session.error`)轉成**一個** `error` 事件。
+   * 同一個失敗 opencode 常常兩邊都報(訊息帶 error + `session.error`,甚至 `session.error` 報兩次、訊息文字不同),
+   * 所以一輪(從 `sendPrompt()` 到下一次 `sendPrompt()`)只回報第一個。標記 `turnErrored`:`markIdleIfBusy()` 就不再補
+   * `completed`(失敗的回合不是完成)。
+   */
+  private reportTurnError(internal: InternalSession, error: { name?: string; data?: { message?: string } }): void {
+    if (internal.turnErrorReported) return;
+    internal.turnErrorReported = true;
+    internal.turnErrored = true;
+    internal.outputQueue.push({
+      type: "error",
+      message: `OpenCode 回合失敗: ${error.name ?? "未知錯誤"}`,
+      detail: error.data?.message,
+    });
+  }
+
   /** 忙碌→閒置的轉換點(見 class 頂端註解):flush 尚未收到 done 的 text part,轉成 completed/略過(若這輪已經送過 error)。 */
   private markIdleIfBusy(internal: InternalSession): void {
     if (!internal.busy) return; // 已經處理過這次轉換(session.status 與 session.idle 常常成對送達)
@@ -1179,6 +1268,14 @@ interface InternalSession {
   busy: boolean;
   /** 這一輪是否已經送出過 error(避免 markIdleIfBusy() 額外再送一次 completed)。 */
   turnErrored: boolean;
+  /**
+   * 這一輪是否已經回報過 SSE 來源的失敗(`message.updated` 帶 error、`session.error`),見 `reportTurnError()`——
+   * 一輪最多回報一次。與 `turnErrored` 的差別:`markIdleIfBusy()` 會把 `turnErrored` 清掉,這個只在下一次 `sendPrompt()`
+   * 才清(實測壞 model 時,第二個、訊息更長的 `session.error` 會在 idle **之後**才到,不能再報第二次)。
+   */
+  turnErrorReported: boolean;
+  /** 這個 opencode server 沒有 `prompt_async`(那個端點回過 404),之後的 prompt 直接走 `/message`,見 `submitPrompt()`。 */
+  promptAsyncUnsupported: boolean;
   idleWaiters: Array<() => void>;
   sseController: AbortController;
   /** setModel() 設定的覆寫值,優先於 handle.launch.model——見 setModel()/sendPrompt() 方法註解。 */
@@ -1416,6 +1513,32 @@ async function postJson<T = unknown>(url: string, body: unknown, authorization: 
     );
   }
   return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/** postJson()/getJson() 丟出的「伺服器回了 404」(例如舊版 opencode 沒有 `prompt_async` 路由)。 */
+function isHttpNotFound(err: unknown): boolean {
+  return err instanceof DeskmonyError && err.code === "opencode.requestFailed" && err.params?.status === 404;
+}
+
+/** undici(Node 內建 `fetch`)因為「等回應等太久」而放棄的錯誤碼:`headersTimeout` 與 `bodyTimeout` 預設都是 300 秒。 */
+const UNDICI_WAIT_TIMEOUT_CODES: ReadonlySet<string> = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+
+/**
+ * 這個 `fetch` 失敗是不是 undici 的「等太久」逾時(`headersTimeout`/`bodyTimeout`,預設 300 秒)。`fetch` 把底層錯誤包成
+ * `TypeError("fetch failed")`,真正的錯誤碼在 `cause.code`(沿 `cause` 鏈往下找,最多五層,避免循環)。
+ *
+ * 只用在**本來就會阻塞到整輪結束**的請求(退路上的 `/message`、`/command`,見 `submitPrompt()`):那種請求等了 5 分鐘還沒
+ * 回應是正常的,不是送出失敗——回合狀態的唯一權威是 SSE。連線被拒(`ECONNREFUSED`)、重設(`ECONNRESET`)等其他錯誤不在此列,
+ * 仍然是真的失敗。
+ */
+export function isUndiciWaitTimeout(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && typeof current === "object" && current !== null; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && UNDICI_WAIT_TIMEOUT_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /** 這輪(slash command)新增:比照上面 postJson() 的既有錯誤處理風格,補一個 GET 版本。 */

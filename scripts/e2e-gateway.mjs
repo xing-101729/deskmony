@@ -1400,11 +1400,11 @@ async function usageMeteringSmokeTest(client, workspaceDir) {
 //       fake-opencode-server.mjs 的 TEST_COMMANDS,argumentHint 依 hints
 //       是否非空正確 coalesce。
 //   31c OpenCode:送 "/greet world"(已知指令)真的打到 POST /session/{id}/command
-//       (回覆帶 [command:greet args:world] 標記),不是 /message。
+//       (回覆帶 [command:greet args:world] 標記),不是一般 prompt 端點(2026-10-05 起是 prompt_async,舊版退路是 /message)。
 //   31d OpenCode:送 "/nonexistent-cmd hello"(/ 開頭但不是已知指令)仍照舊打到
-//       /message(回覆是既有的 FAKE_OPENCODE_REPLY_CHUNKS,不含 [command:...] 標記)。
+//       一般 prompt 端點(prompt_async;回覆是既有的 FAKE_OPENCODE_REPLY_CHUNKS,不含 [command:...] 標記)。
 //   31e OpenCode:送 "/greeting hi"(已知指令 "greet" 的 prefix,但本身不是已知
-//       指令全名)同樣落到 /message,不誤配——驗證比對邏輯是完整 token 相等,
+//       指令全名)同樣落到一般 prompt 端點,不誤配——驗證比對邏輯是完整 token 相等,
 //       不是 startsWith/prefix。
 //   31f claude-agent-sdk(真實模型,見步驟29d 的同一套先例,判定的是系統行為
 //       不是模型講什麼,故仍歸 deterministic):capabilities().slashCommands ===
@@ -1520,7 +1520,7 @@ async function slashCommandSmokeTest(client, workspaceDir) {
       const fullText = groups.map((g) => g.text).join("");
       const ok = finalEvent.event.type === "completed" && !violation && fullText.includes("[command:greet args:world]");
       record(
-        '步驟31c OpenCode 送 "/greet world"(已知指令)打到 POST /session/{id}/command,不是 /message(回覆帶 [command:greet args:world] 標記)',
+        '步驟31c OpenCode 送 "/greet world"(已知指令)打到 POST /session/{id}/command,不是一般 prompt 端點(回覆帶 [command:greet args:world] 標記)',
         ok,
         violation ? `違規: ${violation}` : `fullText=${JSON.stringify(fullText)}`,
       );
@@ -1541,12 +1541,12 @@ async function slashCommandSmokeTest(client, workspaceDir) {
         !fullText.includes("[command:") &&
         fullText === FAKE_OPENCODE_REPLY_CHUNKS.join("");
       record(
-        '步驟31d OpenCode 送 "/nonexistent-cmd hello"(/ 開頭但不是已知指令)仍照舊打到 /message,不誤傷既有行為',
+        '步驟31d OpenCode 送 "/nonexistent-cmd hello"(/ 開頭但不是已知指令)仍照舊走一般 prompt 端點,不誤傷既有行為',
         ok,
         violation ? `違規: ${violation}` : `fullText=${JSON.stringify(fullText)}`,
       );
     } catch (err) {
-      record("步驟31d OpenCode 未知指令落回 /message", false, String(err));
+      record("步驟31d OpenCode 未知指令落回一般 prompt 端點", false, String(err));
     }
 
     try {
@@ -1562,7 +1562,7 @@ async function slashCommandSmokeTest(client, workspaceDir) {
         !fullText.includes("[command:") &&
         fullText === FAKE_OPENCODE_REPLY_CHUNKS.join("");
       record(
-        '步驟31e OpenCode 送 "/greeting hi"(已知指令 "greet" 的 prefix,非完整比對)不誤配,落回 /message',
+        '步驟31e OpenCode 送 "/greeting hi"(已知指令 "greet" 的 prefix,非完整比對)不誤配,落回一般 prompt 端點',
         ok,
         violation ? `違規: ${violation}` : `fullText=${JSON.stringify(fullText)}`,
       );
