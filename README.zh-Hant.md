@@ -64,13 +64,14 @@ flowchart TB
     Auto -- 否 --> Esc["4 · ESCALATE<br/>default-deny"]
 ```
 
-**四類硬性 deny,config 關不掉**:session 工作目錄外的寫入或刪除 · 讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、`**/credentials`)· 危險 git(`push --force`、刪遠端分支、`branch -D`)· 對非白名單主機的外連。
+**四類硬性 deny,config 關不掉**:session 工作目錄外的寫入或刪除 · 讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、桌面殼自己的本機資料夾、`**/.env*`、`**/id_rsa*`、`**/credentials`)· 危險 git(`push --force`、刪遠端分支、`branch -D`)· 對非白名單主機的外連。
 
 有幾個性質值得直說:
 
 - **YOLO 跟 auto 的差別只有一個**:YOLO 額外跳過 config 的 `deny` 規則。**兩者都絕不跳過 hard-deny。** YOLO 還會在 30 分鐘後過期。
 - **引擎判不出來的一律 escalate**,絕不 allow。這是 `decide()` 的最後一行。
-- **OpenCode 也被強制走同一條階梯。** OpenCode 預設放行所有工具,只有它自己設定檔標成 `"ask"` 的才會詢問 —— 而多數人的設定一個都沒標,所以放著不管的話,它的 bash/edit/webfetch/MCP 呼叫根本到不了引擎。Deskmony 啟動 OpenCode(`opencode` 與 `opencode-acp` 兩個 provider)時,會注入一段 `OPENCODE_CONFIG_CONTENT`,把每個工具都設成 `ask`,並與你原本的設定合併(你的設定保留,但權限規則以 Deskmony 的為準)。看得到的影響:`always-ask` 下的 OpenCode session 現在會停下來問,以前是靜默執行;auto/YOLO 照舊。一個限制:`opencode-acp` provider 的 `task`(subagent)工具會被停用,因為 `opencode acp` 不會轉發 subagent 的權限請求,subagent 會永遠卡住。 OpenCode 在 loopback 開的本機 HTTP 伺服器(`opencode serve`,實測 `opencode acp` 也會開)也加了密碼保護,每次啟動都重新產生隨機密碼,所以本機其他程序無法替 OpenCode 核准權限(繞過引擎),也讀不到設定裡的 scoped token;密碼只存在記憶體與子行程環境裡,你自己設的同名密碼會被覆蓋。它擋不住 agent 本身:OpenCode 的 bash 工具會繼承那個環境。
+- **OpenCode 也被強制走同一條階梯。** OpenCode 預設放行所有工具,只有它自己設定檔標成 `"ask"` 的才會詢問 —— 而多數人的設定一個都沒標,所以放著不管的話,它的 bash/edit/webfetch/MCP 呼叫根本到不了引擎。Deskmony 啟動 OpenCode(`opencode` 與 `opencode-acp` 兩個 provider)時,會注入一段 `OPENCODE_CONFIG_CONTENT`,把每個工具都設成 `ask`,並與你原本的設定合併(你的設定保留,但權限規則以 Deskmony 的為準)。看得到的影響:`always-ask` 下的 OpenCode session 現在會停下來問,以前是靜默執行;auto/YOLO 照舊。一個限制:`opencode-acp` provider 的 `task`(subagent)工具會被停用,因為 `opencode acp` 不會轉發 subagent 的權限請求,subagent 會永遠卡住。 OpenCode 在 loopback 開的本機 HTTP 伺服器(`opencode serve`,實測 `opencode acp` 也會開)也加了密碼保護,每次啟動都重新產生隨機密碼,所以本機其他程序無法替 OpenCode 核准權限(繞過引擎),也讀不到設定裡的 scoped token;密碼只存在記憶體與子行程環境裡,你自己設的同名密碼會被覆蓋。OpenCode 自己的 bash 工具本來會繼承那個密碼,所以 2026-10-05 起由 Deskmony 自帶的一個小型 OpenCode 外掛,把它(與注入的設定內容)從 OpenCode 替 agent 執行的 shell 環境裡移除(見 [`DECISIONS.md` §J](docs/DECISIONS.md))。
+- **agent 的環境裡不會有 Deskmony 自己的憑證。** 桌面殼一律把主認證 `DESKMONY_AUTH_TOKEN` 設進 core 的環境,過去每個 adapter 又把整份環境傳給它啟動的 agent —— 於是 agent 的 bash 讀得到 token,連上 gateway 就能自己核准權限、把自己切成 YOLO。現在每個 adapter(Claude、ACP、OpenCode、PTY)都經同一個函式組 agent 的環境,最後一步無條件濾掉主 token、MCP bridge 的 scoped 憑證與繼承來的 OpenCode 伺服器密碼(不分大小寫;你在 provider 環境變數裡自己填的也一樣)。session 網路工具照常可用 —— bridge 的憑證是另外明確交給它的,不靠繼承。這擋不住的是:同一個作業系統使用者的程序讀其他程序的記憶體、或解密 DPAPI 保護的本機檔案 —— 那屬於沙箱的範疇(見 [`DECISIONS.md` §J](docs/DECISIONS.md))。
 - **逾時語意取決於現場有沒有人。** 有人看著 → 待決請求逾時後轉成 deny。沒人看著 → **完全不設計時器**,session 停在 `waiting` 等人回答。把「沒人回應」解讀成「拒絕」,等於把整晚的工作丟掉。真正防止它無限期懸著的是成本斷路器。
 - **「永遠允許」有三條紀律**:寫最窄的規則(`commandEquals` / `pathUnder`);同時寫進設定檔與記憶體,讓重啟前後行為一致;hard-deny 升級來的請求**永遠**不符資格 —— 就算 client 硬塞 `rememberRule`,core 也會把它拔掉。
 - **規則可以限定到某個 agent**(`providerId`,例如只對 Codex 的 session 生效)。舊 profile 時代遺留的規則 —— 在舊版 `config.json` 裡限定 profile id 或角色的 —— 已經對不到任何 session,所以一律往安全的方向收:這類 `allow` 規則不再匹配(該次呼叫改成升級給人),這類 `deny` 規則改成套用到**所有** session,避免被限定範圍的 deny 靜默失效、在 auto 模式下變成自動放行。core 啟動時會逐條記錄受影響的規則。
@@ -331,20 +332,20 @@ Deskmony/
 │  ├─ adapters/         # 4 個 adapter + `deskmony` session 網路 MCP server
 │  ├─ db/               # Drizzle schema、冪等遷移
 │  └─ shared/           # 型別、gateway 協議、zod schema
-├─ scripts/             # 16 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
-├─ .github/workflows/   # CI(build → typecheck → 15 支決定性測試)
+├─ scripts/             # 17 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
+├─ .github/workflows/   # CI(build → typecheck → 16 支決定性測試)
 └─ docs/                # 架構、設計定案、分層設計、開發日誌
 ```
 
 ## 🧪 測試
 
 ```bash
-pnpm test          # typecheck + build + 15 支決定性測試
+pnpm test          # typecheck + build + 16 支決定性測試
 pnpm test:e2e      # 只跑測試(需要 pnpm build 已是最新)
 pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會實際消耗額度
 ```
 
-**十六支端到端測試。** 其中十五支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十五支:**250 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180;之後新增 `e2e-agent-catalog.mjs` 與取代子 agent 測試的 `e2e-session-network.mjs`,斷言數又升上來;2026-10-03 再加上 `e2e-opencode-permissions.mjs`,釘住每個 OpenCode 工具呼叫都會進政策引擎,之後又多了七個斷言釘住 OpenCode 本機伺服器的密碼。)session 網路那支測試也會斷言:in-process server 與 ACP 橋接子行程的工具名稱、描述、參數 schema 逐字一致。
+**十七支端到端測試。** 其中十六支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十六支:**266 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180;之後新增 `e2e-agent-catalog.mjs` 與取代子 agent 測試的 `e2e-session-network.mjs`,斷言數又升上來;2026-10-03 再加上 `e2e-opencode-permissions.mjs`,釘住每個 OpenCode 工具呼叫都會進政策引擎,之後又多了七個斷言釘住 OpenCode 本機伺服器的密碼;2026-10-05 再加上 `e2e-agent-env.mjs`,以設了 `DESKMONY_AUTH_TOKEN` 的環境啟動 core,釘住 Deskmony 自己的憑證一個都沒有進入 agent 的環境,並擴充 OpenCode 權限那支測試,涵蓋「把伺服器密碼從 agent 的 shell 環境中隱藏」的 OpenCode 外掛,另加一個 hard-deny 斷言涵蓋桌面殼的本機資料夾。)session 網路那支測試也會斷言:in-process server 與 ACP 橋接子行程的工具名稱、描述、參數 schema 逐字一致。
 
 `e2e-gateway.mjs` 刻意不在預設範圍內。它需要真實 Claude Code 憑證、會花真的錢,而且有一組 *model-behavior* 斷言依賴模型當輪自由選擇怎麼講 —— 檔案自己標註為已知 flake。一個會因為模型換句話說就變紅的 CI,很快就會被所有人忽略。
 

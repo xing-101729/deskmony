@@ -259,8 +259,15 @@ flowchart TB
 
 - **hard-deny 四類**(`hard-deny.ts`,config 永遠不可關閉):worktree 外寫入/刪除、
   讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、
-  `**/credentials`)、危險 git(force-push / 刪遠端分支 / `branch -D`)、
-  非白名單外連。
+  `**/credentials`;2026-10-05 起還有桌面殼自己的 Electron userData 目錄樹,裡面有加密保存的遠端存取 token)、
+  危險 git(force-push / 刪遠端分支 / `branch -D`)、非白名單外連。
+- **agent 子行程的環境不含 Deskmony 憑證**(2026-10-05,[`DECISIONS.md` §J](./DECISIONS.md)):桌面殼一律把
+  `DESKMONY_AUTH_TOKEN` 設進 core 的環境,過去四個 adapter 又把整份 `process.env` 傳給 agent,agent 的 bash 讀得到主 token、
+  連上 gateway 就能自己核准權限 / 切 YOLO。現在四個 adapter 都經 `packages/adapters/src/agent-env.ts` 的
+  `buildAgentChildEnv()` 組環境,最後一步無條件刪除 `DESKMONY_AUTH_TOKEN`、`DESKMONY_MCP_BRIDGE_*` 與繼承來的
+  `OPENCODE_SERVER_PASSWORD/USERNAME`(不分大小寫;使用者在 provider env 自己填的也刪)。bridge 需要的值是另外明確
+  交給它的,不靠繼承。OpenCode 自己的 bash 工具另由 Deskmony 自帶的 opencode 外掛(`shell.env` hook)把伺服器密碼與設定內容
+  濾掉。**擋不住**:同一個 OS 使用者的程序讀其他程序的記憶體、或用 DPAPI 解密本機檔案(沙箱 / OS 隔離的範疇)。
 - **YOLO 與 auto 的唯一差別**:YOLO 額外跳過 config 的 `effect:"deny"` 規則。
   **hard-deny 兩者都絕不跳過**。YOLO 30 分鐘後惰性過期(不用計時器)。
 - **判不出來一律 escalate**,絕不 allow(`decide()` 最底部的 fallback)。
@@ -640,8 +647,11 @@ opencode 1.18.7 實測:它以 stdio 說 ACP,且確實會啟動 stdio 型 MCP ser
 `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` 給一組**每次 spawn 都重新隨機**產生的密碼
 (`packages/adapters/src/opencode-server-auth.ts`;覆蓋使用者設的同名變數);`OpenCodeAdapter` 對該伺服器的每個請求(含
 SSE `/event`、權限與提問回覆、`dispose()` 的清理)都帶 `Authorization: Basic`,密碼只在 adapter 記憶體裡(不寫 log / DB /
-事件);`opencode acp` 不打它的 HTTP API,只設密碼。已知邊界:密碼會被 opencode 的 bash 工具繼承(擋得住 agent 以外的程序,
-擋不住 agent 本身)。
+事件);`opencode acp` 不打它的 HTTP API,只設密碼。密碼本來會被 opencode 的 bash 工具繼承(擋得住 agent 以外的程序,
+擋不住 agent 本身);2026-10-05 起由 Deskmony 自帶的 opencode 外掛(`packages/adapters/src/opencode-shell-env-plugin.ts`)在
+opencode 的 `shell.env` hook 把 `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` / `OPENCODE_CONFIG_CONTENT` 從 agent 的
+bash 環境移除(經注入的 `OPENCODE_CONFIG_CONTENT` 的 `plugin` 陣列載入,`opencode` 與 `opencode-acp` 都掛;外掛沒載入時
+adapter 警告、session 照常,見 DECISIONS §J)。
 
 | MCP server | 工具 | 進 `allowedTools`(自動放行)? |
 |---|---|---|
@@ -846,7 +856,7 @@ apps/desktop/src/
 | `pnpm start:core` | headless 正式啟動 |
 | `pnpm package` / `package:dir` | `bundle-core.mjs`(含 `@electron/rebuild`)→ vite build → electron-builder NSIS |
 
-**16 支 e2e 腳本**(`scripts/e2e-*.mjs`;`pnpm test` 的 `run-e2e.mjs` 跑其中 15 支
+**17 支 e2e 腳本**(`scripts/e2e-*.mjs`;`pnpm test` 的 `run-e2e.mjs` 跑其中 16 支
 決定性的,`gateway` 需要真實憑證、只留給人工執行),全部直接對獨立的 core process
 打 WS RPC,**從不經過 Electron**:`gateway`(主套件,決定性測試加上少數
 model-behavior 檢查點)、`hard-deny`、`policy-engine`(含 `providerId` 範圍與舊
@@ -860,7 +870,11 @@ bridge token 方法白名單、in-process 與 bridge 的工具描述逐字比對
 `opencode-question`、`opencode-tool-input`、`opencode-permissions`(OpenCode 的工具呼叫一律進政策引擎:
 啟動時注入的 `OPENCODE_CONFIG_CONTENT`、與使用者設定的合併、session 網路 MCP 與 token 撤銷、
 subagent 子 session 的權限、hard-deny 端到端、opencode 本機伺服器的 basic auth:fake 伺服器真的檢查認證,
-斷言每次 spawn 的隨機密碼、無認證/錯認證一律 401、密碼不外洩、使用者設的同名變數被覆蓋、adapter 的每個請求都帶認證)、`child-registry`、
+斷言每次 spawn 的隨機密碼、無認證/錯認證一律 401、密碼不外洩、使用者設的同名變數被覆蓋、adapter 的每個請求都帶認證;
+以及 Deskmony 自帶的 opencode `shell.env` 外掛:`plugin` 陣列的合併、外掛檔只匯出一個函式、fake 後端的外掛宿主模擬驗證 shell
+環境被濾、載入標記檔偵測與「外掛沒載入」警告)、`agent-env`(2026-10-05:core 以設了 `DESKMONY_AUTH_TOKEN` 的環境啟動,fake ACP /
+OpenCode / PTY 後端回報環境裡「有沒有」主 token、bridge 憑證與 opencode 伺服器密碼,另有攔截 Claude SDK adapter 實際 spawn 的探針;
+bridge 仍拿得到自己的 scoped token)、`child-registry`、
 `cli`、`cli-tui`。(2026-10-02 移除 `message-budget` 與 `lead-gate` 兩支;
 `session-subagents` 改寫成 `session-network`。)
 

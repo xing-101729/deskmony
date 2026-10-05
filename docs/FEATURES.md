@@ -128,7 +128,7 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
 - **Default-deny 政策引擎**:每次工具呼叫都走同一套固定優先序判斷,判斷不
   出來一律升級給人,絕不自動放行。
 - **四類硬性禁止(hard-deny),config 永遠關不掉**:worktree 外寫入/刪除、讀
-  秘密路徑(`~/.ssh`、`~/.aws`、`.env*`、`id_rsa*`、`credentials`)、危險
+  秘密路徑(`~/.ssh`、`~/.aws`、桌面殼自己的本機資料夾、`.env*`、`id_rsa*`、`credentials`)、危險
   git(force-push、砍遠端分支、`branch -D`)、對非白名單主機的網路連線。
 - **OpenCode 也走同一套引擎**(2026-10-03):OpenCode 預設放行所有工具,只有它自己
   設定裡標成 `ask` 的才會詢問,所以過去 OpenCode session 的 bash/edit/webfetch/
@@ -144,7 +144,14 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
   的 `opencode acp`)預設**沒有認證**——本機任何程序都能替它核准權限請求、讀到設定
   裡的 scoped bridge token。現在每次啟動都以環境變數給一組隨機密碼(basic auth,
   使用者自己設的同名變數被覆蓋),Deskmony 對它的每個請求都帶認證。擋的是 agent
-  **以外**的本機程序;OpenCode 的 bash 工具會繼承那個環境變數,擋不住 agent 自己。
+  **以外**的本機程序;至於 agent 自己的 bash 工具,2026-10-05 起由 Deskmony 自帶的
+  OpenCode 外掛把那個密碼(以及注入的設定內容)從它的環境移除。
+- **agent 的環境裡沒有 Deskmony 自己的憑證**(2026-10-05):桌面殼一律把主認證 token 設進
+  core 的環境,過去 agent 的 bash 讀得到它——連上 gateway 就能自己核准權限、切 YOLO。
+  現在每個 agent(Claude、所有 ACP、OpenCode、PTY)的子行程環境都會濾掉主 token、MCP
+  bridge 的憑證與繼承來的 OpenCode 伺服器密碼(使用者在 provider 環境變數裡填的也一樣);
+  session 網路工具照常可用(bridge 的憑證是另外明確交給它的)。擋不住的是同一個作業系統
+  使用者的程序讀其他程序的記憶體、或解密本機檔案——那屬於沙箱的範疇。
 - **每 session 的 Auto / YOLO 開關**:Auto 只把「未分類中間地帶」變自動放行;
   YOLO 額外跳過 config 裡的 deny 規則。**兩者都絕不跳過 hard-deny**。YOLO
   30 分鐘後自動失效。
