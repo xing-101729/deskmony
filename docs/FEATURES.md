@@ -140,6 +140,11 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
   放行。`opencode-acp` 的 `task`(subagent)工具會被停用——`opencode acp` 不會
   轉發 subagent 子 session 的權限請求,subagent 會永遠卡住;`opencode`(HTTP)
   則會轉發,不受影響。
+  同時,OpenCode 在 loopback 開的本機 HTTP 伺服器(`opencode serve` 與實測也會開
+  的 `opencode acp`)預設**沒有認證**——本機任何程序都能替它核准權限請求、讀到設定
+  裡的 scoped bridge token。現在每次啟動都以環境變數給一組隨機密碼(basic auth,
+  使用者自己設的同名變數被覆蓋),Deskmony 對它的每個請求都帶認證。擋的是 agent
+  **以外**的本機程序;OpenCode 的 bash 工具會繼承那個環境變數,擋不住 agent 自己。
 - **每 session 的 Auto / YOLO 開關**:Auto 只把「未分類中間地帶」變自動放行;
   YOLO 額外跳過 config 裡的 deny 規則。**兩者都絕不跳過 hard-deny**。YOLO
   30 分鐘後自動失效。

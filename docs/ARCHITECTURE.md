@@ -634,6 +634,15 @@ session,經 gateway 打回 core)掛進 `session/new`。**兩邊的 MCP server �
 「OpenCode(ACP)」(`opencode-acp`)走 `opencode acp`、經 `software: "acp"` 沿用 ACP 那條橋(2026-08-28 對
 opencode 1.18.7 實測:它以 stdio 說 ACP,且確實會啟動 stdio 型 MCP server),兩者差別只剩對接方式。
 
+**opencode 的本機 HTTP 伺服器有 basic auth(2026-10-03,DECISIONS §I-3)**:`opencode serve` 與 `opencode acp`(實測)
+都會在 loopback 開 HTTP 伺服器、預設無認證——本機任何程序能替它核准權限請求(繞過政策引擎)、`GET /config` 讀到上面那個
+`mcp.deskmony.environment` 的 scoped token。所以兩個 adapter 啟動 opencode 家族子行程時都以環境變數
+`OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` 給一組**每次 spawn 都重新隨機**產生的密碼
+(`packages/adapters/src/opencode-server-auth.ts`;覆蓋使用者設的同名變數);`OpenCodeAdapter` 對該伺服器的每個請求(含
+SSE `/event`、權限與提問回覆、`dispose()` 的清理)都帶 `Authorization: Basic`,密碼只在 adapter 記憶體裡(不寫 log / DB /
+事件);`opencode acp` 不打它的 HTTP API,只設密碼。已知邊界:密碼會被 opencode 的 bash 工具繼承(擋得住 agent 以外的程序,
+擋不住 agent 本身)。
+
 | MCP server | 工具 | 進 `allowedTools`(自動放行)? |
 |---|---|---|
 | **`deskmony`** | `list_agents`、`list_sessions`、`read_session` | ✅ 純查詢(`read_session` 只回 user / assistant 訊息、每則 content 截斷到 4000 字元、附件只標示 `hasAttachments`;預設 20 則、上限 100) |
@@ -850,7 +859,8 @@ adapter、舊 schema 的 `agent_profiles` 遷移)、
 bridge token 方法白名單、in-process 與 bridge 的工具描述逐字比對)、
 `opencode-question`、`opencode-tool-input`、`opencode-permissions`(OpenCode 的工具呼叫一律進政策引擎:
 啟動時注入的 `OPENCODE_CONFIG_CONTENT`、與使用者設定的合併、session 網路 MCP 與 token 撤銷、
-subagent 子 session 的權限、hard-deny 端到端)、`child-registry`、
+subagent 子 session 的權限、hard-deny 端到端、opencode 本機伺服器的 basic auth:fake 伺服器真的檢查認證,
+斷言每次 spawn 的隨機密碼、無認證/錯認證一律 401、密碼不外洩、使用者設的同名變數被覆蓋、adapter 的每個請求都帶認證)、`child-registry`、
 `cli`、`cli-tui`。(2026-10-02 移除 `message-budget` 與 `lead-gate` 兩支;
 `session-subagents` 改寫成 `session-network`。)
 

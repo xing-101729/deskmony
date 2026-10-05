@@ -191,9 +191,9 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 
 ---
 
-## I. 2026-10-03 修訂:OpenCode 也走政策引擎、HTTP 版也掛 session 工具
+## I. 2026-10-03 修訂:OpenCode 也走政策引擎、HTTP 版也掛 session 工具、本機伺服器加認證
 
-> 在簡化重構(§H)之後的兩個相關修補。§C 的規則本身一條都沒改——補的是「OpenCode 對這些規則形同虛設」的洞。
+> 在簡化重構(§H)之後的三個相關修補。§C 的規則本身一條都沒改——補的是「OpenCode 對這些規則形同虛設」的洞。
 
 **1. OpenCode 的工具呼叫一律經過 PolicyEngine(C2 / C5 / C6 對它補上)。** opencode **預設所有工具權限都是 allow**,
 只有它自己設定裡標成 `"ask"` 的才會發 `permission.asked`(HTTP)/ `session/request_permission`(ACP);使用者的 opencode
@@ -215,3 +215,21 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 scoped token(`mintMcpBridgeLaunch()`,核發/撤銷沿用 ACP 那條),寫進 opencode 設定的 `mcp.deskmony`;token 只放
 `environment`、不放 `command`,呼叫者身分仍由 token 綁定。`create_session` / `send_to_session` 因為上一項自然走權限流程。
 `softwareCanUseTools("opencode")` 改為 true;provider 目錄的 OpenCode 兩項差別只剩對接方式(HTTP + SSE / ACP)。
+
+**3. Deskmony 啟動的 opencode 本機伺服器一律加 basic auth(上面兩項的前提)。** `opencode serve`(HTTP)與 `opencode acp`
+(實測 1.18.7,看行程樹的 LISTEN port)**都會**在 loopback 開 HTTP 伺服器,而且預設**沒有任何認證**;最常見的第一個伺服器還
+固定落在 opencode 的預設 port 4096(`--port 0` 是「先試 4096、被占用才隨機」,不是純隨機)。本機任何程序就能:
+`POST /permission/{id}/reply` 替 opencode 核准權限請求——直接繞過第 1 項費力接上的政策引擎與使用者本人;`GET /config` 讀到第 2
+項才放進設定裡的 scoped bridge token(只能呼叫 session 網路的五個 gateway 方法,但仍是能冒充該 session 傳訊息、開 session 的憑證);
+對 session 送 prompt、讀對話。所以每次 spawn 都產生一組新的隨機密碼(32 bytes、base64url),以 `OPENCODE_SERVER_PASSWORD` /
+`OPENCODE_SERVER_USERNAME` **環境變數**(不放 command args)交給子行程;`OpenCodeAdapter` 對該伺服器的每個請求(含 SSE `/event`)
+都帶 `Authorization: Basic`,`opencode acp` 那條路 Deskmony 不打它的 HTTP API,只設密碼讓別人進不去。密碼只在 adapter 記憶體,
+不寫 log、不寫 DB、不進任何事件;使用者自己設的同名環境變數一律**被覆蓋**(不沿用長效秘密)。實作與實測見
+`packages/adapters/src/opencode-server-auth.ts` 檔頭。
+
+- **使用者可見的改變**:Deskmony 內部的對話、權限、提問流程完全不變;唯一的差別是從外部(別的程序、手動 `curl`)不帶密碼連不進
+  Deskmony 啟動的 opencode 伺服器了——那正是要擋的事,密碼只有 Deskmony 知道。
+- **已知邊界**:(a) 密碼在 opencode 行程的環境變數裡,而 opencode **不會**把它從 bash 工具的環境濾掉(實測模型跑 bash 讀得到),所以這道鎖
+  擋的是 **agent 以外**的本機程序,擋不住 agent 自己;要連 agent 一起擋得在 opencode 端清掉那個變數(它有 `shell.env` 外掛 hook,
+  但未驗證),列為後續。(b) 不認這個環境變數的舊版 opencode 不會鎖;`OpenCodeAdapter.spawn()` 就緒後會不帶認證探測一次,仍回 2xx 就
+  `console.warn`,但**不拒絕啟動**(拒絕會讓舊版使用者整個 OpenCode 功能壞掉)。
