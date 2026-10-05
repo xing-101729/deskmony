@@ -191,6 +191,7 @@ import { Readable, Writable } from "node:stream";
 import { writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { loadConfigPlugins, simulateShellEnv, presenceIn } from "./lib/fake-opencode-plugin-host.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -260,6 +261,16 @@ function describePresence(namesCsv) {
       .map((name) => [name, upperKeys.has(name.toUpperCase())]),
   );
 }
+/**
+ * 2026-10-05(安全:opencode 外掛)e2e 用:`ACP_REPORT_SHELL_ENV:<逗號分隔的變數名稱>` → 回覆 `SHELLENV:` + JSON
+ * (`{ shell, process, pluginsLoaded, pluginErrors }`)。扮演 `opencode acp`(provider 目錄的 `family: "opencode"`):依
+ * `OPENCODE_CONFIG_CONTENT` 的 `plugin` 載入外掛並跑 `shell.env` hook,回報 agent 的 bash 工具環境與這個行程自己的環境裡「有沒有」
+ * 這些變數(只回有沒有,絕不回顯值)。語意同 fake-opencode-server.mjs 的 REPORT_SHELL_ENV_PREFIX,外掛宿主的模擬規則見
+ * scripts/lib/fake-opencode-plugin-host.mjs;`FAKE_OPENCODE_SKIP_PLUGINS=1` = 不載入任何外掛。
+ */
+export const REPORT_SHELL_ENV_PREFIX = "ACP_REPORT_SHELL_ENV:";
+/** 啟動時(main())載入的外掛宿主狀態。 */
+let pluginHost = { hooks: [], loaded: [], errors: [] };
 /** P3(session 網路)e2e 用,見檔頭註解:把其後的文字原樣當成這一輪的回覆。 */
 export const SAY_PREFIX = "ACP_SAY ";
 /** P3(session 網路)e2e 用,見檔頭註解:prompt 任何位置含這個標記就自己呼叫 bridge 工具。 */
@@ -376,6 +387,8 @@ class FakeAcpAgent {
         await this.handleReportMcpServers(params.sessionId, cx);
       } else if (text === REPORT_ENV_PREFIX) {
         await this.handleReportEnv(params.sessionId, cx);
+      } else if (text.startsWith(REPORT_SHELL_ENV_PREFIX)) {
+        await this.handleReportShellEnv(params.sessionId, text.slice(REPORT_SHELL_ENV_PREFIX.length), cx);
       } else if (text.startsWith(REPORT_PRESENCE_PREFIX)) {
         await this.handleReportPresence(params.sessionId, text.slice(REPORT_PRESENCE_PREFIX.length), cx);
       } else {
@@ -612,6 +625,22 @@ class FakeAcpAgent {
         sessionUpdate: "agent_message_chunk",
         messageId,
         content: { type: "text", text: `ENV:${JSON.stringify({ OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null, serverAuth: describeServerAuth() })}` },
+      },
+    });
+  }
+
+  /** 2026-10-05 e2e 用,見 REPORT_SHELL_ENV_PREFIX 的常數註解。 */
+  async handleReportShellEnv(sessionId, namesCsv, cx) {
+    const shellEnv = await simulateShellEnv(pluginHost.hooks, process.cwd());
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: {
+          type: "text",
+          text: `SHELLENV:${JSON.stringify({ shell: presenceIn(shellEnv, namesCsv), process: presenceIn(process.env, namesCsv), pluginsLoaded: pluginHost.loaded, pluginErrors: pluginHost.errors })}`,
+        },
       },
     });
   }
@@ -955,6 +984,11 @@ function extractText(prompt) {
 }
 
 async function main() {
+  // 2026-10-05:扮演 `opencode acp` 時(環境裡有 OPENCODE_CONFIG_CONTENT),模擬 opencode 載入它的 `plugin`(含 Deskmony 自帶的外掛,
+  // 載入時會寫「載入標記檔」)。沒有這個變數(一般 ACP agent)什麼都不載入。
+  if (process.env.OPENCODE_CONFIG_CONTENT && process.env.FAKE_OPENCODE_SKIP_PLUGINS !== "1") {
+    pluginHost = await loadConfigPlugins(process.env.OPENCODE_CONFIG_CONTENT, process.cwd());
+  }
   const input = Writable.toWeb(process.stdout);
   const output = Readable.toWeb(process.stdin);
   const stream = acp.ndJsonStream(input, output);

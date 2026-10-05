@@ -36,7 +36,17 @@
  * `permission` 優先(使用者在這個值裡寫的 `permission` 鍵,除了與 Deskmony 同名的之外一律排在 Deskmony 的
  * 規則**前面**,所以最後生效的仍是 Deskmony 的)。解析失敗(或不是 JSON 物件)就 `console.warn` 並**只用
  * Deskmony 的**——寧可少合併使用者的設定,也不能因此讓 default-deny 失效或讓 session 起不來。
+ *
+ * ## 2026-10-05:`plugin`(Deskmony 自帶的 shell.env 外掛)
+ *
+ * opencode 不會把 `OPENCODE_SERVER_PASSWORD` 與這份 `OPENCODE_CONFIG_CONTENT`(含 bridge 的 scoped token)從它啟動的 bash 工具環境濾掉,
+ * agent 讀得到就能自我核准權限。Deskmony 自帶一個 opencode 外掛(opencode-shell-env-plugin.ts)在 `shell.env` hook 把它們移除,
+ * 這裡把它加進 `plugin` 陣列。**實測(1.18.7)**:`OPENCODE_CONFIG_CONTENT` 的 `plugin` 會與使用者全域/專案設定的 `plugin` **串接**
+ * (不是取代),所以使用者自己這個值裡的 `plugin` 原樣保留、Deskmony 的附加在**最後**(hook 依序執行,最後一個不會被別人蓋回去)。
+ * 同一個外掛路徑若已在使用者的陣列裡(不該發生)先去掉再附加,避免重複載入。
  */
+
+import type { OpencodePluginEntry } from "./opencode-shell-env.js";
 
 /** opencode 讀的環境變數名稱。 */
 export const OPENCODE_CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT";
@@ -68,6 +78,11 @@ export interface DeskmonyOpencodeConfigOptions {
    * 這個 session 有掛 Deskmony 的 session 網路 MCP server(名稱 `deskmony`)。給了才會預先放行上面三個查詢工具
    * (沒掛的時候不放行:同名的別家工具不該因此被放行)。
    */
+  /**
+   * Deskmony 自帶的 opencode 外掛(把伺服器密碼與設定內容從 agent 的 shell 環境移除,見 opencode-shell-env-plugin.ts)。
+   * 給了才會加進 `plugin` 陣列;兩種 opencode 對接都要給(外掛檔找不到時 adapter 降級成不給,session 照常啟動)。
+   */
+  shellEnvPlugin?: OpencodePluginEntry;
   sessionNetwork?: {
     /**
      * 只有 HTTP adapter 要給:把 bridge 以 `mcp.deskmony`(`type: "local"`)寫進設定。ACP 不用——
@@ -136,6 +151,16 @@ export function buildOpencodeConfigContent(userValue: string | undefined, option
     if (!(key in ours)) permission[key] = value;
   }
   merged.permission = Object.assign(permission, ours);
+
+  const shellEnvPlugin = options.shellEnvPlugin;
+  if (shellEnvPlugin) {
+    if (merged.plugin !== undefined && !Array.isArray(merged.plugin)) {
+      console.warn(`[opencode-config] 使用者設定的 ${OPENCODE_CONFIG_CONTENT_ENV} 裡的 plugin 不是陣列,已忽略、只掛載 Deskmony 的外掛。`);
+    }
+    const userPlugins: unknown[] = Array.isArray(merged.plugin) ? merged.plugin : [];
+    const specOf = (entry: unknown): unknown => (Array.isArray(entry) ? entry[0] : entry);
+    merged.plugin = [...userPlugins.filter((entry) => specOf(entry) !== shellEnvPlugin[0]), shellEnvPlugin];
+  }
 
   const localMcpServer = options.sessionNetwork?.localMcpServer;
   if (localMcpServer) {

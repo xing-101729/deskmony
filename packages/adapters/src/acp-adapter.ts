@@ -15,6 +15,7 @@ import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
 import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
 import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
 import { buildAgentChildEnv } from "./agent-env.js";
+import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded, type OpencodeShellEnvPluginLaunch } from "./opencode-shell-env.js";
 
 /**
  * AcpAdapter — 對接 [Agent Client Protocol](https://agentclientprotocol.com)
@@ -196,10 +197,15 @@ export class AcpAdapter implements AgentAdapter {
     // 否則 agent 的 bash 讀得到 `DESKMONY_AUTH_TOKEN`,連上 gateway 就能自己核准權限/切 YOLO,等於自己拆掉安全罩。
     // bridge 需要的值是下面 `session/new` 的 `mcpServers[].env` 明確交給 bridge 的,不靠繼承。見 agent-env.ts。
     const childEnv: NodeJS.ProcessEnv = buildAgentChildEnv(launch.env, acpConfig.env);
+    let shellEnvPlugin: OpencodeShellEnvPluginLaunch | undefined;
     if (launch.family === "opencode") {
+      // 2026-10-05(安全):opencode 不會把伺服器密碼與這份設定從它啟動的 bash 工具環境濾掉,agent 讀得到就能自我核准權限——
+      // 掛 Deskmony 自帶的外掛在 `shell.env` hook 把它們移除。外掛找不到時降級(警告、session 照常啟動)。見 opencode-shell-env-plugin.ts。
+      shellEnvPlugin = prepareOpencodeShellEnvPlugin("acp-adapter", handleId);
       // opencode 預設所有工具權限都是 allow、不經過 Deskmony 的政策引擎——一律改成全部 ask(default-deny)。
       // 完整理由、設定寫法與實測依據見 opencode-config.ts。掛了 bridge 時三個唯讀查詢工具預先放行。
       childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
+        shellEnvPlugin: shellEnvPlugin?.entry,
         sessionNetwork: bridgeLaunch ? {} : undefined,
         // opencode acp 不會轉發 subagent 子 session 的權限請求 → 子 session 卡死,只能不讓它用 subagent(見該選項註解)。
         denySubagents: true,
@@ -334,6 +340,15 @@ export class AcpAdapter implements AgentAdapter {
       };
       this.sessions.set(handle.id, internal);
 
+      // 2026-10-05:`session/new` 成功 = opencode 對這個資料夾的 instance(含外掛初始化)已建立——看載入標記檔:外掛沒載入只警告、
+      // 不影響 session。背景執行,不拖慢 session 建立;必須在 session 登記**之後**(`isCancelled` 靠 `this.sessions` 判斷 session
+      // 是不是已經被 dispose 掉)。
+      if (shellEnvPlugin) {
+        void watchOpencodeShellEnvPluginLoaded(shellEnvPlugin, "acp-adapter", handleId, {
+          isCancelled: () => !this.sessions.has(handleId),
+        });
+      }
+
       child.on("exit", (code, signal) => {
         if (!this.sessions.has(handle.id)) return; // dispose() 已經處理過
         outputQueue.push({
@@ -359,6 +374,7 @@ export class AcpAdapter implements AgentAdapter {
       if (bridgeMcpServer) {
         this.tokenMinter?.revokeForSession(handleId);
       }
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
       try {
         connection.close();
       } catch {

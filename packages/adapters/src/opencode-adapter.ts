@@ -12,6 +12,7 @@ import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
 import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
 import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
 import { buildAgentChildEnv } from "./agent-env.js";
+import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded } from "./opencode-shell-env.js";
 
 /**
  * OpenCodeAdapter — 對接 opencode 的 headless server API(ARCHITECTURE.md
@@ -278,7 +279,12 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 這個 adapter 就是 opencode(software="opencode"),不需要看 launch.family。
     // 掛了 bridge 時:session 網路 MCP server(名稱 `deskmony`,工具全名 `deskmony_<name>`)寫進同一份設定,
     // 三個唯讀查詢工具預先放行。token 只放 `environment`,**不放 command**(命令列在行程列表看得到)。
+    // 2026-10-05(安全):opencode 不會把伺服器密碼與這份設定(含 bridge 的 scoped token)從它啟動的 bash 工具環境濾掉,
+    // agent 讀得到就能自我核准權限——掛 Deskmony 自帶的外掛在 `shell.env` hook 把它們移除。外掛找不到時降級(警告、session 照常啟動)。
+    // 實測依據、機制與限制見 opencode-shell-env-plugin.ts。
+    const shellEnvPlugin = prepareOpencodeShellEnvPlugin("opencode-adapter", handleId);
     childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
+      shellEnvPlugin: shellEnvPlugin?.entry,
       sessionNetwork: bridgeLaunch
         ? { localMcpServer: { command: [bridgeLaunch.command, ...bridgeLaunch.args], environment: bridgeLaunch.env } }
         : undefined,
@@ -351,6 +357,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     } catch (err) {
       this.killChild(child);
       revokeBridgeToken();
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
       throw err;
     }
 
@@ -370,6 +377,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     } catch (err) {
       this.killChild(child);
       revokeBridgeToken();
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
       throw new DeskmonyError(
         "opencode.sessionCreateFailed",
         { detail: err instanceof Error ? err.message : String(err) },
@@ -435,6 +443,15 @@ export class OpenCodeAdapter implements AgentAdapter {
       availableCommands,
     };
     this.sessions.set(handle.id, internal);
+
+    // 2026-10-05:opencode 對這個資料夾的 instance(含外掛初始化)在上面的 `POST /session`、`GET /command` 就已建立——這時看載入標記檔:
+    // 外掛沒載入(舊版 opencode 不認 `shell.env`、載入失敗……)只警告、不影響 session。背景執行,不拖慢 session 建立;
+    // 必須在 session 登記**之後**(`isCancelled` 靠 `this.sessions` 判斷 session 是不是已經被 dispose 掉)。
+    if (shellEnvPlugin) {
+      void watchOpencodeShellEnvPluginLoaded(shellEnvPlugin, "opencode-adapter", handleId, {
+        isCancelled: () => !this.sessions.has(handleId),
+      });
+    }
 
     child.on("exit", (code, signal) => {
       if (!this.sessions.has(handle.id)) return; // dispose() 已經處理過

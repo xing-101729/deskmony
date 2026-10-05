@@ -54,6 +54,19 @@
  *   PM17 adapter 的**每個**真實請求都帶了認證:整支測試期間,fake 擋下的請求只有 adapter 每次 spawn 的一次無認證健全性探測(GET /global/health)
  *        與 PM12 的刻意探測,零筆其他。
  *
+ *   PM18-PM21 (2026-10-05,第四項改動:**opencode 的 bash 工具環境不得含伺服器密碼與設定內容**)opencode 不會把 `OPENCODE_SERVER_PASSWORD`
+ *        與含 bridge token 的 `OPENCODE_CONFIG_CONTENT` 從它啟動的 bash 工具環境濾掉(2026-10-03 實測)——agent 讀得到就能 `curl` 自家伺服器的
+ *        `POST /permission/{id}/reply` 自我核准權限。Deskmony 自帶一個 opencode 外掛(packages/adapters/src/opencode-shell-env-plugin.ts),
+ *        在 `shell.env` hook 把它們移除(**真實 opencode 1.18.7 + `opencode/big-pickle` 的整合另外實測過**,見提交說明與 docs/DECISIONS.md §J;
+ *        這裡用 fake 後端內建的「外掛宿主模擬」——scripts/lib/fake-opencode-plugin-host.mjs,規則照真實實測——決定性地驗證 adapter 的接線與
+ *        外掛檔本身的行為):
+ *   PM18 HTTP 與 ACP(family=opencode):`OPENCODE_CONFIG_CONTENT` 的 `plugin` 陣列最後一項是 Deskmony 的外掛(`[file:// URL, {loadedMarkerFile}]`,
+ *        URL 指到真實存在的 opencode-shell-env-plugin.js);使用者自己的 `plugin` 原樣保留在前面;同一個外掛路徑被使用者寫進去也只留一份。
+ *   PM19 外掛檔只匯出**一個**函式(opencode 會把每個函式匯出都當外掛工廠呼叫);被宿主載入後,agent 的 bash 工具環境沒有
+ *        OPENCODE_SERVER_PASSWORD/OPENCODE_SERVER_USERNAME/OPENCODE_CONFIG_CONTENT(但 opencode 行程自己的環境有——它需要),其他變數與 PATH 照常有。
+ *   PM20 外掛載入時寫的標記檔被 adapter 的偵測消化(檔案被刪、沒有「外掛沒載入」警告);PM20b 偵測函式本身的三種結果(載入/逾時/session 已 dispose)。
+ *   PM21 外掛沒被載入(模擬不認 shell.env 的舊版 opencode)→ adapter 在 log 裡警告,但 session 照常起得來、照常回覆。
+ *
  * 全程走 scripts/fake-opencode-server.mjs / fake-acp-agent.mjs(決定性、不呼叫任何模型)。只啟動一個 core,
  * DESKMONY_HOME/DATA_DIR/WORKSPACE/CORE_PORT 四個都指向暫存目錄,並在繼續之前確認 core 印出的 SQLite 路徑真的在
  * 暫存目錄底下——漏設任何一個都可能連到使用者真實的 ~/.deskmony/deskmony.db。
@@ -67,7 +80,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
   FAKE_OPENCODE_REPLY_CHUNKS,
@@ -75,11 +88,12 @@ import {
   TOOL_CALL_INPUT,
   TOOL_CALL_ASK_FIRST_MARKER,
   REPORT_ENV_PREFIX as OPENCODE_REPORT_ENV,
+  REPORT_SHELL_ENV_PREFIX as OPENCODE_REPORT_SHELL_ENV,
   SUBAGENT_PERMISSION_PREFIX,
   SUBAGENT_CHILD_TEXT,
   SUBAGENT_CHILD_COMMAND,
 } from "./fake-opencode-server.mjs";
-import { REPORT_ENV_PREFIX as ACP_REPORT_ENV } from "./fake-acp-agent.mjs";
+import { REPORT_ENV_PREFIX as ACP_REPORT_ENV, REPORT_SHELL_ENV_PREFIX as ACP_REPORT_SHELL_ENV } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 import { e2eProvidersEnv, fakeAcpOpencodeProvider, FAKE_OPENCODE, FAKE_ACP, FAKE_ACP_OPENCODE } from "./lib/e2e-providers.mjs";
 
@@ -330,6 +344,28 @@ async function setProviderEnv(client, providerId, value) {
   await client.rpc("settings.setProviderPrefs", { providerId, patch: { env: { OPENCODE_CONFIG_CONTENT: value } } });
 }
 
+/** Deskmony 自帶外掛在 `plugin` 陣列裡的元素:`[file:// URL(指到存在的 opencode-shell-env-plugin.js), { loadedMarkerFile: <暫存目錄裡的絕對路徑> }]`。 */
+function isOurPluginEntry(entry) {
+  if (!Array.isArray(entry) || entry.length !== 2) return false;
+  const [spec, options] = entry;
+  if (typeof spec !== "string" || !spec.startsWith("file://")) return false;
+  let pluginPath;
+  try {
+    pluginPath = fileURLToPath(spec);
+  } catch {
+    return false;
+  }
+  const marker = options?.loadedMarkerFile;
+  return (
+    path.basename(pluginPath) === "opencode-shell-env-plugin.js" &&
+    existsSync(pluginPath) &&
+    typeof marker === "string" &&
+    path.isAbsolute(marker) &&
+    path.basename(marker).startsWith("deskmony-opencode-shell-env-") &&
+    path.resolve(path.dirname(marker)).toLowerCase() === path.resolve(os.tmpdir()).toLowerCase()
+  );
+}
+
 const USER_CONFIG = {
   model: "user/model",
   plugin: ["user-plugin"],
@@ -358,7 +394,11 @@ async function testHttpMerge(client, workspaceDir) {
   const ok =
     got.config !== null &&
     got.config.model === USER_CONFIG.model &&
-    isDeepStrictEqual(got.config.plugin, USER_CONFIG.plugin) &&
+    // 使用者的 plugin 原樣保留在前面,Deskmony 自帶的 shell.env 外掛(2026-10-05)附加在最後(見 PM18)
+    Array.isArray(got.config.plugin) &&
+    got.config.plugin.length === USER_CONFIG.plugin.length + 1 &&
+    isDeepStrictEqual(got.config.plugin.slice(0, USER_CONFIG.plugin.length), USER_CONFIG.plugin) &&
+    isOurPluginEntry(got.config.plugin[got.config.plugin.length - 1]) &&
     isDeepStrictEqual(got.config.mcp?.mine, USER_CONFIG.mcp.mine) &&
     // 使用者的鍵還在(不丟資訊),而且都排在 Deskmony 的 `*` 之前;`*` 被 Deskmony 的 ask 取代;
     // Deskmony 自己的鍵(`*`、`**`、預先放行的查詢工具)是最後的,所以最後符合者永遠是 Deskmony 的。
@@ -835,6 +875,211 @@ async function testOpencodeServerAuth(client, workspaceDir, dbPath, otherLiveSes
 }
 
 // =======================================================================
+/** 送一則 prompt、等這一輪結束,回傳這一輪的 assistant 文字(串起來)。 */
+async function driveText(client, sessionId, text, timeoutMs = 20_000) {
+  const from = client.timeline.length;
+  await client.rpc("session.sendPrompt", { sessionId, prompt: { text } });
+  await client.waitFor((e) => isTurnEnd(e, sessionId), timeoutMs, from);
+  const { messages } = await client.rpc("session.history", { sessionId });
+  return messages.filter((m) => m.role === "assistant").map((m) => m.content).join("\n");
+}
+
+async function withOpenSession(client, providerId, workspaceDir, title, sessionIds, body) {
+  const {
+    session: { id: sessionId },
+  } = await client.rpc("session.create", { providerId, workingDir: workspaceDir, title }, 30_000);
+  sessionIds.push(sessionId);
+  return body(sessionId);
+}
+
+const SHELL_ENV_NAMES = ["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME", "OPENCODE_CONFIG_CONTENT", "E2E_SHELL_KEEP", "PATH"];
+
+async function testShellEnvPlugin(client, workspaceDir) {
+  const backends = [
+    { label: "HTTP(opencode)", providerId: FAKE_OPENCODE, configPrefix: OPENCODE_REPORT_ENV, shellPrefix: OPENCODE_REPORT_SHELL_ENV },
+    { label: "ACP(family=opencode)", providerId: FAKE_ACP_OPENCODE, configPrefix: ACP_REPORT_ENV, shellPrefix: ACP_REPORT_SHELL_ENV },
+  ];
+  const sessionIds = [];
+  try {
+    // ---- PM18:plugin 陣列 ----
+    const pluginFacts = [];
+    for (const { label, providerId, configPrefix } of backends) {
+      await setProviderEnvVars(client, providerId, { OPENCODE_CONFIG_CONTENT: "", E2E_SHELL_KEEP: "1" });
+      const plain = await reportOpencodeConfig(client, providerId, workspaceDir, configPrefix, "pm18a");
+      const ourEntry = plain.config?.plugin?.[0];
+      // 使用者自己的 plugin(含「同一個外掛路徑」)
+      await setProviderEnvVars(client, providerId, {
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ plugin: [ourEntry?.[0] ?? "x", "user-plugin", ["user-tuple-plugin", { a: 1 }]] }),
+      });
+      const merged = await reportOpencodeConfig(client, providerId, workspaceDir, configPrefix, "pm18b");
+      const mergedPlugins = merged.config?.plugin ?? [];
+      pluginFacts.push({
+        label,
+        plainOk: Array.isArray(plain.config?.plugin) && plain.config.plugin.length === 1 && isOurPluginEntry(ourEntry),
+        mergedOk:
+          mergedPlugins.length === 3 &&
+          mergedPlugins[0] === "user-plugin" &&
+          isDeepStrictEqual(mergedPlugins[1], ["user-tuple-plugin", { a: 1 }]) &&
+          isOurPluginEntry(mergedPlugins[2]) &&
+          // 使用者寫進去的同一個外掛路徑只留一份(附加在最後的那份)
+          mergedPlugins.filter((p) => (Array.isArray(p) ? p[0] : p) === ourEntry?.[0]).length === 1,
+      });
+      await setProviderEnvVars(client, providerId, { OPENCODE_CONFIG_CONTENT: "" });
+    }
+    record(
+      "PM18 HTTP 與 ACP(family=opencode):`OPENCODE_CONFIG_CONTENT` 的 plugin 陣列最後一項是 Deskmony 的外掛([file:// URL(指到存在的 opencode-shell-env-plugin.js), {loadedMarkerFile}]);使用者自己的 plugin(字串與元組)原樣保留在前面、同一個外掛路徑只留一份",
+      pluginFacts.every((f) => f.plainOk && f.mergedOk),
+      JSON.stringify(pluginFacts),
+    );
+
+    // ---- PM19:外掛檔本身 + 宿主載入後的 shell 環境 ----
+    const pluginModule = await import(pathToFileURL(path.join(REPO_ROOT, "packages", "adapters", "dist", "opencode-shell-env-plugin.js")).href);
+    const exportNames = Object.keys(pluginModule);
+    const shellFacts = [];
+    for (const { label, providerId, shellPrefix } of backends) {
+      const got = await withOpenSession(client, providerId, workspaceDir, "pm19", sessionIds, async (sessionId) => {
+        const text = await driveText(client, sessionId, `${shellPrefix}${SHELL_ENV_NAMES.join(",")}`);
+        const m = /SHELLENV:(\{.*\})/s.exec(text);
+        if (!m) throw new Error(`回覆裡找不到 SHELLENV:{...}: ${text.slice(0, 200)}`);
+        return JSON.parse(m[1]);
+      });
+      shellFacts.push({
+        label,
+        ok:
+          // opencode 行程自己的環境有(它需要)——所以「shell 裡沒有」是外掛濾掉的、不是本來就沒有
+          got.process.OPENCODE_SERVER_PASSWORD === true &&
+          got.process.OPENCODE_SERVER_USERNAME === true &&
+          got.process.OPENCODE_CONFIG_CONTENT === true &&
+          got.shell.OPENCODE_SERVER_PASSWORD === false &&
+          got.shell.OPENCODE_SERVER_USERNAME === false &&
+          got.shell.OPENCODE_CONFIG_CONTENT === false &&
+          // 其他變數(provider env 給的)與 PATH 照常有,沒有矯枉過正
+          got.shell.E2E_SHELL_KEEP === true &&
+          got.shell.PATH === true &&
+          isDeepStrictEqual(got.pluginsLoaded, ["opencode-shell-env-plugin.js#DeskmonyOpencodeShellEnvPlugin"]) &&
+          got.pluginErrors.length === 0,
+        detail: got,
+      });
+    }
+    record(
+      "PM19 外掛檔只匯出一個函式(opencode 會把每個函式匯出都當外掛工廠呼叫);被宿主載入後 agent 的 bash 工具環境沒有 OPENCODE_SERVER_PASSWORD/OPENCODE_SERVER_USERNAME/OPENCODE_CONFIG_CONTENT(opencode 行程自己的環境有),其他變數與 PATH 照常有",
+      exportNames.length === 1 && typeof pluginModule[exportNames[0]] === "function" && shellFacts.every((f) => f.ok),
+      `exports=${JSON.stringify(exportNames)}; ${JSON.stringify(shellFacts)}`,
+    );
+
+    // ---- PM20:載入標記檔被消化 ----
+    const markerFacts = [];
+    for (const { label, providerId, configPrefix } of backends) {
+      const logFrom = coreOutput.length;
+      const got = await reportOpencodeConfig(client, providerId, workspaceDir, configPrefix, "pm20", { keep: true });
+      sessionIds.push(got.sessionId);
+      const marker = got.config?.plugin?.[got.config.plugin.length - 1]?.[1]?.loadedMarkerFile;
+      // fake 後端啟動時載入外掛(外掛因此寫了標記檔);adapter 在 session 建立之後的背景輪詢會看到並刪掉它。
+      const deadline = Date.now() + 4_000;
+      while (typeof marker === "string" && existsSync(marker) && Date.now() < deadline) await sleep(100);
+      markerFacts.push({
+        label,
+        consumed: typeof marker === "string" && !existsSync(marker),
+        noWarning: !coreOutput.slice(logFrom).includes("沒有載入 Deskmony 的外掛"),
+      });
+    }
+    record(
+      "PM20 外掛載入時寫的標記檔被 adapter 的偵測消化(檔案被刪、沒有「外掛沒載入」警告)——HTTP 與 ACP 都是",
+      markerFacts.every((f) => f.consumed && f.noWarning),
+      JSON.stringify(markerFacts),
+    );
+
+    // ---- PM20b:偵測函式本身的語意(直接呼叫編譯後的函式,不經 core)----
+    {
+      const { prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded, discardOpencodeShellEnvPluginMarker } = await import(
+        pathToFileURL(path.join(REPO_ROOT, "packages", "adapters", "dist", "index.js")).href
+      );
+      const { writeFileSync } = await import("node:fs");
+      const warnings = [];
+      const origWarn = console.warn;
+      console.warn = (...a) => warnings.push(a.join(" "));
+      let loadedResult;
+      let missingResult;
+      let cancelledResult;
+      let markerAfterLoaded;
+      let markerAfterMissing;
+      let markerAfterCancelled;
+      let warnedOnLoaded;
+      let warnedOnCancelled;
+      try {
+        const launchA = prepareOpencodeShellEnvPlugin("e2e", "unit-a");
+        writeFileSync(launchA.markerFile, "{}");
+        loadedResult = await watchOpencodeShellEnvPluginLoaded(launchA, "e2e", "unit-a", { timeoutMs: 1_000, pollMs: 20 });
+        markerAfterLoaded = existsSync(launchA.markerFile);
+        warnedOnLoaded = warnings.length;
+
+        const launchB = prepareOpencodeShellEnvPlugin("e2e", "unit-b");
+        missingResult = await watchOpencodeShellEnvPluginLoaded(launchB, "e2e", "unit-b", { timeoutMs: 300, pollMs: 20 });
+        markerAfterMissing = existsSync(launchB.markerFile);
+        const warnedOnMissing = warnings.length - warnedOnLoaded;
+
+        const launchC = prepareOpencodeShellEnvPlugin("e2e", "unit-c");
+        writeFileSync(launchC.markerFile, "{}");
+        cancelledResult = await watchOpencodeShellEnvPluginLoaded(launchC, "e2e", "unit-c", { timeoutMs: 1_000, pollMs: 20, isCancelled: () => true });
+        markerAfterCancelled = existsSync(launchC.markerFile);
+        warnedOnCancelled = warnings.length - warnedOnLoaded - warnedOnMissing;
+
+        // discard 對 undefined 是安全的 no-op
+        discardOpencodeShellEnvPluginMarker(undefined);
+
+        record(
+          "PM20b 載入標記檔的偵測:標記檔在 → true 且檔案被刪、不警告;逾時沒出現 → false 並警告「opencode 沒有載入 Deskmony 的外掛」;session 已被 dispose(isCancelled)→ false、不警告、標記檔也清掉",
+          loadedResult === true &&
+            markerAfterLoaded === false &&
+            warnedOnLoaded === 0 &&
+            missingResult === false &&
+            markerAfterMissing === false &&
+            warnedOnMissing === 1 &&
+            warnings.some((w) => w.includes("沒有載入 Deskmony 的外掛")) &&
+            cancelledResult === false &&
+            markerAfterCancelled === false &&
+            warnedOnCancelled === 0,
+          `loaded=${loadedResult}/markerLeft=${markerAfterLoaded}/warns=${warnedOnLoaded}; missing=${missingResult}/warns=${warnedOnMissing}; cancelled=${cancelledResult}/markerLeft=${markerAfterCancelled}/warns=${warnedOnCancelled}`,
+        );
+      } finally {
+        console.warn = origWarn;
+      }
+    }
+
+    // ---- PM21:外掛沒被載入 → 警告,但 session 照常 ----
+    await setProviderEnvVars(client, FAKE_OPENCODE, { FAKE_OPENCODE_SKIP_PLUGINS: "1" });
+    let skipped;
+    try {
+      const logFrom = coreOutput.length;
+      skipped = await withOpenSession(client, FAKE_OPENCODE, workspaceDir, "pm21", sessionIds, async (sessionId) => {
+        const reply = await driveText(client, sessionId, "hello without the plugin");
+        const shellText = await driveText(client, sessionId, `${OPENCODE_REPORT_SHELL_ENV}${SHELL_ENV_NAMES.join(",")}`);
+        const parsed = JSON.parse(/SHELLENV:(\{.*\})/s.exec(shellText)?.[1] ?? "null");
+        // adapter 的偵測最多等 10 秒才警告
+        const deadline = Date.now() + 15_000;
+        while (!coreOutput.slice(logFrom).includes("沒有載入 Deskmony 的外掛") && Date.now() < deadline) await sleep(200);
+        return { reply, parsed, warned: coreOutput.slice(logFrom).includes("沒有載入 Deskmony 的外掛") };
+      });
+    } finally {
+      await setProviderEnvVars(client, FAKE_OPENCODE, { FAKE_OPENCODE_SKIP_PLUGINS: "" });
+    }
+    record(
+      "PM21 外掛沒被載入(模擬不認 shell.env 的舊版 opencode)→ adapter 在 log 裡警告「opencode 沒有載入 Deskmony 的外掛」,但 session 照常起得來、照常回覆",
+      skipped.warned &&
+        skipped.reply.includes(FAKE_OPENCODE_REPLY_CHUNKS.join("")) &&
+        skipped.parsed?.pluginsLoaded?.length === 0 &&
+        // 沒外掛 = shell 環境沒被濾(證明警告說的風險是真的,也證明 PM19 的「沒有」確實是外掛的功勞)
+        skipped.parsed?.shell?.OPENCODE_SERVER_PASSWORD === true,
+      `warned=${skipped.warned}, reply=${JSON.stringify(skipped.reply.slice(0, 60))}, pluginsLoaded=${JSON.stringify(skipped.parsed?.pluginsLoaded)}`,
+    );
+  } finally {
+    for (const sessionId of sessionIds) {
+      await client.rpc("session.delete", { sessionId }, 15_000).catch(() => undefined);
+    }
+  }
+}
+
+// =======================================================================
 async function main() {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-oc-perm-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-oc-perm-home-"));
@@ -879,6 +1124,9 @@ async function main() {
 
     console.log("\n=== PM11-PM17:opencode 本機伺服器的認證 ===");
     await testOpencodeServerAuth(client, workspaceDir, dbPath, [httpSessionId]);
+
+    console.log("\n=== PM18-PM21:opencode 外掛(shell.env)===");
+    await testShellEnvPlugin(client, workspaceDir);
   } catch (err) {
     record("執行過程發生未預期錯誤", false, err instanceof Error ? err.stack : String(err));
   } finally {

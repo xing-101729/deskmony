@@ -106,6 +106,7 @@ import { appendFileSync } from "node:fs";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
+import { loadConfigPlugins, simulateShellEnv, presenceIn } from "./lib/fake-opencode-plugin-host.mjs";
 
 export const FAKE_OPENCODE_REPLY_CHUNKS = ["Hello", " from", " fake", " OpenCode", " server"];
 export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
@@ -122,6 +123,16 @@ export const REPORT_ENV_PREFIX = "OPENCODE_REPORT_ENV";
  * 絕不回顯值(回覆會進 session.history/log)。語意同 fake-acp-agent.mjs 的 REPORT_PRESENCE_PREFIX。
  */
 export const REPORT_PRESENCE_PREFIX = "OPENCODE_REPORT_PRESENCE:";
+/**
+ * 2026-10-05(安全:opencode 外掛)e2e 用:`OPENCODE_REPORT_SHELL_ENV:<逗號分隔的變數名稱>` → 回覆 `SHELLENV:` + JSON
+ * (`{ shell, process, pluginsLoaded, pluginErrors }`):`process` = 這個 opencode 行程自己的環境裡有沒有這些變數、`shell` = 模擬
+ * opencode 依 `OPENCODE_CONFIG_CONTENT` 的 `plugin` 載入外掛並跑 `shell.env` hook 之後,agent 的 bash 工具環境裡有沒有。**只回「有沒有」,
+ * 絕不回顯值。**外掛宿主的模擬規則見 scripts/lib/fake-opencode-plugin-host.mjs;`FAKE_OPENCODE_SKIP_PLUGINS=1` = 不載入任何外掛
+ * (模擬不認 `shell.env` hook/載入失敗的舊版 opencode,給 e2e 驗證 adapter 的「外掛沒載入」警告)。
+ */
+export const REPORT_SHELL_ENV_PREFIX = "OPENCODE_REPORT_SHELL_ENV:";
+/** 啟動時(isMainModule)載入的外掛宿主狀態。 */
+let pluginHost = { hooks: [], loaded: [], errors: [] };
 export const SUBAGENT_PERMISSION_PREFIX = "OPENCODE_SUBAGENT_PERMISSION";
 /** SUBAGENT_PERMISSION_PREFIX 流程裡子 session 說的話(e2e 斷言它**不會**出現在本 session 的對話)。 */
 export const SUBAGENT_CHILD_TEXT = "CHILD-SESSION-SECRET-TEXT";
@@ -387,6 +398,13 @@ async function handlePrompt(sessionId, text, model) {
         info: { id: assistantMessageId, role: "assistant", sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
       });
     }
+  } else if (text.startsWith(REPORT_SHELL_ENV_PREFIX)) {
+    const names = text.slice(REPORT_SHELL_ENV_PREFIX.length);
+    const shellEnv = await simulateShellEnv(pluginHost.hooks, process.cwd());
+    await streamTextReply(sessionId, assistantMessageId, [
+      `SHELLENV:${JSON.stringify({ shell: presenceIn(shellEnv, names), process: presenceIn(process.env, names), pluginsLoaded: pluginHost.loaded, pluginErrors: pluginHost.errors })}`,
+    ]);
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   } else if (text.startsWith(REPORT_PRESENCE_PREFIX)) {
     // 2026-10-05:回報子行程環境裡有沒有指定的變數(只回「有沒有」,不回值),見 REPORT_PRESENCE_PREFIX。
     const upperKeys = new Set(Object.keys(process.env).map((k) => k.toUpperCase()));
@@ -702,6 +720,10 @@ async function route(req, res, url) {
 // fake-acp-agent.mjs 底部同樣的 isMainModule 守衛。
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
+  // 2026-10-05:模擬 opencode 載入 `OPENCODE_CONFIG_CONTENT` 的 `plugin`(含 Deskmony 自帶的外掛,它載入時會寫「載入標記檔」)。
+  if (process.env.FAKE_OPENCODE_SKIP_PLUGINS !== "1") {
+    pluginHost = await loadConfigPlugins(process.env.OPENCODE_CONFIG_CONTENT, process.cwd());
+  }
   server.listen(0, "127.0.0.1", () => {
     const addr = server.address();
     const port = typeof addr === "object" && addr ? addr.port : 0;

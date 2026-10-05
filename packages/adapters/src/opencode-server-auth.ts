@@ -33,15 +33,19 @@ import { randomBytes } from "node:crypto";
  *    強度。覆蓋的唯一代價是使用者無法用自己的密碼從外部連進 Deskmony 啟動的那個 opencode——這正是這道鎖要擋的事。
  *  - 密碼只存在 adapter 的記憶體(`InternalSession.authorization`),不寫 log、不寫 DB、不進任何 AgentEvent。
  *
- * ## 已知的剩餘風險
+ * ## agent 自己的 bash 讀得到密碼(2026-10-05 已用外掛堵上)
  *
  * 密碼在 opencode 行程的環境變數裡,而 opencode **不會**把它從自己啟動的子行程(bash 工具)環境裡濾掉——2026-10-03 實測(1.18.7 +
- * `opencode/big-pickle`,YOLO)模型跑 `node -e "…process.env.OPENCODE_SERVER_PASSWORD…"` 得到 PRESENT。所以 **agent 自己(以及
- * 它在 bash 工具裡啟動的任何東西)仍然拿得到密碼**,理論上能 `curl` 自己的伺服器去 `POST /permission/{id}/reply` 核准自己。這**不是新的
- * 權限**(沒鎖之前 agent 也連得上 `127.0.0.1:4096`);那個 curl 是一次 bash 工具呼叫,always-ask 下仍要使用者確認,但 YOLO 下 hard-deny 的
- * 「非白名單外連」只看工具 input 裡結構化的 host/url 欄位(`extractHostFromInput`),不解析 bash 指令字串,**擋不住**。所以這道鎖
- * **擋不住 agent 本身**,只擋 agent **以外**的本機程序。要連 agent 一起擋,得在 opencode 端把這個變數從 bash 工具的環境濾掉
- * (opencode 有 `shell.env` 外掛 hook,二進位字串裡看得到,但這輪沒有驗證能不能用它清掉繼承來的變數)——列為後續。
+ * `opencode/big-pickle`,YOLO)模型跑 `node -e "…process.env.OPENCODE_SERVER_PASSWORD…"` 得到 PRESENT。所以光靠這道鎖,**agent 自己
+ * (以及它在 bash 工具裡啟動的任何東西)仍然拿得到密碼**,能 `curl` 自己的伺服器去 `POST /permission/{id}/reply` 核准自己(YOLO 下
+ * hard-deny 的「非白名單外連」只看工具 input 裡結構化的 host/url 欄位,不解析 bash 指令字串,擋不住)。
+ *
+ * 2026-10-05:Deskmony 自帶一個 opencode 外掛(opencode-shell-env-plugin.ts),在 opencode 的 `shell.env` hook 把
+ * `OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME`/`OPENCODE_CONFIG_CONTENT` 從 agent 的 bash 工具環境移除(對真實 opencode 1.18.7
+ * 實測:設成 `undefined` 就真的消失)——見該檔檔頭與 docs/DECISIONS.md §J。外掛沒載入(舊版 opencode)時 adapter 會警告,這時這道鎖
+ * 仍然**擋不住 agent 本身**。
+ *
+ * 仍然擋不住的:同一個作業系統使用者底下的程序(含 agent 在 bash 裡啟動的)能讀 opencode 行程的記憶體(環境區塊)——屬沙箱/作業系統隔離的範疇。
  */
 
 export const OPENCODE_SERVER_USERNAME_ENV = "OPENCODE_SERVER_USERNAME";

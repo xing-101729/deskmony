@@ -7,6 +7,7 @@ export * from "./acp-adapter.js";
 export * from "./pty-adapter.js";
 export * from "./opencode-adapter.js";
 export * from "./opencode-config.js";
+export * from "./opencode-shell-env.js";
 export * from "./opencode-server-auth.js";
 export * from "./mcp-bridge-launch.js";
 export * from "./codex-acp-locator.js";
