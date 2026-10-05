@@ -1,6 +1,7 @@
 export * from "./types.js";
 export * from "./async-queue.js";
 export * from "./child-registry.js";
+export * from "./agent-env.js";
 export * from "./claude-sdk-adapter.js";
 export * from "./acp-adapter.js";
 export * from "./pty-adapter.js";

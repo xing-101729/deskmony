@@ -48,7 +48,8 @@
  *        含 bridge token(證明被擋住的是有價值的東西)。
  *   PM13 使用者在 provider 環境變數與啟動 core 的 shell 環境裡設的 OPENCODE_SERVER_PASSWORD/USERNAME 被 Deskmony 產生的覆蓋(session 照常運作)。
  *   PM14 伺服器沒鎖(模擬不認 OPENCODE_SERVER_PASSWORD 的舊版 opencode)→ adapter 在 log 裡警告,但 session 照常起得來。
- *   PM15 ACP(family=opencode):`opencode acp` 子行程同樣拿到每次不同的隨機密碼;沒有宣告 family 的 ACP agent 不被動到(對照組)。
+ *   PM15 ACP(family=opencode):`opencode acp` 子行程同樣拿到每次不同的隨機密碼;沒有宣告 family 的 ACP agent 拿不到任何 opencode 伺服器
+ *        密碼/使用者名稱(對照組——2026-10-05 起連從啟動 core 的 shell 繼承來的也濾掉,見 e2e-agent-env.mjs)。
  *   PM16 密碼不出現在 core log、WS 推播、session.history、SQLite 檔(含 WAL)——只存在於 adapter 記憶體與子行程環境。
  *   PM17 adapter 的**每個**真實請求都帶了認證:整支測試期間,fake 擋下的請求只有 adapter 每次 spawn 的一次無認證健全性探測(GET /global/health)
  *        與 PM12 的刻意探測,零筆其他。
@@ -783,13 +784,13 @@ async function testOpencodeServerAuth(client, workspaceDir, dbPath, otherLiveSes
     const control = await reportOpencodeConfig(client, FAKE_ACP, workspaceDir, ACP_REPORT_ENV, "pm15c");
     const acpAuth = [acp1.serverAuth, acp2.serverAuth];
     record(
-      "PM15 ACP(family=opencode):`opencode acp` 子行程同樣拿到隨機密碼(使用者名稱 deskmony、至少 32 字元、兩次 spawn 不同、覆蓋使用者與 shell 環境給的值);沒有宣告 family 的 ACP agent 不被動到(照常繼承 core 的環境)",
+      "PM15 ACP(family=opencode):`opencode acp` 子行程同樣拿到隨機密碼(使用者名稱 deskmony、至少 32 字元、兩次 spawn 不同、覆蓋使用者與 shell 環境給的值);沒有宣告 family 的 ACP agent 拿不到任何 opencode 伺服器密碼/使用者名稱(連 core 的 shell 環境裡繼承來的也被濾掉,2026-10-05)",
       acpAuth.every((x) => x !== null && x.username === "deskmony" && x.passwordLength >= 32) &&
         acpAuth[0].passwordSha256 !== acpAuth[1].passwordSha256 &&
         acpAuth.every((x) => x.passwordSha256 !== sha256Hex(USER_PASSWORD) && x.passwordSha256 !== sha256Hex(AMBIENT_SERVER_PASSWORD)) &&
-        control.serverAuth?.passwordSha256 === sha256Hex(AMBIENT_SERVER_PASSWORD) &&
-        control.serverAuth?.username === AMBIENT_SERVER_USERNAME,
-      `acp 密碼長度=${JSON.stringify(acpAuth.map((x) => x?.passwordLength))}, 兩次不同=${acpAuth[0]?.passwordSha256 !== acpAuth[1]?.passwordSha256}, 對照組沿用 core 環境=${control.serverAuth?.username === AMBIENT_SERVER_USERNAME}`,
+        // 對照組:不是 opencode 家族的 agent 完全不該拿到 opencode 伺服器的認證(2026-10-05:buildAgentChildEnv() 的 denylist)。
+        control.serverAuth === null,
+      `acp 密碼長度=${JSON.stringify(acpAuth.map((x) => x?.passwordLength))}, 兩次不同=${acpAuth[0]?.passwordSha256 !== acpAuth[1]?.passwordSha256}, 對照組拿到的認證=${JSON.stringify(control.serverAuth)}`,
     );
 
     // ---- PM16:密碼沒有洩漏到 log、推播、對話紀錄、DB ----

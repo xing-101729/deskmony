@@ -11,6 +11,7 @@ import { waitForChildExit } from "./child-process.js";
 import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
 import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
 import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
+import { buildAgentChildEnv } from "./agent-env.js";
 
 /**
  * OpenCodeAdapter — 對接 opencode 的 headless server API(ARCHITECTURE.md
@@ -267,7 +268,9 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     // launch.env(provider 層級 env)疊在 process.env 之上,config.env(既有欄位)
     // 最優先——同 acp-adapter.ts 的合併順序說明。
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...launch.env, ...config.env };
+    // 2026-10-05(安全):最後一律濾掉 Deskmony 內部憑證(含繼承來的 OPENCODE_SERVER_PASSWORD——下面 applyOpencodeServerAuth()
+    // 會設這個 opencode 行程自己的新密碼,必須在這之後)。完整理由見 agent-env.ts。
+    const childEnv: NodeJS.ProcessEnv = buildAgentChildEnv(launch.env, config.env);
     // 2026-10-03(安全):opencode 預設所有工具權限都是 allow,只有它自己設定裡標成 "ask" 的才會發
     // `permission.asked`——不處理的話 bash/edit/webfetch/MCP 工具**完全不經過** Deskmony 的政策引擎
     // (default-deny、hard-deny 四類、auto/YOLO 全部失效)。這裡一律注入「所有工具都 ask」的設定,

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { resolveCodexAcpBridge } from "@deskmony/adapters";
+import { buildAgentChildEnv, resolveCodexAcpBridge } from "@deskmony/adapters";
 import { type AgentDetectionEntry, type AgentSoftware, type DetectedModel } from "@deskmony/shared";
 
 /**
@@ -140,7 +140,8 @@ function runVersionCommand(resolvedPath: string, versionArgs: string[]): Promise
     // 只有 .cmd/.bat 這類 shell shim 需要 shell:true(見 class 頂端註解第2點)。
     const needsShell = process.platform === "win32" && (ext === ".cmd" || ext === ".bat");
     const file = needsShell ? quoteForShell(resolvedPath) : resolvedPath;
-    execFile(file, versionArgs, { timeout: PROBE_TIMEOUT_MS, shell: needsShell }, (error, stdout, stderr) => {
+    // 2026-10-05(安全):探測的是使用者機器上的 agent 執行檔——同樣不把 core 的主認證 token 等內部憑證交給它(見 adapters 的 agent-env.ts)。
+    execFile(file, versionArgs, { timeout: PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv() }, (error, stdout, stderr) => {
       if (error) {
         resolve(undefined);
         return;
@@ -175,7 +176,7 @@ function runModelsCommand(resolvedPath: string, args: string[]): Promise<Detecte
     const ext = path.extname(resolvedPath).toLowerCase();
     const needsShell = process.platform === "win32" && (ext === ".cmd" || ext === ".bat");
     const file = needsShell ? quoteForShell(resolvedPath) : resolvedPath;
-    execFile(file, args, { timeout: MODELS_PROBE_TIMEOUT_MS, shell: needsShell }, (error, stdout) => {
+    execFile(file, args, { timeout: MODELS_PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv() }, (error, stdout) => {
       if (error) {
         resolve([]);
         return;

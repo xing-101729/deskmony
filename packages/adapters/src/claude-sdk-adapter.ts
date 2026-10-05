@@ -20,6 +20,7 @@ import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Wor
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
+import { buildAgentChildEnv } from "./agent-env.js";
 import {
   SESSION_NETWORK_MCP_SERVER_NAME,
   SESSION_NETWORK_ALLOWED_TOOL_NAMES,
@@ -227,11 +228,12 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // 這輪新增(provider 目錄重構):`launch.env`(provider 層級 env,已由
       // SessionManager.prepareSpawnSpec() 從 settings 讀出併好)併入
       // SDK 子程序的環境變數(見 sdk.d.ts 對 `Options.env` 的官方註解——設定
-      // 這個欄位會**整個取代**子程序環境,不會自動 merge process.env,故這裡
-      // 手動 `...process.env` 展開,子程序仍會繼承 PATH/HOME 等既有變數)。
-      // 沒有任何 provider env 時(最常見情況)刻意省略這個欄位,讓
-      // SDK 沿用「省略時繼承 process.env」的預設行為。
-      ...(launch.env && Object.keys(launch.env).length > 0 ? { env: { ...process.env, ...launch.env } } : {}),
+      // 這個欄位會**整個取代**子程序環境,不會自動 merge process.env,而
+      // `buildAgentChildEnv()` 從 process.env 出發,所以 PATH/HOME 等既有變數都保留)。
+      // 2026-10-05(安全):**一律明確傳** sanitized env,不再依賴「省略 `env` 時 SDK 繼承整份 process.env」
+      // ——那樣沒有 provider env 的 Claude session(最常見情況)裡,agent 的 bash 讀得到 core 的
+      // `DESKMONY_AUTH_TOKEN`,連上 gateway 就能自己核准權限/切 YOLO。完整理由見 agent-env.ts。
+      env: buildAgentChildEnv(launch.env) as Record<string, string>,
       // S6(crash-recovery)L4 §4.1:「繼續(保有記憶)」——見檔案頂端查證說明。
       ...(resume ? { resume: resume.backendSessionId } : {}),
       // S8(agent-lifecycle)L4 §3.2 修正實作:`systemPrompt` 在這輪之前

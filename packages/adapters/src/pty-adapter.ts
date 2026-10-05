@@ -7,6 +7,7 @@ import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
 import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
+import { buildAgentChildEnv } from "./agent-env.js";
 
 /**
  * GenericPtyAdapter — ARCHITECTURE.md 3.4 節「保底方案,無結構化事件,功能
@@ -117,9 +118,11 @@ export class GenericPtyAdapter implements AgentAdapter {
     try {
       // launch.env(provider 層級 env)疊在 process.env 之上,ptyConfig.env(既有欄位)
       // 最優先——同 acp-adapter.ts 的合併順序說明。
+      // 2026-10-05(安全):最後一律濾掉 Deskmony 內部憑證(主認證 token 等)——PTY 裡的終端 agent 同樣能 `echo $DESKMONY_AUTH_TOKEN`。
+      // 見 agent-env.ts。
       ptyProcess = pty.spawn(ptyConfig.command, ptyConfig.args ?? [], {
         cwd: workspace.path,
-        env: { ...process.env, ...launch.env, ...ptyConfig.env } as Record<string, string>,
+        env: buildAgentChildEnv(launch.env, ptyConfig.env) as Record<string, string>,
         cols: ptyConfig.cols ?? 80,
         rows: ptyConfig.rows ?? 24,
         name: "xterm-color",

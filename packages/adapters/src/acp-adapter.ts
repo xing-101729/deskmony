@@ -14,6 +14,7 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
 import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
 import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
 import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
+import { buildAgentChildEnv } from "./agent-env.js";
 
 /**
  * AcpAdapter — 對接 [Agent Client Protocol](https://agentclientprotocol.com)
@@ -191,7 +192,10 @@ export class AcpAdapter implements AgentAdapter {
     // `launch.env`(provider 層級 env,由 SessionManager.prepareSpawnSpec() 從
     // settings 讀出併好)疊在 process.env 之上,`acpConfig.env`(既有欄位)最優先
     // ——維持這個既有欄位一直以來的「最終覆寫」語意不變。
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...launch.env, ...acpConfig.env };
+    // 2026-10-05(安全):最後一律濾掉 Deskmony 內部憑證(主認證 token、MCP bridge 的 scoped token……)——
+    // 否則 agent 的 bash 讀得到 `DESKMONY_AUTH_TOKEN`,連上 gateway 就能自己核准權限/切 YOLO,等於自己拆掉安全罩。
+    // bridge 需要的值是下面 `session/new` 的 `mcpServers[].env` 明確交給 bridge 的,不靠繼承。見 agent-env.ts。
+    const childEnv: NodeJS.ProcessEnv = buildAgentChildEnv(launch.env, acpConfig.env);
     if (launch.family === "opencode") {
       // opencode 預設所有工具權限都是 allow、不經過 Deskmony 的政策引擎——一律改成全部 ask(default-deny)。
       // 完整理由、設定寫法與實測依據見 opencode-config.ts。掛了 bridge 時三個唯讀查詢工具預先放行。

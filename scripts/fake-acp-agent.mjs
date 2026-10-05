@@ -242,6 +242,24 @@ function describeServerAuth() {
     passwordSha256: createHash("sha256").update(password).digest("hex"),
   };
 }
+/**
+ * 2026-10-05(安全:agent 子行程環境不得含 Deskmony 憑證)e2e 用:`ACP_REPORT_PRESENCE:<逗號分隔的變數名稱>` →
+ * 回覆 `PRESENCE:` + JSON(`{ <名稱>: boolean }`)——**只回報這個子行程的環境裡「有沒有」這個變數(不分大小寫比對,
+ * Windows 的環境變數不分大小寫),絕不回顯值**:回覆會進 `session.history`/log,而 e2e 要斷言 token 不會出現在那裡。
+ * 給 scripts/e2e-agent-env.mjs 斷言 `DESKMONY_AUTH_TOKEN`/`DESKMONY_MCP_BRIDGE_*` 沒有被繼承進 agent 的環境。
+ */
+export const REPORT_PRESENCE_PREFIX = "ACP_REPORT_PRESENCE:";
+/** 回報 `names` 各自在 `process.env` 裡是否存在(不分大小寫);給三支 fake 後端共用的語意(見 fake-opencode-server/fake-pty-echo)。 */
+function describePresence(namesCsv) {
+  const upperKeys = new Set(Object.keys(process.env).map((k) => k.toUpperCase()));
+  return Object.fromEntries(
+    namesCsv
+      .split(",")
+      .map((n) => n.trim())
+      .filter(Boolean)
+      .map((name) => [name, upperKeys.has(name.toUpperCase())]),
+  );
+}
 /** P3(session 網路)e2e 用,見檔頭註解:把其後的文字原樣當成這一輪的回覆。 */
 export const SAY_PREFIX = "ACP_SAY ";
 /** P3(session 網路)e2e 用,見檔頭註解:prompt 任何位置含這個標記就自己呼叫 bridge 工具。 */
@@ -358,6 +376,8 @@ class FakeAcpAgent {
         await this.handleReportMcpServers(params.sessionId, cx);
       } else if (text === REPORT_ENV_PREFIX) {
         await this.handleReportEnv(params.sessionId, cx);
+      } else if (text.startsWith(REPORT_PRESENCE_PREFIX)) {
+        await this.handleReportPresence(params.sessionId, text.slice(REPORT_PRESENCE_PREFIX.length), cx);
       } else {
         await this.handleEcho(params.sessionId, cx);
       }
@@ -592,6 +612,18 @@ class FakeAcpAgent {
         sessionUpdate: "agent_message_chunk",
         messageId,
         content: { type: "text", text: `ENV:${JSON.stringify({ OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null, serverAuth: describeServerAuth() })}` },
+      },
+    });
+  }
+
+  /** 2026-10-05 e2e 用,見 REPORT_PRESENCE_PREFIX 的常數註解。 */
+  async handleReportPresence(sessionId, namesCsv, cx) {
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: { type: "text", text: `PRESENCE:${JSON.stringify(describePresence(namesCsv))}` },
       },
     });
   }

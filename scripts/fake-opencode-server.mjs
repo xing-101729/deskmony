@@ -116,6 +116,12 @@ export const TOOL_CALL_ASK_FIRST_MARKER = "[ask-before-running]";
 /** prompt 內含 `[command:<指令>]` 時覆寫 TOOL_CALL_PREFIX 流程的 bash 指令,見檔頭。 */
 export const TOOL_CALL_COMMAND_PATTERN = /\[command:([^\]]+)\]/;
 export const REPORT_ENV_PREFIX = "OPENCODE_REPORT_ENV";
+/**
+ * 2026-10-05(安全:agent 子行程環境不得含 Deskmony 憑證)e2e 用:`OPENCODE_REPORT_PRESENCE:<逗號分隔的變數名稱>` →
+ * 回覆 `PRESENCE:` + JSON(`{ <名稱>: boolean }`)——只回報這個子行程的環境裡**有沒有**這個變數(不分大小寫比對),
+ * 絕不回顯值(回覆會進 session.history/log)。語意同 fake-acp-agent.mjs 的 REPORT_PRESENCE_PREFIX。
+ */
+export const REPORT_PRESENCE_PREFIX = "OPENCODE_REPORT_PRESENCE:";
 export const SUBAGENT_PERMISSION_PREFIX = "OPENCODE_SUBAGENT_PERMISSION";
 /** SUBAGENT_PERMISSION_PREFIX 流程裡子 session 說的話(e2e 斷言它**不會**出現在本 session 的對話)。 */
 export const SUBAGENT_CHILD_TEXT = "CHILD-SESSION-SECRET-TEXT";
@@ -381,6 +387,19 @@ async function handlePrompt(sessionId, text, model) {
         info: { id: assistantMessageId, role: "assistant", sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
       });
     }
+  } else if (text.startsWith(REPORT_PRESENCE_PREFIX)) {
+    // 2026-10-05:回報子行程環境裡有沒有指定的變數(只回「有沒有」,不回值),見 REPORT_PRESENCE_PREFIX。
+    const upperKeys = new Set(Object.keys(process.env).map((k) => k.toUpperCase()));
+    const presence = Object.fromEntries(
+      text
+        .slice(REPORT_PRESENCE_PREFIX.length)
+        .split(",")
+        .map((n) => n.trim())
+        .filter(Boolean)
+        .map((name) => [name, upperKeys.has(name.toUpperCase())]),
+    );
+    await streamTextReply(sessionId, assistantMessageId, [`PRESENCE:${JSON.stringify(presence)}`]);
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   } else if (text.startsWith(REPORT_ENV_PREFIX)) {
     // 2026-10-03:回顯子行程收到的 OPENCODE_CONFIG_CONTENT(原始字串),見檔頭。
     const raw = process.env.OPENCODE_CONFIG_CONTENT;

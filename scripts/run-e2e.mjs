@@ -21,7 +21,7 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十五支是**決定性**
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十六支是**決定性**
  * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
@@ -63,6 +63,10 @@ const SUITES = [
   // 2026-10-03:OpenCode 的工具呼叫一律經過 Deskmony 權限引擎(啟動時注入「所有工具 ask」的 OPENCODE_CONFIG_CONTENT)——
   // 一個 core + fake-opencode-server/fake-acp-agent,十幾秒跑完。
   "e2e-opencode-permissions",
+  // 2026-10-05(安全):agent 子行程的環境不得含 Deskmony 憑證(主認證 token、MCP bridge 的 scoped token、繼承來的 opencode
+  // 伺服器密碼)——core 以設了 DESKMONY_AUTH_TOKEN 的環境啟動,fake ACP/OpenCode/PTY 後端回報環境裡「有沒有」這些變數,
+  // 另有 Claude SDK 的 spawn 攔截探針;一個 core,十幾秒跑完。
+  "e2e-agent-env",
   "e2e-notification",
   "e2e-policy-engine",
   "e2e-agent-lifecycle",
