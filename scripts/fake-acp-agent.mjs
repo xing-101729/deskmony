@@ -189,7 +189,7 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
 import { writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -226,6 +226,22 @@ export const REPORT_MCP_SERVERS_PREFIX = "ACP_REPORT_MCP_SERVERS";
  * 的 `family: "opencode"`)時注入的「所有工具 ask」設定,以及其他 ACP agent **沒有**被注入(對照組)。
  */
 export const REPORT_ENV_PREFIX = "ACP_REPORT_ENV";
+/**
+ * 2026-10-03(安全:認證):`ENV:` 回覆多一個 `serverAuth`——子行程收到的 `OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME`
+ * 的**描述**(沒收到密碼是 null;有收到是 `{username, passwordLength, passwordSha256}`)。刻意**不回顯密碼本身**:回覆會進
+ * `session.history`,而 e2e 要斷言密碼不會出現在對話裡;雜湊足夠讓測試判斷「每次 spawn 都不同」(256 bit 隨機值的雜湊不洩漏什麼)。
+ * `opencode acp` 實測會在 loopback 開 HTTP 伺服器(固定 4096、預設無認證),所以 Deskmony 對 opencode 家族的 ACP 子行程也要設密碼,
+ * 見 packages/adapters/src/opencode-server-auth.ts。
+ */
+function describeServerAuth() {
+  const password = process.env.OPENCODE_SERVER_PASSWORD;
+  if (password === undefined) return null;
+  return {
+    username: process.env.OPENCODE_SERVER_USERNAME ?? null,
+    passwordLength: password.length,
+    passwordSha256: createHash("sha256").update(password).digest("hex"),
+  };
+}
 /** P3(session 網路)e2e 用,見檔頭註解:把其後的文字原樣當成這一輪的回覆。 */
 export const SAY_PREFIX = "ACP_SAY ";
 /** P3(session 網路)e2e 用,見檔頭註解:prompt 任何位置含這個標記就自己呼叫 bridge 工具。 */
@@ -575,7 +591,7 @@ class FakeAcpAgent {
       update: {
         sessionUpdate: "agent_message_chunk",
         messageId,
-        content: { type: "text", text: `ENV:${JSON.stringify({ OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null })}` },
+        content: { type: "text", text: `ENV:${JSON.stringify({ OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null, serverAuth: describeServerAuth() })}` },
       },
     });
   }

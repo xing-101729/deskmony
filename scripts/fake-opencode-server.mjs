@@ -80,6 +80,18 @@
  *     再送 `session.created`(`info.parentID` = 本 session)、子 session 的一段文字(不能混進本 session 的對話)、
  *     子 session 的 bash `permission.asked`(`sessionID` 是子 session,真實 opencode 實測就是這樣),等
  *     `POST /permission/{id}/reply`,最後回覆 `[child-reply:<reply>]` 與 `[stranger-reply:<有沒有被回覆>]`。
+ *   - 2026-10-03(安全:認證):**真的檢查 HTTP basic auth**,行為比照真實 opencode 1.18.7 實測——收到的 `OPENCODE_SERVER_PASSWORD`
+ *     (及 `OPENCODE_SERVER_USERNAME`,預設 `opencode`)有設時,**所有端點(含 SSE `/event`、`/global/health`)**沒帶或帶錯的
+ *     `Authorization: Basic ...` 一律回 401;沒設密碼就不鎖(真實 opencode 的「unsecured」行為——所以 adapter 若忘了設密碼,
+ *     e2e 會從報告檔看到密碼是 null)。這樣所有走這支 fake 的既有 e2e 同時驗證了「adapter 對 opencode 的**每個**請求都有帶認證」。
+ *     另外有兩個只給 e2e 用的旁路(都由啟動 core 的測試設在環境變數,不是 gateway 能設的):
+ *       - `FAKE_OPENCODE_AUTH_REPORT_FILE`:啟動時附加一行 JSON `{kind:"start",pid,baseUrl,username,password}`(測試要比對「每次
+ *         spawn 密碼都不同、夠長」,並掃描 log/history/推播有沒有洩漏這個密碼——所以密碼**不能**走回覆文字,只能走這個測試專用的檔案),
+ *         之後每個被擋下的請求附加 `{kind:"rejected",pid,method,path}`(測試斷言只有 adapter 的健全性探測被擋、真正的請求零被擋)。
+ *       - `FAKE_OPENCODE_DISABLE_AUTH=1`:即使有密碼也不檢查,模擬「不認 OPENCODE_SERVER_PASSWORD 的舊版 opencode」,
+ *         給 e2e 驗證 adapter 的「伺服器沒鎖」警告。
+ *     `GET /config` 回傳子行程收到的 `OPENCODE_CONFIG_CONTENT`(解析後),模擬真實 opencode 會把含 scoped bridge token 的
+ *     設定吐給任何讀得到它的人——e2e 用它證明「不帶認證讀不到」。
  *   - 這輪(slash command)新增:`GET /command` 回傳 TEST_COMMANDS(固定測試
  *     清單,形狀比照本機真實 `opencode serve`(1.18.7)`GET /command` 的
  *     `Command[]`,見 packages/adapters/src/opencode-adapter.ts 檔案頂端查證
@@ -90,7 +102,8 @@
  */
 
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
@@ -479,8 +492,43 @@ async function handleCommand(sessionId, command, args) {
   return { info: { id: assistantMessageId, role: "assistant", sessionID: sessionId }, parts: [] };
 }
 
+/** 2026-10-03:認證設定(見檔頭)。沒有密碼 = 不鎖(真實 opencode 的行為);`FAKE_OPENCODE_DISABLE_AUTH=1` = 有密碼也不檢查(舊版模擬)。 */
+const SERVER_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD || undefined;
+const SERVER_USERNAME = process.env.OPENCODE_SERVER_USERNAME || "opencode";
+const AUTH_ENFORCED = SERVER_PASSWORD !== undefined && process.env.FAKE_OPENCODE_DISABLE_AUTH !== "1";
+const AUTH_REPORT_FILE = process.env.FAKE_OPENCODE_AUTH_REPORT_FILE || undefined;
+
+function sha256(text) {
+  return createHash("sha256").update(text).digest();
+}
+
+/** `Authorization: Basic base64(user:pass)` 是否等於這個伺服器的憑證(比對雜湊,避免長度差異洩漏)。 */
+function isAuthorized(req) {
+  const header = req.headers.authorization;
+  if (typeof header !== "string" || !header.startsWith("Basic ")) return false;
+  const expected = `${SERVER_USERNAME}:${SERVER_PASSWORD}`;
+  const given = Buffer.from(header.slice("Basic ".length), "base64").toString("utf8");
+  return timingSafeEqual(sha256(given), sha256(expected));
+}
+
+function appendAuthReport(record) {
+  if (!AUTH_REPORT_FILE) return;
+  try {
+    appendFileSync(AUTH_REPORT_FILE, `${JSON.stringify({ pid: process.pid, ...record })}\n`);
+  } catch {
+    // 測試專用旁路,寫不進去就算了(e2e 會從缺少紀錄看出來)。
+  }
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://internal");
+  if (AUTH_ENFORCED && !isAuthorized(req)) {
+    // 比照真實 opencode:所有端點(含 SSE、health)一律擋,不洩漏任何資訊。
+    appendAuthReport({ kind: "rejected", method: req.method, path: url.pathname });
+    res.writeHead(401, { "content-type": "application/json", "www-authenticate": 'Basic realm="Secure Area"' });
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+    return;
+  }
   void route(req, res, url).catch((err) => {
     try {
       sendJson(res, 500, { error: String(err) });
@@ -498,6 +546,19 @@ async function route(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/command") {
     sendJson(res, 200, TEST_COMMANDS);
+    return;
+  }
+
+  // 2026-10-03:真實 opencode 的 `GET /config` 會吐出完整設定(含 `mcp.deskmony.environment` 的 scoped bridge token)——
+  // 沒有認證時等於把 token 給任何本機程序;e2e 用它證明有認證之後讀不到。
+  if (req.method === "GET" && url.pathname === "/config") {
+    let config = {};
+    try {
+      config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? "{}");
+    } catch {
+      // 設定壞掉就回空物件
+    }
+    sendJson(res, 200, config);
     return;
   }
 
@@ -626,6 +687,14 @@ if (isMainModule) {
     const addr = server.address();
     const port = typeof addr === "object" && addr ? addr.port : 0;
     process.stdout.write(`opencode server listening on http://127.0.0.1:${port}\n`);
+    appendAuthReport({
+      kind: "start",
+      baseUrl: `http://127.0.0.1:${port}`,
+      username: SERVER_USERNAME,
+      // 刻意把密碼原文寫進測試專用的報告檔(只有 e2e 設了 FAKE_OPENCODE_AUTH_REPORT_FILE 才會寫),見檔頭。沒收到密碼時是 null。
+      password: SERVER_PASSWORD ?? null,
+      enforced: AUTH_ENFORCED,
+    });
   });
 
   process.on("SIGTERM", () => process.exit(0));
