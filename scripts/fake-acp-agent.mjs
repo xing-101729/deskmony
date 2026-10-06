@@ -184,6 +184,18 @@
  *     唯一能把那個 AgentEvent 形狀餵給**真正的 CLI 子程序**的方法就是讓這個
  *     假 agent 把 title 蓋成空字串——與上面 UPSERT_TOOL_CALLS 送兩則
  *     `tool_call` 是同一種取捨,理由見該段的 ⚠️。
+ *   - 2026-10-06(session 自動命名,scripts/e2e-session-title.mjs 用):prompt 是 core 組的**命名請求**
+ *     (`parseTitleRequestPrompt()` 認得,開頭是 `TITLE_REQUEST_HEADER`)時,這個 session 被標成「命名用臨時 session」,
+ *     依引用的使用者訊息裡的標記決定行為(標記與預期標題見 scripts/lib/fake-title-modes.mjs;這一條排在所有其他判斷
+ *     之前——引用的訊息本身可能含別的標記):
+ *       - 沒有標記:回 `fakeTitleReplyFor(訊息)`(含 core 要清掉的 markdown、前綴、引號與第二行)。
+ *       - `TITLE_MODE_TOOL`:先送 `tool_call`,再 `session/request_permission`;**被允許**才在工作目錄寫
+ *         `TITLE_TOOL_MARKER_FILE`(e2e 斷言它不存在)。結果記在這個 session 的 `permissionOutcomes`。
+ *       - `TITLE_MODE_HANG`:一直不回(直到 `session/cancel`),讓 core 的逾時退回截取首句。
+ *       - `TITLE_MODE_REFUSE`:以 `stopReason: "refusal"` 結束。
+ *     initialize 宣告 `sessionCapabilities.close`,`session/close` 會把 session 標成 closed。
+ *   - `REPORT_SESSIONS_PREFIX`(不接受參數):回 `SESSIONS:` + JSON——這個 agent 行程裡每個 session 的
+ *     `{sessionId, kind:"main"|"title", closed, cancelled, permissionOutcomes, prompts}`(只回這些統計,不回對話內容)。
  */
 
 import * as acp from "@agentclientprotocol/sdk";
@@ -195,8 +207,13 @@ import { loadConfigPlugins, simulateShellEnv, presenceIn } from "./lib/fake-open
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+// 2026-10-06:命名請求的格式以 core 實際用的為準(單一來源),見檔頭。需要先 pnpm build。
+import { parseTitleRequestPrompt } from "../packages/shared/dist/session-title.js";
+import { TITLE_MODE_HANG, TITLE_MODE_REFUSE, TITLE_MODE_TOOL, TITLE_TOOL_MARKER_FILE, fakeTitleReplyFor } from "./lib/fake-title-modes.mjs";
 
 export const FAKE_ACP_REPLY_CHUNKS = ["Hello", " from", " fake ACP agent"];
+/** 回報這個 agent 行程裡每個 session 的統計,見檔頭。 */
+export const REPORT_SESSIONS_PREFIX = "ACP_REPORT_SESSIONS";
 export const WRITE_FILE_PREFIX = "ACP_WRITE_FILE ";
 /** S3a(usage-metering)e2e 用,見檔頭註解。 */
 export const USAGE_UPDATE_PREFIX = "ACP_USAGE_UPDATE ";
@@ -315,7 +332,8 @@ class FakeAcpAgent {
   async initialize() {
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
-      agentCapabilities: { loadSession: false },
+      // 2026-10-06:宣告支援 session/close(命名用臨時 session 收尾時會用到,見 closeSession())。
+      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
     };
   }
 
@@ -327,8 +345,27 @@ class FakeAcpAgent {
     // `handleCallBridgeTool()` 之後真的拿去 spawn 成子行程。沒有掛任何
     // server 時(這個 session 沒有 subagentPort)是空陣列,不是
     // undefined(見 NewSessionRequest.mcpServers 的型別——必填欄位)。
-    this.sessions.set(sessionId, { abort: null, mcpServers: params?.mcpServers ?? [] });
+    this.sessions.set(sessionId, {
+      abort: null,
+      mcpServers: params?.mcpServers ?? [],
+      // 2026-10-06(session 自動命名)e2e 用的統計,見 REPORT_SESSIONS_PREFIX。
+      kind: "main",
+      closed: false,
+      cancelled: 0,
+      permissionOutcomes: [],
+      prompts: 0,
+    });
     return { sessionId };
+  }
+
+  /** 2026-10-06:`session/close`——取消進行中的回合並標成 closed(真實 agent 會釋放資源)。 */
+  async closeSession(params) {
+    const session = this.sessions.get(params.sessionId);
+    if (session) {
+      session.closed = true;
+      session.abort?.abort();
+    }
+    return {};
   }
 
   async authenticate() {
@@ -340,7 +377,9 @@ class FakeAcpAgent {
   }
 
   cancel(params) {
-    this.sessions.get(params.sessionId)?.abort?.abort();
+    const session = this.sessions.get(params.sessionId);
+    if (session) session.cancelled += 1;
+    session?.abort?.abort();
   }
 
   async prompt(params, cx) {
@@ -352,6 +391,20 @@ class FakeAcpAgent {
     const text = extractText(params.prompt);
     const abort = new AbortController();
     session.abort = abort;
+    session.prompts += 1;
+
+    // 2026-10-06:命名請求排在最前面(引用的使用者訊息裡可能含其他標記),見檔頭。
+    const titleRequest = parseTitleRequestPrompt(text);
+    if (titleRequest) {
+      session.kind = "title";
+      let stopReason;
+      try {
+        stopReason = await this.handleTitleRequest(params.sessionId, titleRequest.firstMessage, abort, cx);
+      } finally {
+        session.abort = null;
+      }
+      return { stopReason: stopReason ?? (abort.signal.aborted ? "cancelled" : "end_turn") };
+    }
 
     try {
       // 2026-10-02(P3):呼叫 bridge 工具的三條路徑**排在最前面**——它們的內文(`message` 參數、巢狀標記)本來就會
@@ -383,6 +436,8 @@ class FakeAcpAgent {
         await this.handleUpsertToolCalls(params.sessionId, cx);
       } else if (text === EMPTY_RESULT_TOOL_NAME_PREFIX) {
         await this.handleEmptyResultToolName(params.sessionId, cx);
+      } else if (text === REPORT_SESSIONS_PREFIX) {
+        await this.handleReportSessions(params.sessionId, cx);
       } else if (text === REPORT_MCP_SERVERS_PREFIX) {
         await this.handleReportMcpServers(params.sessionId, cx);
       } else if (text === REPORT_ENV_PREFIX) {
@@ -399,6 +454,77 @@ class FakeAcpAgent {
     }
 
     return { stopReason: abort.signal.aborted ? "cancelled" : "end_turn" };
+  }
+
+  /** 2026-10-06:命名請求(見檔頭)。回傳值有給就當 stopReason。 */
+  async handleTitleRequest(sessionId, firstMessage, abort, cx) {
+    const say = (text) =>
+      cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text } },
+      });
+    if (firstMessage.includes(TITLE_MODE_HANG)) {
+      try {
+        await delay(10 * 60_000, undefined, { signal: abort.signal });
+      } catch {
+        // session/cancel 抵達
+      }
+      return undefined;
+    }
+    if (firstMessage.includes(TITLE_MODE_REFUSE)) {
+      return "refusal";
+    }
+    if (firstMessage.includes(TITLE_MODE_TOOL)) {
+      const toolCallId = `title-tool-${randomUUID()}`;
+      const rawInput = { path: TITLE_TOOL_MARKER_FILE, content: "the title conversation was allowed to run a tool" };
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "tool_call", toolCallId, title: "Write file", kind: "edit", status: "pending", rawInput },
+      });
+      const response = await cx.request(acp.methods.client.session.requestPermission, {
+        sessionId,
+        toolCall: { toolCallId, title: "Write file", kind: "edit", status: "pending", rawInput },
+        options: [
+          { optionId: "allow", name: "Allow", kind: "allow_once" },
+          { optionId: "deny", name: "Reject", kind: "reject_once" },
+        ],
+      });
+      const outcome = response.outcome.outcome === "selected" ? response.outcome.optionId : response.outcome.outcome;
+      this.sessions.get(sessionId)?.permissionOutcomes.push(outcome);
+      if (outcome === "allow") {
+        writeFileSync(TITLE_TOOL_MARKER_FILE, rawInput.content, "utf8");
+        await say("TOOL-RAN");
+      } else {
+        await say("工具被拒");
+      }
+      return undefined;
+    }
+    // 分兩段送(模擬串流),core 收到的是兩段接起來的全文。
+    const reply = fakeTitleReplyFor(firstMessage);
+    const cut = reply.indexOf("\n");
+    await say(reply.slice(0, cut));
+    await say(reply.slice(cut));
+    return undefined;
+  }
+
+  /** 2026-10-06:見 REPORT_SESSIONS_PREFIX。 */
+  async handleReportSessions(sessionId, cx) {
+    const report = [...this.sessions.entries()].map(([id, s]) => ({
+      sessionId: id,
+      kind: s.kind,
+      closed: s.closed,
+      cancelled: s.cancelled,
+      permissionOutcomes: s.permissionOutcomes,
+      prompts: s.prompts,
+    }));
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: { type: "text", text: `SESSIONS:${JSON.stringify(report)}` },
+      },
+    });
   }
 
   async handleEcho(sessionId, cx) {
@@ -1000,6 +1126,7 @@ async function main() {
     .onRequest(acp.methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
     .onRequest(acp.methods.agent.authenticate, () => agent.authenticate())
     .onRequest(acp.methods.agent.session.setMode, () => agent.setSessionMode())
+    .onRequest(acp.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
     .onRequest(acp.methods.agent.session.prompt, (ctx) => agent.prompt(ctx.params, ctx.client))
     .onNotification(acp.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
     .connect(stream);
