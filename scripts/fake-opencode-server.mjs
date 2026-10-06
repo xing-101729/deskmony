@@ -29,6 +29,12 @@
  *     覆寫,見該檔案),回覆文字前面會多一段 `[model:providerID/modelID]`
  *     標記——只用來讓 e2e(步驟24f)斷言「setModel() 之後,實際送出的請求
  *     真的帶新 model」,沒有帶 model 的既有呼叫方式完全不受影響。
+ *     2026-10-06:body 帶了 `variant`(思考程度,見 OpenCodeAdapter.setEffort())時,再加一段
+ *     `[variant:X]` 標記,同樣只用來讓 e2e 斷言 wire 上真的帶了選的思考程度。
+ *   - 2026-10-06:以 `--variants` 旗標啟動時(e2e 的 FAKE_OPENCODE_VARIANTS provider,見
+ *     scripts/lib/e2e-providers.mjs),模擬 opencode 1.18.7 的 `GET /config/providers`(FAKE_OPENCODE_VARIANT_PROVIDERS:
+ *     每個 model 的 `variants`)與 `GET /config` 的 `model`(使用者設定的預設 model,FAKE_OPENCODE_DEFAULT_MODEL)。
+ *     沒有這個旗標時兩者都維持「舊版沒有這支端點 / 設定裡沒寫 model」,既有測試不受影響。
  *   - 若 prompt 文字以 TOOL_CALL_PREFIX 開頭:照真實 opencode 1.18.7 實測到的
  *     形狀(2026-09-17,見 packages/adapters/src/opencode-adapter.ts 檔頭
  *     `type==="tool"` 的實測紀錄)送出一個 bash 工具——整個生命週期同一個
@@ -152,6 +158,21 @@ export const REPORT_PRESENCE_PREFIX = "OPENCODE_REPORT_PRESENCE:";
 export const REPORT_SHELL_ENV_PREFIX = "OPENCODE_REPORT_SHELL_ENV:";
 /** 啟動時(isMainModule)載入的外掛宿主狀態。 */
 let pluginHost = { hooks: [], loaded: [], errors: [] };
+
+/** 2026-10-06:`--variants` 模式(見檔頭)回報的 provider/model/variants——形狀照 opencode 1.18.7 的 `/config/providers`。 */
+export const FAKE_OPENCODE_VARIANT_PROVIDERS = [
+  {
+    id: "fake",
+    models: {
+      "model-a": { id: "model-a", variants: {} },
+      "model-b": { id: "model-b", variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } } },
+      "model-c": { id: "model-c", variants: { minimal: {}, max: {} } },
+    },
+  },
+];
+/** `--variants` 模式下 `GET /config` 回報的預設 model。 */
+export const FAKE_OPENCODE_DEFAULT_MODEL = "fake/model-b";
+const VARIANTS_MODE = process.argv.includes("--variants");
 export const SUBAGENT_PERMISSION_PREFIX = "OPENCODE_SUBAGENT_PERMISSION";
 /** SUBAGENT_PERMISSION_PREFIX 流程裡子 session 說的話(e2e 斷言它**不會**出現在本 session 的對話)。 */
 export const SUBAGENT_CHILD_TEXT = "CHILD-SESSION-SECRET-TEXT";
@@ -271,7 +292,7 @@ async function streamTextReply(sessionId, messageId, chunks, { chunkDelayMs = 5 
   return partId;
 }
 
-async function handlePrompt(sessionId, text, model) {
+async function handlePrompt(sessionId, text, model, variant) {
   const session = sessions.get(sessionId);
   const userMessageId = `msg_${randomUUID()}`;
   const assistantMessageId = `msg_${randomUUID()}`;
@@ -531,9 +552,11 @@ async function handlePrompt(sessionId, text, model) {
     // OpenCodeAdapter.sendPrompt()/setModel())在回覆前面加一段可觀察的
     // 標記——只用來讓 e2e(步驟24f)能斷言「收到的 model 欄位真的變了」,
     // 不影響既有沒有帶 model 的呼叫(該分支維持與之前完全相同的純文字回覆)。
-    const chunks = model
-      ? [`[model:${model.providerID}/${model.modelID}] `, ...FAKE_OPENCODE_REPLY_CHUNKS]
-      : FAKE_OPENCODE_REPLY_CHUNKS;
+    const chunks = [
+      ...(model ? [`[model:${model.providerID}/${model.modelID}] `] : []),
+      ...(variant ? [`[variant:${variant}] `] : []),
+      ...FAKE_OPENCODE_REPLY_CHUNKS,
+    ];
     await streamTextReply(sessionId, assistantMessageId, chunks);
     broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   }
@@ -651,7 +674,14 @@ async function route(req, res, url) {
     } catch {
       // 設定壞掉就回空物件
     }
-    sendJson(res, 200, config);
+    // 2026-10-06:`--variants` 模式模擬使用者 opencode 設定裡寫了預設 model。
+    sendJson(res, 200, VARIANTS_MODE ? { ...config, model: FAKE_OPENCODE_DEFAULT_MODEL } : config);
+    return;
+  }
+
+  // 2026-10-06:只有 `--variants` 模式才有這支端點(其餘情況落到最後的 404,模擬舊版)。
+  if (VARIANTS_MODE && req.method === "GET" && url.pathname === "/config/providers") {
+    sendJson(res, 200, { providers: FAKE_OPENCODE_VARIANT_PROVIDERS, default: { fake: "model-a" } });
     return;
   }
 
@@ -695,7 +725,7 @@ async function route(req, res, url) {
     const body = await readJsonBody(req);
     res.writeHead(204);
     res.end();
-    void handlePrompt(sessionId, textOfParts(body), body.model).catch((err) => console.error("[fake-opencode] prompt_async 回合失敗:", err));
+    void handlePrompt(sessionId, textOfParts(body), body.model, body.variant).catch((err) => console.error("[fake-opencode] prompt_async 回合失敗:", err));
     return;
   }
 
@@ -714,10 +744,10 @@ async function route(req, res, url) {
     const body = await readJsonBody(req);
     if (MESSAGE_HANG) {
       // 回合照跑(事件走 SSE),HTTP 回應永遠不送——模擬「超過 undici 300 秒逾時才會回」的長回合。
-      void handlePrompt(sessionId, textOfParts(body), body.model).catch((err) => console.error("[fake-opencode] message 回合失敗:", err));
+      void handlePrompt(sessionId, textOfParts(body), body.model, body.variant).catch((err) => console.error("[fake-opencode] message 回合失敗:", err));
       return;
     }
-    const result = await handlePrompt(sessionId, textOfParts(body), body.model);
+    const result = await handlePrompt(sessionId, textOfParts(body), body.model, body.variant);
     sendJson(res, 200, result);
     return;
   }

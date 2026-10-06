@@ -78,6 +78,10 @@ const SUITES = [
   // 重啟後接手仍是 ACP(含 provider 已不在偵測清單的退路)、舊 schema 的 agent_profiles/sessions 遷移。
   // 這些都能用 fake backend 決定性驗證,所以放在 `pnpm test` 跑得到的地方(e2e-gateway.mjs 不在其中)。
   "e2e-agent-catalog",
+  // 2026-10-06:各 agent 選 model 與思考程度——ACP 的 configOptions / set_config_option、OpenCode 的 variants、記住
+  // provider 上次的選擇、不支援/不合法時的明確錯誤。fake ACP agent(`--config-options`)+ fake opencode server
+  // (`--variants`),一個 core,約半分鐘。
+  "e2e-agent-options",
   // 2026-09-17:OS 層級的孤兒**行程**回收(packages/adapters/src/child-registry.ts),
   // 與下一支處理的 DB 孤兒**紀錄**是崩潰後的兩半(見 crash-recovery_hld.md 開頭)。
   // 不啟動 core,但會真的開 `.cmd` shim / node 行程並反覆查 PowerShell CIM(每次約

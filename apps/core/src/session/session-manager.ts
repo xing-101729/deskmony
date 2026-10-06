@@ -1883,19 +1883,23 @@ export class SessionManager extends EventEmitter {
    *   - 思考程度:以回報為準——沒有思考程度選項(例如換到沒有 variants 的 model)或沒有目前值,就清掉。
    */
   private async applyReportedOptions(sessionId: string, runtime: RuntimeState, options: SessionOptions): Promise<void> {
-    runtime.sessionOptions = options;
     this.catalog.noteLiveOptions(runtime.providerId, options);
     const session = await this.getSession(sessionId);
-    if (!session) return;
-    const model = options.model ? (options.model.current ?? session.model) : session.model;
+    // **只寫回報決定得了的欄位**:這裡讀到的 session 可能比 `setSessionModel()` 的 DB 寫入還舊(兩邊非同步交錯),
+    // 沒回報 model 的 agent(OpenCode)若照舊值整列寫回,會把剛換的 model 蓋回去。
+    const patch: { model?: string; effort?: string | null } = {};
+    if (options.model?.current && options.model.current !== session?.model) patch.model = options.model.current;
     const effort = options.effort?.current;
-    if (model !== session.model || effort !== session.effort) {
+    if (effort !== session?.effort) patch.effort = effort ?? null;
+    if (session && Object.keys(patch).length > 0) {
       await this.db
         .update(sessionsTable)
-        .set({ model: model ?? null, effort: effort ?? null, updatedAt: Date.now() })
+        .set({ ...patch, updatedAt: Date.now() })
         .where(eq(sessionsTable.id, sessionId))
         .run();
     }
+    // DB 寫完才換記憶體裡的選項:之後任何人讀到的 session,選項與 model/effort 一定是同一份回報。
+    runtime.sessionOptions = options;
     const updated = await this.getSession(sessionId);
     if (updated) this.emit("session-updated", updated);
   }
