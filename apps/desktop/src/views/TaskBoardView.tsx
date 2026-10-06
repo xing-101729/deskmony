@@ -9,6 +9,7 @@ import { Button, IconButton } from "../ui/Button.js";
 import { Input, Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
+import { confirmDialog } from "../ui/ConfirmDialog.js";
 import { Icon } from "../ui/icons.js";
 import { taskStatusMeta } from "../ui/status.js";
 import { useLocale } from "../ui/locale.js";
@@ -287,9 +288,13 @@ function TaskCard({
             className="!bg-ok/12 !text-ok hover:!bg-ok/20"
             disabled={busy}
             onClick={() => {
-              const ok = window.confirm(t("taskBoard:card.confirmMerge", { branch: branch ?? task.workspaceId ?? "?" }));
-              if (!ok) return;
-              void run(onMerge);
+              void confirmDialog({
+                title: t("taskBoard:card.approveMerge"),
+                message: t("taskBoard:card.confirmMerge", { branch: branch ?? task.workspaceId ?? "?" }),
+                confirmLabel: t("taskBoard:card.approveMerge"),
+              }).then((ok) => {
+                if (ok) void run(onMerge);
+              });
             }}
           >
             {t("taskBoard:card.approveMerge")}
@@ -426,7 +431,12 @@ export function TaskBoardView({ onOpenSidebar }: { onOpenSidebar: () => void }):
   };
 
   const handleDelete = async (task: Task): Promise<void> => {
-    const ok = window.confirm(t("taskBoard:card.confirmDelete", { title: task.title }));
+    const ok = await confirmDialog({
+      title: t("taskBoard:card.deleteTaskAriaLabel"),
+      message: t("taskBoard:card.confirmDelete", { title: task.title }),
+      confirmLabel: t("common:delete"),
+      tone: "danger",
+    });
     if (!ok) return;
     const result = await deleteTask(task.id);
     if (result.hadUncommittedChanges) {

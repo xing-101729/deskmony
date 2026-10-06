@@ -21,6 +21,7 @@ import { sessionStatusMeta } from "./ui/status.js";
 import { useTheme } from "./ui/theme.js";
 import { useFontScale } from "./ui/font-scale.js";
 import { ErrorBoundary } from "./ui/ErrorBoundary.js";
+import { ConfirmDialogHost } from "./ui/ConfirmDialog.js";
 import { shortenPath } from "./lib/workspaces.js";
 
 export type ViewMode = "session" | "team-chat" | "task-board";
@@ -473,6 +474,10 @@ export default function App(): JSX.Element {
         </ErrorBoundary>
       )}
       {paletteOpen && <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />}
+      {/* 放最後:確認框可能從上面任何一個對話框裡叫出來(例如復原視圖),要疊在它們上面。 */}
+      <ErrorBoundary label="確認框">
+        <ConfirmDialogHost />
+      </ErrorBoundary>
     </div>
   );
 }
