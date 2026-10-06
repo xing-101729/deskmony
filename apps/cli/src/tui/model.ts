@@ -429,6 +429,7 @@ export function applySessionEvent(model: TuiModel, envelope: SessionEventEnvelop
     case "usage":
     case "context-usage":
     case "available-commands":
+    case "session-options":
     case "terminal-data":
       break;
   }

@@ -3,6 +3,10 @@
     "notFound": "agent「{{providerId}}」が見つかりません。利用可能な id は agent の一覧で確認してください",
     "disabled": "Agent「{{label}}」は設定で無効になっています",
     "notInstalled": "Agent「{{label}}」はこのコンピューターで検出されていません。インストール後、設定で再検出してください",
-    "launchInfoMissing": "この session の agent「{{providerId}}」は検出リストから消えており、session にも起動情報が残っていない(旧バージョンで作成)ため、再起動できません。新しい session を使用してください"
+    "launchInfoMissing": "この session の agent「{{providerId}}」は検出リストから消えており、session にも起動情報が残っていない(旧バージョンで作成)ため、再起動できません。新しい session を使用してください",
+    "modelNotOffered": "{{agent}} は model の選択に対応していません",
+    "effortNotOffered": "{{agent}} は現在、思考レベルを選択できません",
+    "invalidModel": "「{{value}}」は {{agent}} で選べる model ではありません(選択肢:{{allowed}})",
+    "invalidEffort": "「{{value}}」は {{agent}} で選べる思考レベルではありません(選択肢:{{allowed}})"
   }
 }

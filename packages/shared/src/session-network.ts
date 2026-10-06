@@ -36,6 +36,7 @@ export interface SessionNetworkPort {
     agent: string;
     prompt: string;
     model?: string;
+    effort?: string;
     title?: string;
     workingDir?: string;
   }): Promise<{ sessionId: string }>;
@@ -74,8 +75,16 @@ export const NetworkAgentSummarySchema = z.object({
   id: z.string(),
   label: z.string(),
   software: z.string(),
-  models: z.array(z.object({ id: z.string(), label: z.string() })),
+  /** `efforts`:這個 model 可選的思考程度(各 model 不同的 agent 才有,例如 OpenCode 的 variants)。 */
+  models: z.array(z.object({ id: z.string(), label: z.string(), efforts: z.array(z.string()).optional() })),
   defaultModelId: z.string().optional(),
+  /** 2026-10-06:與 model 無關的固定思考程度清單(例如 Claude 的 low…max);省略 = 不能選,或要看 `models[].efforts`。 */
+  efforts: z.array(z.string()).optional(),
+  /**
+   * 2026-10-06:true = 這個 agent 的 model/思考程度清單要等 session 開起來才由 agent 自己回報(ACP)。上面的
+   * `models`/`efforts` 若有值,是這個 core 最近一個同 agent session 回報的(僅供參考,以 agent 實際接受的為準)。
+   */
+  optionsAfterStart: z.boolean().optional(),
   canUseTools: z.boolean(),
 });
 export type NetworkAgentSummary = z.infer<typeof NetworkAgentSummarySchema>;

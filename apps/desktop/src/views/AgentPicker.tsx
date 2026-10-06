@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import type { EffortLevel } from "@deskmony/shared";
+import { providerEffortChoices } from "@deskmony/shared";
 import { useSessionStore, selectAvailableProviders } from "../stores/session-store.js";
 import { reconcileSelection, type NewSessionSelection } from "../lib/new-session-selection.js";
 import { Button } from "../ui/Button.js";
@@ -13,7 +13,9 @@ import { EmptyState } from "../ui/Feedback.js";
  *
  * 「用哪個 agent 開新對話」的選單組:**agent 下拉**(從這台電腦偵測到、且沒被停用的 provider,顯示 label + 版本)
  * + **model 下拉**(該 provider 的 models;`supportsModelSelection` 為 false 或清單為空時整個隱藏)
- * + **effort**(只有 claude-agent-sdk 顯示)+(選填)**工作資料夾**。取代原本的「選 profile」下拉與
+ * + **思考程度**(2026-10-06 起不只 Claude:清單由 `providerEffortChoices()` 決定——Claude 的固定 5 級、OpenCode
+ * 選定 model 的 variants;建立前不知道就隱藏)+(選填)**工作資料夾**。「要等 session 開起來才知道選項」的 agent
+ * (ACP:Codex / Gemini / OpenCode ACP)改顯示一行說明:建立後在對話標題列選,會記住上次的選擇。取代原本的「選 profile」下拉與
  * ProfileCreateDialog——SessionList 側欄頂部與「在這個 session 底下開新 session」對話框共用同一份,選擇狀態由呼叫端持有(見
  * lib/new-session-selection.ts,上次的選擇存 localStorage)。
  *
@@ -98,7 +100,16 @@ export function AgentPicker({
 
   const showModel = Boolean(provider?.supportsModelSelection) && (provider?.models.length ?? 0) > 0;
   const modelSelect = showModel ? (
-    <Select aria-label={t("agentPicker:modelAriaLabel")} value={effective.model} onChange={(e) => set({ model: e.target.value })}>
+    <Select
+      aria-label={t("agentPicker:modelAriaLabel")}
+      value={effective.model}
+      onChange={(e) => {
+        // 可選的思考程度可能隨 model 變(OpenCode 的 variants)——新 model 沒有目前選的那個就清掉。
+        const model = e.target.value;
+        const efforts = provider ? providerEffortChoices(provider, model || undefined) : undefined;
+        set({ model, effort: effective.effort && efforts?.includes(effective.effort) ? effective.effort : "" });
+      }}
+    >
       <option value="">{t("agentPicker:defaultModelOption")}</option>
       {provider!.models.map((m) => (
         <option key={m.id} value={m.id}>
@@ -108,20 +119,22 @@ export function AgentPicker({
     </Select>
   ) : null;
 
-  const showEffort = provider?.software === "claude-agent-sdk";
-  const effortSelect = showEffort ? (
-    <Select
-      aria-label={t("agentPicker:effortAriaLabel")}
-      value={effective.effort}
-      onChange={(e) => set({ effort: e.target.value as EffortLevel | "" })}
-    >
-      <option value="">{t("agentPicker:defaultEffortOption")}</option>
-      <option value="low">low</option>
-      <option value="medium">medium</option>
-      <option value="high">high</option>
-      <option value="xhigh">xhigh</option>
-      <option value="max">max</option>
-    </Select>
+  const effortChoices = provider ? providerEffortChoices(provider, effective.model || undefined) : undefined;
+  const effortSelect =
+    effortChoices && effortChoices.length > 0 ? (
+      <Select aria-label={t("agentPicker:effortAriaLabel")} value={effective.effort} onChange={(e) => set({ effort: e.target.value })}>
+        <option value="">{t("agentPicker:defaultEffortOption")}</option>
+        {effortChoices.map((value) => (
+          <option key={value} value={value}>
+            {value}
+          </option>
+        ))}
+      </Select>
+    ) : null;
+
+  // 建立前不知道選項的 agent:說明建立後在哪裡選。
+  const optionsLaterNote = provider?.optionsAfterStart ? (
+    <p className="text-2xs text-fg-faint">{t("agentPicker:optionsAfterStartHint")}</p>
   ) : null;
 
   const handlePickDirectory = async (): Promise<void> => {
@@ -165,6 +178,7 @@ export function AgentPicker({
         {agentSelect}
         {modelSelect}
         {effortSelect}
+        {optionsLaterNote}
         {workingDirInput}
         <div className="flex justify-end">{redetectLink}</div>
       </div>
@@ -178,6 +192,7 @@ export function AgentPicker({
       </Field>
       {modelSelect && <Field label={t("agentPicker:modelLabel")}>{modelSelect}</Field>}
       {effortSelect && <Field label={t("agentPicker:effortLabel")}>{effortSelect}</Field>}
+      {optionsLaterNote}
       {workingDirInput && <Field label={t("agentPicker:workingDirLabel")}>{workingDirInput}</Field>}
     </div>
   );

@@ -8,6 +8,7 @@
   "effortAriaLabel": "思考レベルを選択",
   "effortLabel": "思考レベル",
   "defaultEffortOption": "(既定の思考レベル)",
+  "optionsAfterStartHint": "この agent は会話が始まってから model と思考レベルの一覧を Deskmony に伝えます。作成後に会話のヘッダーで選択してください。前回の選択は記憶され、次回は自動で適用されます。",
   "workingDirLabel": "作業フォルダ",
   "workingDirPlaceholder": "既定:{{dir}}",
   "workingDirPlaceholderNoDefault": "作業フォルダ(空欄で既定を使用)",

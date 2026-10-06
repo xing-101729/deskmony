@@ -2,7 +2,8 @@ import { z } from "zod";
 import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema } from "./session.js";
 import { PromptInputSchema } from "./prompt.js";
 import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema, SlashCommandInfoSchema } from "./events.js";
-import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-launch.js";
+import { AgentSoftwareSchema, SessionPermissionModeSchema } from "./agent-launch.js";
+import { EffortValueSchema } from "./session-options.js";
 import { AdapterCapabilitiesSchema } from "./adapter-capabilities.js";
 import { AgentDetectionEntrySchema } from "./detect.js";
 import { MaskedProviderPrefsSchema, ProviderPrefsPatchInputSchema } from "./provider-catalog.js";
@@ -155,8 +156,9 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * M5 Round C 新增:對話中切換 model(見 apps/core/src/session/
    * session-manager.ts 的 `SessionManager.setSessionModel()`、
    * packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
-   * `software="claude-agent-sdk"` 與 `"opencode"` 的 session 支援;acp/pty
-   * 呼叫這個方法會得到明確的錯誤(而不是默默成功),見對應 adapter 的實作。
+   * `software="claude-agent-sdk"` 與 `"opencode"` 的 session 支援;acp 要看 agent 有沒有宣告 model 選項
+   * (`Session.options.model`,2026-10-06 起);pty 與沒宣告的 acp agent 呼叫這個方法會得到明確的錯誤
+   * (而不是默默成功),見對應 adapter 的實作。
    */
   z.object({
     ...baseRequest,
@@ -167,13 +169,14 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * 比照上面的 `session.setModel`:對話中切換 effort(思考程度,見
    * apps/core/src/session/session-manager.ts 的
    * `SessionManager.setSessionEffort()`、packages/adapters/src/types.ts 的
-   * `AgentAdapter.setEffort()` 介面註解)。只有 `software="claude-agent-sdk"`
-   * 的 session 支援;其餘 adapter 呼叫這個方法會得到明確的錯誤。
+   * `AgentAdapter.setEffort()` 介面註解)。2026-10-06 起值由各 agent 定義(見 session-options.ts):
+   * claude-agent-sdk 只收 Claude 的 5 級;acp/opencode 要在 agent 回報的清單裡(`Session.options.effort`);
+   * 不支援的 session 會得到明確的錯誤。
    */
   z.object({
     ...baseRequest,
     method: z.literal("session.setEffort"),
-    params: z.object({ sessionId: z.string(), effort: EffortLevelSchema }),
+    params: z.object({ sessionId: z.string(), effort: EffortValueSchema }),
   }),
   z.object({
     ...baseRequest,
@@ -278,7 +281,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     params: z.object({ sessionId: z.string().min(1), limit: z.number().int().positive().optional() }),
   }),
   /**
-   * `create_session` 的 gateway 入口。參數只有 agent/prompt/model/title/workingDir(`agent` = providerId);
+   * `create_session` 的 gateway 入口。參數只有 agent/prompt/model/effort/title/workingDir(`agent` = providerId);
    * 新 session 的 `parentSessionId` 由 core 以 token 綁定的呼叫者帶入(**不是參數**)。`workingDir` 省略時沿用
    * 呼叫者的資料夾。
    */
@@ -289,6 +292,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
       agent: z.string().min(1),
       prompt: z.string().min(1),
       model: z.string().optional(),
+      effort: EffortValueSchema.optional(),
       title: z.string().optional(),
       workingDir: z.string().optional(),
     }),

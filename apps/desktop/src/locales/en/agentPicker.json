@@ -8,6 +8,7 @@
   "effortAriaLabel": "Choose thinking effort",
   "effortLabel": "Thinking effort",
   "defaultEffortOption": "(Default effort)",
+  "optionsAfterStartHint": "This agent only reports its models and thinking-effort levels once the conversation starts — pick them in the conversation header after creating it. Your last choice is remembered and applied next time.",
   "workingDirLabel": "Working folder",
   "workingDirPlaceholder": "Default: {{dir}}",
   "workingDirPlaceholderNoDefault": "Working folder (leave empty for the default)",

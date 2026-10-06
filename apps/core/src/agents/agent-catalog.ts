@@ -4,14 +4,15 @@ import {
   DeskmonyError,
   type AgentFamily,
   ProviderCatalogEntrySchema,
+  providerEffortChoices,
   resolveProviders,
   type AgentDetectionEntry,
   type AgentLaunchSpec,
   type AgentSoftware,
-  type EffortLevel,
   type ProviderCatalogEntry,
   type NetworkAgentSummary,
   type ResolvedProvider,
+  type SessionOptions,
   softwareCanUseTools,
 } from "@deskmony/shared";
 import { detectAllAgents } from "../detect/agent-detector.js";
@@ -28,7 +29,7 @@ import { getProviderPrefsMap, type SettingsStore } from "../settings/settings-st
  *     回傳」(`detectAgents()`)。
  *   - `resolve()` = `resolveProviders(BUILTIN_PROVIDERS, 偵測快取, providerPrefs)`(providerPrefs
  *     從 `SettingsStore` 讀)。`listAvailable()` = `enabled && installed` 的項目。
- *   - `buildLaunchSpec(providerId, model?, effort?)`:組出 `AgentAdapter.spawn()` 要的啟動規格;
+ *   - `buildLaunchSpec(providerId, {model?, effort?, preferredModel?, preferredEffort?})`:組出 `AgentAdapter.spawn()` 要的啟動規格;
  *     找不到/未安裝/已停用 → 丟 `DeskmonyError`(`agent.notFound`/`agent.notInstalled`/
  *     `agent.disabled`,前端 errors namespace 有對應的中文訊息)。偵測快取尚未完成時,`await` 那一次
  *     偵測而不是回錯——但**只有真的需要偵測結果的 provider**(外部 CLI)才等,內嵌的
@@ -146,7 +147,17 @@ export interface SessionLaunchSource {
   providerId: string;
   adapterType: AgentSoftware;
   model?: string;
-  effort?: EffortLevel;
+  effort?: string;
+}
+
+/** `buildLaunch()` 的選填參數。 */
+export interface LaunchChoices {
+  /** 明確指定的 model / 思考程度:做不到要讓建立失敗(見 `AgentLaunchSpec.model`)。 */
+  model?: string;
+  effort?: string;
+  /** 軟性偏好(這個 provider 上次的選擇、續接時 session 記得的值):做不到就略過(見 `AgentLaunchSpec.preferredModel`)。 */
+  preferredModel?: string;
+  preferredEffort?: string;
 }
 
 export class AgentCatalog {
@@ -230,20 +241,43 @@ export class AgentCatalog {
   }
 
   /**
+   * 2026-10-06:「要等 session 開起來才知道選項」的 agent(ACP),最近一個同 provider 的 session 回報的選項
+   * (SessionManager 收到 `session-options` 事件時呼叫 `noteLiveOptions()`)。純記憶體——只用來讓
+   * `list_agents` 在「已知」時也列出可選的 model / 思考程度,不影響任何驗證(驗證以 agent 當下的回報為準)。
+   */
+  private readonly liveOptions = new Map<string, SessionOptions>();
+
+  noteLiveOptions(providerId: string, options: SessionOptions): void {
+    if (options.model || options.effort) this.liveOptions.set(providerId, options);
+  }
+
+  /**
    * `list_agents` 工具與 `agent.listForAgent` gateway 方法共用的最小摘要:只含 agent 做決策
-   * 需要的欄位(id/label/software/models/defaultModelId/canUseTools),**不含 command/args/env**(本機路徑與
+   * 需要的欄位(id/label/software/models/defaultModelId/efforts/canUseTools),**不含 command/args/env**(本機路徑與
    * 可能的密鑰不該進 agent 的對話 context)。兩個入口共用這個函式,結構上保證回傳一致。
    * `canUseTools`:claude-agent-sdk、acp 與 opencode 能掛工具、主動傳訊息(見 `softwareCanUseTools()`)。
+   * 2026-10-06:帶上可選的思考程度(固定清單 `efforts`、各 model 的 `models[].efforts`);ACP agent
+   * (`optionsAfterStart`)建立前不知道選項,有同 agent 的 session 回報過就列出那一份。
    */
   async summarizeAvailable(): Promise<NetworkAgentSummary[]> {
-    return (await this.listAvailable()).map((p) => ({
-      id: p.id,
-      label: p.label,
-      software: p.software,
-      models: p.models.map((m) => ({ id: m.id, label: m.label })),
-      defaultModelId: p.defaultModelId,
-      canUseTools: softwareCanUseTools(p.software),
-    }));
+    return (await this.listAvailable()).map((p) => {
+      const live = p.optionsAfterStart ? this.liveOptions.get(p.id) : undefined;
+      const models =
+        p.models.length > 0
+          ? p.models.map((m) => ({ id: m.id, label: m.label, ...(m.efforts ? { efforts: m.efforts } : {}) }))
+          : (live?.model?.choices ?? []).map((c) => ({ id: c.value, label: c.label }));
+      const efforts = p.supportsEffortSelection ? (p.efforts ?? live?.effort?.choices.map((c) => c.value)) : undefined;
+      return {
+        id: p.id,
+        label: p.label,
+        software: p.software,
+        models,
+        defaultModelId: p.defaultModelId,
+        ...(efforts ? { efforts } : {}),
+        ...(p.optionsAfterStart ? { optionsAfterStart: true } : {}),
+        canUseTools: softwareCanUseTools(p.software),
+      };
+    });
   }
 
   /** 找單一 provider(含已停用/未安裝的),只等「這個 provider 真的需要」的偵測。 */
@@ -264,18 +298,24 @@ export class AgentCatalog {
    * 組出啟動規格。`model` 省略時用 provider **明確標記 `isDefault`** 的 model(沒有標記就不帶,
    * 讓 agent/CLI 自己決定——不退回清單第一項:`opencode models` 清單是依字母排序的,把第一項當預設
    * 會悄悄把使用者的 opencode 換到一個不是他設定的 model)。`supportsModelSelection` 為 false 的
-   * provider 一律忽略 `model`;`effort` 只有 claude-agent-sdk 有意義,其餘忽略。
+   * provider 一律忽略 `model`;`supportsEffortSelection` 為 false 的忽略 `effort`。
+   *
+   * 2026-10-06:思考程度的值由各 agent 定義——建立前就知道清單的(Claude 的固定 5 級、OpenCode 偵測到的
+   * 各 model variants,見 `providerEffortChoices()`)在這裡驗證,不合法丟 `agent.invalidEffort`;建立前不知道的
+   * (ACP agent)交給 adapter 在 `session/new` 之後驗證。軟性偏好(`preferred*`)原樣帶給 adapter。
    */
-  async buildLaunchSpec(providerId: string, model?: string, effort?: EffortLevel): Promise<AgentLaunchSpec> {
-    return (await this.buildLaunch(providerId, model, effort)).spec;
+  async buildLaunchSpec(providerId: string, choices: LaunchChoices = {}): Promise<AgentLaunchSpec> {
+    return (await this.buildLaunch(providerId, choices)).spec;
+  }
+
+  /** 這個 provider 是不是「要等 session 開起來才知道選項」的 agent(找不到就是 false)。不等偵測。 */
+  async optionsAfterStart(providerId: string): Promise<boolean> {
+    return this.allEntries().find((p) => p.id === providerId)?.optionsAfterStart ?? false;
   }
 
   /** 同 `buildLaunchSpec()`,另外回傳 provider 的顯示名稱(session 建立時給筆記指路段落用)。 */
-  async buildLaunch(
-    providerId: string,
-    model?: string,
-    effort?: EffortLevel,
-  ): Promise<{ spec: AgentLaunchSpec; label: string }> {
+  async buildLaunch(providerId: string, choices: LaunchChoices = {}): Promise<{ spec: AgentLaunchSpec; label: string }> {
+    const { model, effort } = choices;
     const provider = await this.resolveOne(providerId);
     if (!provider) {
       throw new DeskmonyError("agent.notFound", { providerId }, `找不到 agent「${providerId}」,請先用 agent 清單確認可用的 id`);
@@ -294,6 +334,18 @@ export class AgentCatalog {
     const effectiveModel = provider.supportsModelSelection
       ? (model ?? provider.models.find((m) => m.isDefault)?.id)
       : undefined;
+    const effectiveEffort = provider.supportsEffortSelection ? effort : undefined;
+    if (effectiveEffort !== undefined) {
+      const allowed = providerEffortChoices(provider, effectiveModel);
+      if (allowed !== undefined && !allowed.includes(effectiveEffort)) {
+        const list = allowed.join(", ");
+        throw new DeskmonyError(
+          "agent.invalidEffort",
+          { agent: provider.label, value: effectiveEffort, allowed: list },
+          `「${effectiveEffort}」不是 ${provider.label} 可選的思考程度(可選:${list || "無"})`,
+        );
+      }
+    }
     const base: AgentLaunchSpec = {
       software: provider.software,
       providerId: provider.id,
@@ -301,7 +353,9 @@ export class AgentCatalog {
       // (opencode 預設全 allow,必須改成全 ask 才會經過 PolicyEngine)。
       family: provider.family,
       model: effectiveModel,
-      effort: provider.software === "claude-agent-sdk" ? effort : undefined,
+      effort: effectiveEffort,
+      ...(provider.supportsModelSelection && choices.preferredModel ? { preferredModel: choices.preferredModel } : {}),
+      ...(provider.supportsEffortSelection && choices.preferredEffort ? { preferredEffort: choices.preferredEffort } : {}),
     };
     if (provider.software === "claude-agent-sdk") return { spec: base, label: provider.label };
 
@@ -326,17 +380,19 @@ export class AgentCatalog {
     }
     // pty。claude-cli 的「支援 model 選擇」是把 `--model <別名>` 烤進固定的啟動參數(pty 建立後不能
     // 像 SDK 一樣中途切換 model,見 provider-catalog.ts 的 claude-cli 項目註解)——只對這個 provider。
+    // 2026-10-06:思考程度同理,`--effort <level>`(claude 2.1.199 實測;值已在上面對 Claude 的 5 級驗證過)。
     const modelArgs = provider.id === "claude-cli" && effectiveModel ? ["--model", effectiveModel] : [];
+    const effortArgs = provider.id === "claude-cli" && effectiveEffort ? ["--effort", effectiveEffort] : [];
     return {
-      spec: { ...base, ptyConfig: { command: provider.command, args: nonEmpty([...defaultArgs, ...modelArgs]) } },
+      spec: { ...base, ptyConfig: { command: provider.command, args: nonEmpty([...defaultArgs, ...modelArgs, ...effortArgs]) } },
       label: provider.label,
     };
   }
 
   /**
    * 續接/接手等「重新 spawn 既有 session」的路徑一律從 session 自己的資料重建(絕不讀已移除的
-   * `agent_profiles` 表):先用 `providerId` 走 `buildLaunchSpec(providerId, session.model,
-   * session.effort)`;provider 已不存在/未安裝/已停用,或重建出來的 software 對不上 session 的
+   * `agent_profiles` 表):先用 `providerId` 走 `buildLaunch(providerId, {model: session.model,
+   * effort: session.effort})`(ACP session 改成軟性偏好,見方法內註解);provider 已不存在/未安裝/已停用,或重建出來的 software 對不上 session 的
    * `adapterType`(目錄版本間 provider 的 software 改過)時,退回
    * `adapterType + launch_command + launch_args`。連退路也沒有(舊資料回填不出啟動資訊)就丟明確錯誤。
    */
@@ -344,8 +400,14 @@ export class AgentCatalog {
     session: SessionLaunchSource,
     stored: StoredLaunchInfo,
   ): Promise<{ spec: AgentLaunchSpec; label: string }> {
+    // 2026-10-06:ACP agent 的 model/思考程度是 agent 自己回報的清單——續接時 agent 可能已經不提供上次的值,
+    // 用軟性偏好(做不到就略過),不讓「續接」因為 agent 換了清單而整個失敗。
+    const soft = session.adapterType === "acp";
+    const choices: LaunchChoices = soft
+      ? { preferredModel: session.model, preferredEffort: session.effort }
+      : { model: session.model, effort: session.effort };
     try {
-      const built = await this.buildLaunch(session.providerId, session.model, session.effort);
+      const built = await this.buildLaunch(session.providerId, choices);
       if (built.spec.software === session.adapterType) return built;
     } catch (err) {
       if (!(err instanceof DeskmonyError) || !FALLBACK_ERROR_CODES.has(err.code)) throw err;
@@ -366,12 +428,17 @@ function nonEmpty(args: string[]): string[] | undefined {
 
 /** 從 session 存的 `adapterType + launch_command + launch_args` 組啟動規格(provider 已不存在時的退路)。 */
 function launchSpecFromStored(session: SessionLaunchSource, stored: StoredLaunchInfo, family: AgentFamily | undefined): AgentLaunchSpec {
+  // 2026-10-06:ACP 一律當軟性偏好(理由見 `buildLaunchSpecForSession()`);pty 的 model/effort 已經烤在存下來的
+  // launch_args 裡,不需要再帶。
+  const soft = session.adapterType === "acp";
   const base: AgentLaunchSpec = {
     software: session.adapterType,
     providerId: session.providerId,
     family,
-    model: session.model,
-    effort: session.adapterType === "claude-agent-sdk" ? session.effort : undefined,
+    model: soft ? undefined : session.model,
+    effort: session.adapterType === "claude-agent-sdk" || session.adapterType === "opencode" ? session.effort : undefined,
+    ...(soft && session.model ? { preferredModel: session.model } : {}),
+    ...(soft && session.effort ? { preferredEffort: session.effort } : {}),
   };
   if (session.adapterType === "claude-agent-sdk") return base;
 

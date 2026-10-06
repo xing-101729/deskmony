@@ -1,4 +1,4 @@
-import type { EffortLevel, ResolvedProvider } from "@deskmony/shared";
+import { providerEffortChoices, type ResolvedProvider } from "@deskmony/shared";
 
 /**
  * 2026-10-02(P2:移除 profile)新增:「新對話」用的 agent/model/effort/資料夾選擇——取代原本的
@@ -12,8 +12,8 @@ export interface NewSessionSelection {
   providerId: string;
   /** 空字串 = 不指定(由 agent/CLI 自己決定,或 provider 標記的預設 model)。 */
   model: string;
-  /** 只有 claude-agent-sdk 有意義;空字串 = 不指定。 */
-  effort: EffortLevel | "";
+  /** 思考程度(值由 agent 定義,見 `providerEffortChoices()`);空字串 = 不指定。 */
+  effort: string;
   /** 空字串 = 用 core 的預設工作資料夾(`workspace.defaultWorkingDir`)。 */
   workingDir: string;
 }
@@ -28,7 +28,6 @@ export const DEFAULT_NEW_SESSION_SELECTION: NewSessionSelection = {
 };
 
 const STORAGE_KEY = "deskmony:newSessionSelection";
-const EFFORT_VALUES: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
 
 export function loadNewSessionSelection(): NewSessionSelection {
   try {
@@ -40,7 +39,8 @@ export function loadNewSessionSelection(): NewSessionSelection {
     return {
       providerId: typeof o.providerId === "string" && o.providerId ? o.providerId : DEFAULT_PROVIDER_ID,
       model: typeof o.model === "string" ? o.model : "",
-      effort: typeof o.effort === "string" && EFFORT_VALUES.includes(o.effort) ? (o.effort as EffortLevel) : "",
+      // 合不合法交給 `reconcileSelection()` 依 provider 的清單判斷(值由各 agent 定義)。
+      effort: typeof o.effort === "string" ? o.effort : "",
       workingDir: typeof o.workingDir === "string" ? o.workingDir : "",
     };
   } catch {
@@ -61,17 +61,20 @@ export function saveNewSessionSelection(selection: NewSessionSelection): void {
  *   - provider 已不在可用清單(被停用、CLI 被移除、偵測還沒回來)→ 退回清單第一個(沒有就保持原樣,
  *     呼叫端據此顯示「沒有可用 agent」);
  *   - model 不在該 provider 的清單、或該 provider 不支援選 model → 清空(用 agent 預設);
- *   - 不是 claude-agent-sdk → effort 清空(只有它驗證支援思考程度)。
+ *   - effort 不在「這個 provider(選了這個 model 時)」的思考程度清單裡 → 清空(2026-10-06 起清單由
+ *     `providerEffortChoices()` 決定,不再只有 claude-agent-sdk)。
  */
 export function reconcileSelection(selection: NewSessionSelection, available: ResolvedProvider[]): NewSessionSelection {
   const provider = available.find((p) => p.id === selection.providerId) ?? available[0];
   if (!provider) return selection;
   const modelOk =
     selection.model === "" || (provider.supportsModelSelection && provider.models.some((m) => m.id === selection.model));
+  const model = modelOk ? selection.model : "";
+  const efforts = providerEffortChoices(provider, model || undefined);
   return {
     providerId: provider.id,
-    model: modelOk ? selection.model : "",
-    effort: provider.software === "claude-agent-sdk" ? selection.effort : "",
+    model,
+    effort: selection.effort !== "" && efforts?.includes(selection.effort) ? selection.effort : "",
     workingDir: selection.workingDir,
   };
 }

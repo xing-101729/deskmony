@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-launch.js";
+import { AgentSoftwareSchema, SessionPermissionModeSchema } from "./agent-launch.js";
+import { EffortValueSchema, SessionOptionsSchema } from "./session-options.js";
 import { PromptAttachmentSchema } from "./prompt.js";
 
 /**
@@ -51,14 +52,20 @@ export const SessionSchema = z.object({
   /**
    * session 級別的 effort(思考程度),比照上面的 `model` 欄位。建立時取自
    * `CreateSessionInput.effort`(見 `SessionManager.createSession()`);之後可
-   * 透過 `session.setEffort` gateway 方法變更,只有 `adapterType ===
-   * "claude-agent-sdk"` 的 session 支援(見 packages/adapters/src/types.ts 的
-   * `AgentAdapter.setEffort()` 介面註解——呼叫 SDK 的
-   * `Query.applyFlagSettings({ effortLevel })`)。其餘 adapter(含 opencode)
-   * 呼叫這個方法會得到明確錯誤。這個欄位可能是 `undefined` —— UI 應視為
-   * 「(未指定,使用 CLI 預設)」。
+   * 透過 `session.setEffort` gateway 方法變更。2026-10-06 起值由各 agent 定義(不再只是 Claude 的
+   * 5 級,見 session-options.ts):claude-agent-sdk 呼叫 SDK 的 `Query.applyFlagSettings({ effortLevel })`;
+   * ACP agent 有宣告 `thought_level` 選項時走 `session/set_config_option`;OpenCode(HTTP)是目前 model
+   * 的 variant。agent 回報的目前值也會寫回這裡(見 SessionManager 的 `session-options` 處理)。
+   * 這個欄位可能是 `undefined` —— UI 應視為「(未指定,使用 agent 預設)」。
    */
-  effort: EffortLevelSchema.optional(),
+  effort: EffortValueSchema.optional(),
+  /**
+   * 2026-10-06:agent 回報「這個 session 現在能選哪些 model / 思考程度」(見 session-options.ts)。
+   * **純 ephemeral**——同 `permissionMode` 的待遇,只存 `SessionManager` 記憶體(最近一次 `session-options`
+   * 事件),每次回傳 Session 物件前即時補上;session 沒在跑(或 agent 還沒回報)時是 undefined。
+   * UI 依此決定顯示哪些選擇器(claude-agent-sdk 不送這個事件,沿用 provider 目錄的 model 清單與固定 5 級)。
+   */
+  options: SessionOptionsSchema.optional(),
   /**
    * S7(auto-mode-and-yolo):這個 session 目前的權限模式(auto/YOLO)——**純
    * ephemeral**,只存在 `SessionManager` 記憶體(見 apps/core/src/session/
@@ -127,8 +134,11 @@ export const CreateSessionInputSchema = z.object({
   providerId: z.string().min(1),
   /** 省略時用該 provider 明確標記 `isDefault` 的 model;都沒有就由 agent 自己決定。 */
   model: z.string().optional(),
-  /** 只有 claude-agent-sdk 有意義(見 `EffortLevelSchema` 註解)。 */
-  effort: EffortLevelSchema.optional(),
+  /**
+   * 思考程度,值由各 agent 定義(見 session-options.ts)。provider 不支援選思考程度時忽略;建立時就知道選項的
+   * agent(Claude、OpenCode HTTP)會在建立前驗證,ACP agent 要等 `session/new` 回報選項後由 adapter 驗證。
+   */
+  effort: EffortValueSchema.optional(),
   workingDir: z.string(),
   title: z.string().optional(),
   /**

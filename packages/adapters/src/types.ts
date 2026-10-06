@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, PromptInput } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, PromptInput } from "@deskmony/shared";
 import type { AdapterCapabilities } from "@deskmony/shared";
 
 /**
@@ -102,12 +102,11 @@ export interface AgentAdapter {
    * 覆寫已記錄,並不保證 opencode 真的認得這個 model,不合法的值會在下一輪
    * 對話透過既有的錯誤事件路徑浮現。
    *
-   * ACP/PTY 協議本身沒有對應的「呼叫端指定 model」機制(ACP 的
-   * `session/new`/`session/prompt` 沒有 model 參數,model 完全由被 spawn
-   * 出來的那個外部 agent/CLI 自行決定與管理;PTY 更只是無結構化的終端
-   * 直通,連「model」這個概念本身都不存在)——`AcpAdapter`/`GenericPtyAdapter`
-   * 一律丟出明確錯誤,不可靜默忽略成功(呼叫端 `SessionManager.
-   * setSessionModel()` 會讓這個錯誤原樣傳給 gateway 呼叫端)。
+   * 2026-10-06:`AcpAdapter` 改成向 agent 查——agent 在 `session/new` 回報的 `configOptions` 有
+   * `category: "model"` 的選項時,用 `session/set_config_option` 切換(值必須在 agent 給的清單裡);
+   * 沒宣告就丟明確錯誤。`GenericPtyAdapter` 是無結構化的終端直通,只能在建立時把 `--model` 烤進啟動
+   * 參數,一律丟明確錯誤。不可靜默忽略成功(呼叫端 `SessionManager.setSessionModel()` 會讓這個錯誤
+   * 原樣傳給 gateway 呼叫端)。可選清單有變動時,adapter 送 `session-options` 事件(見 session-options.ts)。
    */
   setModel(handle: AgentHandle, model: string): Promise<void>;
   /**
@@ -121,12 +120,15 @@ export interface AgentAdapter {
    * `'max'` 是 session-scoped(只在這個 session 生效,不會持久化到 settings
    * 檔案,見 sdk.d.ts 對 `applyFlagSettings()` 的說明)。
    *
-   * `OpenCodeAdapter`/`AcpAdapter`/`GenericPtyAdapter` 都沒有查到對應的
-   * reasoning-effort 機制(不像 model 那樣 opencode 至少有 per-message 欄位
-   * 可以模擬覆寫)——三者一律丟出明確錯誤,不可靜默忽略成功(呼叫端
-   * `SessionManager.setSessionEffort()` 會讓這個錯誤原樣傳給 gateway 呼叫端)。
+   * 2026-10-06:`effort` 的值由各 agent 定義(見 session-options.ts),各 adapter 自己驗證:
+   *   - `ClaudeAgentSdkAdapter`:只接受 Claude 的 5 級(`EffortLevelSchema`)。
+   *   - `AcpAdapter`:agent 宣告了 `category: "thought_level"` 的選項才支援,走 `session/set_config_option`。
+   *   - `OpenCodeAdapter`:目前 model 的 variants 之一,記在 session 裡、隨下一則訊息的 `variant` 欄位送出。
+   *   - `GenericPtyAdapter`:只能建立時決定(claude-cli 的 `--effort`),一律丟明確錯誤。
+   * 不支援或值不合法一律丟明確錯誤,不可靜默忽略成功(呼叫端 `SessionManager.setSessionEffort()` 會讓
+   * 這個錯誤原樣傳給 gateway 呼叫端)。
    */
-  setEffort(handle: AgentHandle, effort: EffortLevel): Promise<void>;
+  setEffort(handle: AgentHandle, effort: string): Promise<void>;
   /**
    * 原始 byte/字元級輸入直通(對應 Bug A 修正:xterm.js 的 `term.onData()`)。
    * 與 `sendPrompt()` 的差異——`sendPrompt()` 是「送一整行文字,語意上等同
