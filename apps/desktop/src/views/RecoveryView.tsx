@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { RecoverySessionInfo } from "@deskmony/shared";
 import { useRecoveryStore } from "../stores/recovery-store.js";
 import { Dialog } from "../ui/Dialog.js";
+import { confirmDialog } from "../ui/ConfirmDialog.js";
 import { Button } from "../ui/Button.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
 import { useLocale } from "../ui/locale.js";
@@ -46,10 +47,14 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
     }
   };
 
-  const handleAbandon = (): void => {
-    if (!window.confirm(t("recovery:confirmAbandon", { title: session.sessionTitle }))) {
-      return;
-    }
+  const handleAbandon = async (): Promise<void> => {
+    const ok = await confirmDialog({
+      title: t("recovery:abandonLabel"),
+      message: t("recovery:confirmAbandon", { title: session.sessionTitle }),
+      confirmLabel: t("recovery:abandonLabel"),
+      tone: "danger",
+    });
+    if (!ok) return;
     void run(() => abandon(session.sessionId));
   };
 
@@ -80,7 +85,7 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
         <Button size="sm" variant="outline" disabled={busy} title={t("recovery:takeoverTitle")} onClick={() => void run(() => takeover(session.sessionId))}>
           {t("recovery:takeoverLabel")}
         </Button>
-        <Button size="sm" variant="ghost" disabled={busy} className="hover:!text-danger" onClick={handleAbandon}>
+        <Button size="sm" variant="ghost" disabled={busy} className="hover:!text-danger" onClick={() => void handleAbandon()}>
           {t("recovery:abandonLabel")}
         </Button>
       </div>
