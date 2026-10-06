@@ -36,7 +36,7 @@ Deskmony 讓你跑 AI coding agent —— 不是側邊欄裡的一個聊天機�
 
 - 🛡️ **獨立的斷路器** —— 權限、訊息與成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
 - 🌱 **每個 session 都能找到可用的 agent、開新 session、和任何 session 互傳訊息** —— Deskmony 會偵測你電腦上已經裝好的 agent CLI;開新 session 只要選一個 agent、(選填)model 與工作資料夾,不必先建 profile。能跑工具的 session(內嵌 Claude Agent SDK,以及所有走 ACP 的 agent:Codex、Gemini,還有走 `opencode acp` 的 OpenCode)會從 `deskmony` MCP server 拿到五個工具 —— `list_agents`、`list_sessions`、`read_session`、`create_session`、`send_to_session`。**不做任何自動回送**:收到訊息的 agent 自己決定要不要回、回給誰。開 session 與傳訊息**刻意不放進自動放行清單** —— 它們和其他工具呼叫走同一道權限階梯 —— 而且有「每條訊息鏈」的預算擋住失控的來回對傳。
-- 🖥️ **貨真價實的桌面 IDE** —— 串流 markdown、行內 diff、內嵌終端機、todo 追蹤、圖片工具輸出、互動式提問元件,以及能把任何一則 assistant 回覆「轉傳到…」另一個 session 的按鈕。
+- 🖥️ **貨真價實的桌面 IDE** —— 串流 markdown、行內 diff、內嵌終端機、todo 追蹤、圖片工具輸出、互動式提問元件,能把任何一則 assistant 回覆「轉傳到…」另一個 session 的按鈕,以及可以就地改名的 session 標題——或由 session 自己的 agent 在用完即丟的臨時對話裡替你取名,不會在你的對話裡多一輪。
 - 🔌 **四個 adapter,同一套介面** —— 內嵌 Claude Agent SDK、ACP、OpenCode HTTP/SSE,以及保底的原始 PTY。
 - 🔄 **不靠猜的崩潰復原** —— 孤兒 session 在啟動時對帳,由人逐一分流。**刻意不做任何自動續接。**
 - 🌐 **可遠端,但清楚劃出哪些事只能留在本機** —— 瀏覽器或手機經 token 認證連上;2026-08-25 起遠端在 session 控制與政策編輯上與本機同權,但 provider 設定(可能含 API key)與綁定介面永遠只能本機動。
@@ -178,6 +178,7 @@ flowchart TB
 - **開 session** 就是 `session.create`:帶一個 agent(`providerId`)、選填的 model 與 effort(effort 只對 Claude Agent SDK 有意義)、一個工作資料夾。桌面側欄有這四個選單加上「新對話」鈕;CLI 用 `--agent <providerId>`(預設 `claude-agent-sdk`)、`--model`、`--effort`。偵測不到任何 agent 時,側欄會說明並提供重新偵測。
 - **session 自帶啟動資訊**(它的 provider,以及走 CLI 的那幾種要用的 command 與參數),所以重啟後續接它不依賴其他東西;若該 agent 已經偵測不到,就改用 session 存下來的 command。這次改版之前建立的 session,會在 core 第一次啟動時依它們原本的 profile 回填;舊的 `agent_profiles` 表只會被讀取、絕不修改。
 - 每個 session 一律從 `always-ask` 開始。切到 auto/YOLO 仍然是逐 session 的操作,跟以前一樣。
+- **標題。** session 可以就地改名:側欄雙擊標題(或用「⋯」/右鍵選單),或點對話上方的標題——Enter 儲存、Esc 取消。gateway 是 `session.rename`(去頭尾空白後 1–100 個字,錯誤碼明確:`session.titleEmpty` / `session.titleTooLong`)。沒給標題建立的 session,會在你送出第一則訊息後自動命名:由這個 session **自己的 agent** 在一個**臨時對話**裡寫一個簡短標題,用完即丟——Claude 是另跑一次性的 SDK 查詢、OpenCode 是同一個伺服器上的臨時 session、ACP 是同一條連線上的第二個 `session/new`——所以你的對話與它的上下文一個字都不會多。臨時對話拿不到任何工具:它的權限請求當場拒絕,一呼叫工具就中止。agent 做不到(PTY)、逾時(60 秒)或失敗時,改用你第一則訊息的第一行;主 session 絕不受影響。你自己取的標題(`titleSource: "user"`)永遠不會被自動覆蓋——只有你按「AI 重新命名」(`session.autoTitle`)才會換。各 agent 的做法見 [`docs/FEATURES.md` §1.5](docs/FEATURES.md)。
 
 ### Session 網路
 
@@ -340,12 +341,12 @@ Deskmony/
 ## 🧪 測試
 
 ```bash
-pnpm test          # typecheck + build + 17 支決定性測試
+pnpm test          # typecheck + build + 18 支決定性測試
 pnpm test:e2e      # 只跑測試(需要 pnpm build 已是最新)
 pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會實際消耗額度
 ```
 
-**十八支端到端測試。** 其中十七支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十七支:**279 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180;之後新增 `e2e-agent-catalog.mjs` 與取代子 agent 測試的 `e2e-session-network.mjs`,斷言數又升上來;2026-10-03 再加上 `e2e-opencode-permissions.mjs`,釘住每個 OpenCode 工具呼叫都會進政策引擎,之後又多了七個斷言釘住 OpenCode 本機伺服器的密碼;2026-10-05 再加上 `e2e-agent-env.mjs`,以設了 `DESKMONY_AUTH_TOKEN` 的環境啟動 core,釘住 Deskmony 自己的憑證一個都沒有進入 agent 的環境,並擴充 OpenCode 權限那支測試,涵蓋「把伺服器密碼從 agent 的 shell 環境中隱藏」的 OpenCode 外掛,另加一個 hard-deny 斷言涵蓋桌面殼的本機資料夾;同日再加上 `e2e-opencode-long-turn.mjs`,釘住 OpenCode 一輪工作超過五分鐘不再跳出假的「送出失敗」錯誤——prompt 改走 OpenCode 立即回應的 `prompt_async` 端點,並保留舊版 opencode 的退路。)session 網路那支測試也會斷言:in-process server 與 ACP 橋接子行程的工具名稱、描述、參數 schema 逐字一致。
+**十九支端到端測試。** 其中十八支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十八支:**306 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180;之後新增 `e2e-agent-catalog.mjs` 與取代子 agent 測試的 `e2e-session-network.mjs`,斷言數又升上來;2026-10-03 再加上 `e2e-opencode-permissions.mjs`,釘住每個 OpenCode 工具呼叫都會進政策引擎,之後又多了七個斷言釘住 OpenCode 本機伺服器的密碼;2026-10-05 再加上 `e2e-agent-env.mjs`,以設了 `DESKMONY_AUTH_TOKEN` 的環境啟動 core,釘住 Deskmony 自己的憑證一個都沒有進入 agent 的環境,並擴充 OpenCode 權限那支測試,涵蓋「把伺服器密碼從 agent 的 shell 環境中隱藏」的 OpenCode 外掛,另加一個 hard-deny 斷言涵蓋桌面殼的本機資料夾;同日再加上 `e2e-opencode-long-turn.mjs`,釘住 OpenCode 一輪工作超過五分鐘不再跳出假的「送出失敗」錯誤——prompt 改走 OpenCode 立即回應的 `prompt_async` 端點,並保留舊版 opencode 的退路;2026-10-06 再加上 `e2e-session-title.mjs`,釘住改名、標題來源的規則與遷移,以及自動命名來自不會在主 session 多加任何東西、不能用工具的臨時對話,並在嘗試用工具、逾時、拒答或 PTY 時退回第一行。)session 網路那支測試也會斷言:in-process server 與 ACP 橋接子行程的工具名稱、描述、參數 schema 逐字一致。
 
 `e2e-gateway.mjs` 刻意不在預設範圍內。它需要真實 Claude Code 憑證、會花真的錢,而且有一組 *model-behavior* 斷言依賴模型當輪自由選擇怎麼講 —— 檔案自己標註為已知 flake。一個會因為模型換句話說就變紅的 CI,很快就會被所有人忽略。
 
@@ -368,7 +369,7 @@ pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會�
 
 ## 🗺️ 現況
 
-已完成,並由 CI 上每次 push/PR 都會跑的端到端測試把關(見上方「測試」):agent 偵測與從任一偵測到的 agent 開 session、session 網路(agent 之間的工具、訊息信封、UI 轉傳)、桌面 IDE、帶 token 認證的瀏覽器/遠端存取、安全罩的三個斷路器(權限、每條訊息鏈的訊息、成本)、崩潰復原、桌面與 webhook 通知、自助式政策允許清單管理介面、真.無限制繞過層。2026-10-02 已移除(見 [`DECISIONS.md` §H](docs/DECISIONS.md)):agent profile、team、任務看板、每任務一個 git worktree、驗收閘、訊息匯流排(它的斷路器已重建給 session 之間的訊息),以及「子完成 → 結果自動注入父 session」的子 agent 行為。
+已完成,並由 CI 上每次 push/PR 都會跑的端到端測試把關(見上方「測試」):agent 偵測與從任一偵測到的 agent 開 session、session 網路(agent 之間的工具、訊息信封、UI 轉傳)、桌面 IDE、帶 token 認證的瀏覽器/遠端存取、安全罩的三個斷路器(權限、每條訊息鏈的訊息、成本)、崩潰復原、桌面與 webhook 通知、自助式政策允許清單管理介面、真.無限制繞過層,以及 session 改名與自動命名。2026-10-02 已移除(見 [`DECISIONS.md` §H](docs/DECISIONS.md)):agent profile、team、任務看板、每任務一個 git worktree、驗收閘、訊息匯流排(它的斷路器已重建給 session 之間的訊息),以及「子完成 → 結果自動注入父 session」的子 agent 行為。
 
 **刻意留白的部分,在你依賴它之前值得先知道:**
 
