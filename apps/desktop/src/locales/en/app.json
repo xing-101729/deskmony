@@ -7,7 +7,6 @@
     "message": "The last session wasn't shut down cleanly — <strong>{{count}}</strong> session(s) need manual triage (continue / take over / abandon)",
     "action": "Start triage"
   },
-  "sessionDefaultTitle": "Conversation {{n}}",
   "commands": {
     "groupActions": "Actions",
     "groupSessions": "Conversations",

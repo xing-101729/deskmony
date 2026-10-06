@@ -1,0 +1,7 @@
+{
+  "session": {
+    "titleEmpty": "El título no puede estar vacío",
+    "titleTooLong": "El título puede tener como máximo {{max}} caracteres (ahora tiene {{length}})",
+    "autoTitleNoContent": "Esta conversación aún no tiene mensajes de texto, así que no se puede nombrar automáticamente"
+  }
+}

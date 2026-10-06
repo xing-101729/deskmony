@@ -7,7 +7,8 @@ import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
 import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, TitleGenerationRequest, TitleGenerationResult, Workspace } from "./types.js";
+import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
@@ -266,6 +267,9 @@ export class AcpAdapter implements AgentAdapter {
         ),
     });
     const pendingPermissions = new Map<string, PendingPermission>();
+    // 2026-10-06(AI 自動命名):命名用臨時 session 的 id(見 `generateTitle()`)。權限請求的 handler 在 internal 建好之前
+    // 就得註冊,所以這個 Set 先在這裡建、再放進 internal。
+    const titleSessionIds = new Set<string>();
 
     const stream = acp.ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -275,6 +279,13 @@ export class AcpAdapter implements AgentAdapter {
     const clientApp = acp
       .client({ name: "deskmony" })
       .onRequest(acp.methods.client.session.requestPermission, (ctx) => {
+        // 2026-10-06:命名用臨時 session 的權限請求**一律當場拒絕**——不進政策引擎、不進 UI、不轉給主 session
+        // (臨時對話不得取得任何工具或權限,見 types.ts 的 `AgentAdapter.generateTitle()`)。`generateTitle()` 看到
+        // tool_call 也會自己中止這次命名。
+        if (titleSessionIds.has(ctx.params.sessionId)) {
+          console.warn(`[acp-adapter] ${agentLabel} 的命名用臨時對話要求工具權限(${ctx.params.toolCall.title ?? "?"}),已拒絕`);
+          return Promise.resolve(buildPermissionResponse(ctx.params.options, "deny"));
+        }
         return new Promise<acp.RequestPermissionResponse>((resolve) => {
           const requestId = String(ctx.requestId);
           pendingPermissions.set(requestId, { resolve, options: ctx.params.options });
@@ -301,7 +312,7 @@ export class AcpAdapter implements AgentAdapter {
       : undefined;
 
     try {
-      await Promise.race([
+      const initialized = await Promise.race([
         connection.agent.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
           clientCapabilities: {
@@ -337,6 +348,9 @@ export class AcpAdapter implements AgentAdapter {
         toolTitles: new Map(),
         toolInputs: new Map(),
         currentMessageId: null,
+        sessionCapabilities: initialized.agentCapabilities?.sessionCapabilities ?? undefined,
+        titleSessionIds,
+        titleAborts: new Set(),
       };
       this.sessions.set(handle.id, internal);
 
@@ -435,6 +449,8 @@ export class AcpAdapter implements AgentAdapter {
       pending.resolve(buildPermissionResponse(pending.options, "deny"));
     }
     internal.pendingPermissions.clear();
+    // 進行中的命名臨時對話一併中止(連線馬上要關了)。
+    for (const controller of internal.titleAborts) controller.abort();
     internal.lastCost = undefined;
     internal.outputQueue.close();
     try {
@@ -499,6 +515,108 @@ export class AcpAdapter implements AgentAdapter {
       { software: "acp", operation: "setEffort" },
       'software="acp" 不支援變更思考程度(思考程度由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
     );
+  }
+
+  /**
+   * 2026-10-06(AI 自動命名):在**同一條 ACP 連線**上用 `session/new` 另開一個臨時 session 產生標題,收集它的文字回覆後
+   * 取消/關閉它——主 session 的上下文完全不受影響。介面紀律見 types.ts 的 `AgentAdapter.generateTitle()`。
+   *
+   * 為什麼可行(2026-10-06 實測 opencode 1.18.7 的 `opencode acp`,不是讀文件猜的):同一條連線開第二個 session 正常;
+   * ACP SDK 依 `sessionId` 把 `session/update` 分流給各自的 `ActiveSession`(讀 `@agentclientprotocol/sdk@1.2.1` 的
+   * `SessionUpdateRouter` 確認),所以臨時 session 的事件**結構上**不會進主 session 的 `consume()` 迴圈;它的
+   * `session/request_permission` 帶的是臨時 session 的 id,spawn() 註冊的 handler 依 `titleSessionIds` 一律當場拒絕。
+   *
+   * 臨時 session 的設定:`session/new` **不掛** Deskmony 的 session 網路 MCP server(主 session 才有)。agent 自己的內建
+   * 工具還在(ACP 沒有「開一個沒有工具的 session」的標準方法),所以靠兩道防線:權限請求一律拒絕,以及**一看到
+   * `tool_call`/`tool_call_update` 就中止**這次命名(丟錯 → core 退回截取首句)——後者也涵蓋「agent 自己判斷不需要權限
+   * 就直接執行」的唯讀工具(例如 codex 沙箱內的指令),不讓它們跑完。
+   *
+   * 收尾(不論成功、失敗或逾時):還沒收到 stop 就送 `session/cancel`;停止事件分流;agent 有宣告
+   * `sessionCapabilities.close` 就送 `session/close`、有宣告 `delete` 就再送 `session/delete`(背景執行,不拖慢回傳)。
+   * 實測 `opencode acp` 宣告 close、**沒有** delete——臨時 session 會留在 opencode 自己的 session 清單裡(Deskmony 這邊
+   * 已丟棄,不影響任何對話),見 docs/FEATURES.md。
+   *
+   * 用量:`usage_update` 的 `cost` 是這個臨時 session 自己的累計(= 這次命名的總花費),有給就回傳給 core 計入。
+   */
+  async generateTitle(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult> {
+    const internal = this.mustGet(handle);
+    const controller = new AbortController();
+    const forwardAbort = (): void => controller.abort();
+    if (request.signal.aborted) controller.abort();
+    request.signal.addEventListener("abort", forwardAbort, { once: true });
+    internal.titleAborts.add(controller);
+    const signal = controller.signal;
+    try {
+      const starting = internal.connection.agent.buildSession(handle.workspace.path).start();
+      let temp: acp.ActiveSession;
+      try {
+        temp = await raceAbort(starting, signal);
+      } catch (err) {
+        // 中止時 `session/new` 可能還在路上:晚到的臨時 session 一樣要收掉,不然它的事件分流會一直掛著。
+        void starting.then((late) => this.discardTitleSession(internal, late, false), () => undefined);
+        throw err;
+      }
+      internal.titleSessionIds.add(temp.sessionId);
+      let stopped = false;
+      try {
+        // prompt 的失敗也會經 `nextUpdate()` 丟出來(SDK 會 reject 這個 session 的更新佇列),這裡只吞掉
+        // 「沒人接」的 unhandled rejection。
+        temp.prompt(request.prompt).catch(() => undefined);
+        let text = "";
+        let cost: { amount: number; currency: string } | undefined;
+        for (;;) {
+          const message = await raceAbort(temp.nextUpdate(), signal);
+          if (message.kind === "stop") {
+            stopped = true;
+            if (message.stopReason !== "end_turn") throw titleAgentFailedError("acp", `stopReason=${message.stopReason}`);
+            break;
+          }
+          const update = message.update;
+          if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+            throw titleToolUseError("acp");
+          }
+          if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+            text += update.content.text;
+          } else if (update.sessionUpdate === "usage_update" && update.cost) {
+            cost = { amount: update.cost.amount, currency: update.cost.currency };
+          }
+        }
+        return { text, ...(cost ? { usage: { costAmount: cost.amount, costCurrency: cost.currency } } : {}) };
+      } finally {
+        this.discardTitleSession(internal, temp, stopped);
+      }
+    } catch (err) {
+      if (signal.aborted) throw titleAbortedError();
+      throw err;
+    } finally {
+      request.signal.removeEventListener("abort", forwardAbort);
+      internal.titleAborts.delete(controller);
+    }
+  }
+
+  /**
+   * 收掉一個命名用的臨時 session(見 `generateTitle()`)。id **留在** `titleSessionIds`:收尾之後才晚到的權限請求
+   * 也一樣要拒絕(Set 只放 id 字串,一個 session 一輩子頂多累積幾個,不需要清)。
+   */
+  private discardTitleSession(internal: InternalSession, temp: acp.ActiveSession, stopped: boolean): void {
+    const sessionId = temp.sessionId;
+    internal.titleSessionIds.add(sessionId);
+    temp.dispose();
+    const caps = internal.sessionCapabilities;
+    void (async () => {
+      if (!stopped) {
+        await internal.connection.agent.notify(acp.methods.agent.session.cancel, { sessionId });
+      }
+      if (caps?.close) {
+        await internal.connection.agent.request(acp.methods.agent.session.close, { sessionId });
+      }
+      if (caps?.delete) {
+        await internal.connection.agent.request(acp.methods.agent.session.delete, { sessionId });
+      }
+    })().catch((err: unknown) => {
+      // 連線已關閉(主 session 被 dispose)或 agent 不認這些方法:只記 log,不影響任何東西。
+      console.warn(`[acp-adapter] 收掉命名用臨時 session ${sessionId} 失敗(忽略): ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   private mustGet(handle: AgentHandle): InternalSession {
@@ -785,6 +903,12 @@ interface InternalSession {
   child: ChildProcessWithoutNullStreams;
   connection: acp.ClientConnection;
   session: acp.ActiveSession;
+  /** `initialize` 回應裡 agent 宣告的 session 能力(命名用臨時 session 收尾時看它支不支援 close/delete)。 */
+  sessionCapabilities?: acp.SessionCapabilities;
+  /** 命名用臨時 session 的 id——它們的權限請求一律拒絕,見 spawn() 的 handler 與 `generateTitle()`。 */
+  titleSessionIds: Set<string>;
+  /** 進行中的命名臨時對話,`dispose()` 時一併中止。 */
+  titleAborts: Set<AbortController>;
   outputQueue: AsyncQueue<AgentEvent>;
   pendingPermissions: Map<string, PendingPermission>;
   /** toolCallId -> 建立時的 title,tool_call_update 有時不會重複帶 title。 */

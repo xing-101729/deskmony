@@ -1,0 +1,11 @@
+{
+  "untitled": "新對話",
+  "editorAriaLabel": "對話標題",
+  "menuLabel": "對話選項",
+  "rename": "重新命名",
+  "autoTitle": "AI 重新命名",
+  "autoTitleRunning": "AI 命名中…",
+  "autoTitleHint": "AI 重新命名:請這個對話的 agent 依內容取一個簡短標題(不會加進對話)",
+  "clickToRename": "點一下重新命名",
+  "doubleClickToRename": "按兩下重新命名"
+}

@@ -8,6 +8,7 @@ import { IconButton } from "../ui/Button.js";
 import { Badge } from "../ui/Badge.js";
 import { useTheme } from "../ui/theme.js";
 import { useFontScale } from "../ui/font-scale.js";
+import { SessionTitleHeading } from "./SessionTitle.js";
 
 /** 把 index.css 定義的 CSS 變數(RGB 通道值)解析成 xterm.js 能吃的 `rgb()`
  *  字串——xterm 用 canvas/webgl 繪製,`fillStyle` 不會像一般 DOM 那樣解析
@@ -220,7 +221,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
       <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("terminal:openSidebar")} onClick={onOpenSidebar} className="sm:hidden" />
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
+          <SessionTitleHeading session={session} />
           <p className="mt-0.5 flex items-center gap-1.5 text-2xs text-fg-faint" title={session.workingDir}>
             <Badge tone="accent" icon="terminal">{t("terminal:directTerminal")}</Badge>
             <span className="truncate">{session.workingDir}</span>

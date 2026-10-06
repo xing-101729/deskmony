@@ -1,0 +1,7 @@
+{
+  "session": {
+    "titleEmpty": "The title can't be blank",
+    "titleTooLong": "The title can be at most {{max}} characters (currently {{length}})",
+    "autoTitleNoContent": "This conversation has no text messages yet, so it can't be named automatically"
+  }
+}
