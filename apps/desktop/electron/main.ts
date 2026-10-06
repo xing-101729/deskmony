@@ -323,6 +323,10 @@ function registerIpcHandlers(): void {
   // 真正的鍵盤事件,直到使用者手動切換視窗讓 OS 把焦點還給它。`window.focus()`
   // 在 renderer 端不保證真的觸發 OS 層級 focus(瀏覽器的 user-activation 限制),
   // 必須透過 main process 呼叫 `BrowserWindow.focus()`(貨真價實的 OS API)。
+  //
+  // 注意(2026-10-06 實測):這救不回「原生 `confirm()` 關掉之後收不到鍵盤」——那時
+  // 視窗本來就是前景視窗,這個呼叫等於沒做事。那個問題的修法是不開原生對話框,
+  // 見 src/ui/ConfirmDialog.tsx。
   ipcMain.handle("deskmony:focusWindow", () => {
     mainWindow?.focus();
   });
