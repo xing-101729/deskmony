@@ -10,6 +10,7 @@ import { Field, Input, Textarea } from "../ui/Field.js";
 import { StatusDot, Meta } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
 import { Dialog } from "../ui/Dialog.js";
+import { confirmDialog } from "../ui/ConfirmDialog.js";
 import { sessionStatusMeta, softwareLabel } from "../ui/status.js";
 import { MOD_LABEL } from "../ui/hotkeys.js";
 import type { ThemePreference, ResolvedTheme } from "../ui/theme.js";
@@ -145,12 +146,18 @@ export function SessionList({
   const conn = connectionMeta(connectionStatus, t);
 
   /**
-   * 刪除對話:原生 `confirm()` 二次確認(既有作法維持不變)——低頻、不可逆但
-   * 影響範圍單一的操作,原生確認框已足夠。`stopPropagation()` 避免同時觸發
-   * 外層的 selectSession()。
+   * 刪除對話:二次確認。用 app 內的 `confirmDialog()`,不用原生 `confirm()`——後者在
+   * Windows 上關掉之後整個視窗收不到鍵盤,要切窗才恢復(見 ui/ConfirmDialog.tsx)。
+   * `stopPropagation()` 避免同時觸發外層的 selectSession()。
    */
-  const handleDelete = (sessionId: string, title: string): void => {
-    if (!window.confirm(t("sessionList:confirmDeleteSession", { title }))) return;
+  const handleDelete = async (sessionId: string, title: string): Promise<void> => {
+    const ok = await confirmDialog({
+      title: t("sessionList:deleteSessionAriaLabel"),
+      message: t("sessionList:confirmDeleteSession", { title }),
+      confirmLabel: t("common:delete"),
+      tone: "danger",
+    });
+    if (!ok) return;
     void deleteSession(sessionId);
   };
 
@@ -265,7 +272,7 @@ export function SessionList({
           className="my-auto mr-1 opacity-0 hover:!text-danger focus-visible:opacity-100 group-hover:opacity-100"
           onClick={(e) => {
             e.stopPropagation();
-            handleDelete(session.id, title);
+            void handleDelete(session.id, title);
           }}
         />
       </div>
