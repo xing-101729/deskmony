@@ -118,14 +118,25 @@
  *     文字前面帶一段 `[command:X args:Y]` 可觀察標記(比照既有 `[model:...]`
  *     手法),只用來讓 e2e(步驟31)斷言「送 /已知指令 真的打到這支端點,
  *     且 body 形狀正確」,不影響既有 `/message` 端點的行為。
+ *   - 2026-10-06(session 自動命名,scripts/e2e-session-title.mjs 用):prompt 是 core 組的**命名請求**
+ *     (`parseTitleRequestPrompt()` 認得)時,這個 session 被標成「命名用臨時 session」,依引用的使用者訊息裡的標記
+ *     (scripts/lib/fake-title-modes.mjs)決定行為——沒有標記:回 `fakeTitleReplyFor(訊息)` 並在最後的 assistant
+ *     `message.updated` 帶 `cost`/`tokens`(真實 opencode 的形狀);`TITLE_MODE_TOOL`:bash 工具 pending → running →
+ *     `permission.asked`,**被允許**才寫 `TITLE_TOOL_MARKER_FILE`;`TITLE_MODE_HANG`:等到 `/abort` 或 `DELETE`;
+ *     `TITLE_MODE_REFUSE`:`session.error`。新增 `DELETE /session/{id}`(真實 opencode 1.18.7 實測回 `true`)。
+ *   - `REPORT_SESSIONS_PREFIX`:回 `SESSIONS:` + JSON——每個 session 的 `{id, kind, parentID, deleted, abortCount,
+ *     permissionReplies}`(只回統計,不回對話內容)。
  */
 
 import http from "node:http";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { loadConfigPlugins, simulateShellEnv, presenceIn } from "./lib/fake-opencode-plugin-host.mjs";
+// 2026-10-06:命名請求的格式以 core 實際用的為準(單一來源),見檔頭。需要先 pnpm build。
+import { parseTitleRequestPrompt } from "../packages/shared/dist/session-title.js";
+import { TITLE_MODE_HANG, TITLE_MODE_REFUSE, TITLE_MODE_TOOL, TITLE_TOOL_MARKER_FILE, fakeTitleReplyFor } from "./lib/fake-title-modes.mjs";
 
 export const FAKE_OPENCODE_REPLY_CHUNKS = ["Hello", " from", " fake", " OpenCode", " server"];
 export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
@@ -163,6 +174,10 @@ export function manyToolCallInput(index) {
   return { command: `echo many-tool-${index}` };
 }
 export const SLOW_PREFIX = "OPENCODE_SLOW";
+/** 2026-10-06:回報每個 session 的統計(命名用臨時 session 有沒有被刪掉、權限怎麼被回覆),見檔頭。 */
+export const REPORT_SESSIONS_PREFIX = "OPENCODE_REPORT_SESSIONS";
+/** 命名請求成功時,最後的 assistant `message.updated` 帶的用量(e2e 斷言它被計入該 session 的成本 rollup)。 */
+export const FAKE_TITLE_USAGE = { cost: 0.0042, tokens: { input: 321, output: 7 } };
 /** 2026-10-05:模擬回合跑不起來(壞 model),見檔頭。 */
 export const SESSION_ERROR_PREFIX = "OPENCODE_SESSION_ERROR";
 /** SESSION_ERROR_PREFIX 流程第一個 `session.error` 的訊息(e2e 斷言 adapter 報的是這個,不是 idle 後那個)。 */
@@ -290,7 +305,12 @@ async function handlePrompt(sessionId, text, model) {
   broadcast("session.status", { sessionID: sessionId, status: { type: "busy" } });
   broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
 
-  if (text.startsWith(SLOW_PREFIX)) {
+  // 2026-10-06:命名請求排在最前面(引用的使用者訊息裡可能含其他前綴/標記),見檔頭。
+  const titleRequest = parseTitleRequestPrompt(text);
+  if (titleRequest) {
+    session.kind = "title";
+    await handleTitlePrompt(session, sessionId, assistantMessageId, titleRequest.firstMessage);
+  } else if (text.startsWith(SLOW_PREFIX)) {
     session.aborted = false;
     // 真實 opencode 實測:一個 text part 的「建立」事件(message.part.updated,
     // 帶空字串)一定先於它的 message.part.delta 到達——OpenCodeAdapter 的
@@ -453,6 +473,17 @@ async function handlePrompt(sessionId, text, model) {
     );
     await streamTextReply(sessionId, assistantMessageId, [`PRESENCE:${JSON.stringify(presence)}`]);
     broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+  } else if (text.startsWith(REPORT_SESSIONS_PREFIX)) {
+    const report = [...sessions.entries()].map(([id, s]) => ({
+      id,
+      kind: s.kind,
+      parentID: s.parentID ?? null,
+      deleted: s.deleted,
+      abortCount: s.abortCount,
+      permissionReplies: s.permissionReplies,
+    }));
+    await streamTextReply(sessionId, assistantMessageId, [`SESSIONS:${JSON.stringify(report)}`]);
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   } else if (text.startsWith(REPORT_ENV_PREFIX)) {
     // 2026-10-03:回顯子行程收到的 OPENCODE_CONFIG_CONTENT(原始字串),見檔頭。
     const raw = process.env.OPENCODE_CONFIG_CONTENT;
@@ -548,6 +579,82 @@ async function handlePrompt(sessionId, text, model) {
     });
   }
   return { info: { id: assistantMessageId, role: "assistant", sessionID: sessionId }, parts: [] };
+}
+
+/** 2026-10-06:命名請求(見檔頭)。結尾的 idle 由 handlePrompt() 共同的收尾送。 */
+async function handleTitlePrompt(session, sessionId, assistantMessageId, firstMessage) {
+  if (firstMessage.includes(TITLE_MODE_HANG)) {
+    session.aborted = false;
+    const deadline = Date.now() + 10 * 60_000;
+    while (!session.aborted && !session.deleted && Date.now() < deadline) await delay(50);
+    broadcast("message.updated", {
+      sessionID: sessionId,
+      info: { id: assistantMessageId, role: "assistant", sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
+    });
+    return;
+  }
+  if (firstMessage.includes(TITLE_MODE_REFUSE)) {
+    broadcast("session.error", { sessionID: sessionId, error: { name: "UnknownError", data: { message: "fake: title request failed" } } });
+    return;
+  }
+  if (firstMessage.includes(TITLE_MODE_TOOL)) {
+    const callId = `call_${randomUUID()}`;
+    const partId = `prt_${randomUUID()}`;
+    const toolPart = (state) => ({ id: partId, messageID: assistantMessageId, sessionID: sessionId, type: "tool", callID: callId, tool: "write", state });
+    const input = { filePath: TITLE_TOOL_MARKER_FILE, content: "the title conversation was allowed to run a tool" };
+    const start = Date.now();
+    broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "pending", input: {}, raw: "" }) });
+    broadcast("message.part.updated", { sessionID: sessionId, part: toolPart({ status: "running", input, time: { start } }) });
+    const requestId = `per_${randomUUID()}`;
+    const replyPromise = new Promise((resolve) => session.pendingPermission.set(requestId, resolve));
+    broadcast("permission.asked", {
+      id: requestId,
+      sessionID: sessionId,
+      permission: "edit",
+      patterns: [TITLE_TOOL_MARKER_FILE],
+      metadata: { filepath: TITLE_TOOL_MARKER_FILE },
+      always: [],
+      tool: { messageID: assistantMessageId, callID: callId },
+    });
+    // 等回覆;被 abort/刪除也要結束(真實 opencode 被中止時工具直接變 error)。
+    const reply = await Promise.race([
+      replyPromise,
+      (async () => {
+        while (!session.aborted && !session.deleted) await delay(50);
+        return "aborted";
+      })(),
+    ]);
+    if (reply === "once" || reply === "always") {
+      writeFileSync(TITLE_TOOL_MARKER_FILE, input.content, "utf8");
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "completed", input, output: "written", title: TITLE_TOOL_MARKER_FILE, time: { start, end: Date.now() } }),
+      });
+      await streamTextReply(sessionId, assistantMessageId, ["TOOL-RAN"]);
+    } else {
+      broadcast("message.part.updated", {
+        sessionID: sessionId,
+        part: toolPart({ status: "error", input, error: "The user rejected permission to use this specific tool call.", time: { start, end: Date.now() } }),
+      });
+    }
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
+    return;
+  }
+  const reply = fakeTitleReplyFor(firstMessage);
+  const cut = reply.indexOf("\n");
+  await streamTextReply(sessionId, assistantMessageId, [reply.slice(0, cut), reply.slice(cut)]);
+  broadcast("message.updated", {
+    sessionID: sessionId,
+    info: {
+      id: assistantMessageId,
+      role: "assistant",
+      sessionID: sessionId,
+      providerID: "fake",
+      modelID: "title-model",
+      cost: FAKE_TITLE_USAGE.cost,
+      tokens: { ...FAKE_TITLE_USAGE.tokens, reasoning: 0, cache: { read: 0, write: 0 } },
+    },
+  });
 }
 
 /**
@@ -669,8 +776,33 @@ async function route(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/session") {
     const id = `ses_${randomUUID()}`;
-    sessions.set(id, { aborted: false, pendingPermission: new Map(), pendingQuestion: new Map() });
-    sendJson(res, 200, { id, directory: process.cwd() });
+    const body = await readJsonBody(req).catch(() => ({}));
+    sessions.set(id, {
+      aborted: false,
+      pendingPermission: new Map(),
+      pendingQuestion: new Map(),
+      // 2026-10-06:REPORT_SESSIONS_PREFIX 回報用的統計。
+      kind: "main",
+      parentID: typeof body.parentID === "string" ? body.parentID : undefined,
+      deleted: false,
+      abortCount: 0,
+      permissionReplies: [],
+    });
+    sendJson(res, 200, { id, directory: process.cwd(), ...(typeof body.title === "string" ? { title: body.title } : {}) });
+    return;
+  }
+
+  // 2026-10-06:`DELETE /session/{id}`(真實 opencode 1.18.7 實測回 `true`)。進行中的回合一併視為中止。
+  const deleteMatch = url.pathname.match(/^\/session\/([^/]+)$/);
+  if (req.method === "DELETE" && deleteMatch) {
+    const session = sessions.get(deleteMatch[1]);
+    if (!session) {
+      sendJson(res, 404, { name: "NotFoundError", data: { message: `Session not found: ${deleteMatch[1]}` } });
+      return;
+    }
+    session.deleted = true;
+    session.aborted = true;
+    sendJson(res, 200, true);
     return;
   }
 
@@ -753,6 +885,7 @@ async function route(req, res, url) {
       return;
     }
     session.aborted = true;
+    session.abortCount += 1;
     for (const resolve of session.pendingQuestion.values()) resolve({ kind: "abort" });
     sendJson(res, 200, true);
     return;
@@ -790,6 +923,7 @@ async function route(req, res, url) {
       const resolve = session.pendingPermission.get(requestId);
       if (resolve) {
         session.pendingPermission.delete(requestId);
+        session.permissionReplies.push(body.reply);
         resolve(body.reply);
         break;
       }

@@ -28,6 +28,7 @@ import { DiffHunkView, parseDiffResult } from "./chat/DiffHunkView.js";
 import { ToolImage, parseImageBlock } from "./chat/ToolImage.js";
 import { AskUserQuestionWidget, PendingUserDialogsDock, isQuestionToolName } from "./chat/AskUserQuestionWidget.js";
 import { ForwardMessageDialog } from "./chat/ForwardMessageDialog.js";
+import { SessionTitleHeading } from "./SessionTitle.js";
 
 /**
  * 2026-09-04(稽核修補):「沒有選中 session」時 `items` selector 的固定回傳值。
@@ -951,8 +952,9 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
     <main className="flex h-full flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
+        {/* 2026-10-06:標題是可點擊的改名入口,給它最小寬度——控制項多時讓右側那組換行,而不是把標題擠到剩一個字。 */}
+        <div className="min-w-[8rem] flex-1">
+          <SessionTitleHeading session={session} />
           <p className="truncate text-2xs text-fg-faint" title={`${agentLabel} · ${session.workingDir}`}>
             <span className="text-fg-subtle">{agentLabel}</span> · {shortenPath(session.workingDir)}
           </p>

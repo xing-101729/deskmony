@@ -20,6 +20,7 @@ import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 import { ConfirmDialogHost } from "./ui/ConfirmDialog.js";
 import { shortenPath } from "./lib/workspaces.js";
 import { translateError } from "./lib/error-i18n.js";
+import { displaySessionTitle } from "./views/SessionTitle.js";
 import {
   loadNewSessionSelection,
   reconcileSelection,
@@ -145,10 +146,11 @@ export default function App(): JSX.Element {
     setCreatingSession(true);
     setCreateError(null);
     try {
+      // 2026-10-06:不帶標題——core 用預設標題(titleSource "default"),第一則訊息送出後自動命名;
+      // 帶了標題就會被當成使用者取的名字,永遠不會自動命名。
       await createSession({
         providerId,
         workingDir,
-        title: t("app:sessionDefaultTitle", { n: sessions.length + 1 }),
         model: effectiveSelection.model || undefined,
         effort: effectiveSelection.effort || undefined,
       });
@@ -158,7 +160,7 @@ export default function App(): JSX.Element {
     } finally {
       setCreatingSession(false);
     }
-  }, [availableProviders, createSession, effectiveSelection, resolveWorkingDir, sessions.length, t]);
+  }, [availableProviders, createSession, effectiveSelection, resolveWorkingDir, t]);
 
   const handleConnected = (url: string, token: string): void => {
     client.configure(url, token);
@@ -312,7 +314,7 @@ export default function App(): JSX.Element {
       list.push({
         id: `session:${session.id}`,
         group: t("app:commands.groupSessions"),
-        title: session.title,
+        title: displaySessionTitle(session, t),
         subtitle: shortenPath(session.workingDir ?? ""),
         status: sessionStatusMeta(session.status),
         keywords: `${session.adapterType} ${session.workingDir ?? ""}`,

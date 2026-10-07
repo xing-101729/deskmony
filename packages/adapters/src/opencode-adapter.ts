@@ -4,7 +4,8 @@ import type { Readable } from "node:stream";
 import path from "node:path";
 import type { AgentEvent, AgentLaunchSpec, DialogAnswer, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, TitleGenerationRequest, TitleGenerationResult, Workspace } from "./types.js";
+import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { waitForChildExit } from "./child-process.js";
@@ -453,6 +454,9 @@ export class OpenCodeAdapter implements AgentAdapter {
       idleWaiters: [],
       sseController,
       availableCommands,
+      titleSessionIds: new Set(),
+      titleCollectors: new Map(),
+      titleAborts: new Set(),
     };
     this.sessions.set(handle.id, internal);
 
@@ -660,6 +664,8 @@ export class OpenCodeAdapter implements AgentAdapter {
       }
     }
     internal.pendingQuestions.clear();
+    // 進行中的命名臨時對話一併中止(伺服器馬上要被關掉)。
+    for (const controller of internal.titleAborts) controller.abort();
     internal.sseController.abort();
     internal.outputQueue.close();
     this.killChild(internal.child);
@@ -776,6 +782,198 @@ export class OpenCodeAdapter implements AgentAdapter {
     );
   }
 
+  /**
+   * 2026-10-06(AI 自動命名):在**同一個** opencode 伺服器上 `POST /session` 開一個臨時 session → `prompt_async` 送命名指示
+   * → 從**同一條** SSE `/event` 收集它的回覆 → `DELETE /session/{id}` 丟掉。主 session 的上下文完全不受影響。介面紀律見
+   * types.ts 的 `AgentAdapter.generateTitle()`。
+   *
+   * 事件隔離(2026-10-06 用 opencode 1.18.7 實測確認,不是讀文件猜的):臨時 session 的所有事件(`session.*`、
+   * `message.updated`、`message.part.updated/delta`、`permission.asked`……)都帶頂層 `properties.sessionID`;臨時 session
+   * 建立時**不帶** `parentID`,所以它不會被當成主 session 的 subagent 子 session(那些的權限請求會轉給主 session)。
+   * `handleEvent()` 一開頭就把 `titleSessionIds` 裡的事件整個轉給 `handleTitleEvent()`,不會走到主 session 的任何分支。
+   *
+   * 工具:opencode 沒有能可靠停用工具的做法——實測 prompt body 帶 `tools: {"*": false}` 或指定內建的 `title` agent,
+   * OpenCode 免費方案(`opencode/big-pickle`)都直接回 403「free tier can only be used from within OpenCode」。所以工具定義
+   * 留著,靠兩道防線:Deskmony 注入的設定讓每個工具都是 ask,臨時 session 的 `permission.asked` 一律當場 reject(提問一律
+   * reject),而且**一看到 tool part 就中止**這次命名(`/abort` + 丟錯 → core 退回截取首句)。實測拒絕後 tool part 變
+   * error、回合結束,工具沒有執行。
+   *
+   * 用量:臨時 session 最後一則 assistant 訊息的 `cost`/`tokens`(這次命名自己的總量)回傳給 core 計入。
+   */
+  async generateTitle(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult> {
+    const internal = this.mustGet(handle);
+    const controller = new AbortController();
+    const forwardAbort = (): void => controller.abort();
+    if (request.signal.aborted) controller.abort();
+    request.signal.addEventListener("abort", forwardAbort, { once: true });
+    internal.titleAborts.add(controller);
+    const signal = controller.signal;
+    let tempSessionId: string | undefined;
+    let finished = false;
+    try {
+      const created = await raceAbort(
+        postJson<{ id: string }>(`${internal.baseUrl}/session`, { title: "Deskmony title (temporary)" }, internal.authorization),
+        signal,
+      );
+      tempSessionId = created.id;
+      // 先登記再送 prompt:之後這個 session 的每個事件都進 handleTitleEvent()。
+      internal.titleSessionIds.add(tempSessionId);
+      const done = new Promise<TitleCollectorResult>((resolve, reject) => {
+        internal.titleCollectors.set(created.id, {
+          parts: new Map(),
+          roles: new Map(),
+          busySeen: false,
+          resolve,
+          reject,
+        });
+      });
+      done.catch(() => undefined); // 中止時沒人等它,避免 unhandled rejection。
+      const modelField = internal.modelOverride ?? parseModelString(handle.launch.model);
+      const body = { parts: [{ type: "text", text: request.prompt }], ...(modelField ? { model: modelField } : {}) };
+      const sessionUrl = `${internal.baseUrl}/session/${tempSessionId}`;
+      if (internal.promptAsyncUnsupported) {
+        // 舊版 opencode(沒有 prompt_async,見 submitPrompt()):`/message` 會阻塞到回合結束,不等它,結果一樣從 SSE 收。
+        void postJson(`${sessionUrl}/message`, body, internal.authorization).catch(() => undefined);
+      } else {
+        try {
+          await raceAbort(postJson(`${sessionUrl}/prompt_async`, body, internal.authorization), signal);
+        } catch (err) {
+          if (!isHttpNotFound(err)) throw err;
+          void postJson(`${sessionUrl}/message`, body, internal.authorization).catch(() => undefined);
+        }
+      }
+      const result = await raceAbort(done, signal);
+      finished = true;
+      return { text: result.text, ...(result.usage ? { usage: result.usage } : {}) };
+    } catch (err) {
+      if (signal.aborted) throw titleAbortedError();
+      throw err;
+    } finally {
+      request.signal.removeEventListener("abort", forwardAbort);
+      internal.titleAborts.delete(controller);
+      if (tempSessionId) {
+        internal.titleCollectors.delete(tempSessionId);
+        // id 留在 titleSessionIds:收尾之後才晚到的事件(包括權限請求)照樣被攔下、不會漏進主 session。
+        void this.discardTitleSession(internal, tempSessionId, finished);
+      }
+    }
+  }
+
+  /** 收掉命名用的臨時 session:回合還沒結束就先 `/abort`,然後 `DELETE`(不留在 opencode 的 session 清單裡)。失敗只記 log。 */
+  private async discardTitleSession(internal: InternalSession, sessionId: string, finished: boolean): Promise<void> {
+    try {
+      if (!finished) {
+        await postJson(`${internal.baseUrl}/session/${sessionId}/abort`, {}, internal.authorization).catch(() => undefined);
+      }
+      await deleteJson(`${internal.baseUrl}/session/${sessionId}`, internal.authorization);
+    } catch (err) {
+      console.warn(`[opencode-adapter] 刪除命名用臨時 session ${sessionId} 失敗(忽略): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 命名用臨時 session 的事件(見 `generateTitle()`)——**只**在這裡處理,絕不轉進主 session 的 outputQueue。
+   * 收集 assistant 的文字 part;權限請求/提問一律拒絕;出現 tool part 就中止;busy 之後回到 idle 就算結束。
+   */
+  private handleTitleEvent(internal: InternalSession, sessionId: string, evt: OpencodeEvent): void {
+    const properties = evt.properties as Record<string, unknown> | undefined;
+    // 權限與提問:就算這次命名已經收尾(collector 不在了)也照樣拒絕,不讓 opencode 卡著等。
+    if (evt.type === "permission.asked") {
+      const requestId = properties?.id as string | undefined;
+      if (requestId) {
+        console.warn(`[opencode-adapter] 命名用臨時對話要求工具權限(${String(properties?.permission ?? "?")}),已拒絕`);
+        void postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply: "reject" }, internal.authorization).catch(() => undefined);
+      }
+      this.failTitleCollector(internal, sessionId, titleToolUseError("opencode"));
+      return;
+    }
+    if (evt.type === "question.asked") {
+      const requestId = properties?.id as string | undefined;
+      if (requestId) void postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}, internal.authorization).catch(() => undefined);
+      this.failTitleCollector(internal, sessionId, titleToolUseError("opencode"));
+      return;
+    }
+    const collector = internal.titleCollectors.get(sessionId);
+    if (!collector) return;
+    switch (evt.type) {
+      case "session.status": {
+        const status = properties?.status as { type?: string } | undefined;
+        if (status?.type === "busy") collector.busySeen = true;
+        else if (status?.type === "idle") this.finishTitleCollector(internal, sessionId);
+        break;
+      }
+      case "session.idle":
+        this.finishTitleCollector(internal, sessionId);
+        break;
+      case "session.error": {
+        const error = properties?.error as { name?: string; data?: { message?: string } } | undefined;
+        if (error && error.name !== "MessageAbortedError") collector.error = error.data?.message ?? error.name ?? "unknown";
+        break;
+      }
+      case "message.updated": {
+        const info = properties?.info as
+          | { id?: string; role?: string; cost?: number; tokens?: { input?: number; output?: number }; modelID?: string; providerID?: string; error?: { name?: string; data?: { message?: string } } }
+          | undefined;
+        if (info?.id && info.role) collector.roles.set(info.id, info.role);
+        if (info?.role === "assistant") {
+          if (info.error && info.error.name !== "MessageAbortedError") collector.error = info.error.data?.message ?? info.error.name ?? "unknown";
+          if (typeof info.cost === "number" || info.tokens) {
+            collector.usage = {
+              ...(typeof info.cost === "number" ? { costAmount: info.cost, costCurrency: "USD" } : {}),
+              ...(typeof info.tokens?.input === "number" ? { inputTokens: info.tokens.input } : {}),
+              ...(typeof info.tokens?.output === "number" ? { outputTokens: info.tokens.output } : {}),
+              ...(info.providerID && info.modelID ? { model: `${info.providerID}/${info.modelID}` } : {}),
+            };
+          }
+        }
+        break;
+      }
+      case "message.part.updated": {
+        const part = properties?.part as OpencodePart | undefined;
+        if (!part) break;
+        if (part.type === "tool") {
+          this.failTitleCollector(internal, sessionId, titleToolUseError("opencode"));
+        } else if (part.type === "text") {
+          collector.parts.set(part.id, { messageID: part.messageID, text: part.text ?? "" });
+        }
+        break;
+      }
+      case "message.part.delta": {
+        const partId = properties?.partID as string | undefined;
+        const delta = properties?.delta as string | undefined;
+        const entry = partId ? collector.parts.get(partId) : undefined;
+        // 只補已知的 text part;完整文字以 part.updated 的快照為準(它最後一定會帶全文)。
+        if (properties?.field === "text" && entry && delta && !entry.text.endsWith(delta)) entry.text += delta;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  /** 臨時 session 回到 idle:組出 assistant 的文字(排除使用者自己那則命名指示的 part)交給 `generateTitle()`。 */
+  private finishTitleCollector(internal: InternalSession, sessionId: string): void {
+    const collector = internal.titleCollectors.get(sessionId);
+    if (!collector || !collector.busySeen) return;
+    internal.titleCollectors.delete(sessionId);
+    if (collector.error) {
+      collector.reject(titleAgentFailedError("opencode", collector.error));
+      return;
+    }
+    const text = [...collector.parts.values()]
+      .filter((part) => !part.messageID || collector.roles.get(part.messageID) !== "user")
+      .map((part) => part.text)
+      .join("");
+    collector.resolve({ text, usage: collector.usage });
+  }
+
+  private failTitleCollector(internal: InternalSession, sessionId: string, err: Error): void {
+    const collector = internal.titleCollectors.get(sessionId);
+    if (!collector) return;
+    internal.titleCollectors.delete(sessionId);
+    collector.reject(err);
+  }
+
   private mustGet(handle: AgentHandle): InternalSession {
     const internal = this.sessions.get(handle.id);
     if (!internal) {
@@ -848,6 +1046,14 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   private handleEvent(internal: InternalSession, evt: OpencodeEvent): void {
     const properties = evt.properties as Record<string, unknown> | undefined;
+
+    // 2026-10-06:命名用臨時 session 的事件**整個**交給 handleTitleEvent(),一個都不會走到下面主 session 的分支
+    // (見 generateTitle() 的「事件隔離」說明)。
+    const eventSessionId = properties?.sessionID;
+    if (typeof eventSessionId === "string" && internal.titleSessionIds.has(eventSessionId)) {
+      this.handleTitleEvent(internal, eventSessionId, evt);
+      return;
+    }
 
     // 2026-10-03:追蹤這個 session 底下的 **subagent 子 session**(`task` 工具會建立
     // `parentID` 指向呼叫者的子 session,實測 `session.created` 一定先於子 session 的任何事件)。
@@ -1224,6 +1430,24 @@ interface PendingPermission {
   toolCallId?: string;
 }
 
+/** 命名用臨時 session 的收集結果(見 `OpenCodeAdapter.generateTitle()`)。 */
+interface TitleCollectorResult {
+  text: string;
+  usage?: TitleGenerationResult["usage"];
+}
+
+/** 一次命名的進行中狀態:臨時 session 的 text part 與訊息角色,回到 idle 時組出文字。 */
+interface TitleCollector {
+  parts: Map<string, { messageID?: string; text: string }>;
+  roles: Map<string, string>;
+  /** 看過 busy 之後的 idle 才算這一輪結束(建立 session 時的事件不算)。 */
+  busySeen: boolean;
+  error?: string;
+  usage?: TitleGenerationResult["usage"];
+  resolve: (result: TitleCollectorResult) => void;
+  reject: (err: Error) => void;
+}
+
 /**
  * `user-dialog-request.questions` 的形狀(見 packages/shared/src/events.ts 的
  * `UserDialogRequestEventSchema` 註解)——對齊 claude-agent-sdk 的
@@ -1287,6 +1511,12 @@ interface InternalSession {
    * 失敗分支的註解),不影響一般 /message 路徑。
    */
   availableCommands: Map<string, OpencodeCommand>;
+  /** 命名用臨時 session 的 id(含已收尾的)——它們的事件一律交給 handleTitleEvent(),見 generateTitle()。 */
+  titleSessionIds: Set<string>;
+  /** 進行中的命名:臨時 session id -> 收集狀態。 */
+  titleCollectors: Map<string, TitleCollector>;
+  /** 進行中的命名臨時對話,`dispose()` 時一併中止。 */
+  titleAborts: Set<AbortController>;
 }
 
 /**
@@ -1454,7 +1684,7 @@ function waitForListeningLine(child: OpencodeChildProcess): Promise<string> {
 
 /**
  * 對 opencode 伺服器發的**每一個**請求都要帶的標頭(2026-10-03:伺服器有 basic auth,見 opencode-server-auth.ts)。
- * 這個檔案裡所有打 opencode 伺服器的 `fetch` 只有四處——waitForHealthy()、postJson()、getJson()、SSE 的 consumeEvents()——
+ * 這個檔案裡所有打 opencode 伺服器的 `fetch` 只有五處——waitForHealthy()、postJson()、getJson()、deleteJson()、SSE 的 consumeEvents()——
  * 全都經過這個函式;`authorization` 在這幾個函式都是**必填參數**,漏帶會是編譯錯誤。
  * (warnIfServerUnsecured() 刻意不帶:它就是要驗證「不帶標頭會被擋」。)
  */
@@ -1513,6 +1743,19 @@ async function postJson<T = unknown>(url: string, body: unknown, authorization: 
     );
   }
   return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/** 2026-10-06:`DELETE`(命名用臨時 session 收尾用),錯誤處理比照 postJson()。 */
+async function deleteJson(url: string, authorization: string): Promise<void> {
+  const res = await fetch(url, { method: "DELETE", headers: authHeaders(authorization) });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new DeskmonyError(
+      "opencode.requestFailed",
+      { url, status: res.status, detail: text.slice(0, 500) },
+      `DELETE ${url} 失敗(status=${res.status}): ${text.slice(0, 500)}`,
+    );
+  }
 }
 
 /** postJson()/getJson() 丟出的「伺服器回了 404」(例如舊版 opencode 沒有 `prompt_async` 路由)。 */

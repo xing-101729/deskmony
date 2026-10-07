@@ -30,12 +30,22 @@ import {
   type SessionEventEnvelope,
   type SessionPermissionMode,
   type SessionStatus,
+  type SessionTitleMethod,
+  type SessionTitleSource,
   type SlashCommandInfo,
   type UserDialogResolvedPush,
   MessageOriginSchema,
   READ_SESSION_DEFAULT_LIMIT,
   READ_SESSION_MAX_CONTENT_CHARS,
   READ_SESSION_MAX_LIMIT,
+  DEFAULT_SESSION_TITLE,
+  SESSION_TITLE_MAX_CHARS,
+  SessionTitleSourceSchema,
+  TITLE_GENERATION_TIMEOUT_MS,
+  buildTitleRequestPrompt,
+  checkManualTitle,
+  fallbackTitleFromText,
+  sanitizeGeneratedTitle,
   softwareCanUseTools,
 } from "@deskmony/shared";
 import { storedLaunchFromSpec, type AgentCatalog, type StoredLaunchInfo } from "../agents/agent-catalog.js";
@@ -154,6 +164,23 @@ interface PendingNetworkMessage {
   text: string;
   origin: MessageOrigin;
   chainId: string;
+}
+
+/**
+ * 2026-10-06(AI 自動命名):命名臨時對話的逾時。預設 `TITLE_GENERATION_TIMEOUT_MS`(60 秒);環境變數
+ * `DESKMONY_TITLE_TIMEOUT_MS` 可以覆寫——只給 e2e 用(假 agent「卡住不回」的情境不必真的等 60 秒),只有啟動 core 的人能設。
+ */
+function titleGenerationTimeoutMs(): number {
+  const raw = Number(process.env.DESKMONY_TITLE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : TITLE_GENERATION_TIMEOUT_MS;
+}
+
+/** `autoTitleSession()` 的結果(= gateway `session.autoTitle` 的回應)。 */
+export interface AutoTitleOutcome {
+  session: Session;
+  method: SessionTitleMethod;
+  /** false = 產生期間標題被別人(通常是使用者手動改名)改掉了,這次的結果沒有套用。 */
+  applied: boolean;
 }
 
 /** 一次 prompt 投遞帶的鏈/來源資訊(人類輸入只有 `chainId`;跨 session 訊息另帶 `origin` 與原始本體)。 */
@@ -487,6 +514,199 @@ export class SessionManager extends EventEmitter {
     });
   }
 
+  // ==========================================================================================
+  // 2026-10-06:session 標題——手動改名(`renameSession`)與 AI 自動命名(`autoTitleSession` 與第一則人類輸入後的
+  // 自動觸發)。標題來源三態(default/auto/user)的語意見 packages/shared/src/session-title.ts 檔頭。
+  //
+  // 自動命名**一律**用 session 自己的 agent 另開一個**臨時對話**(`AgentAdapter.generateTitle()`),絕不在主對話多插
+  // 一輪;做不到(pty、agent 不在執行中、每日成本斷路器已觸發)、逾時或失敗,一律退回「截取第一則訊息的第一行」,
+  // 錯誤只記 log,主 session 完全不受影響。命名用的回合**不**經過 consumeEvents(),所以不計入回合硬上限、訊息鏈
+  // 預算,也不寫進對話歷史;用量(adapter 拿得到時)直接計入該 session 與當日的成本 rollup。
+  // ==========================================================================================
+
+  /** 進行中的自動命名(同一個 session 同時只跑一次;第一則訊息觸發的與手動「AI 重新命名」共用)。 */
+  private readonly titleGenerations = new Map<string, Promise<AutoTitleOutcome | undefined>>();
+
+  /**
+   * 手動改名(gateway `session.rename`)。正規化與長度檢查見 `checkManualTitle()`;成功後 `titleSource = "user"`
+   * (之後 AI 絕不自動覆蓋),推播 `session-updated`。純 DB 欄位,session 不在執行中也能改。
+   */
+  async renameSession(sessionId: string, rawTitle: string): Promise<Session> {
+    const check = checkManualTitle(rawTitle);
+    if (!check.ok) {
+      if (check.reason === "empty") {
+        throw new DeskmonyError("session.titleEmpty", { sessionId }, "標題不能是空白");
+      }
+      throw new DeskmonyError(
+        "session.titleTooLong",
+        { sessionId, max: SESSION_TITLE_MAX_CHARS, length: check.length },
+        `標題最多 ${SESSION_TITLE_MAX_CHARS} 個字(目前 ${check.length} 個字)`,
+      );
+    }
+    const result = await this.db
+      .update(sessionsTable)
+      .set({ title: check.title, titleSource: "user", updatedAt: Date.now() })
+      .where(eq(sessionsTable.id, sessionId))
+      .run();
+    const session = result.changes > 0 ? await this.getSession(sessionId) : undefined;
+    if (!session) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
+    }
+    this.emit("session-updated", session);
+    return session;
+  }
+
+  /**
+   * 「AI 重新命名」(gateway `session.autoTitle`):使用者對既有 session 手動觸發自動命名——**即使**目前標題是使用者
+   * 自己取的(這是使用者明確的要求)。等到產生完才回傳;產生期間使用者若又手動改名,以使用者的為準(`applied:false`)。
+   * 對話裡還沒有任何文字訊息 → `session.autoTitleNoContent`。
+   */
+  async autoTitleSession(sessionId: string): Promise<AutoTitleOutcome> {
+    const session = await this.getSession(sessionId);
+    if (!session) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
+    }
+    // 同一個 session 已經在命名(例如第一則訊息剛觸發的那次):等它跑完,再照使用者的要求重新產生一次。
+    await this.titleGenerations.get(sessionId)?.catch(() => undefined);
+    const outcome = await this.startTitleGeneration(sessionId, "manual");
+    if (!outcome) {
+      throw new DeskmonyError("session.autoTitleNoContent", { sessionId }, "這個對話還沒有任何文字訊息,無法自動命名");
+    }
+    return outcome;
+  }
+
+  /**
+   * 第一則人類輸入送出後(`sendPrompt()` 成功之後呼叫):標題還是 `default` 就在背景自動命名。fire-and-forget——
+   * 任何失敗只記 log,不影響這次 `sendPrompt()` 的結果,也不影響主 session。
+   */
+  private maybeAutoTitleAfterHumanPrompt(sessionId: string): void {
+    if (this.titleGenerations.has(sessionId)) return;
+    void this.startTitleGeneration(sessionId, "first-prompt").catch((err: unknown) => {
+      console.error(`[session-title] session ${sessionId} 自動命名失敗(不影響對話): ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
+  /** 同步登記進 `titleGenerations`(同一個 session 不會同時跑兩次),結束時移除。 */
+  private startTitleGeneration(sessionId: string, trigger: "first-prompt" | "manual"): Promise<AutoTitleOutcome | undefined> {
+    const run = this.runTitleGeneration(sessionId, trigger).finally(() => {
+      if (this.titleGenerations.get(sessionId) === run) this.titleGenerations.delete(sessionId);
+    });
+    this.titleGenerations.set(sessionId, run);
+    return run;
+  }
+
+  /**
+   * 產生並套用標題。回傳 undefined = 沒做任何事(自動觸發時標題已不是 default,或對話裡沒有可用的文字)。
+   *
+   * 套用是 **compare-and-set**:只有 DB 裡的 (title, titleSource) 仍等於開始時讀到的那組才寫入——產生期間(最多約
+   * 60 秒)使用者手動改名、或另一個 client 改過,這次的結果就作廢,不覆蓋使用者的名字。
+   */
+  private async runTitleGeneration(sessionId: string, trigger: "first-prompt" | "manual"): Promise<AutoTitleOutcome | undefined> {
+    const before = await this.getSession(sessionId);
+    if (!before) return undefined;
+    if (trigger === "first-prompt" && before.titleSource !== "default") return undefined;
+    const basis = await this.titleBasis(sessionId);
+    if (!basis) return undefined;
+
+    const generated = await this.generateTitleText(sessionId, basis);
+    if (!generated) return undefined;
+
+    const result = await this.db
+      .update(sessionsTable)
+      .set({ title: generated.title, titleSource: "auto", updatedAt: Date.now() })
+      .where(
+        and(
+          eq(sessionsTable.id, sessionId),
+          eq(sessionsTable.title, before.title),
+          eq(sessionsTable.titleSource, before.titleSource),
+        ),
+      )
+      .run();
+    const applied = result.changes > 0;
+    const after = await this.getSession(sessionId);
+    if (!after) return undefined; // 產生期間 session 被刪掉了
+    if (applied) {
+      // 不印標題本身:它可能是使用者第一則訊息的原文(截取首句)。
+      console.log(`[session-title] session ${sessionId} 已自動命名(${generated.method},${[...generated.title].length} 字)`);
+      this.emit("session-updated", after);
+    } else {
+      console.log(`[session-title] session ${sessionId} 的標題在命名期間被改過,這次的結果(${generated.method})不套用`);
+    }
+    return { session: after, method: generated.method, applied };
+  }
+
+  /**
+   * 命名的依據:第一則**人類**輸入的 user 訊息(沒有的話退而用第一則 user 訊息,例如別的 session 送來的),以及它之後
+   * agent 的第一則回覆。都沒有可用的文字(例如只有附件)→ undefined。
+   */
+  private async titleBasis(sessionId: string): Promise<{ firstMessage: string; firstReply?: string } | undefined> {
+    const userRows = await this.db
+      .select({ content: messagesTable.content, origin: messagesTable.origin, createdAt: messagesTable.createdAt })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.sessionId, sessionId), eq(messagesTable.role, "user")))
+      .orderBy(messagesTable.createdAt, sql`rowid`)
+      .limit(20)
+      .all();
+    const withText = userRows.filter((row) => fallbackTitleFromText(row.content) !== undefined);
+    const first = withText.find((row) => row.origin === null) ?? withText[0];
+    if (!first) return undefined;
+    const replyRows = await this.db
+      .select({ content: messagesTable.content })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.sessionId, sessionId),
+          eq(messagesTable.role, "assistant"),
+          sql`${messagesTable.createdAt} >= ${first.createdAt}`,
+        ),
+      )
+      .orderBy(messagesTable.createdAt, sql`rowid`)
+      .limit(1)
+      .all();
+    return { firstMessage: first.content, ...(replyRows[0] ? { firstReply: replyRows[0].content } : {}) };
+  }
+
+  /**
+   * 先試 session 自己的 agent(臨時對話,`AgentAdapter.generateTitle()`),拿不到可用的標題就退回截取第一則訊息的
+   * 第一行。不嘗試 agent 的情況:adapter 沒有這個能力(pty)、session 不在執行中、每日成本斷路器已觸發(不再花錢)。
+   */
+  private async generateTitleText(
+    sessionId: string,
+    basis: { firstMessage: string; firstReply?: string },
+  ): Promise<{ title: string; method: SessionTitleMethod } | undefined> {
+    const runtime = this.runtime.get(sessionId);
+    const budget = runtime?.adapter.generateTitle ? await this.costGovernor.checkSendPromptAllowed() : { allowed: false };
+    if (runtime?.adapter.generateTitle && budget.allowed) {
+      const controller = new AbortController();
+      const timeoutMs = titleGenerationTimeoutMs();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const startedAt = Date.now();
+      try {
+        const result = await runtime.adapter.generateTitle(runtime.handle, {
+          prompt: buildTitleRequestPrompt(basis),
+          signal: controller.signal,
+        });
+        if (result.usage) {
+          void this.costGovernor.recordStandaloneUsage(sessionId, result.usage, Date.now()).catch((err: unknown) => {
+            console.error(`[session-title] 記錄命名用量(${sessionId})失敗: ${String(err)}`);
+          });
+        }
+        const title = sanitizeGeneratedTitle(result.text);
+        if (title) return { title, method: "agent" };
+        console.warn(`[session-title] session ${sessionId} 的 agent 回了空白標題,退回截取第一則訊息`);
+      } catch (err) {
+        const reason = controller.signal.aborted ? `逾時(${timeoutMs}ms)` : err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[session-title] session ${sessionId} 用 agent 產生標題失敗(${Date.now() - startedAt}ms),退回截取第一則訊息: ${reason}`,
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    const fallback = fallbackTitleFromText(basis.firstMessage);
+    return fallback ? { title: fallback, method: "fallback" } : undefined;
+  }
+
   /**
    * 真正 spawn 一個新 adapter handle、寫 DB、登記 runtime 的共用路徑——`createSession()`、
    * `createSessionFromAgent()`、`takeoverWithSummary()` 都走這裡。
@@ -494,7 +714,7 @@ export class SessionManager extends EventEmitter {
   private async spawnNewSession(
     spec: AgentLaunchSpec,
     label: string,
-    opts: { workingDir: string; title?: string; parentSessionId?: string },
+    opts: { workingDir: string; title?: string; titleSource?: SessionTitleSource; parentSessionId?: string },
   ): Promise<Session> {
     // S8(agent-lifecycle)L4 §3.2:provider env 合併 + `.deskmony/notes/` 確保存在 +
     // systemPrompt 附加「指路」段落,三件事都收斂到 `prepareSpawnSpec()`。
@@ -505,9 +725,12 @@ export class SessionManager extends EventEmitter {
 
     const providerId = spec.providerId ?? spec.software;
     const now = Date.now();
+    // 2026-10-06:明確給了(非空白)標題 → `user`(不自動命名);沒給 → 預設標題 + `default`(第一則人類輸入後自動命名)。
+    const explicitTitle = opts.title !== undefined && opts.title.trim().length > 0 ? opts.title : undefined;
     const session: Session = {
       id: handle.id,
-      title: opts.title ?? "新對話",
+      title: explicitTitle ?? DEFAULT_SESSION_TITLE,
+      titleSource: opts.titleSource ?? (explicitTitle !== undefined ? "user" : "default"),
       providerId,
       adapterType: spec.software,
       status: "idle",
@@ -566,7 +789,10 @@ export class SessionManager extends EventEmitter {
    *   - 跨 session 投遞:沿用訊息自己帶的 `chainId` 與 `origin`(只有 core 內部能組出來)。
    */
   async sendPrompt(sessionId: string, prompt: PromptInput): Promise<void> {
-    return this.sendPromptSerialized(sessionId, prompt, { chainId: randomUUID() });
+    await this.sendPromptSerialized(sessionId, prompt, { chainId: randomUUID() });
+    // 2026-10-06:人類輸入送出成功之後,標題還是預設的就在背景自動命名(見 `maybeAutoTitleAfterHumanPrompt()`)。
+    // 只有這個入口(人類輸入)會觸發——跨 session 投遞走 `deliverNetworkMessage()`,不經過這裡。
+    this.maybeAutoTitleAfterHumanPrompt(sessionId);
   }
 
   private async sendPromptSerialized(sessionId: string, prompt: PromptInput, delivery: PromptDelivery): Promise<void> {
@@ -1105,6 +1331,8 @@ export class SessionManager extends EventEmitter {
 
     const created = await this.spawnNewSession(spec, label, {
       title: input.title ?? `「${caller.title}」開的 session`,
+      // 2026-10-06:agent 用 create_session 開的 session 視為「已命名」,不自動命名(使用者仍可手動改名或按 AI 重新命名)。
+      titleSource: "user",
       workingDir: input.workingDir ?? caller.workingDir,
       parentSessionId: caller.id,
     });
@@ -2048,9 +2276,13 @@ function truncateForNetwork(content: string): { content: string; truncated: bool
 }
 
 function rowToSession(row: typeof sessionsTable.$inferSelect): Session {
+  // 啟動遷移(packages/db/src/client.ts 的 ensureSessionsTitleSourceColumn())之後一律有值;萬一是 NULL 或不認得的值,
+  // 用同一條回填規則推導(預設標題 → default,其他 → user)。
+  const parsedTitleSource = SessionTitleSourceSchema.safeParse(row.titleSource);
   return {
     id: row.id,
     title: row.title,
+    titleSource: parsedTitleSource.success ? parsedTitleSource.data : row.title === DEFAULT_SESSION_TITLE ? "default" : "user",
     // 啟動時的回填遷移之後 provider_id 一律非 NULL;型別上仍是 nullable,保險起見給 legacy-unknown。
     providerId: row.providerId ?? "legacy-unknown",
     adapterType: row.adapterType as Session["adapterType"],
@@ -2072,6 +2304,7 @@ function sessionToRow(session: Session, launch: StoredLaunchInfo): typeof sessio
   return {
     id: session.id,
     title: session.title,
+    titleSource: session.titleSource,
     // `agent_profile_id` 在既有 DB 是 NOT NULL,無法改約束,新 session 寫入 providerId 當值(見 schema.ts 的
     // legacyAgentProfileId 註解);真正的資料在 provider_id/launch_command/launch_args。
     legacyAgentProfileId: session.providerId,

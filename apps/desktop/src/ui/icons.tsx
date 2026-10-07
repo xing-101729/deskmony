@@ -33,7 +33,9 @@ export type IconName =
   | "menu"
   | "message"
   | "moon"
+  | "more"
   | "pause"
+  | "pencil"
   | "play"
   | "plus"
   | "refresh"
@@ -157,10 +159,23 @@ const PATHS: Record<IconName, JSX.Element> = {
   ),
   message: <path d="M20 12.5c0 3.9-3.6 7-8 7-.9 0-1.8-.1-2.6-.4L5 21l1.2-3.2A6.6 6.6 0 0 1 4 12.5c0-3.9 3.6-7 8-7s8 3.1 8 7Z" />,
   moon: <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" />,
+  more: (
+    <>
+      <circle cx="6" cy="12" r="1.2" />
+      <circle cx="12" cy="12" r="1.2" />
+      <circle cx="18" cy="12" r="1.2" />
+    </>
+  ),
   pause: (
     <>
       <rect x="7" y="5" width="3.5" height="14" rx="1" />
       <rect x="13.5" y="5" width="3.5" height="14" rx="1" />
+    </>
+  ),
+  pencil: (
+    <>
+      <path d="M15.5 4.5 19.5 8.5 8.5 19.5H4.5V15.5L15.5 4.5Z" />
+      <path d="m13 7 4 4" />
     </>
   ),
   play: <path d="M8 5.5v13l11-6.5-11-6.5Z" />,

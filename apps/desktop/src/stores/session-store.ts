@@ -27,6 +27,7 @@ import {
   type SessionEventEnvelope,
   type SessionMessagePush,
   type SessionPermissionMode,
+  type SessionTitleMethod,
   type SlashCommandInfo,
   type UserDialogRequestEvent,
   type UserDialogResolvedPush,
@@ -47,10 +48,12 @@ import {
   PolicyRemoveRuleResultSchema,
   resolveCapabilitySupport,
   resolveProviders,
+  SessionAutoTitleResultSchema,
   SessionCreateResultSchema,
   SessionGetSlashCommandsResultSchema,
   SessionHistoryResultSchema,
   SessionListResultSchema,
+  SessionRenameResultSchema,
   SessionSetEffortResultSchema,
   SessionSetModelResultSchema,
   SessionSetPermissionModeResultSchema,
@@ -263,6 +266,8 @@ interface SessionStoreState {
    * 更新維持同步(比照 `sessions` 陣列的既有模式)。
    */
   policyRules: PolicyRule[];
+  /** 2026-10-06:正在「AI 重新命名」的 session(側欄與對話標題列共用,顯示進行中狀態、避免重複觸發)。 */
+  titleGenerating: Record<string, true>;
 
   connect: () => void;
   refreshSessions: () => Promise<void>;
@@ -287,6 +292,16 @@ interface SessionStoreState {
    * 打架或造成畫面閃爍。
    */
   deleteSession: (sessionId: string) => Promise<void>;
+  /**
+   * 2026-10-06:手動改名(`session.rename`)。成功後立即更新本地 sessions(稍後抵達的 "session-updated" 推播內容相同);
+   * 失敗(空白、超過長度上限、session 不存在)原樣丟錯,呼叫端顯示。
+   */
+  renameSession: (sessionId: string, title: string) => Promise<void>;
+  /**
+   * 2026-10-06:「AI 重新命名」(`session.autoTitle`)——用 session 自己的 agent 在臨時對話裡產生標題,做不到就退回截取
+   * 第一則訊息。最多約 60 秒;期間 `titleGenerating[sessionId]` 為 true。回傳實際用的方式與是否套用。
+   */
+  autoTitleSession: (sessionId: string) => Promise<{ method: SessionTitleMethod; applied: boolean }>;
   /**
    * 使用者手動從某個 session 底下開一個新 session(側欄的「在這個 session 底下開新 session」對話框,與側欄
    * 「新對話」同一組 agent/model 選單)。2026-10-02(P3):呼叫 `session.create`(帶 `parentSessionId`,工作資料夾沿用
@@ -819,6 +834,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     isRemoteConnection: false,
   },
   policyRules: [],
+  titleGenerating: {},
 
   connect: () => {
     client.onStatus((status) => set({ status }));
@@ -1190,6 +1206,29 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       if (next) {
         await get().selectSession(next.id);
       }
+    }
+  },
+
+  renameSession: async (sessionId, title) => {
+    const raw = await client.call("session.rename", { sessionId, title });
+    const { session } = SessionRenameResultSchema.parse(raw);
+    set((state) => ({ sessions: state.sessions.map((s) => (s.id === session.id ? session : s)) }));
+  },
+
+  autoTitleSession: async (sessionId) => {
+    if (get().titleGenerating[sessionId]) return { method: "agent", applied: false };
+    set((state) => ({ titleGenerating: { ...state.titleGenerating, [sessionId]: true } }));
+    try {
+      const raw = await client.call("session.autoTitle", { sessionId });
+      const { session, method, applied } = SessionAutoTitleResultSchema.parse(raw);
+      set((state) => ({ sessions: state.sessions.map((s) => (s.id === session.id ? session : s)) }));
+      return { method, applied };
+    } finally {
+      set((state) => {
+        const titleGenerating = { ...state.titleGenerating };
+        delete titleGenerating[sessionId];
+        return { titleGenerating };
+      });
     }
   },
 

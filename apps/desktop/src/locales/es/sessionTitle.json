@@ -1,0 +1,11 @@
+{
+  "untitled": "Nueva conversación",
+  "editorAriaLabel": "Título de la conversación",
+  "menuLabel": "Opciones de la conversación",
+  "rename": "Cambiar nombre",
+  "autoTitle": "Renombrar con IA",
+  "autoTitleRunning": "Nombrando con IA…",
+  "autoTitleHint": "Renombrar con IA: el agente de esta conversación sugiere un título corto según su contenido (no se agrega nada a la conversación)",
+  "clickToRename": "Haz clic para cambiar el nombre",
+  "doubleClickToRename": "Doble clic para cambiar el nombre"
+}

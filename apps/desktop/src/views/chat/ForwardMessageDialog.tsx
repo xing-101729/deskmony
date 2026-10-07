@@ -8,6 +8,7 @@ import { Field, Select, Textarea } from "../../ui/Field.js";
 import { Alert } from "../../ui/Feedback.js";
 import { sessionStatusMeta } from "../../ui/status.js";
 import { translateError } from "../../lib/error-i18n.js";
+import { displaySessionTitle } from "../SessionTitle.js";
 
 /**
  * ForwardMessageDialog.tsx(2026-10-02,P3「session 網路」新增,見
@@ -93,7 +94,7 @@ export function ForwardMessageDialog({
               <option value="">{t("chat:forward.targetPlaceholder")}</option>
               {targets.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.title} · {providerLabelOf(s.providerId, detectedAgents, providerPrefs)} · {sessionStatusMeta(s.status).label}
+                  {displaySessionTitle(s, t)} · {providerLabelOf(s.providerId, detectedAgents, providerPrefs)} · {sessionStatusMeta(s.status).label}
                 </option>
               ))}
             </Select>

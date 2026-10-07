@@ -7,7 +7,6 @@
     "message": "前回正常に終了しなかったため、<strong>{{count}}</strong> 件の session に人による仕分け(続行 / 引き継ぎ / 放棄)が必要です",
     "action": "仕分けを開始"
   },
-  "sessionDefaultTitle": "会話 {{n}}",
   "commands": {
     "groupActions": "アクション",
     "groupSessions": "会話",

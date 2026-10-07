@@ -98,6 +98,44 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
   不會被熔斷擋下。
 - session 底下仍可手動開新 session(巢狀顯示),走的是一般的建立流程。
 
+### 1.5 Session 標題:手動改名與 AI 自動命名(2026-10-06)
+
+- **手動改名**:側欄雙擊標題,或「⋯」選單/右鍵選單的「重新命名」;對話(或終端)標題列點一下標題。都是
+  就地編輯:Enter 儲存、Esc 取消、點別處也算儲存。gateway 是 `session.rename({sessionId, title})`:換行/控制字元
+  換成空白、去頭尾空白後必須是 1–100 個字(以 Unicode code point 計),否則回 `session.titleEmpty` /
+  `session.titleTooLong`;成功後推播 `session-updated`。session 已關閉/中斷也能改(純 DB 欄位)。
+- **標題來源** `titleSource`:`default`(還是預設的「新對話」——桌面端依介面語言顯示)、`auto`(自動命名的結果)、
+  `user`(使用者改過,或建立時就明確給了標題)。**`user` 之後 AI 絕不自動覆蓋。** `session.create` 明確帶了
+  (非空白)標題——例如在某個 session 底下開新 session 時填了標題——或由 agent 用 `create_session` 開的 session,
+  一律是 `user`;桌面端側欄的「新對話」與 CLI 都不帶標題(桌面端過去會帶「對話 N」這種佔位標題,已拿掉),
+  所以會自動命名。既有資料庫在啟動時冪等補上 `title_source` 欄位:標題是「新對話」的回填成 `default`,其他一律
+  `user`。
+- **AI 自動命名**:第一則**人類**輸入送出後(標題還是 `default` 時),在背景用**這個 session 自己的 agent** 另開一個
+  **臨時對話**產生標題(依使用者語言、約 30 字內),完成就丟棄——**主對話不會多一輪**,上下文、歷史一個字都不會多。
+  側欄「⋯」選單與標題列的 ✦ 按鈕是「AI 重新命名」(gateway `session.autoTitle`),可以對既有 session 手動觸發
+  (即使標題是自己取的);產生期間使用者又手動改名,以使用者的為準(compare-and-set,結果作廢)。
+- **各 agent 的命名方式**(2026-10-06 本機實測):
+
+  | Agent | 臨時對話怎麼開 | 工具/權限 |
+  |---|---|---|
+  | Claude Code(內嵌 SDK) | 另跑一次性的 SDK `query()`:同一個 model、同一份 sanitized 環境;純字串系統提示取代 Claude Code 預設提示、`settingSources: []`、`persistSession: false`(不寫 `~/.claude/projects/`)、`maxTurns: 1`、`effort: "low"` | `tools: []` + `mcpServers: {}` + `strictMcpConfig`,`canUseTool` 一律 deny;出現 `tool_use` 就中止 |
+  | OpenCode(HTTP) | 同一個 `opencode serve` 上 `POST /session`(不帶 `parentID`)→ `prompt_async` → 從同一條 SSE 收集該 session 的回覆 → `DELETE /session/{id}` | 該 session 的 `permission.asked`/`question.asked` 一律當場 reject,出現 tool part 就 `/abort` 並中止。(OpenCode 免費方案在 prompt 帶 `tools` 停用或指定內建 `title` agent 時都回 403,所以只能靠拒絕權限) |
+  | OpenCode(ACP)、Codex、Gemini | 同一條 ACP 連線 `session/new`(不掛 Deskmony 的 MCP 工具)→ prompt → 收集文字 → 有宣告就 `session/close`、`session/delete` | 該 session 的 `session/request_permission` 一律拒絕,出現 `tool_call` 就 `session/cancel` 並中止 |
+  | PTY(Claude Code CLI、Aider) | 沒有「另開一個對話」的方法 | —— 直接退回截取首句 |
+
+- **一律退回「截取首句」**:agent 不支援、session 不在執行中、每日成本斷路器已觸發、臨時對話逾時(60 秒)、拒答或出錯、
+  回了空白——都改用第一則訊息的第一個非空白行(去掉 markdown,截到 30 字)。錯誤只記 log,**絕不影響主 session**。
+- 命名用的回合不經過主 session 的事件迴圈:不計入回合硬上限與訊息鏈預算、不寫進對話歷史。拿得到用量的後端
+  (Claude SDK 的 result、OpenCode assistant 訊息的 cost/tokens、ACP 的 `usage_update.cost`)會把**這次臨時對話自己的**
+  用量直接加進該 session 與當日的成本 rollup(每日 kill-switch 一樣算得到);桌面端對話標題列即時顯示的用量徽章只反映
+  主對話。
+- 2026-10-06 本機以真實 agent 實測過臨時對話這條路:Claude Code(內嵌 SDK,預設 model)、OpenCode(HTTP 與 ACP,
+  `opencode/big-pickle`)、Codex(codex-acp 1.4.0)都由 agent 產生標題,主對話歷史只有一問一答;Gemini 本機沒有安裝,
+  沒有實測(走同一個 ACP adapter)。
+- **已知限制**:`opencode acp`(1.18.7)宣告支援 `session/close` 但沒有 `session/delete`——臨時 session 會留在 opencode
+  自己的 session 清單裡(Deskmony 這邊已關閉、丟棄,不影響任何對話)。臨時對話與主對話同時進行,慢的免費模型
+  命名可能要二、三十秒。
+
 ## 2. 多後端 Adapter,一套介面
 
 | Provider | 對接方式 | 能力層級 |
@@ -256,6 +294,7 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
 - **Slash command**:輸入 `/` 叫出後端原生支援的指令清單(claude-agent-sdk、
   ACP、OpenCode 三種來源都支援,清單即時更新)。
 - **Command Palette**(`Ctrl+K`):快速搜尋與執行指令。
+- **Session 標題**:就地改名、第一則訊息後由 session 自己的 agent 在臨時對話裡自動命名、「AI 重新命名」(見 1.5)。
 - 對話中可即時切換 model 與 effort(思考程度)——依後端能力優雅降級,不支援
   的後端會得到明確錯誤而不是靜默失敗。
 
@@ -302,7 +341,8 @@ session、agent、model 等技術詞)依詞彙表刻意保留原文,不強行本
   `agent_profiles` 只在啟動回填舊 session 時被讀取),冪等遷移
   (`CREATE TABLE IF NOT EXISTS` + 逐欄位 `ensure` 函式,不需要版本化 migration 系統)。
 - session 自帶 provider 與啟動指令(`provider_id` / `launch_command` /
-  `launch_args`,不存 env);`messages.origin` 記錄跨 session 訊息的來源。
+  `launch_args`,不存 env);`messages.origin` 記錄跨 session 訊息的來源;
+  `sessions.title_source` 記錄標題來源(見 1.5)。
 - `enforcement_audit` 是系統裡唯一 append-only 的表:只記權限決策(含自動
   放行)、三斷路器熔斷、啟動對帳、真.無限制切換、允許清單變更——供事後
   稽核與除錯,**不是** event sourcing,不記 agent 輸出,不能拿來重建狀態。

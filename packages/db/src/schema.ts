@@ -18,6 +18,12 @@ export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
   title: text("title").notNull().default("新對話"),
   /**
+   * 2026-10-06:標題來源 `"default" | "auto" | "user"`(見 packages/shared/src/session.ts 的 `SessionTitleSourceSchema`)。
+   * nullable 只是為了讓 `ALTER TABLE ADD COLUMN` 對舊列合法——啟動時 client.ts 的 `ensureSessionsTitleSourceColumn()`
+   * 冪等補欄位並回填(標題是「新對話」→ default,其他 → user),新 session 一律寫入值。
+   */
+  titleSource: text("title_source"),
+  /**
    * 舊欄位(2026-10-02 P2 起不再是 profile id,原名 `agentProfileId`):`agent_profile_id` 在
    * 既有 DB 裡是 `NOT NULL`,SQLite 不能直接改約束,所以欄位保留——**新 session 寫入
    * `providerId` 當值**(只為滿足約束,沒有任何程式碼讀它);舊 session 這欄仍是當年的
