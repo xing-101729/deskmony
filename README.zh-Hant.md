@@ -160,8 +160,8 @@ flowchart TB
 | Adapter | 對接方式 | 目前涵蓋的後端 | 能力等級 |
 |---|---|---|---|
 | `ClaudeAgentSdkAdapter` | Claude Agent SDK,程式內嵌 | Claude Code | 最深 —— hooks、in-process session 工具、細粒度權限事件、對話中換 model 與 effort |
-| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件——官方 `codex` 執行檔本身不原生講 ACP)、其他 ACP-native agent | 結構化事件 |
-| `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用 |
+| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件——官方 `codex` 執行檔本身不原生講 ACP)、其他 ACP-native agent | 結構化事件;agent 有提供時可換 model 與 effort |
+| `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用;可換 model 與 effort(variant) |
 | `GenericPtyAdapter` | 原始 `node-pty` 直通 | Claude Code CLI、Aider、任意互動式 CLI | **保底 —— 沒有權限事件** |
 
 使用者看到的那一層是七項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,session 工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY。手動輸入 command 的那一項(`custom-pty`)已於 2026-10-02 移除:session 只能從 Deskmony 自己偵測到的 agent 開出來,gateway 上也沒有任何能新增 command 的入口。
@@ -175,7 +175,8 @@ flowchart TB
 不再有 profile。`AgentCatalog`(`apps/core/src/agents/`)是「哪些 agent 可以開 session」的唯一權威:
 
 - **偵測。** core 啟動時在背景掃描目錄裡的 agent(不會卡住啟動);側欄或設定裡的「重新偵測」會重新掃描。設定介面仍然能停用某個 agent、調整順序、挑要開放的 model、設定各 agent 的環境變數 —— API key 就放在那裡。
-- **開 session** 就是 `session.create`:帶一個 agent(`providerId`)、選填的 model 與 effort(effort 只對 Claude Agent SDK 有意義)、一個工作資料夾。桌面側欄有這四個選單加上「新對話」鈕;CLI 用 `--agent <providerId>`(預設 `claude-agent-sdk`)、`--model`、`--effort`。偵測不到任何 agent 時,側欄會說明並提供重新偵測。
+- **開 session** 就是 `session.create`:帶一個 agent(`providerId`)、選填的 model 與 effort、一個工作資料夾。桌面側欄有這四個選單加上「新對話」鈕;CLI 用 `--agent <providerId>`(預設 `claude-agent-sdk`)、`--model`、`--effort`。偵測不到任何 agent 時,側欄會說明並提供重新偵測。
+- **model 與思考程度向 agent 本身查詢**,不寫死清單,UI 只顯示 agent 真的提供的選項。Claude 是固定的 5 級(Claude Code CLI 在啟動時帶 `--model`/`--effort`);ACP agent(Codex、Gemini、OpenCode ACP)在 `session/new` 的 config options 回報(`model` / `thought_level` 類別),以 `session/set_config_option` 切換;OpenCode 的思考程度就是 model 的 *variant*(例如 `low`/`high`),從 `opencode models --verbose` 與 `/config/providers` 讀取,隨每則訊息送出。思考程度的值由各 agent 定義。ACP agent 要等 session 開起來才知道有哪些選項,所以在對話標題列選;Deskmony 會記住每個 agent 上次的選擇,下次建立時自動套用(agent 這次不提供就略過)。agent 不提供的值一律回明確錯誤,絕不靜默忽略。
 - **session 自帶啟動資訊**(它的 provider,以及走 CLI 的那幾種要用的 command 與參數),所以重啟後續接它不依賴其他東西;若該 agent 已經偵測不到,就改用 session 存下來的 command。這次改版之前建立的 session,會在 core 第一次啟動時依它們原本的 profile 回填;舊的 `agent_profiles` 表只會被讀取、絕不修改。
 - 每個 session 一律從 `always-ask` 開始。切到 auto/YOLO 仍然是逐 session 的操作,跟以前一樣。
 
