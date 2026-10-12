@@ -230,8 +230,8 @@ export class AcpAdapter implements AgentAdapter {
       throw err;
     }
     // 2026-09-04(稽核修補):登記 pid,讓 core 若非正常終止,下次啟動時能回收
-    // 這個孤兒。見 packages/adapters/src/child-registry.ts。
-    registerChild(child.pid, `acp:${command}`);
+    // 這個孤兒。見 packages/adapters/src/child-registry.ts。2026-10-12:非同步登記,不 await。
+    void registerChild(child.pid, `acp:${command}`, () => child.exitCode !== null || child.signalCode !== null);
 
     // child 啟動失敗(command 找不到等)會觸發 "error" 而不是 reject 某個
     // promise;把它轉成一個會 reject 的 promise,跟 initialize/newSession

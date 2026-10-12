@@ -127,8 +127,6 @@ export class GenericPtyAdapter implements AgentAdapter {
         rows: ptyConfig.rows ?? 24,
         name: "xterm-color",
       });
-      // 2026-09-04(稽核修補):見 child-registry.ts。
-      registerChild(ptyProcess.pid, `pty:${ptyConfig.command}`);
     } catch (err) {
       throw new DeskmonyError(
         "adapterProcess.spawnFailed",
@@ -162,6 +160,12 @@ export class GenericPtyAdapter implements AgentAdapter {
       }
       outputQueue.close();
     });
+
+    // 2026-09-04(稽核修補):見 child-registry.ts。2026-10-12:非同步登記,不 await;
+    // 排在 onExit 掛上之後才能用 `internal.exited` 回報是否已結束 —— 仍與 spawn 在
+    // 同一個同步區段,中間沒有處理任何事件。node-pty 的 onExit 比行程真正結束晚
+    // 至少 1 秒,這個旗標因此有一段空窗,見 child-registry.ts「登記不能卡住事件迴圈」。
+    void registerChild(ptyProcess.pid, `pty:${ptyConfig.command}`, () => internal.exited);
 
     return handle;
   }

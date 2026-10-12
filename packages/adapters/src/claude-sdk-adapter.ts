@@ -208,8 +208,12 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
           signal: spawnOptions.signal,
           windowsHide: true,
         });
-        // 2026-09-04(稽核修補):見 child-registry.ts。
-        registerChild(spawned.pid, `claude-agent-sdk:${spawnOptions.command}`);
+        // 2026-09-04(稽核修補):見 child-registry.ts。2026-10-12:非同步登記,不 await。
+        void registerChild(
+          spawned.pid,
+          `claude-agent-sdk:${spawnOptions.command}`,
+          () => spawned.exitCode !== null || spawned.signalCode !== null,
+        );
         // SDK 內建的 spawn 會自己讀掉 stderr(拿來組錯誤訊息的 tail);換成自訂
         // spawner 之後沒有人讀它,pipe 緩衝區(預設 64KB)填滿就會**卡住**
         // 子程序的寫入 —— 這裡必須自己排掉。內容轉給 console.error,與

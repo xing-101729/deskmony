@@ -317,8 +317,8 @@ export class OpenCodeAdapter implements AgentAdapter {
       revokeBridgeToken();
       throw err;
     }
-    // 2026-09-04(稽核修補):見 child-registry.ts。
-    registerChild(child.pid, `opencode:${command}`);
+    // 2026-09-04(稽核修補):見 child-registry.ts。2026-10-12:非同步登記,不 await。
+    void registerChild(child.pid, `opencode:${command}`, () => child.exitCode !== null || child.signalCode !== null);
 
     const spawnFailure = new Promise<never>((_, reject) => {
       child.once("error", (err) => {
