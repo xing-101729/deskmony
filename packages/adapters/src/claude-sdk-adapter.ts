@@ -587,7 +587,11 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
           signal: spawnOptions.signal,
           windowsHide: true,
         });
-        registerChild(spawned.pid, `claude-agent-sdk-title:${spawnOptions.command}`);
+        void registerChild(
+          spawned.pid,
+          `claude-agent-sdk-title:${spawnOptions.command}`,
+          () => spawned.exitCode !== null || spawned.signalCode !== null,
+        );
         // 理由同 spawn():自訂 spawner 之後沒有人讀 stderr,不排掉會把子程序卡住。
         spawned.stderr?.on("data", (chunk: Buffer) => {
           const text = chunk.toString().trimEnd();
