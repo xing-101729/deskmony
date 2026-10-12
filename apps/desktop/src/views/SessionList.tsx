@@ -11,6 +11,7 @@ import { Field, Input, Select, Textarea } from "../ui/Field.js";
 import { StatusDot, Meta } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
 import { Dialog } from "../ui/Dialog.js";
+import { confirmDialog } from "../ui/ConfirmDialog.js";
 import { sessionStatusMeta, softwareLabel } from "../ui/status.js";
 import { MOD_LABEL } from "../ui/hotkeys.js";
 import type { ThemePreference, ResolvedTheme } from "../ui/theme.js";
@@ -168,26 +169,38 @@ export function SessionList({
   }, [selectedProfileId]);
 
   /**
-   * 刪除對話:原生 `confirm()` 二次確認(既有作法維持不變)——低頻、不可逆但
-   * 影響範圍單一的操作,原生確認框已足夠。`stopPropagation()` 避免同時觸發
-   * 外層的 selectSession()。
+   * 刪除對話:二次確認。用 app 內的 `confirmDialog()`,不用原生 `confirm()`——後者在
+   * Windows 上關掉之後整個視窗收不到鍵盤,要切窗才恢復(見 ui/ConfirmDialog.tsx)。
+   * `stopPropagation()` 避免同時觸發外層的 selectSession()。
    */
-  const handleDelete = (sessionId: string, title: string): void => {
-    if (!window.confirm(t("sessionList:confirmDeleteSession", { title }))) return;
+  const handleDelete = async (sessionId: string, title: string): Promise<void> => {
+    const ok = await confirmDialog({
+      title: t("sessionList:deleteSessionAriaLabel"),
+      message: t("sessionList:confirmDeleteSession", { title }),
+      confirmLabel: t("common:delete"),
+      tone: "danger",
+    });
+    if (!ok) return;
     void deleteSession(sessionId);
   };
 
   /**
-   * 刪除 Agent Profile:與 handleDelete()(刪對話)同樣的原生 confirm() 二次
-   * 確認作風。額外算一下目前有幾個既有對話是用這個 profile 建立的,一併提示
-   * ——刪除不會動到那些對話本身(core 端 ProfileStore.delete() 無條件刪除,
-   * 不檢查引用,見 apps/core/src/profiles.ts),只是讓使用者刪之前心裡有數。
+   * 刪除 Agent Profile:與 handleDelete()(刪對話)同樣的二次確認。額外算一下目前有幾個
+   * 既有對話是用這個 profile 建立的,一併提示——刪除不會動到那些對話本身(core 端
+   * ProfileStore.delete() 無條件刪除,不檢查引用,見 apps/core/src/profiles.ts),只是讓
+   * 使用者刪之前心裡有數。
    */
-  const handleDeleteProfile = (profile: AgentProfile): void => {
+  const handleDeleteProfile = async (profile: AgentProfile): Promise<void> => {
     const inUseCount = sessions.filter((s) => s.agentProfileId === profile.id).length;
     const usageNote =
       inUseCount > 0 ? t("sessionList:confirmDeleteProfileUsageNote", { count: inUseCount }) : "";
-    if (!window.confirm(t("sessionList:confirmDeleteProfile", { name: profile.name, usageNote }))) return;
+    const ok = await confirmDialog({
+      title: t("sessionList:deleteProfileAriaLabel"),
+      message: t("sessionList:confirmDeleteProfile", { name: profile.name, usageNote }),
+      confirmLabel: t("common:delete"),
+      tone: "danger",
+    });
+    if (!ok) return;
     void deleteProfile(profile.id);
   };
 
@@ -264,7 +277,7 @@ export function SessionList({
           className="my-auto mr-1 opacity-0 hover:!text-danger focus-visible:opacity-100 group-hover:opacity-100"
           onClick={(e) => {
             e.stopPropagation();
-            handleDelete(session.id, session.title);
+            void handleDelete(session.id, session.title);
           }}
         />
       </div>
@@ -433,7 +446,7 @@ export function SessionList({
             variant="outline"
             className="hover:!text-danger"
             disabled={!selectedProfile}
-            onClick={() => selectedProfile && handleDeleteProfile(selectedProfile)}
+            onClick={() => selectedProfile && void handleDeleteProfile(selectedProfile)}
           />
         </div>
       </div>

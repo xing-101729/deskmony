@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { RecoveryGitStatusResult, RecoverySessionInfo } from "@deskmony/shared";
 import { useRecoveryStore } from "../stores/recovery-store.js";
 import { Dialog } from "../ui/Dialog.js";
+import { confirmDialog } from "../ui/ConfirmDialog.js";
 import { Button } from "../ui/Button.js";
 import { Badge } from "../ui/Badge.js";
 import { Alert, EmptyState } from "../ui/Feedback.js";
@@ -62,9 +63,13 @@ function DirtyWorktreeResolver({ session, onResolved }: { session: RecoverySessi
   };
 
   const handleDiscard = async (): Promise<void> => {
-    if (!window.confirm(t("recovery:confirmDiscard", { title: session.sessionTitle }))) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: t("recovery:dirtyResolver.discard"),
+      message: t("recovery:confirmDiscard", { title: session.sessionTitle }),
+      confirmLabel: t("recovery:dirtyResolver.discard"),
+      tone: "danger",
+    });
+    if (!ok) return;
     setBusy(true);
     setError(null);
     try {
@@ -155,10 +160,14 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
     }
   };
 
-  const handleAbandon = (): void => {
-    if (!window.confirm(t("recovery:confirmAbandon", { title: session.sessionTitle }))) {
-      return;
-    }
+  const handleAbandon = async (): Promise<void> => {
+    const ok = await confirmDialog({
+      title: t("recovery:abandonLabel"),
+      message: t("recovery:confirmAbandon", { title: session.sessionTitle }),
+      confirmLabel: t("recovery:abandonLabel"),
+      tone: "danger",
+    });
+    if (!ok) return;
     void run(() => abandon(session.sessionId));
   };
 
@@ -225,7 +234,7 @@ function RecoveryRow({ session }: { session: RecoverySessionInfo }): JSX.Element
               {t("recovery:rerunLabel")}
             </Button>
           )}
-          <Button size="sm" variant="ghost" disabled={busy} className="hover:!text-danger" onClick={handleAbandon}>
+          <Button size="sm" variant="ghost" disabled={busy} className="hover:!text-danger" onClick={() => void handleAbandon()}>
             {t("recovery:abandonLabel")}
           </Button>
         </div>
