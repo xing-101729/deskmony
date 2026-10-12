@@ -7,7 +7,6 @@
     "message": "上次未被乾淨關閉,有 <strong>{{count}}</strong> 個 session 需要人工分流(繼續 / 接手 / 放棄)",
     "action": "開始分流"
   },
-  "sessionDefaultTitle": "對話 {{n}}",
   "commands": {
     "groupActions": "動作",
     "groupSessions": "對話",

@@ -1154,6 +1154,11 @@ export class WsGateway {
         return { session: await this.sessionManager.setSessionModel(request.params.sessionId, request.params.model) };
       case "session.setEffort":
         return { session: await this.sessionManager.setSessionEffort(request.params.sessionId, request.params.effort) };
+      // 2026-10-06:手動改名 / 「AI 重新命名」,見 packages/shared/src/gateway.ts 對應 case 的說明。
+      case "session.rename":
+        return { session: await this.sessionManager.renameSession(request.params.sessionId, request.params.title) };
+      case "session.autoTitle":
+        return await this.sessionManager.autoTitleSession(request.params.sessionId);
       case "permission.resolve":
         // rememberRule 若帶 escalate-strong 的 requestId,SessionManager 端會
         // 強制忽略(C4 紀律③);遠端連線帶 rememberRule 已在 handleMessage()

@@ -16,9 +16,24 @@ import { PromptAttachmentSchema } from "./prompt.js";
 export const SessionStatusSchema = z.enum(["idle", "busy", "waiting", "error", "closed", "interrupted"]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 
+/**
+ * 2026-10-06:標題從哪來(三態的完整語意見 session-title.ts 檔頭)。`user` 之後 AI 絕不自動覆蓋。
+ */
+export const SessionTitleSourceSchema = z.enum(["default", "auto", "user"]);
+export type SessionTitleSource = z.infer<typeof SessionTitleSourceSchema>;
+
+/** `session.autoTitle` 實際用的命名方式:`agent` = session 自己的 agent 在臨時對話裡產生;`fallback` = 截取第一則訊息的第一行。 */
+export const SessionTitleMethodSchema = z.enum(["agent", "fallback"]);
+export type SessionTitleMethod = z.infer<typeof SessionTitleMethodSchema>;
+
 export const SessionSchema = z.object({
   id: z.string(),
   title: z.string().default("新對話"),
+  /**
+   * 2026-10-06:標題來源(見 `SessionTitleSourceSchema`)。舊資料由 packages/db/src/client.ts 的啟動遷移回填:
+   * 標題是「新對話」→ `default`,其他 → `user`(不知道當年是誰取的,一律當成使用者取的、不自動覆蓋)。
+   */
+  titleSource: SessionTitleSourceSchema.default("default"),
   /**
    * 2026-10-02(P2:移除 profile):這個 session 是用哪個 provider 目錄項目
    * (`ProviderCatalogEntry.id`,例如 "claude-agent-sdk"、"codex"、"opencode")建立的。
@@ -130,6 +145,7 @@ export const CreateSessionInputSchema = z.object({
   /** 只有 claude-agent-sdk 有意義(見 `EffortLevelSchema` 註解)。 */
   effort: EffortLevelSchema.optional(),
   workingDir: z.string(),
+  /** 明確給了(非空白)標題 → `titleSource: "user"`,不會自動命名;省略 → 預設標題,第一則人類輸入後自動命名。 */
   title: z.string().optional(),
   /**
    * 掛在哪個 session 底下顯示(UI 巢狀 + 溯源,見 `Session.parentSessionId`)。使用者從畫面

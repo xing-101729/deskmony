@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema } from "./session.js";
+import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema, SessionTitleMethodSchema } from "./session.js";
 import { PromptInputSchema } from "./prompt.js";
 import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema, SlashCommandInfoSchema } from "./events.js";
 import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-launch.js";
@@ -174,6 +174,27 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     ...baseRequest,
     method: z.literal("session.setEffort"),
     params: z.object({ sessionId: z.string(), effort: EffortLevelSchema }),
+  }),
+  /**
+   * 2026-10-06:手動改名。`title` 在 core 端正規化(換行/控制字元換成空白、去頭尾空白)後必須是
+   * 1–`SESSION_TITLE_MAX_CHARS` 個字,否則丟 `session.titleEmpty` / `session.titleTooLong`(schema 這裡刻意不設長度,
+   * 讓錯誤碼明確,而不是籠統的「無效的請求格式」)。成功後 `titleSource` 變成 `user`(之後 AI 絕不自動覆蓋),
+   * 推播 `session-updated`。純 DB 欄位,session 不在執行中(closed/interrupted)也能改。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.rename"),
+    params: z.object({ sessionId: z.string(), title: z.string() }),
+  }),
+  /**
+   * 2026-10-06:「AI 重新命名」——使用者對既有 session 手動觸發自動命名(即使標題是自己取的)。用 session 自己的 agent
+   * 開一個**臨時對話**產生標題(不會在主對話多插一輪),agent 做不到/逾時/失敗就退回截取第一則訊息的第一行。
+   * 等到產生完才回應(最多約 60 秒);產生期間使用者若又手動改名,以使用者的為準(`applied:false`)。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.autoTitle"),
+    params: z.object({ sessionId: z.string() }),
   }),
   z.object({
     ...baseRequest,
@@ -630,6 +651,17 @@ export const OkResultSchema = z.object({ ok: z.literal(true) });
 export const SessionSetModelResultSchema = z.object({ session: SessionSchema });
 /** 比照上面的 `SessionSetModelResultSchema`:`session.setEffort` 的回應。 */
 export const SessionSetEffortResultSchema = z.object({ session: SessionSchema });
+/** 2026-10-06:`session.rename` 的回應——改名後的完整 Session(同時也會推播 `session-updated`)。 */
+export const SessionRenameResultSchema = z.object({ session: SessionSchema });
+/**
+ * 2026-10-06:`session.autoTitle` 的回應。`method` 是這次實際用的命名方式;`applied:false` 代表產生期間標題被別人
+ * (通常是使用者手動改名)改掉了,這次的結果沒有套用——`session` 一律是目前 DB 裡的最新狀態。
+ */
+export const SessionAutoTitleResultSchema = z.object({
+  session: SessionSchema,
+  method: SessionTitleMethodSchema,
+  applied: z.boolean(),
+});
 /** S7:`session.setPermissionMode` 的回應——回傳套用後的模式與(若為 YOLO)
  *  到期時間戳,讓呼叫端不需要再等一次 "session-updated" 推播就能更新 UI。
  *  2026-08-25 新增 `trueUnrestricted`:切換 mode 一定會連帶清掉這個欄位(見

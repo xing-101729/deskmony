@@ -292,6 +292,7 @@ function getOrCreateSessionView(model: TuiModel, sessionId: string): SessionView
   const placeholder: Session = {
     id: sessionId,
     title: "(尚未同步的 session)",
+    titleSource: "user",
     providerId: "",
     adapterType: "claude-agent-sdk",
     status: "busy",

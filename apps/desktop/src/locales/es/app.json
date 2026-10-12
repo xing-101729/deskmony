@@ -7,7 +7,6 @@
     "message": "La última vez no se cerró correctamente: <strong>{{count}}</strong> session(es) necesitan clasificación manual (continuar / retomar / abandonar)",
     "action": "Iniciar clasificación"
   },
-  "sessionDefaultTitle": "Conversación {{n}}",
   "commands": {
     "groupActions": "Acciones",
     "groupSessions": "Conversaciones",

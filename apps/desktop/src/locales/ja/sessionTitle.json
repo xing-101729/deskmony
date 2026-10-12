@@ -1,0 +1,11 @@
+{
+  "untitled": "新しい会話",
+  "editorAriaLabel": "会話のタイトル",
+  "menuLabel": "会話のオプション",
+  "rename": "名前を変更",
+  "autoTitle": "AIで名前を変更",
+  "autoTitleRunning": "AIが命名中…",
+  "autoTitleHint": "AIで名前を変更:この会話のエージェントが内容から短いタイトルを付けます(会話には何も追加されません)",
+  "clickToRename": "クリックして名前を変更",
+  "doubleClickToRename": "ダブルクリックで名前を変更"
+}

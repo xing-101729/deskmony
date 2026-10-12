@@ -171,13 +171,58 @@ export class CostGovernor {
       outputTokens: event.outputTokens ?? last.outputTokens,
     });
 
-    let costDelta = deltaCostRaw ?? 0;
-    let costCurrency: string | undefined = event.costAmount !== undefined ? (event.costCurrency ?? "USD") : undefined;
-    if (event.costAmount === undefined && (deltaInput > 0 || deltaOutput > 0)) {
+    await this.applyDelta(
+      sessionId,
+      {
+        cost: event.costAmount !== undefined ? (deltaCostRaw ?? 0) : undefined,
+        currency: event.costCurrency,
+        inputTokens: deltaInput,
+        outputTokens: deltaOutput,
+        model: event.model,
+      },
+      ts,
+    );
+  }
+
+  /**
+   * 2026-10-06(AI 自動命名):記一筆**一次性**的用量——命名用臨時對話自己的總量(見 SessionManager 的
+   * `generateTitleText()`),直接加進該 session 與當日的 rollup(每日 kill-switch 一樣算得到)。**不碰
+   * `lastCumulative`**:那是主對話連線「累計值 → delta」的基準,把臨時對話的數字混進去,下一個主對話 usage 事件就會
+   * 被誤判成「連線重置」而重複計算。
+   */
+  async recordStandaloneUsage(
+    sessionId: string,
+    usage: { costAmount?: number; costCurrency?: string; inputTokens?: number; outputTokens?: number; model?: string },
+    ts: number,
+  ): Promise<void> {
+    await this.applyDelta(
+      sessionId,
+      {
+        cost: usage.costAmount,
+        currency: usage.costCurrency,
+        inputTokens: usage.inputTokens ?? 0,
+        outputTokens: usage.outputTokens ?? 0,
+        model: usage.model,
+      },
+      ts,
+    );
+  }
+
+  /** `recordUsage()`/`recordStandaloneUsage()` 共用:一筆 delta 加進 session 與當日的 rollup,並檢查每日門檻。 */
+  private async applyDelta(
+    sessionId: string,
+    delta: { cost: number | undefined; currency: string | undefined; inputTokens: number; outputTokens: number; model?: string },
+    ts: number,
+  ): Promise<void> {
+    const deltaInput = delta.inputTokens;
+    const deltaOutput = delta.outputTokens;
+    let costDelta = delta.cost ?? 0;
+    let costCurrency: string | undefined = delta.cost !== undefined ? (delta.currency ?? "USD") : undefined;
+    if (delta.cost === undefined && (deltaInput > 0 || deltaOutput > 0)) {
       // §3.2 雙軌:後端這次只給 token,嘗試用 price table 換算成 $(缺價則
       // 完全不編造,costDelta 維持 0、costCurrency 維持 undefined,由 token
       // 上限接手保護)。
-      const pricing = resolveModelPricing(this.config.modelPricing, event.model);
+      const pricing = resolveModelPricing(this.config.modelPricing, delta.model);
       if (pricing) {
         costDelta = (deltaInput / 1_000_000) * pricing.inputPerMTokUsd + (deltaOutput / 1_000_000) * pricing.outputPerMTokUsd;
         costCurrency = "USD";

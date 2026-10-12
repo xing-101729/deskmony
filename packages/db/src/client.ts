@@ -54,6 +54,7 @@ export function createDb(dbFilePath: string): NexusDb {
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL DEFAULT '新對話',
+      title_source TEXT,
       -- 舊欄位(2026-10-02 起不再是 profile id):SQLite 不能直接改 NOT NULL 約束,
       -- 所以保留欄位,新 session 寫入 provider id 當值。見 schema.ts 的 legacyAgentProfileId。
       agent_profile_id TEXT NOT NULL,
@@ -125,8 +126,38 @@ export function createDb(dbFilePath: string): NexusDb {
   ensureMessagesOriginColumn(sqlite);
   ensureSessionsLaunchColumns(sqlite);
   backfillLegacySessionsProvider(sqlite);
+  ensureSessionsTitleSourceColumn(sqlite);
 
   return drizzle(sqlite, { schema });
+}
+
+/**
+ * 2026-10-06(session 改名/AI 自動命名):對「已存在的舊 DB 檔案」補上 `sessions.title_source` 欄位並回填。
+ * 補欄位的作法比照 `ensureSessionsModelColumn()`。
+ *
+ * 回填規則(只處理 `title_source IS NULL` 的列,所以冪等——回填後一律非 NULL,下次啟動沒有東西可做):
+ *   - 標題還是預設的「新對話」→ `default`:第一則人類輸入之後會自動命名(舊 session 早就有訊息了,所以實務上要等
+ *     下一則人類輸入才會觸發;使用者也可以按「AI 重新命名」)。
+ *   - 其他 → `user`:不知道當年是誰取的(UI 建立時給的、`create_session` 帶的、接手時組的),一律當成使用者取的,
+ *     AI 不自動覆蓋。
+ */
+function ensureSessionsTitleSourceColumn(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+  if (!columns.some((col) => col.name === "title_source")) {
+    try {
+      sqlite.exec("ALTER TABLE sessions ADD COLUMN title_source TEXT");
+    } catch {
+      // 欄位已存在(競態)或其他非預期情況,同上——不讓啟動流程因此中斷。
+    }
+  }
+  try {
+    sqlite
+      .prepare("UPDATE sessions SET title_source = CASE WHEN title = ? THEN 'default' ELSE 'user' END WHERE title_source IS NULL")
+      .run("新對話");
+  } catch (err) {
+    // 回填失敗不阻擋啟動:rowToSession() 對 NULL 用同一條規則推導,行為一致,下次啟動會再試。
+    console.error(`[db] sessions.title_source 回填失敗(啟動流程仍繼續): ${String(err)}`);
+  }
 }
 
 /**

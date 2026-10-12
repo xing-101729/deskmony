@@ -20,6 +20,7 @@ import { FONT_SCALES, useFontScale } from "../ui/font-scale.js";
 import { groupSessionsByWorkspace } from "../lib/workspaces.js";
 import { translateError } from "../lib/error-i18n.js";
 import { reconcileSelection, type NewSessionSelection } from "../lib/new-session-selection.js";
+import { SessionTitleEditor, SessionTitleMenu, displaySessionTitle } from "./SessionTitle.js";
 
 /**
  * S3a(usage-metering)L4 §4:「SessionList 每列顯示 context 使用率(如 32%)」。
@@ -116,8 +117,9 @@ export function SessionList({
   onToggleTheme,
   onLogout,
 }: SessionListProps): JSX.Element {
-  const { t } = useTranslation(["sessionList", "common"]);
+  const { t } = useTranslation(["sessionList", "common", "sessionTitle"]);
   const sessions = useSessionStore((s) => s.sessions);
+  const titleGenerating = useSessionStore((s) => s.titleGenerating);
   const sessionUsage = useSessionStore((s) => s.sessionUsage);
   const capabilitiesBySoftware = useSessionStore((s) => s.capabilitiesBySoftware);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
@@ -127,6 +129,10 @@ export function SessionList({
   const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set());
   const [spawnParent, setSpawnParent] = useState<Session | null>(null);
+  // 2026-10-06:改名——正在 inline 編輯標題的 session、「⋯」選單(含右鍵)、「AI 重新命名」失敗的訊息。
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [titleMenu, setTitleMenu] = useState<{ session: Session; anchor: { x: number; y: number } } | null>(null);
+  const [titleError, setTitleError] = useState<string | null>(null);
 
   // 有沒有「現在真的能開 session」的 agent——沒有時「新對話」鈕停用(AgentPicker 會顯示說明 + 重新偵測)。
   const availableProviders = useMemo(
@@ -168,6 +174,8 @@ export function SessionList({
    *  巢狀只反映「從哪個 session 底下開出來的」,2026-10-02 起不代表任何權限或回報關係)。 */
   const renderSessionRow = (session: Session, isChild: boolean): JSX.Element => {
     const meta = sessionStatusMeta(session.status);
+    const title = displaySessionTitle(session, t);
+    const editing = editingTitleId === session.id;
     const contextPct =
       selectContextReporting(capabilitiesBySoftware[session.adapterType], sessionUsage[session.id]) === "supported"
         ? (formatContextUsage(sessionUsage[session.id]) ?? "—")
@@ -178,36 +186,73 @@ export function SessionList({
         className={`group flex items-stretch gap-0.5 rounded-md transition ${isChild ? "pl-4" : ""} ${
           session.id === currentSessionId ? "bg-surface-2" : "hover:bg-surface"
         }`}
+        onContextMenu={(e) => {
+          // 右鍵 = 同一個「⋯」選單(重新命名 / AI 重新命名)。
+          e.preventDefault();
+          setTitleMenu({ session, anchor: { x: e.clientX, y: e.clientY } });
+        }}
       >
-        <button
-          type="button"
-          onClick={() => {
-            void selectSession(session.id);
-            onCloseMobile();
+        {editing ? (
+          // 編輯中不能把 <input> 放在 <button> 裡(空白鍵會觸發按鈕、點擊會選取 session),整列換成編輯器。
+          <div className="min-w-0 flex-1 py-1.5 pl-2.5 pr-1">
+            <SessionTitleEditor session={session} onDone={() => setEditingTitleId(null)} />
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              void selectSession(session.id);
+              onCloseMobile();
+            }}
+            className="focus-ring min-w-0 flex-1 rounded-md py-2 pl-2.5 pr-1 text-left"
+          >
+            <div className="flex items-center gap-1.5">
+              <StatusDot meta={meta} />
+              <span
+                className={`truncate text-xs ${session.id === currentSessionId ? "font-medium text-fg" : "text-fg-soft"}`}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  setTitleError(null);
+                  setEditingTitleId(session.id);
+                }}
+                title={t("sessionTitle:doubleClickToRename")}
+              >
+                {isChild && <span className="text-fg-faint">↳ </span>}
+                {title}
+              </span>
+              {titleGenerating[session.id] && (
+                <span className="flex-shrink-0 animate-breathe text-accent" title={t("sessionTitle:autoTitleRunning")}>
+                  <Icon name="sparkle" size={10} />
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 flex items-center gap-1.5 pl-3">
+              <Meta className="text-fg-faint">{meta.label}</Meta>
+              <span className="text-fg-faint">·</span>
+              <Meta mono>{softwareLabel(session.adapterType)}</Meta>
+              {contextPct && (
+                <>
+                  <span className="text-fg-faint">·</span>
+                  <Meta mono title={t("sessionList:contextUsageTitle")}>
+                    ctx {contextPct}
+                  </Meta>
+                </>
+              )}
+            </div>
+          </button>
+        )}
+        <IconButton
+          icon="more"
+          aria-label={t("sessionTitle:menuLabel")}
+          title={t("sessionTitle:menuLabel")}
+          size="xs"
+          className="my-auto opacity-0 focus-visible:opacity-100 group-hover:opacity-100"
+          onClick={(e) => {
+            e.stopPropagation();
+            const rect = e.currentTarget.getBoundingClientRect();
+            setTitleMenu({ session, anchor: { x: rect.left, y: rect.bottom + 2 } });
           }}
-          className="focus-ring min-w-0 flex-1 rounded-md py-2 pl-2.5 pr-1 text-left"
-        >
-          <div className="flex items-center gap-1.5">
-            <StatusDot meta={meta} />
-            <span className={`truncate text-xs ${session.id === currentSessionId ? "font-medium text-fg" : "text-fg-soft"}`}>
-              {isChild && <span className="text-fg-faint">↳ </span>}
-              {session.title}
-            </span>
-          </div>
-          <div className="mt-0.5 flex items-center gap-1.5 pl-3">
-            <Meta className="text-fg-faint">{meta.label}</Meta>
-            <span className="text-fg-faint">·</span>
-            <Meta mono>{softwareLabel(session.adapterType)}</Meta>
-            {contextPct && (
-              <>
-                <span className="text-fg-faint">·</span>
-                <Meta mono title={t("sessionList:contextUsageTitle")}>
-                  ctx {contextPct}
-                </Meta>
-              </>
-            )}
-          </div>
-        </button>
+        />
         <IconButton
           icon="branch"
           aria-label={t("sessionList:spawnChildAriaLabel")}
@@ -227,7 +272,7 @@ export function SessionList({
           className="my-auto mr-1 opacity-0 hover:!text-danger focus-visible:opacity-100 group-hover:opacity-100"
           onClick={(e) => {
             e.stopPropagation();
-            void handleDelete(session.id, session.title);
+            void handleDelete(session.id, title);
           }}
         />
       </div>
@@ -317,6 +362,11 @@ export function SessionList({
         {createError && (
           <Alert tone="danger" onDismiss={onDismissCreateError}>
             {createError}
+          </Alert>
+        )}
+        {titleError && (
+          <Alert tone="danger" onDismiss={() => setTitleError(null)}>
+            {titleError}
           </Alert>
         )}
       </div>
@@ -428,6 +478,18 @@ export function SessionList({
       </div>
 
       {spawnParent && <SpawnChildDialog session={spawnParent} onClose={() => setSpawnParent(null)} />}
+      {titleMenu && (
+        <SessionTitleMenu
+          session={titleMenu.session}
+          anchor={titleMenu.anchor}
+          onClose={() => setTitleMenu(null)}
+          onRename={() => {
+            setTitleError(null);
+            setEditingTitleId(titleMenu.session.id);
+          }}
+          onError={setTitleError}
+        />
+      )}
     </aside>
   );
 }
@@ -572,7 +634,7 @@ function FontScaleSwitcher(): JSX.Element {
  * 它跟其他 session 一樣平等,結果**不會**自動回到這個 session(原本的 `session.spawnChild` 已移除)。
  */
 function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () => void }): JSX.Element {
-  const { t } = useTranslation(["sessionList", "common"]);
+  const { t } = useTranslation(["sessionList", "common", "sessionTitle"]);
   const createChildSession = useSessionStore((s) => s.createChildSession);
   const detectedAgents = useSessionStore((s) => s.detectedAgents);
   const providerPrefs = useSessionStore((s) => s.providerPrefs);
@@ -614,7 +676,7 @@ function SpawnChildDialog({ session, onClose }: { session: Session; onClose: () 
 
   return (
     <Dialog
-      title={t("sessionList:spawnChildDialog.title", { title: session.title })}
+      title={t("sessionList:spawnChildDialog.title", { title: displaySessionTitle(session, t) })}
       description={t("sessionList:spawnChildDialog.description")}
       icon="branch"
       size="md"

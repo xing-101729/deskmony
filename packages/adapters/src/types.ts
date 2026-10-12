@@ -49,8 +49,41 @@ export interface ResumeOptions {
   sessionId?: string;
 }
 
+/**
+ * 2026-10-06(AI 自動命名):`AgentAdapter.generateTitle()` 的輸入。`prompt` 是 core 組好的完整命名指示
+ * (`buildTitleRequestPrompt()`,含引用的使用者訊息);`signal` 在逾時(或 session 被刪)時觸發,adapter 必須據此
+ * 中止並清掉臨時對話。
+ */
+export interface TitleGenerationRequest {
+  prompt: string;
+  signal: AbortSignal;
+}
+
+/**
+ * `generateTitle()` 的結果。`text` 是 agent 的原始回覆(core 會再清理、截斷);`usage` 是**這一次臨時對話自己的**
+ * 用量(一次性的值,不是主 session 連線的累計),拿得到才填——core 把它直接加進該 session 與當日的成本 rollup。
+ */
+export interface TitleGenerationResult {
+  text: string;
+  usage?: { costAmount?: number; costCurrency?: string; inputTokens?: number; outputTokens?: number; model?: string };
+}
+
 export interface AgentAdapter {
   capabilities(): AdapterCapabilities;
+  /**
+   * 2026-10-06(AI 自動命名):用**同一個 agent** 另開一個**臨時對話**產生 session 標題,完成後丟棄——**絕不能**在主對話裡
+   * 多插一輪(那會污染這個 agent 的上下文,也會讓使用者在對話串看到一則莫名其妙的「幫我取標題」)。
+   *
+   * 各 adapter 的共同紀律(安全):
+   *   - 臨時對話**不得取得任何工具或權限**:它發出的權限請求一律拒絕(不經過政策引擎、不進 UI、不轉給主 session),
+   *     agent 一嘗試呼叫工具就中止這次命名(丟錯,core 退回截取首句)。
+   *   - 臨時對話的任何事件(文字、工具、權限、錯誤)都不得混進主 session 的事件串流。
+   *   - `request.signal` 觸發時中止並清理(取消/關閉/刪除臨時對話、收掉子程序),然後丟錯。
+   *   - 失敗一律丟錯,不得影響主 session;core 只記 log 並退回截取首句。
+   *
+   * **可選**:做不到的 adapter(pty 沒有「另開一個對話」的概念)不實作,core 直接退回截取首句。
+   */
+  generateTitle?(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult>;
   spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle>;
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void;
   /** AgentEvent = 訊息增量 | 工具呼叫 | 權限請求 | 完成 | 錯誤 */

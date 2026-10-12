@@ -16,7 +16,16 @@ import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, SlashComma
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
 import type { SessionNetworkPort } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Workspace } from "./types.js";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
+import { TITLE_SYSTEM_PROMPT, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
@@ -319,6 +328,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       getChild: () => child,
       currentMessageId: null,
       backendSessionId: undefined,
+      currentModel: launch.model,
+      titleAborts: new Set(),
     };
     this.sessions.set(handle.id, internal);
 
@@ -479,6 +490,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       pending.resolve({ behavior: "allow", updatedInput: { ...pending.input, answers: {} } });
     }
     internal.pendingAskUserQuestion.clear();
+    // 進行中的命名臨時對話一併中止(它們各自的 finally 會殺掉自己的子程序)。
+    for (const controller of internal.titleAborts) controller.abort();
     internal.inputQueue.close();
     internal.outputQueue.close();
     try {
@@ -507,6 +520,131 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   async setModel(handle: AgentHandle, model: string): Promise<void> {
     const internal = this.mustGet(handle);
     await internal.sdkQuery.setModel(model);
+    // 命名用的臨時對話(`generateTitle()`)要跟主對話用同一個 model。
+    internal.currentModel = model;
+  }
+
+  /**
+   * 2026-10-06(AI 自動命名):另跑一次**一次性**的 SDK `query()` 產生標題,跟主對話的 `query()` 完全分開(不同的 CLI
+   * 子程序、不同的 SDK session)——主對話的上下文一個字都不會多。介面紀律見 types.ts 的 `AgentAdapter.generateTitle()`。
+   *
+   * 與主對話相同的:model(`setModel()` 換過就用換過的)、環境(`buildAgentChildEnv(launch.env)`,同一份 sanitized env——
+   * 認證、provider 層級的 base URL 都一樣)、工作目錄。刻意不同的(全是為了「臨時對話沒有任何工具/權限,用完即丟」):
+   *   - `tools: []`(官方語意:停用所有內建工具)+ `mcpServers: {}` + `strictMcpConfig: true`(不載入使用者/專案的 MCP 設定),
+   *     不掛 Deskmony 的 session 網路工具。
+   *   - `settingSources: []`:不讀 settings.json/CLAUDE.md——不會跑使用者的 hooks、不載入外掛,也不把專案說明塞進這個小請求。
+   *     代價:使用者若把端點/金鑰設定寫在 `~/.claude/settings.json` 的 `env`(而不是 Deskmony 的 provider 環境變數),
+   *     臨時查詢讀不到,命名會失敗並退回截取首句(`claude` 登入的 OAuth 憑證不在 settings 裡,不受影響,2026-10-06 實測)。
+   *   - `allowedTools: []` + `canUseTool` 一律 deny(`interrupt: true`):萬一還是冒出一個工具呼叫,直接拒絕並中止。
+   *   - `systemPrompt`:純字串,**取代** Claude Code 的預設系統提示(那裡全是工具使用說明),只說「你只負責取標題」。
+   *   - `maxTurns: 1`、`persistSession: false`(不寫 `~/.claude/projects/` 的 session 檔,用完即丟)、`effort: "low"`。
+   *   - 收到任何 `tool_use` 區塊就丟錯(core 退回截取首句)。
+   *
+   * 用量:這個 `query()` 的 result 帶它自己的 `total_cost_usd`/`modelUsage`(這次臨時對話的總量,不是主對話的累計),
+   * 原樣回傳給 core 計入該 session 與當日的 rollup。
+   *
+   * 子程序:比照 `spawn()` 用 `spawnClaudeCodeProcess` 自己 spawn、登記到 child-registry,結束(含逾時中止)時殺整棵樹。
+   */
+  async generateTitle(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult> {
+    const internal = this.mustGet(handle);
+    const agentLabel = handle.launch.providerId ?? "claude-agent-sdk";
+    if (request.signal.aborted) throw titleAbortedError();
+    const abortController = new AbortController();
+    const onAbort = (): void => abortController.abort();
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    internal.titleAborts.add(abortController);
+    let child: ChildProcess | undefined;
+
+    const options: SdkOptions = {
+      cwd: handle.workspace.path,
+      model: internal.currentModel,
+      effort: "low",
+      env: buildAgentChildEnv(handle.launch.env) as Record<string, string>,
+      tools: [],
+      allowedTools: [],
+      mcpServers: {},
+      strictMcpConfig: true,
+      settingSources: [],
+      persistSession: false,
+      maxTurns: 1,
+      permissionMode: "default",
+      systemPrompt: TITLE_SYSTEM_PROMPT,
+      abortController,
+      canUseTool: async () => ({
+        behavior: "deny",
+        message: "這是只負責產生標題的臨時對話,不允許使用任何工具。",
+        interrupt: true,
+      }),
+      spawnClaudeCodeProcess: (spawnOptions) => {
+        const spawned = spawn(spawnOptions.command, spawnOptions.args, {
+          cwd: spawnOptions.cwd,
+          env: spawnOptions.env,
+          stdio: ["pipe", "pipe", "pipe"],
+          signal: spawnOptions.signal,
+          windowsHide: true,
+        });
+        registerChild(spawned.pid, `claude-agent-sdk-title:${spawnOptions.command}`);
+        // 理由同 spawn():自訂 spawner 之後沒有人讀 stderr,不排掉會把子程序卡住。
+        spawned.stderr?.on("data", (chunk: Buffer) => {
+          const text = chunk.toString().trimEnd();
+          if (text) console.error(`[claude-sdk-adapter] ${agentLabel} (命名用臨時對話) stderr: ${text}`);
+        });
+        spawned.stderr?.on("error", () => {
+          // 子程序已結束時讀取 stderr 可能報錯,忽略。
+        });
+        child = spawned;
+        return spawned;
+      },
+    };
+
+    try {
+      const titleQuery = query({ prompt: request.prompt, options });
+      let text: string | undefined;
+      let usage: TitleGenerationResult["usage"];
+      for await (const message of titleQuery) {
+        if (abortController.signal.aborted) throw titleAbortedError();
+        if (message.type === "assistant") {
+          const content = message.message?.content;
+          if (Array.isArray(content) && content.some((block) => isRecord(block) && block.type === "tool_use")) {
+            throw titleToolUseError("claude-agent-sdk");
+          }
+        } else if (message.type === "result") {
+          const tokens = aggregateModelUsage(message.modelUsage);
+          const modelKeys = Object.keys(message.modelUsage ?? {});
+          if (modelKeys.length > 0 || message.total_cost_usd) {
+            usage = {
+              costAmount: message.total_cost_usd,
+              costCurrency: "USD",
+              inputTokens: tokens.inputTokens,
+              outputTokens: tokens.outputTokens,
+              ...(modelKeys.length === 1 ? { model: modelKeys[0] } : {}),
+            };
+          }
+          if (message.subtype !== "success") {
+            throw titleAgentFailedError("claude-agent-sdk", `result subtype ${message.subtype}`);
+          }
+          text = message.result;
+        }
+      }
+      if (abortController.signal.aborted) throw titleAbortedError();
+      if (text === undefined) {
+        throw titleAgentFailedError("claude-agent-sdk", "沒有回傳結果");
+      }
+      return { text, usage };
+    } catch (err) {
+      // SDK 在 abortController 觸發後丟的是自己的 AbortError,統一成同一個錯誤碼,core 的 log 比較好讀。
+      if (abortController.signal.aborted) throw titleAbortedError();
+      throw err;
+    } finally {
+      request.signal.removeEventListener("abort", onAbort);
+      internal.titleAborts.delete(abortController);
+      const spawned = child as ChildProcess | undefined;
+      if (spawned) {
+        killProcessTree(spawned);
+        await waitForChildExit(spawned, 3_000);
+        unregisterChild(spawned.pid);
+      }
+    }
   }
 
   /**
@@ -837,6 +975,10 @@ interface InternalSession {
   currentMessageId: string | null;
   /** S6(crash-recovery)L4 §4.1:見檔案頂端查證說明。 */
   backendSessionId: string | undefined;
+  /** 目前的 model(`setModel()` 換過就是換過的)——命名用的臨時對話要用同一個,見 `generateTitle()`。 */
+  currentModel: string | undefined;
+  /** 進行中的命名臨時對話(`generateTitle()`),`dispose()` 時一併中止。 */
+  titleAborts: Set<AbortController>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
