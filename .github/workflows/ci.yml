@@ -142,5 +142,37 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # 2026-10-12:根 package.json 的 `pnpm.auditConfig.ignoreGhsas` 刻意接受了
+      # 兩個 high,因為它們**沒有修補版本**可升,而且都只出現在 apps/desktop 的
+      # devDependencies(建置/打包工具鏈,不會進安裝檔)。這個 job 的價值在於
+      # 「新的 advisory 一出現就變紅」——放著兩個永遠修不掉的 high 讓它恆紅,
+      # 等於沒有這個 job。
+      #
+      #   GHSA-vfj7-8cjw-p6xm  braces <=3.0.3(3.0.3 就是最新版)
+      #     路徑:tailwindcss@3 → chokidar / micromatch / fast-glob → braces。
+      #     觸發條件是攻擊者能控制送進 braces 的 glob 樣式;這裡的樣式是我們
+      #     自己寫在 tailwind.config.js `content` 的常數。要移除只能遷移到
+      #     tailwindcss@4,那不是相依版本調整的範圍。
+      #   GHSA-ch52-4w7c-c8xp  http-cache-semantics <=4.2.0(advisory 未列修補版)
+      #     路徑:electron-builder → @electron/get → got@11 → cacheable-request。
+      #     ⚠️ npm 上有 advisory 之後才發的 4.3.0,範圍上「不在受影響版本內」,
+      #     但比對過原始碼,它的 max-stale 判斷與 4.2.0 一字不差——override 到
+      #     4.3.0 只會讓 audit 閉嘴、不會真的修掉,所以不那樣做。實際暴露面:
+      #     got 只有在設了 `cache` 選項時才會經過 cacheable-request,
+      #     @electron/get 沒設;漏洞情境是「多使用者共用的快取」,打包時下載
+      #     Electron binary 不是那種情境。
+      #
+      # 另有兩個 moderate 沒有可用的修補,沒加進 ignore(低於 --audit-level
+      # high 不會讓 job 變紅,但仍會印出來,保持可見):
+      #   GHSA-hp3w-g68c-fv3c  sprintf-js <=1.1.3:electron-builder → @electron/get
+      #     → global-agent → roarr,沒有修補版;global-agent 傳給 roarr 的格式
+      #     字串全是原始碼裡的字面常數,攻擊者碰不到。
+      #   GHSA-rj75-hqrm-r3gf  postcss-selector-parser <7.1.6:修補只在 7.x,
+      #     tailwindcss@3 要求 ^6;只在建置時解析我們自己的 CSS。
+      #
+      # ⚠️ ignoreGhsas 是**依 GHSA 編號全域忽略**,不看路徑。哪天這兩個套件
+      # 出現在 production 相依路徑上,audit 不會再提醒——動到 tailwind、
+      # electron-builder 或新增會帶進 braces/got 的 production 相依時,要回來
+      # 重看這兩筆;有修補版或升上 tailwindcss@4 之後就把對應的那筆刪掉。
       - name: pnpm audit
         run: pnpm audit --audit-level high
