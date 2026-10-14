@@ -887,6 +887,9 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     client.onReconnected(() => {
       console.info("[gateway] 重新連上,重新同步狀態(斷線期間的推播事件已遺失)");
       void get().refreshSessions();
+      // 本機裝了哪些 agent 不會因為斷線而改變,只在還沒拿到結果時補偵測
+      // (典型情境:app 啟動時 core 尚未就緒,初始那次偵測隨連線失敗)。
+      if (get().detectedAgents.length === 0 && !get().detectingAgents) void get().detectAgents();
       void get().loadEnabledModels();
       void get().loadProviderPrefs();
       void get().loadEffectiveConfig();

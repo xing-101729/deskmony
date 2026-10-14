@@ -48,6 +48,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SUITES = [
   // 單元層級、毫秒級跑完(不啟動 core)—— 放第一個當快速煙霧測試。
   "e2e-hard-deny",
+  // 2026-10-14:GatewayClient 首次連線失敗後的補載(假 WebSocket,不啟動 core,約 4 秒)。
+  "e2e-gateway-client-startup",
   // 2026-10-02(P3:session 網路):五個工具(list_agents/list_sessions/read_session/create_session/send_to_session)
   // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
   // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。

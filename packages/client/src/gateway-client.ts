@@ -144,8 +144,18 @@ export class GatewayClient {
   private statusListeners = new Set<(status: ConnectionStatus) => void>();
   /** 見 `onReconnected()`。 */
   private reconnectedListeners = new Set<() => void>();
-  /** 曾經成功連上過 —— 用來區分「第一次連上」與「重新連上」。 */
-  private hasConnectedBefore = false;
+  /** 已經建立過至少一條 WebSocket —— 見 `isFirstAttempt`。 */
+  private hasAttemptedBefore = false;
+  /**
+   * 目前這條連線是不是**第一次嘗試**。只有第一次嘗試就成功時,`connect()`
+   * 之後同步排隊的初始載入呼叫才會真的送出;第一次嘗試失敗(桌面殼啟動時
+   * core 子程序還沒開始監聽 port,是常態)那些呼叫會在 close 時被 reject,
+   * 之後重連成功就必須當成「重新連上」通知訂閱者補載。過去用「曾經成功
+   * 連上過」判斷,首次失敗後的那次成功被當成第一次連上 → 不觸發
+   * `onReconnected` → session 清單、agent 偵測結果等一直空著,直到使用者
+   * 做了某個會觸發推播的動作(例如建立新對話)才出現。
+   */
+  private isFirstAttempt = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByUser = false;
 
@@ -171,6 +181,8 @@ export class GatewayClient {
     this.closedByUser = false;
     this.ready = false;
     this.emitStatus("connecting");
+    this.isFirstAttempt = !this.hasAttemptedBefore;
+    this.hasAttemptedBefore = true;
     const ws = this.wsFactory(this.url);
     this.ws = ws;
 
@@ -230,8 +242,9 @@ export class GatewayClient {
    * 除非使用者剛好手動切走再切回那個 session。
    *
    * 刻意與 `onStatus` 分開:大多數訂閱者只想知道「現在通不通」(拿來顯示提示
-   * 條),只有需要補資料的才關心「這是一次**重新**連上」。第一次連上不觸發,
-   * 因為那條路徑本來就會走完整的初始載入。
+   * 條),只有需要補資料的才關心「這是一次**重新**連上」。第一次嘗試就連上
+   * 不觸發,因為那條路徑本來就會走完整的初始載入;第一次嘗試失敗後才連上
+   * 則會觸發(初始載入的呼叫已隨失敗的連線被 reject,見 `isFirstAttempt`)。
    */
   onReconnected(listener: () => void): () => void {
     this.reconnectedListeners.add(listener);
@@ -277,8 +290,7 @@ export class GatewayClient {
 
   private markReady(): void {
     this.ready = true;
-    const isReconnect = this.hasConnectedBefore;
-    this.hasConnectedBefore = true;
+    const isReconnect = !this.isFirstAttempt;
     this.emitStatus("open");
     const queue = this.sendQueue;
     this.sendQueue = [];
