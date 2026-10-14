@@ -10,8 +10,9 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json && vite build",
     "bundle:core": "node ../../scripts/bundle-core.mjs",
-    "package": "pnpm bundle:core && pnpm build && electron-builder --win",
-    "package:dir": "pnpm bundle:core && pnpm build && electron-builder --win --dir",
+    "build:deps": "pnpm --filter \"@deskmony/desktop^...\" build",
+    "package": "pnpm build:deps && pnpm bundle:core && pnpm build && electron-builder --win",
+    "package:dir": "pnpm build:deps && pnpm bundle:core && pnpm build && electron-builder --win --dir",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "clean": "rimraf dist dist-electron core-bundle release",
     "electron": "electron ."

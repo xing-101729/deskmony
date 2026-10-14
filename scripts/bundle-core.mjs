@@ -9,8 +9,12 @@ const root = path.resolve(__dirname, "..");
 const bundleDir = path.join(root, "apps", "desktop", "core-bundle");
 const desktopElectronPkg = path.join(root, "apps", "desktop", "node_modules", "electron", "package.json");
 
-console.log("[bundle-core] building core...");
-execSync("pnpm --filter @deskmony/core build", { cwd: root, stdio: "inherit" });
+// `core...` 連同它依賴的 workspace 套件(adapters/db/shared)一起編譯:core 執行時
+// 讀的是那些套件的 dist,只編 core 的話,改在 packages/* 的修正不會進安裝檔,
+// 而且不會有任何錯誤提示(2026-10-14 撞過:client 的修正 merge 了,打包出來的
+// app 行為卻沒變)。桌面殼自己依賴的 client/shared 由 `build:deps` 負責。
+console.log("[bundle-core] building core and its workspace dependencies...");
+execSync('pnpm --filter "@deskmony/core..." build', { cwd: root, stdio: "inherit" });
 
 if (existsSync(bundleDir)) rmSync(bundleDir, { recursive: true });
 
