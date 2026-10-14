@@ -65,6 +65,9 @@ export function mintMcpBridgeLaunch(
     command: process.execPath,
     args: [entryPath],
     env: {
+      // 打包版 core 跑在 Electron 內建的 Node(ELECTRON_RUN_AS_NODE),process.execPath 就是 Deskmony.exe。
+      // codex 等 agent 啟動 MCP server 時不會繼承父行程環境,少了這個旗標 Deskmony.exe 會當成完整 app 多開一個視窗。
+      ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
       DESKMONY_MCP_BRIDGE_TOKEN: grant.token,
       DESKMONY_MCP_BRIDGE_GATEWAY_URL: grant.gatewayUrl,
       DESKMONY_MCP_BRIDGE_SESSION_ID: sessionId,

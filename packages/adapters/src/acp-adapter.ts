@@ -224,6 +224,7 @@ export class AcpAdapter implements AgentAdapter {
         env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
         shell: useShell,
+        windowsHide: true,
       });
     } catch (err) {
       // spawn 本身同步丟例外(例如 Windows 上 `.cmd` 沒走 shell 的 EINVAL):token 已核發,不能留成孤兒。
