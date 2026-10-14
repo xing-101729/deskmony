@@ -48,6 +48,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SUITES = [
   // 單元層級、毫秒級跑完(不啟動 core)—— 放第一個當快速煙霧測試。
   "e2e-hard-deny",
+  // 2026-10-14:GatewayClient 首次連線失敗後的補載(假 WebSocket,不啟動 core,約 4 秒)。
+  "e2e-gateway-client-startup",
   "e2e-session-subagents",
   // 2026-09-17:OpenCode 的 `question` 工具(模型向使用者提問)——一個 core +
   // fake-opencode-server,幾秒跑完。
