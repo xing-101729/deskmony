@@ -11,6 +11,7 @@
  *      (思考程度跟著換清單)、換思考程度;值真的送到 agent(agent 回報自己的設定);不合法 / 不提供的值回明確錯誤
  *      且 agent 沒收到;agent 主動送 `config_option_update`;記住 provider 上次的選擇、下次建立自動套用(做不到就略過);
  *      建立時明確指定(做不到就建立失敗、不留 session)。
+ *      B9:自動命名的臨時對話(另開 session/new)與選項並存——主 session 的選項/設定不被動到,臨時 session 不套用記住的選擇。
  *   C. 不回報選項的 ACP agent(標準 fake ACP):沒有選項、換 model/思考程度與建立時指定都回明確錯誤。
  *   D. OpenCode HTTP(fake-opencode-server.mjs `--variants`):思考程度 = 目前 model 的 variants;選了之後下一則訊息
  *      wire 上真的帶 `variant`;換 model 時不再適用的 variant 被清掉;建立時指定(核對 provider 目錄的 model 清單)。
@@ -25,7 +26,8 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CONFIG_UPDATE_PREFIX, FAKE_ACP_CONFIG_MODELS, REPORT_CONFIG_PREFIX } from "./fake-acp-agent.mjs";
+import { CONFIG_UPDATE_PREFIX, FAKE_ACP_CONFIG_MODELS, REPORT_CONFIG_PREFIX, REPORT_SESSIONS_PREFIX } from "./fake-acp-agent.mjs";
+import { fakeTitleFor } from "./lib/fake-title-modes.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 import {
   e2eProvidersEnv,
@@ -496,6 +498,41 @@ async function main() {
       );
     } catch (err) {
       record("B8 建立時明確指定", false, String(err));
+    }
+
+    // 2026-10-06:兩個功能的交會點——自動命名會在**同一條 ACP 連線**另開臨時 session(`session/new`),那個 session 的回應也帶
+    // configOptions;選項是依 sessionId 分流的,臨時 session 不得動到主 session 的選項/設定,也不得被套用「記住的上次選擇」。
+    // (真實 Codex 的同一流程本機實測過:命名後主 session 的 model/思考程度/選項清單都沒變。)
+    try {
+      const untitled = await create({ providerId: FAKE_ACP_OPTIONS });
+      const before = await waitForSession(client, untitled.id, (x) => x.options?.model);
+      const message = "選項與命名並存的第一則訊息";
+      await promptText(client, untitled.id, message);
+      const named = await waitForSession(client, untitled.id, (x) => x.titleSource === "auto", 15_000);
+      // 命名完成之後才查報告(報告本身是一則人類輸入,不能搶在第一則之前)。
+      const reportText = await promptText(client, untitled.id, REPORT_SESSIONS_PREFIX);
+      const idx = reportText.indexOf("SESSIONS:");
+      const report = idx === -1 ? [] : JSON.parse(reportText.slice(idx + "SESSIONS:".length));
+      const titleSessions = report.filter((r) => r.kind === "title");
+      const mainSessions = report.filter((r) => r.kind === "main");
+      const cfg = await agentConfig(client, untitled.id);
+      const after = await getSession(client, untitled.id);
+      record(
+        "B9 自動命名(臨時 session/new)與選項並存:標題由臨時對話產生;主 session 的 model/思考程度/選項清單沒被動到(仍是 B8 記住的 beta + high);" +
+          "agent 只開了一個臨時 session、沒對它送過 set_config_option;主 session 的 set_config_option 只有建立時套用記住的那一次",
+        named?.title === fakeTitleFor(message) && named?.titleSource === "auto" &&
+          before?.model === "fake/beta" && before?.effort === "high" &&
+          after?.model === "fake/beta" && after?.effort === "high" &&
+          after?.options?.model?.current === "fake/beta" && after?.options?.effort?.current === "high" &&
+          sameList(values(after?.options?.model), FAKE_ACP_CONFIG_MODELS.map((m) => m.value)) &&
+          sameList(values(after?.options?.effort), ["low", "high"]) &&
+          titleSessions.length === 1 && titleSessions[0].setConfigCalls === 0 &&
+          mainSessions.length === 1 && mainSessions[0].setConfigCalls === 1 &&
+          cfg?.setCalls.length === 1 && cfg.setCalls[0].configId === "think" && cfg.setCalls[0].value === "high",
+        JSON.stringify({ title: named?.title, titleSource: named?.titleSource, before: [before?.model, before?.effort], after: { model: after?.model, effort: after?.effort, options: after?.options }, report, setCalls: cfg?.setCalls }),
+      );
+    } catch (err) {
+      record("B9 自動命名與選項並存", false, String(err));
     }
 
     // ======================= C. 不回報選項的 ACP agent =======================

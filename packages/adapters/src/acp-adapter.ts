@@ -68,7 +68,8 @@ import { acpOptionChoices, acpSessionOptions, findAcpConfigOption, invalidOption
  *    `setModel()`/`setEffort()` 走 `session/set_config_option`。建立時指定的值在 `session/new` 之後立刻套用
  *    (見 `applyLaunchOptions()`)。agent 沒宣告的項目就是不支援(UI 不顯示、呼叫回明確錯誤)。實測:
  *    opencode 1.18.7 回 `model` + `mode`,目前 model 有 variants 時另有 `effort`;codex-acp 1.4.0 回 `model` +
- *    `reasoning_effort`(讀它的原始碼確認)。Gemini 本機未安裝,沒有實測。
+ *    `reasoning_effort`(讀它的原始碼確認,2026-10-15 以真實 Codex 實測:model 有 `gpt-5.6-terra`/`gpt-5.6-luna`,思考程度
+ *    隨 model 變——terra 有 low…max 與 ultra、luna 只到 max)。Gemini 本機未安裝,沒有實測。
  *  - `diff` 能力(Codex ACP 橋接切換 Phase 3 起回報為 true):
  *    `resolveDiffStructuredResult()` 用兩條路徑合成
  *    `ToolResultEvent.structuredResult`(消費端是既有機制,見

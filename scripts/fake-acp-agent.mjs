@@ -624,6 +624,9 @@ class FakeAcpAgent {
       cancelled: s.cancelled,
       permissionOutcomes: s.permissionOutcomes,
       prompts: s.prompts,
+      // 2026-10-06(model/思考程度 × 自動命名):這個 session 收過幾次 `session/set_config_option`(沒開 `--config-options` 是 null)——
+      // 命名用臨時 session 不得被套用「記住的上次選擇」,e2e 靠它確認。
+      setConfigCalls: s.config ? s.config.setCalls.length : null,
     }));
     await cx.notify(acp.methods.client.session.update, {
       sessionId,

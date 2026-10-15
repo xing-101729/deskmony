@@ -161,6 +161,10 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
   明確指定卻做不到,建立失敗、不留 session。換 model 後新 model 沒有的思考程度會被清掉。
 - `list_agents` 的摘要帶上可選的思考程度(`efforts`、`models[].efforts`)與 `optionsAfterStart`;
   `create_session` 可帶 `effort`。
+- **真實 Codex 實測**(2026-10-15,codex-acp 1.4.0,本機 ChatGPT 登入):建立後 `Session.options` 有 codex 回報的
+  model 清單(`gpt-5.6-terra`、`gpt-5.6-luna`)與思考程度(`low…max`,`terra` 另有 `ultra`——換 model 後清單跟著變);
+  對話中換 model/思考程度後回合照常回覆、建立時指定的值有套用、不在清單的值回 `agent.invalidModel`/`agent.invalidEffort`;
+  自動命名(§1.5)的臨時對話不會動到主 session 的選項。桌面端建立選單對 Codex 只顯示說明、對話標題列顯示兩個選擇器。
 
 ## 2. 多後端 Adapter,一套介面
 
