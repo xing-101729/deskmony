@@ -15,7 +15,7 @@ import type {
 import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
 import type { SessionNetworkPort } from "@deskmony/shared";
-import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
+import { DeskmonyError, EffortLevelSchema, ErrorCodes } from "@deskmony/shared";
 import type {
   AdapterCapabilities,
   AgentAdapter,
@@ -30,6 +30,7 @@ import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 import { buildAgentChildEnv } from "./agent-env.js";
+import { invalidOptionError } from "./agent-options.js";
 import {
   SESSION_NETWORK_MCP_SERVER_NAME,
   SESSION_NETWORK_ALLOWED_TOOL_NAMES,
@@ -150,6 +151,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // 憑證實測,見 spawn() 內呼叫點的註解),可靠性等同上面的
       // usageReporting:"supported"。
       slashCommands: "supported",
+      // 2026-10-06:SDK 的 `Query.setModel()`/`applyFlagSettings({ effortLevel })`,adapter 自己保證做得到。
+      modelSwitching: "supported",
+      effortSwitching: "supported",
     };
   }
 
@@ -206,7 +210,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     const options: SdkOptions = {
       cwd: workspace.path,
       model: launch.model,
-      effort: launch.effort,
+      effort: toClaudeEffort(launch.effort),
       includePartialMessages: true,
       permissionMode: "default",
       spawnClaudeCodeProcess: (spawnOptions) => {
@@ -662,9 +666,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
    * `applyFlagSettings()` 的官方文件)。同樣不需要 dispose 現有連線或重新
    * spawn,對話上下文原封不動保留。
    */
-  async setEffort(handle: AgentHandle, effort: EffortLevel): Promise<void> {
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
     const internal = this.mustGet(handle);
-    await internal.sdkQuery.applyFlagSettings({ effortLevel: effort });
+    await internal.sdkQuery.applyFlagSettings({ effortLevel: toClaudeEffort(effort) });
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {
@@ -1009,4 +1013,15 @@ function mapSlashCommands(commands: SlashCommand[]): SlashCommandInfo[] {
     description: c.description || undefined,
     argumentHint: c.argumentHint || undefined,
   }));
+}
+
+/**
+ * 2026-10-06:思考程度的值改成各 agent 自己定義的字串(見 packages/shared/src/session-options.ts),Claude 只認
+ * `EffortLevelSchema` 的 5 級——其他值丟明確錯誤,不能原樣塞給 SDK。
+ */
+function toClaudeEffort(effort: string | undefined): EffortLevel | undefined {
+  if (effort === undefined) return undefined;
+  const parsed = EffortLevelSchema.safeParse(effort);
+  if (!parsed.success) throw invalidOptionError("effort", "Claude", effort, [...EffortLevelSchema.options]);
+  return parsed.data;
 }

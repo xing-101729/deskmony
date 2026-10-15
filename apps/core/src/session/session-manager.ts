@@ -14,7 +14,7 @@ import {
   type AgentSoftware,
   type CreateSessionInput,
   type DialogAnswer,
-  type EffortLevel,
+  type SessionOptions,
   type MessageBudgetConfig,
   type MessageOrigin,
   type MessageRecord,
@@ -48,9 +48,9 @@ import {
   sanitizeGeneratedTitle,
   softwareCanUseTools,
 } from "@deskmony/shared";
-import { storedLaunchFromSpec, type AgentCatalog, type StoredLaunchInfo } from "../agents/agent-catalog.js";
+import { storedLaunchFromSpec, type AgentCatalog, type LaunchChoices, type StoredLaunchInfo } from "../agents/agent-catalog.js";
 import type { PermissionGateway } from "../permissions/permission-gateway.js";
-import { getProviderEnv, type SettingsStore } from "../settings/settings-store.js";
+import { getProviderEnv, getProviderLastSelection, rememberProviderSelection, type SettingsStore } from "../settings/settings-store.js";
 import type { PolicyEngine, PermissionRequest, ExecContext } from "../permissions/policy-engine.js";
 import type { AuditLog } from "../enforcement/audit-log.js";
 import type { Notifier } from "../enforcement/notifier.js";
@@ -232,6 +232,12 @@ interface RuntimeState {
    *  空的),用來讓 `session.getSlashCommands` 的回應區分「還不知道」與「已
    *  確認是空清單」,對齊既有 usage/context-usage 事件的 observed 慣例。 */
   slashCommandsObserved: boolean;
+  /**
+   * 2026-10-06:agent 最近一次回報的「這個 session 能選哪些 model / 思考程度」(`session-options` 事件,
+   * REPLACE 語意,見 packages/shared/src/session-options.ts)。純記憶體,回傳 Session 前掛到 `Session.options`
+   * (見 `decorate()`)——同 `permissionMode` 的待遇,不落地。
+   */
+  sessionOptions?: SessionOptions;
   /**
    * 2026-09-17:已經計入回合硬上限、已經寫進 DB,但還沒收到 tool-result 的工具
    * 呼叫,key 是 toolCallId。`consumeEventsInner()` 的 `"tool-call"` case 靠它分辨
@@ -443,13 +449,13 @@ export class SessionManager extends EventEmitter {
 
   async listSessions(): Promise<Session[]> {
     const rows = await this.db.select().from(sessionsTable).all();
-    return rows.map((row) => this.permissions.attachTo(rowToSession(row)));
+    return rows.map((row) => this.decorate(rowToSession(row)));
   }
 
   /** S6(crash-recovery):復原視圖的資料來源之一,見 `RecoveryService.list()`。 */
   async listInterruptedSessions(): Promise<Session[]> {
     const rows = await this.db.select().from(sessionsTable).where(eq(sessionsTable.status, "interrupted")).all();
-    return rows.map((row) => this.permissions.attachTo(rowToSession(row)));
+    return rows.map((row) => this.decorate(rowToSession(row)));
   }
 
   /**
@@ -506,12 +512,47 @@ export class SessionManager extends EventEmitter {
    * 既有的 session 級 auto/YOLO 切換不變。
    */
   async createSession(input: CreateSessionInput): Promise<Session> {
-    const { spec, label } = await this.catalog.buildLaunch(input.providerId, input.model, input.effort);
-    return this.spawnNewSession(spec, label, {
+    const { spec, label } = await this.catalog.buildLaunch(
+      input.providerId,
+      await this.launchChoicesFor(input.providerId, input.model, input.effort),
+    );
+    const session = await this.spawnNewSession(spec, label, {
       workingDir: input.workingDir,
       title: input.title,
       parentSessionId: input.parentSessionId,
     });
+    // 2026-10-06:使用者(gateway 的 `session.create`)明確選的 model/思考程度,記成這個 provider 的「上次選擇」
+    // ——只對「要等 session 開起來才知道選項」的 agent(見 `rememberSelection()`)。
+    await this.rememberSelection(input.providerId, { model: input.model, effort: input.effort });
+    return session;
+  }
+
+  /**
+   * 2026-10-06:建立 session 的 model/思考程度。明確給的值照用;「要等 session 開起來才知道選項」的 agent
+   * (provider 目錄的 `optionsAfterStart`,ACP)沒給的那一項,帶上這個 provider 上次的選擇當**軟性偏好**——
+   * agent 這次不提供那個值就略過(見 `AgentLaunchSpec.preferredModel`)。這類 agent 在建立選單裡沒有選項可選,
+   * 使用者只能在對話標題列選,所以要記住、下次自動套用。
+   */
+  private async launchChoicesFor(providerId: string, model?: string, effort?: string): Promise<LaunchChoices> {
+    if (!(await this.catalog.optionsAfterStart(providerId))) return { model, effort };
+    const last = await getProviderLastSelection(this.settingsStore, providerId);
+    return {
+      model,
+      effort,
+      preferredModel: model ? undefined : last.model,
+      preferredEffort: effort ? undefined : last.effort,
+    };
+  }
+
+  /** 見 `launchChoicesFor()`:只記「要等 session 開起來才知道選項」的 agent;寫入失敗不影響呼叫端。 */
+  private async rememberSelection(providerId: string, selection: { model?: string; effort?: string }): Promise<void> {
+    if (!selection.model && !selection.effort) return;
+    try {
+      if (!(await this.catalog.optionsAfterStart(providerId))) return;
+      await rememberProviderSelection(this.settingsStore, providerId, selection);
+    } catch (err) {
+      console.warn(`[session-manager] 記住 ${providerId} 上次的 model/思考程度失敗(不影響這次操作): ${String(err)}`);
+    }
   }
 
   // ==========================================================================================
@@ -738,8 +779,8 @@ export class SessionManager extends EventEmitter {
       createdAt: now,
       updatedAt: now,
       // M5 Round C:session 級別的 model/effort 取自建立參數(`AgentCatalog.buildLaunch()` 已套用
-      // 「沒給就用 provider 明確標記的預設 model、否則維持 undefined」與「effort 只有
-      // claude-agent-sdk 有意義」的規則),不臆測任何預設值。
+      // 「沒給就用 provider 明確標記的預設 model、否則維持 undefined」與「provider 不支援就忽略」的規則),
+      // 不臆測任何預設值。2026-10-06:agent 回報目前值之後(`session-options` 事件)會寫回實際的值。
       model: spec.model,
       effort: spec.effort,
       // 從哪個 session 底下開出來的(只用於 UI 巢狀顯示與溯源)
@@ -762,7 +803,7 @@ export class SessionManager extends EventEmitter {
     void this.consumeEvents(session.id);
 
     this.emit("session-list-updated");
-    return this.permissions.attachTo(session);
+    return this.decorate(session);
   }
 
   /**
@@ -1072,6 +1113,7 @@ export class SessionManager extends EventEmitter {
     }
 
     await runtime.adapter.setModel(runtime.handle, model);
+    await this.rememberSelection(runtime.providerId, { model });
 
     const updatedAt = Date.now();
     await this.db.update(sessionsTable).set({ model, updatedAt }).where(eq(sessionsTable.id, sessionId)).run();
@@ -1097,16 +1139,14 @@ export class SessionManager extends EventEmitter {
    * packages/adapters/src/types.ts 的 `AgentAdapter.setEffort()` 介面註解)。
    * `ClaudeAgentSdkAdapter.setEffort()` 呼叫 SDK 的
    * `Query.applyFlagSettings({ effortLevel })`,對話上下文原封不動保留,不需要
-   * dispose/respawn。只有 `software="claude-agent-sdk"` 驗證得到這個能力(見
-   * packages/shared/src/agent-launch.ts 的 `EffortLevelSchema` 註解)——其餘
-   * adapter(含 opencode)的 `setEffort()` 會直接丟出明確錯誤,這裡不特別
-   * 攔截、原樣往外傳,呼叫端(gateway)會收到 `ok:false` + 明確的錯誤訊息,
-   * 不會誤以為成功。
+   * dispose/respawn。2026-10-06 起值由各 agent 定義,ACP(`session/set_config_option`)與 OpenCode
+   * (variant)也支援,見 packages/shared/src/session-options.ts;不支援或值不合法時 adapter 丟出明確錯誤,
+   * 這裡不特別攔截、原樣往外傳,呼叫端(gateway)會收到 `ok:false` + 明確的錯誤訊息,不會誤以為成功。
    *
    * 要求 session 目前必須是「執行中」的(`this.runtime` 有對應的
    * RuntimeState)——理由同 `setSessionModel()`。
    */
-  async setSessionEffort(sessionId: string, effort: EffortLevel): Promise<Session> {
+  async setSessionEffort(sessionId: string, effort: string): Promise<Session> {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) {
       throw new DeskmonyError(
@@ -1117,6 +1157,7 @@ export class SessionManager extends EventEmitter {
     }
 
     await runtime.adapter.setEffort(runtime.handle, effort);
+    await this.rememberSelection(runtime.providerId, { effort });
 
     const updatedAt = Date.now();
     await this.db.update(sessionsTable).set({ effort, updatedAt }).where(eq(sessionsTable.id, sessionId)).run();
@@ -1316,6 +1357,7 @@ export class SessionManager extends EventEmitter {
     agent: string;
     prompt: string;
     model?: string;
+    effort?: string;
     title?: string;
     workingDir?: string;
   }): Promise<{ sessionId: string }> {
@@ -1323,7 +1365,9 @@ export class SessionManager extends EventEmitter {
     if (!caller) {
       throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: input.callerSessionId }, `找不到呼叫者 session: ${input.callerSessionId}`);
     }
-    const { spec, label } = await this.catalog.buildLaunch(input.agent, input.model);
+    // agent 指定的 model/思考程度照用(做不到就建立失敗);沒指定的套用使用者上次對這個 agent 的選擇(軟性),
+    // 但 agent 的選擇**不**記成使用者的「上次選擇」。
+    const { spec, label } = await this.catalog.buildLaunch(input.agent, await this.launchChoicesFor(input.agent, input.model, input.effort));
 
     const chainId = this.chainOfCaller(input.callerSessionId);
     const admission = await this.chainBudget.admit(chainId, [input.callerSessionId]);
@@ -2048,8 +2092,44 @@ export class SessionManager extends EventEmitter {
           runtime.slashCommandsObserved = true;
           break;
         }
+        /**
+         * 2026-10-06:agent 回報可選的 model / 思考程度與目前值(REPLACE 語意,見 session-options.ts)。記在記憶體
+         * (`decorate()` 掛到 `Session.options`),目前值寫回 session 的 model/effort(UI 與續接都看得到實際的設定),
+         * 再廣播 session-updated 讓 UI 更新選擇器。
+         */
+        case "session-options": {
+          await this.applyReportedOptions(sessionId, runtime, event.options);
+          break;
+        }
       }
     }
+  }
+
+  /**
+   * 見 `consumeEventsInner()` 的 `"session-options"` case。目前值的規則:
+   *   - model:agent 有回報 model 選項才採用它的目前值(OpenCode 不回報 model 選項,model 維持 session 自己的)。
+   *   - 思考程度:以回報為準——沒有思考程度選項(例如換到沒有 variants 的 model)或沒有目前值,就清掉。
+   */
+  private async applyReportedOptions(sessionId: string, runtime: RuntimeState, options: SessionOptions): Promise<void> {
+    this.catalog.noteLiveOptions(runtime.providerId, options);
+    const session = await this.getSession(sessionId);
+    // **只寫回報決定得了的欄位**:這裡讀到的 session 可能比 `setSessionModel()` 的 DB 寫入還舊(兩邊非同步交錯),
+    // 沒回報 model 的 agent(OpenCode)若照舊值整列寫回,會把剛換的 model 蓋回去。
+    const patch: { model?: string; effort?: string | null } = {};
+    if (options.model?.current && options.model.current !== session?.model) patch.model = options.model.current;
+    const effort = options.effort?.current;
+    if (effort !== session?.effort) patch.effort = effort ?? null;
+    if (session && Object.keys(patch).length > 0) {
+      await this.db
+        .update(sessionsTable)
+        .set({ ...patch, updatedAt: Date.now() })
+        .where(eq(sessionsTable.id, sessionId))
+        .run();
+    }
+    // DB 寫完才換記憶體裡的選項:之後任何人讀到的 session,選項與 model/effort 一定是同一份回報。
+    runtime.sessionOptions = options;
+    const updated = await this.getSession(sessionId);
+    if (updated) this.emit("session-updated", updated);
   }
 
   /**
@@ -2157,7 +2237,17 @@ export class SessionManager extends EventEmitter {
   /** 公開:查詢單一 session 的目前狀態(idle/busy/...),例如投遞訊息前決定要立即送還是排隊。 */
   async getSession(sessionId: string): Promise<Session | undefined> {
     const rows = await this.db.select().from(sessionsTable).where(eq(sessionsTable.id, sessionId)).all();
-    return rows[0] ? this.permissions.attachTo(rowToSession(rows[0])) : undefined;
+    return rows[0] ? this.decorate(rowToSession(rows[0])) : undefined;
+  }
+
+  /**
+   * 回傳給外部的 Session 一律經過這裡:補上只存記憶體的欄位——權限模式(`SessionPermissionCoordinator`)與
+   * 2026-10-06 起 agent 回報的 model / 思考程度選項(`RuntimeState.sessionOptions`)。
+   */
+  private decorate(session: Session): Session {
+    const withPermissions = this.permissions.attachTo(session);
+    const options = this.runtime.get(session.id)?.sessionOptions;
+    return options ? { ...withPermissions, options } : withPermissions;
   }
 
   private async setStatus(sessionId: string, status: SessionStatus, lastError?: string): Promise<void> {

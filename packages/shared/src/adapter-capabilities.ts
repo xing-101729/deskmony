@@ -102,5 +102,17 @@ export const AdapterCapabilitiesSchema = z.object({
    * 直通,連「指令清單」這個概念本身都不存在,為 `"unsupported"`。
    */
   slashCommands: CapabilitySupportSchema,
+  /**
+   * 2026-10-06(各 agent 選 model 與思考程度):**對話中**能不能換 model / 思考程度。三態,理由同上:
+   *   - `claude-agent-sdk`:兩者都 `"supported"`(SDK 的 `Query.setModel()`/`applyFlagSettings()`,adapter 自己保證)。
+   *   - `opencode`(HTTP):model `"supported"`(每則訊息自帶 `model` 欄位,adapter 自己保證);思考程度 `"unknown"`
+   *     ——要看目前 model 有沒有 variants。
+   *   - `acp`:兩者都 `"unknown"`——要等 `session/new` 回報 `configOptions` 才知道 agent 宣告了什麼。
+   *   - `pty`:兩者都 `"unsupported"`(只能在建立時烤進啟動參數,見 AgentCatalog.buildLaunch())。
+   * 「這個 session 實際能選什麼」以 `Session.options`(agent 回報的選項,見 session-options.ts)為準,
+   * 收斂方式同 `resolveCapabilitySupport()`:收到了就是支援。
+   */
+  modelSwitching: CapabilitySupportSchema,
+  effortSwitching: CapabilitySupportSchema,
 });
 export type AdapterCapabilities = z.infer<typeof AdapterCapabilitiesSchema>;

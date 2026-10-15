@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EffortLevelSchema, SessionPermissionModeSchema, type EffortLevel, type SessionPermissionMode } from "@deskmony/shared";
+import { EffortValueSchema, SessionPermissionModeSchema, type SessionPermissionMode } from "@deskmony/shared";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,7 +39,7 @@ export interface GlobalOptions {
   /** 2026-10-02(P2:移除 profile):`--agent <providerId>`,取代原本的 `--profile`。預設 claude-agent-sdk。 */
   agent: string;
   model: string | undefined;
-  effort: EffortLevel | undefined;
+  effort: string | undefined;
   json: boolean;
   /** 已經套用 isTTY / NO_COLOR / --no-color / --json 全部規則後的最終值,
    *  render.ts 只看這個欄位,不重新判斷任何一個來源。 */
@@ -192,11 +192,16 @@ function parseTimeout(raw: string | undefined, fallback: number): number {
   return Math.floor(n);
 }
 
-function parseEffort(raw: string | undefined): EffortLevel | undefined {
+/**
+ * 2026-10-06:思考程度的值由各 agent 定義(Claude 是 low…max,codex/opencode 有 none/minimal……,見
+ * packages/shared/src/session-options.ts),這裡只擋空字串,合不合法交給 core 依那個 agent 的清單判斷
+ * (不合法時 session.create 回明確錯誤)。
+ */
+function parseEffort(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  const parsed = EffortLevelSchema.safeParse(raw);
+  const parsed = EffortValueSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new CliUsageError(`--effort 必須是以下其中之一:${EffortLevelSchema.options.join("、")}(收到:${raw})`);
+    throw new CliUsageError(`--effort 不能是空字串(收到:${JSON.stringify(raw)})`);
   }
   return parsed.data;
 }
@@ -351,7 +356,7 @@ export function printHelp(): void {
     "  --agent <id>               用哪個 agent 建 session(providerId,預設 claude-agent-sdk;",
     "                             例如 codex / opencode / opencode-acp / gemini / claude-cli / aider)",
     "  --model <m>                建 session 時指定 model",
-    "  --effort <e>               建 session 時指定 effort(只有 claude-agent-sdk 適用)",
+    "  --effort <e>               建 session 時指定思考程度(值依 agent 而定,例如 Claude 的 low…max)",
     "  --permission-mode <mode>   對應 session.setPermissionMode:",
     "                             always-ask / auto-accept-edits /",
     "                             auto-accept-all(僅 run/chat 適用)",

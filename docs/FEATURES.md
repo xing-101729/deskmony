@@ -36,7 +36,7 @@ Deskmony 是一個桌面控制室,讓 AI coding agent(不是單一聊天視窗)�
   Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider;固定清單,偵測**不阻塞
   啟動**),桌面側欄、設定與 CLI 的 `doctor` 都能「重新偵測」。
 - **沒有 profile**:開 session = 從偵測到的 agent 挑一個(`providerId`)+ 選填
-  model / effort + 工作資料夾。桌面側欄有這四個選單加上「新對話」鈕(上次選的
+  model / effort(思考程度,見 §1.6)+ 工作資料夾。桌面側欄有這四個選單加上「新對話」鈕(上次選的
   組合記在 `localStorage`,`Ctrl/⌘+N` 沿用);CLI 用 `--agent <providerId>`
   (預設 `claude-agent-sdk`)+ `--model` / `--effort`。偵測不到任何 agent 時,UI
   會說明並提供「重新偵測」。
@@ -136,16 +136,42 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
   自己的 session 清單裡(Deskmony 這邊已關閉、丟棄,不影響任何對話)。臨時對話與主對話同時進行,慢的免費模型
   命名可能要二、三十秒。
 
+### 1.6 每個 agent 都能選 model 與思考程度(2026-10-06)
+
+> 過去只有 Claude 能選 model 與思考程度,其他 agent 一律「由 agent 自行管理」。
+> 對應測試:`scripts/e2e-agent-options.mjs`、`scripts/e2e-agent-catalog.mjs`(A3/A3b)。
+
+- **向 agent 本身查詢,不寫死**:agent 回報「這個 session 能選哪些 model / 思考程度、
+  目前是哪個」(`session-options` 事件,掛在 `Session.options`),UI 只顯示真的提供的。
+  思考程度的值由各 agent 定義(Claude 是 low…max,codex/opencode 有 none/minimal……)。
+
+  | Agent | model | 思考程度 | 什麼時候能選 |
+  |---|---|---|---|
+  | Claude(內嵌 SDK) | provider 目錄清單 | 固定 5 級 | 建立時、對話中 |
+  | Claude Code CLI | 別名清單(`--model`) | 固定 5 級(`--effort`) | 只有建立時 |
+  | Codex / Gemini / OpenCode ACP | agent 在 `session/new` 回報的 `configOptions`(category `model`) | 同上(category `thought_level`) | 建立後在對話標題列;`session/set_config_option` |
+  | OpenCode(HTTP) | `opencode models` 清單 | 目前 model 的 variants(`opencode models --verbose` / `/config/providers`),隨每則訊息的 `variant` 送出 | 建立時、對話中 |
+  | Aider | — | — | — |
+
+- **記住上次的選擇**:要等 session 開起來才知道選項的 agent(ACP),建立選單會說明「建立後在
+  對話標題列選」,並把使用者上次對這個 agent 的選擇記下來(core 設定 `providerLastSelection`),
+  下次建立時自動套用;agent 這次不提供那個值就略過,建立不會失敗。agent 自己改的設定不算。
+- **不支援就明確報錯**:agent 不提供的 model / 思考程度(`agent.modelNotOffered`、
+  `agent.effortNotOffered`、`agent.invalidModel`、`agent.invalidEffort`)一律回明確錯誤;建立時
+  明確指定卻做不到,建立失敗、不留 session。換 model 後新 model 沒有的思考程度會被清掉。
+- `list_agents` 的摘要帶上可選的思考程度(`efforts`、`models[].efforts`)與 `optionsAfterStart`;
+  `create_session` 可帶 `effort`。
+
 ## 2. 多後端 Adapter,一套介面
 
 | Provider | 對接方式 | 能力層級 |
 |---|---|---|
 | Claude Code(內嵌 SDK) | Claude Agent SDK,程式內嵌 | 最深——hooks、in-process session 工具、細粒度權限事件、對話中即時切換 model/effort |
 | Claude Code CLI | PTY 原始直通 | 相容層,無權限事件 |
-| Codex | ACP(經 `@agentclientprotocol/codex-acp` 橋接套件) | 結構化事件 |
-| Gemini CLI | ACP | 結構化事件 |
-| OpenCode(HTTP) | HTTP + SSE(原生 server) | 結構化事件,可遠端;能用 session 工具、主動傳訊息 |
-| OpenCode(ACP) | `opencode acp`,ACP | 結構化事件;能用 session 工具、主動傳訊息(subagent 工具停用) |
+| Codex | ACP(經 `@agentclientprotocol/codex-acp` 橋接套件) | 結構化事件;可換 model 與思考程度 |
+| Gemini CLI | ACP | 結構化事件;agent 有提供時可換 model 與思考程度 |
+| OpenCode(HTTP) | HTTP + SSE(原生 server) | 結構化事件,可遠端;能用 session 工具、主動傳訊息;可換 model 與思考程度(variant) |
+| OpenCode(ACP) | `opencode acp`,ACP | 結構化事件;能用 session 工具、主動傳訊息(subagent 工具停用);可換 model 與思考程度 |
 | Aider | PTY | 相容層,無權限事件 |
 
 - **能力探測誠實分級**:每個 adapter 回報 streaming / 工具事件 / 權限請求 /
@@ -295,8 +321,8 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   ACP、OpenCode 三種來源都支援,清單即時更新)。
 - **Command Palette**(`Ctrl+K`):快速搜尋與執行指令。
 - **Session 標題**:就地改名、第一則訊息後由 session 自己的 agent 在臨時對話裡自動命名、「AI 重新命名」(見 1.5)。
-- 對話中可即時切換 model 與 effort(思考程度)——依後端能力優雅降級,不支援
-  的後端會得到明確錯誤而不是靜默失敗。
+- 對話中可即時切換 model 與 effort(思考程度)——選項由 agent 本身回報(見 §1.6),
+  不支援的後端會得到明確錯誤而不是靜默失敗。
 
 ## 8. 設定系統
 

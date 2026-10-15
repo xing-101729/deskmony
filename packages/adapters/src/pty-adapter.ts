@@ -89,6 +89,10 @@ export class GenericPtyAdapter implements AgentAdapter {
       // 清單」這個概念本身都不存在,這是**結構上**的不可能。若底層 CLI 自己
       // 有互動式 "/" 選單,終端視圖裡直接打字就已經能用,不需要這裡額外支援。
       slashCommands: "unsupported",
+      // 2026-10-06:對話中換 model/思考程度結構上不可能——claude-cli 只能在建立時把 `--model`/`--effort` 烤進
+      // 啟動參數(見 AgentCatalog.buildLaunch())。
+      modelSwitching: "unsupported",
+      effortSwitching: "unsupported",
     };
   }
 
@@ -271,6 +275,7 @@ export class GenericPtyAdapter implements AgentAdapter {
    * M5 Round C:pty 是無結構化的終端直通,連「model」這個概念本身都不存在
    * (終端裡跑的可能根本不是任何 LLM CLI)——明確拋出錯誤,不可靜默忽略成功
    * (見 packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
+   * claude-cli 的 model/思考程度只能在建立 session 時決定(`--model`/`--effort`,見 AgentCatalog.buildLaunch())。
    */
   async setModel(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)

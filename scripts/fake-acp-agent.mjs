@@ -19,6 +19,16 @@
  * 起,e2e 經 core 的環境變數 `DESKMONY_E2E_EXTRA_PROVIDERS` 把這組 command/args 注入
  * `AgentCatalog`(見 scripts/lib/e2e-providers.mjs),session 用 `providerId:"e2e-fake-acp"` 建立。
  *
+ * 2026-10-06:以 `--config-options` 旗標啟動時(e2e 的 FAKE_ACP_OPTIONS provider,見 scripts/lib/e2e-providers.mjs),
+ * 模擬會回報 model / 思考程度的 ACP agent(opencode acp、codex-acp):`session/new` 回應帶 `configOptions`(一個
+ * 無關的 `mode`、`category: "model"` 的 model 選項(分組)、目前 model 有思考程度時再加 `category: "thought_level"`),
+ * 並處理 `session/set_config_option`(換 model 時思考程度重設成新 model 的第一個,沒有就整個選項消失——同 opencode 的行為)。
+ * option id 刻意用不常見的 `llm`/`think`:Deskmony 必須靠 category 認,不能靠 id。沒有這個旗標時完全不回報
+ * configOptions、也不處理 set_config_option(既有測試不受影響)。兩個只在這個模式有意義的 prompt:
+ *   - `ACP_REPORT_CONFIG`:回一句 `CONFIG:{"model","effort","setCalls"}`——agent 端實際的設定與收到過的
+ *     set_config_option 呼叫,讓 e2e 證明「切換真的送到 agent、之後的回合用的是新設定」。
+ *   - `ACP_CONFIG_UPDATE {"model"?,"effort"?}`:agent 自己改設定並送 `config_option_update` 通知(模擬 agent 主動變更)。
+ *
  * 協定(僅供本腳本與 e2e-gateway.mjs 步驟 9 之間使用,非 ACP 標準的一部分):
  *   - 一般 prompt:固定回覆 FAKE_ACP_REPLY_CHUNKS 串接而成的文字,拆成多段
  *     `agent_message_chunk` 送出(同一個 messageId),用來驗證
@@ -317,6 +327,52 @@ export const FAILING_NO_INPUT_TOOL_TITLE = "FailingNoInputTool";
 export const FAILING_TOOL_COMMAND = "echo will-fail";
 export const FAILING_TOOL_ERROR_TEXT = "boom";
 export const EMPTY_RESULT_DONE_TEXT = "failing tool calls sent";
+/** 2026-10-06:`--config-options` 模式(見檔頭)的 model 清單——每個 model 自己的思考程度(可能沒有)。 */
+export const FAKE_ACP_CONFIG_MODELS = [
+  { value: "fake/alpha", name: "Fake Alpha", efforts: [] },
+  { value: "fake/beta", name: "Fake Beta", efforts: ["low", "high"] },
+  { value: "fake/gamma", name: "Fake Gamma", efforts: ["minimal", "medium", "max"] },
+];
+export const FAKE_ACP_DEFAULT_MODEL = "fake/beta";
+export const FAKE_ACP_MODEL_CONFIG_ID = "llm";
+export const FAKE_ACP_EFFORT_CONFIG_ID = "think";
+export const REPORT_CONFIG_PREFIX = "ACP_REPORT_CONFIG";
+export const CONFIG_UPDATE_PREFIX = "ACP_CONFIG_UPDATE ";
+const CONFIG_OPTIONS_MODE = process.argv.includes("--config-options");
+
+function effortsOf(model) {
+  return FAKE_ACP_CONFIG_MODELS.find((m) => m.value === model)?.efforts ?? [];
+}
+
+/** 這個 session 目前的 configOptions(完整一份,`session/new`、`set_config_option`、`config_option_update` 共用)。 */
+function buildConfigOptions(state) {
+  const efforts = effortsOf(state.model);
+  return [
+    // 無關的選項:Deskmony 只取 model 與思考程度,這個要被忽略。
+    { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "build" }] },
+    {
+      id: FAKE_ACP_MODEL_CONFIG_ID,
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: state.model,
+      options: [{ group: "fake", name: "Fake", options: FAKE_ACP_CONFIG_MODELS.map((m) => ({ value: m.value, name: m.name })) }],
+    },
+    ...(efforts.length > 0
+      ? [
+          {
+            id: FAKE_ACP_EFFORT_CONFIG_ID,
+            name: "Thinking",
+            category: "thought_level",
+            type: "select",
+            currentValue: state.effort,
+            options: efforts.map((e) => ({ value: e, name: e.toUpperCase(), description: `effort ${e}` })),
+          },
+        ]
+      : []),
+  ];
+}
+
 /** 建構出一段「延遲 delayMs 毫秒後把整段 prompt 文字回顯」的標記文字。 */
 export function delayEchoMarker(delayMs) {
   return `[[E2E_DELAY_ECHO:${delayMs}]]`;
@@ -345,7 +401,7 @@ class FakeAcpAgent {
     // `handleCallBridgeTool()` 之後真的拿去 spawn 成子行程。沒有掛任何
     // server 時(這個 session 沒有 subagentPort)是空陣列,不是
     // undefined(見 NewSessionRequest.mcpServers 的型別——必填欄位)。
-    this.sessions.set(sessionId, {
+    const session = {
       abort: null,
       mcpServers: params?.mcpServers ?? [],
       // 2026-10-06(session 自動命名)e2e 用的統計,見 REPORT_SESSIONS_PREFIX。
@@ -354,8 +410,56 @@ class FakeAcpAgent {
       cancelled: 0,
       permissionOutcomes: [],
       prompts: 0,
+    };
+    this.sessions.set(sessionId, session);
+    if (!CONFIG_OPTIONS_MODE) return { sessionId };
+    const config = { model: FAKE_ACP_DEFAULT_MODEL, effort: effortsOf(FAKE_ACP_DEFAULT_MODEL)[0], setCalls: [] };
+    session.config = config;
+    return { sessionId, configOptions: buildConfigOptions(config) };
+  }
+
+  /** 2026-10-06:`--config-options` 模式才會註冊(見 main()),見檔頭。 */
+  async setConfigOption(params) {
+    const config = this.sessions.get(params.sessionId)?.config;
+    if (!config) throw new Error(`未知的 ACP session: ${params.sessionId}`);
+    config.setCalls.push({ configId: params.configId, value: params.value });
+    if (params.configId === FAKE_ACP_MODEL_CONFIG_ID) {
+      if (!FAKE_ACP_CONFIG_MODELS.some((m) => m.value === params.value)) throw new Error(`model not found: ${params.value}`);
+      config.model = params.value;
+      const efforts = effortsOf(config.model);
+      if (!efforts.includes(config.effort)) config.effort = efforts[0];
+    } else if (params.configId === FAKE_ACP_EFFORT_CONFIG_ID) {
+      if (!effortsOf(config.model).includes(params.value)) throw new Error(`effort not found: ${params.value}`);
+      config.effort = params.value;
+    } else {
+      throw new Error(`unknown config option: ${params.configId}`);
+    }
+    return { configOptions: buildConfigOptions(config) };
+  }
+
+  async handleReportConfig(sessionId, cx) {
+    const config = this.sessions.get(sessionId)?.config ?? null;
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text: `CONFIG:${JSON.stringify(config)}` } },
     });
-    return { sessionId };
+  }
+
+  async handleConfigUpdate(sessionId, rawJson, cx) {
+    const config = this.sessions.get(sessionId)?.config;
+    if (config) {
+      const patch = JSON.parse(rawJson);
+      if (patch.model) config.model = patch.model;
+      config.effort = patch.effort ?? (effortsOf(config.model).includes(config.effort) ? config.effort : effortsOf(config.model)[0]);
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "config_option_update", configOptions: buildConfigOptions(config) },
+      });
+    }
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text: "config updated" } },
+    });
   }
 
   /** 2026-10-06:`session/close`——取消進行中的回合並標成 closed(真實 agent 會釋放資源)。 */
@@ -446,6 +550,10 @@ class FakeAcpAgent {
         await this.handleReportShellEnv(params.sessionId, text.slice(REPORT_SHELL_ENV_PREFIX.length), cx);
       } else if (text.startsWith(REPORT_PRESENCE_PREFIX)) {
         await this.handleReportPresence(params.sessionId, text.slice(REPORT_PRESENCE_PREFIX.length), cx);
+      } else if (text === REPORT_CONFIG_PREFIX) {
+        await this.handleReportConfig(params.sessionId, cx);
+      } else if (text.startsWith(CONFIG_UPDATE_PREFIX)) {
+        await this.handleConfigUpdate(params.sessionId, text.slice(CONFIG_UPDATE_PREFIX.length), cx);
       } else {
         await this.handleEcho(params.sessionId, cx);
       }
@@ -1120,7 +1228,7 @@ async function main() {
   const stream = acp.ndJsonStream(input, output);
   const agent = new FakeAcpAgent();
 
-  acp
+  let app = acp
     .agent({ name: "deskmony-fake-acp-agent" })
     .onRequest(acp.methods.agent.initialize, () => agent.initialize())
     .onRequest(acp.methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
@@ -1128,8 +1236,10 @@ async function main() {
     .onRequest(acp.methods.agent.session.setMode, () => agent.setSessionMode())
     .onRequest(acp.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
     .onRequest(acp.methods.agent.session.prompt, (ctx) => agent.prompt(ctx.params, ctx.client))
-    .onNotification(acp.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
-    .connect(stream);
+    .onNotification(acp.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params));
+  // 2026-10-06:沒有 `--config-options` 時不處理 set_config_option(SDK 回 method-not-found),模擬不支援的 agent。
+  if (CONFIG_OPTIONS_MODE) app = app.onRequest(acp.methods.agent.session.setConfigOption, (ctx) => agent.setConfigOption(ctx.params));
+  app.connect(stream);
 }
 
 // 只有「被當成獨立程序直接執行」時才啟動 stdio 連線(即 AcpAdapter.spawn()

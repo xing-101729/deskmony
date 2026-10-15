@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CLAUDE_MODEL_ALIASES } from "./known-models.js";
+import { EffortLevelSchema } from "./agent-launch.js";
 
 /**
  * provider-catalog.ts(這輪新增):把「Paseo 的 provider 設計」——具名 provider
@@ -17,8 +18,11 @@ import { CLAUDE_MODEL_ALIASES } from "./known-models.js";
  * 使用者偏好 → 可直接用來建立 session 的清單」這件事的實際邏輯,兩者分開
  * 是因為目錄是靜態資料、resolve 是每次呼叫都要重新套用偵測/偏好的計算。
  *
+ * 2026-10-06:思考程度(對應 Paseo 模型物件的 `thinkingOptions`)已補上——provider 層級的固定清單
+ * (`efforts`,Claude 的 low…max)、model 層級的清單(`ProviderModel.efforts`,OpenCode 偵測到的 variants),
+ * 以及「要等 session 開起來才由 agent 回報」的 ACP agent(`optionsAfterStart`,見 session-options.ts)。
+ *
  * 刻意不做(記入未來項目,對齊需求描述「這輪不做」的範圍)：
- *   - `thinkingOptions`(Paseo 模型物件的思考預算選項)。
  *   - `disallowedTools`(Paseo provider 層級的工具黑名單)。
  *   - Paseo 的「具名 provider 多實例」(例如同時存在 `claude-work`/
  *     `claude-personal` 兩個都 extends `claude` 的具名 provider)。(曾經用
@@ -27,13 +31,18 @@ import { CLAUDE_MODEL_ALIASES } from "./known-models.js";
  *     `getProviderEnv()`——要多組憑證得在目錄裡多加一個項目。)
  */
 
-/** 對齊 Paseo 模型物件的形狀(id/label/description/isDefault),先不含
- *  `thinkingOptions`(見上方檔案註解「刻意不做」)。 */
+/** 對齊 Paseo 模型物件的形狀(id/label/description/isDefault)。 */
 export const ProviderModelSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   description: z.string().optional(),
   isDefault: z.boolean().optional(),
+  /**
+   * 2026-10-06:這個 model 可選的思考程度(值由 agent 定義)。目前只有 OpenCode 會有:偵測時用
+   * `opencode models --verbose` 讀每個 model 的 `variants`(見 apps/core/src/detect/agent-detector.ts)。
+   * 空陣列 = 這個 model 沒有可選的思考程度;省略 = 不知道。
+   */
+  efforts: z.array(z.string()).optional(),
 });
 export type ProviderModel = z.infer<typeof ProviderModelSchema>;
 
@@ -95,6 +104,20 @@ export const ProviderCatalogEntrySchema = z.object({
    *  不臆測)。 */
   models: z.array(ProviderModelSchema),
   supportsModelSelection: z.boolean(),
+  /**
+   * 2026-10-06:建立 session 時能不能指定思考程度(`AgentCatalog.buildLaunch()` 只對 true 的 provider 帶 effort)。
+   * 可選的值:provider 層級的 `efforts`、model 層級的 `ProviderModel.efforts`,或 agent 開起來之後回報的
+   * (`optionsAfterStart`)。省略 = false。
+   */
+  supportsEffortSelection: z.boolean().optional(),
+  /** 2026-10-06:與 model 無關的固定思考程度清單(Claude 的 low…max)。省略 = 沒有固定清單。 */
+  efforts: z.array(z.string()).optional(),
+  /**
+   * 2026-10-06:這個 agent 的 model/思考程度清單**要等 session 開起來才知道**(ACP 的 `session/new` 回應才帶
+   * `configOptions`,見 session-options.ts)。建立 session 的選單因此沒有選項可列,改成建立後在對話標題列選,
+   * 並記住這個 provider 上次的選擇、下次建立後自動套用(見 SessionManager)。省略 = false。
+   */
+  optionsAfterStart: z.boolean().optional(),
   /** UI 排序(數字越小越前面),使用者偏好的 `order` 可覆寫。 */
   order: z.number().int(),
 });
@@ -210,6 +233,8 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // 永遠至少有這幾個別名可選,不會完全空白。
     models: CLAUDE_MODEL_ALIASES,
     supportsModelSelection: true,
+    supportsEffortSelection: true,
+    efforts: [...EffortLevelSchema.options],
     order: 0,
   },
   {
@@ -223,8 +248,11 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // 「支援 model 選擇」意思是「建立 session 時把 --model <別名> 烤進固定的
     // 啟動參數」(見 AgentCatalog.buildLaunchSpec()),不是隨時可
     // 切換。底層是同一支 claude 執行檔,同樣的別名清單直接適用。
+    // 2026-10-06:思考程度同理——`claude --effort <level>`(2.1.199 實測,值同 SDK 的 5 級),建立時烤進參數。
     models: CLAUDE_MODEL_ALIASES,
     supportsModelSelection: true,
+    supportsEffortSelection: true,
+    efforts: [...EffortLevelSchema.options],
     order: 10,
   },
   {
@@ -235,7 +263,11 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     detectKey: "gemini-cli",
     defaultArgs: ["--acp"],
     models: [],
+    // 2026-10-06:model/思考程度由 agent 在 `session/new` 回報(ACP configOptions),見 session-options.ts。
+    // 本機未安裝 gemini,沒有實測過它回什麼;沒宣告的項目 UI 就不顯示。
     supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
     order: 20,
   },
   {
@@ -259,6 +291,9 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // 的既有先例一致,不是這輪新發明的模式。
     models: [],
     supportsModelSelection: true,
+    // 2026-10-06:思考程度 = opencode 的 model variants(各 model 不同,偵測時讀 `opencode models --verbose`),
+    // 隨每則訊息的 `variant` 欄位送出,見 opencode-adapter.ts。
+    supportsEffortSelection: true,
     order: 30,
   },
   {
@@ -283,7 +318,11 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // mcp-bridge-server.ts 正是 stdio 型,所以不需要對 AcpAdapter 做任何修改。
     defaultArgs: ["acp"],
     models: [],
-    supportsModelSelection: false,
+    // 2026-10-06:`session/new` 回應的 configOptions 有 `model`(category model)與 `mode`;目前 model 有 variants
+    // 時另有 `effort`(category thought_level)——opencode 1.18.7 實測 + 讀它的 ACP 實作確認,見 session-options.ts。
+    supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
     order: 31,
   },
   {
@@ -297,7 +336,11 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // 只能在偵測階段動態解析,見 resolve-providers.ts 的
     // `defaultArgs: detected?.args ?? entry.defaultArgs`。
     models: [],
-    supportsModelSelection: false,
+    // 2026-10-06:codex-acp 1.4.0 的 configOptions 有 `model`(category model)與 `reasoning_effort`
+    // (category thought_level),見 session-options.ts。
+    supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
     order: 40,
   },
   {

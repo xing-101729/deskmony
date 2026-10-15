@@ -79,9 +79,10 @@ export function createSessionNetworkMcpServer(
     tools: [
       tool(
         "list_agents",
-        "查詢目前可用的 agent(id/label/software/models/defaultModelId/canUseTools),決定 create_session 要用哪一個。" +
+        "查詢目前可用的 agent(id/label/software/models/defaultModelId/efforts/canUseTools),決定 create_session 要用哪一個。" +
           "id 就是 create_session 的 agent 參數。canUseTools=false 的 agent(終端機型,例如 Claude Code CLI、Aider)收得到訊息," +
-          "但不能主動傳訊息,所以不會回覆你。",
+          "但不能主動傳訊息,所以不會回覆你。efforts(或 models[].efforts)是可選的思考程度;optionsAfterStart=true 的 agent " +
+          "要等 session 開起來才知道確切選項,列出的清單只供參考。",
         {},
         async () => {
           try {
@@ -131,7 +132,8 @@ export function createSessionNetworkMcpServer(
         "create_session",
         "用指定的 agent 開一個新 session,並把 prompt 當第一則訊息送過去(信封會標明是你開的)。" +
           "prompt 是給新 session 的完整任務描述(它看不到你的對話歷史,要寫清楚);agent 填 list_agents 回傳的 id;" +
-          "model 選填(從該 agent 的 models 挑,省略時用 agent 預設);title 選填,只是顯示名稱;" +
+          "model 選填(從該 agent 的 models 挑,省略時用 agent 預設);effort 選填(思考程度,從 efforts 或 models[].efforts 挑);" +
+          "指定了 agent 做不到的 model/effort 會建立失敗並回明確錯誤;title 選填,只是顯示名稱;" +
           "workingDir 選填,省略時沿用你自己的工作資料夾。回傳新 session 的 id。" +
           "新 session 會掛在你底下顯示,但它跟其他 session 一樣平等:它跑完後系統不會自動把結果帶回給你——" +
           "它自己決定要不要回報,你也可以用 read_session 去看它的對話。",
@@ -139,6 +141,7 @@ export function createSessionNetworkMcpServer(
           agent: z.string().min(1).describe("要使用的 agent id(list_agents 回傳的 id)"),
           prompt: z.string().min(1).describe("給新 session 的完整任務描述(它看不到你的對話歷史,要寫清楚)"),
           model: z.string().optional().describe("選填:要使用的 model id(list_agents 回傳該 agent 的 models 之一)"),
+          effort: z.string().optional().describe("選填:思考程度(list_agents 回傳的 efforts 或該 model 的 efforts 之一)"),
           title: z.string().optional().describe("選填:新 session 的顯示名稱"),
           workingDir: z.string().optional().describe("選填:新 session 的工作資料夾,省略時沿用你自己的"),
         },
@@ -149,6 +152,7 @@ export function createSessionNetworkMcpServer(
               agent: args.agent,
               prompt: args.prompt,
               model: args.model,
+              effort: args.effort,
               title: args.title,
               workingDir: args.workingDir,
             });

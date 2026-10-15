@@ -24,6 +24,8 @@ import { AgentSoftwareSchema } from "./agent-launch.js";
 export const DetectedModelSchema = z.object({
   id: z.string(),
   label: z.string(),
+  /** 2026-10-06:這個 model 可選的思考程度(目前只有 opencode 的 variants);見 `ProviderModel.efforts`。 */
+  efforts: z.array(z.string()).optional(),
 });
 export type DetectedModel = z.infer<typeof DetectedModelSchema>;
 
