@@ -8,6 +8,7 @@
   "effortAriaLabel": "Elegir nivel de razonamiento",
   "effortLabel": "Nivel de razonamiento",
   "defaultEffortOption": "(nivel predeterminado)",
+  "optionsAfterStartHint": "Este agent solo informa de sus models y niveles de razonamiento cuando la conversación ya ha empezado: elíjalos en la cabecera de la conversación después de crearla. Se recuerda su última elección y se aplica la próxima vez.",
   "workingDirLabel": "Carpeta de trabajo",
   "workingDirPlaceholder": "Predeterminada: {{dir}}",
   "workingDirPlaceholderNoDefault": "Carpeta de trabajo (vacío = predeterminada)",

@@ -25,6 +25,7 @@ import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./openc
 import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
 import { buildAgentChildEnv } from "./agent-env.js";
 import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded, type OpencodeShellEnvPluginLaunch } from "./opencode-shell-env.js";
+import { acpOptionChoices, acpSessionOptions, findAcpConfigOption, invalidOptionError, optionNotOfferedError, type AgentOptionKind } from "./agent-options.js";
 
 /**
  * AcpAdapter — 對接 [Agent Client Protocol](https://agentclientprotocol.com)
@@ -73,12 +74,20 @@ import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, wat
  *  - 只處理 `ContentBlock.type === "text"`,image/audio/resource(_link)
  *    尚未轉發。
  *  - `session/update` 的 `plan`/`plan_update`/`current_mode_update`/
- *    `config_option_update`/`session_info_update`/`agent_thought_chunk`/
+ *    `session_info_update`/`agent_thought_chunk`/
  *    `user_message_chunk` 尚未有對應的 AgentEvent 型別(見
  *    packages/shared/src/events.ts),先略過不轉發。`usage_update` 已在 S3a
  *    (usage-metering)接上(見下方 `handleSessionUpdate()`),
- *    `available_commands_update` 已在這輪(slash command)接上,這裡的清單
+ *    `available_commands_update` 已在這輪(slash command)接上,
+ *    `config_option_update` 已在 2026-10-06(model/思考程度)接上,這裡的清單
  *    同步移除,避免文件與程式碼漂移。
+ *  - **model / 思考程度(2026-10-06)**:向 agent 查,不寫死。`session/new` 回應的 `configOptions`(與之後的
+ *    `config_option_update`)裡 `category: "model"` / `"thought_level"` 的選項轉成 `session-options` 事件;
+ *    `setModel()`/`setEffort()` 走 `session/set_config_option`。建立時指定的值在 `session/new` 之後立刻套用
+ *    (見 `applyLaunchOptions()`)。agent 沒宣告的項目就是不支援(UI 不顯示、呼叫回明確錯誤)。實測:
+ *    opencode 1.18.7 回 `model` + `mode`,目前 model 有 variants 時另有 `effort`;codex-acp 1.4.0 回 `model` +
+ *    `reasoning_effort`(讀它的原始碼確認,2026-10-15 以真實 Codex 實測:model 有 `gpt-5.6-terra`/`gpt-5.6-luna`,思考程度
+ *    隨 model 變——terra 有 low…max 與 ultra、luna 只到 max)。Gemini 本機未安裝,沒有實測。
  *  - `diff` 能力(Codex ACP 橋接切換 Phase 3 起回報為 true):
  *    `resolveDiffStructuredResult()` 用兩條路徑合成
  *    `ToolResultEvent.structuredResult`(消費端是既有機制,見
@@ -171,6 +180,9 @@ export class AcpAdapter implements AgentAdapter {
       // `available_commands_update`(已查證 `@agentclientprotocol/sdk@1.2.1`
       // 型別上這是一個 optional 的 session/update 變體,agent 不一定會送)。
       slashCommands: "unknown",
+      // 2026-10-06:要等 `session/new` 回報 `configOptions` 才知道 agent 宣告了哪些(見 agent-options.ts)。
+      modelSwitching: "unknown",
+      effortSwitching: "unknown",
     };
   }
 
@@ -356,6 +368,13 @@ export class AcpAdapter implements AgentAdapter {
         spawnFailure,
       ]);
 
+      // 2026-10-06:model / 思考程度。agent 回報的選項在 `session/new` 回應的 `configOptions`;建立時指定的值
+      // (明確值做不到就讓建立失敗,記住的上次選擇做不到就略過)在這裡、第一則訊息之前套用。
+      const configOptions = await Promise.race([
+        this.applyLaunchOptions(connection, session.sessionId, session.newSessionResponse.configOptions ?? [], launch, agentLabel),
+        spawnFailure,
+      ]);
+
       // 2026-09-17:handshake 與 session/new 都成功 = 真正的 agent 行程一定已經在
       // 回應了。`child.pid` 可能只是外殼 —— `.cmd` shim 的 cmd.exe、`.ps1` 的
       // powershell.exe,或 codex-acp 那種 node → node(launcher)→ codex.exe 三層
@@ -378,8 +397,11 @@ export class AcpAdapter implements AgentAdapter {
         sessionCapabilities: initialized.agentCapabilities?.sessionCapabilities ?? undefined,
         titleSessionIds,
         titleAborts: new Set(),
+        configOptions,
+        agentLabel,
       };
       this.sessions.set(handle.id, internal);
+      this.pushSessionOptions(internal);
 
       // 2026-10-05:`session/new` 成功 = opencode 對這個資料夾的 instance(含外掛初始化)已建立——看載入標記檔:外掛沒載入只警告、
       // 不影響 session。背景執行,不拖慢 session 建立;必須在 session 登記**之後**(`isCancelled` 靠 `this.sessions` 判斷 session
@@ -523,34 +545,73 @@ export class AcpAdapter implements AgentAdapter {
   }
 
   /**
-   * M5 Round C:ACP 協議的 `session/new`/`session/prompt` 沒有 model 參數,
-   * model 完全由被 spawn 出來的外部 agent/CLI 自行決定與管理,呼叫端(我們)
-   * 沒有介面可以介入——明確拋出錯誤,不可靜默忽略成功(見
-   * packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
+   * 2026-10-06:向 agent 查——agent 在 `configOptions` 宣告了 `category: "model"` 的選項才支援,值必須在它給的
+   * 清單裡,用 `session/set_config_option` 切換(對話上下文不受影響)。沒宣告就丟明確錯誤,不可靜默忽略成功
+   * (見 packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
    */
-  async setModel(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "acp", operation: "setModel" },
-      'software="acp" 不支援變更 model(model 由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
-    );
+  async setModel(handle: AgentHandle, model: string): Promise<void> {
+    await this.setConfigValue(this.mustGet(handle), "model", model);
+  }
+
+  /** 比照上面的 `setModel()`:`category: "thought_level"` 的選項。 */
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
+    await this.setConfigValue(this.mustGet(handle), "effort", effort);
+  }
+
+  private async setConfigValue(internal: InternalSession, kind: AgentOptionKind, value: string): Promise<void> {
+    const option = findAcpConfigOption(internal.configOptions, kind);
+    if (!option) throw optionNotOfferedError(kind, internal.agentLabel);
+    const allowed = acpOptionChoices(option).map((c) => c.value);
+    if (!allowed.includes(value)) throw invalidOptionError(kind, internal.agentLabel, value, allowed);
+    const response = await internal.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+      sessionId: internal.session.sessionId,
+      configId: option.id,
+      value,
+    });
+    // 回應是**完整**的一份 configOptions(換 model 之後可選的思考程度可能跟著變,見 opencode 的實作)。
+    internal.configOptions = response.configOptions;
+    this.pushSessionOptions(internal);
   }
 
   /**
-   * 比照上面的 `setModel()`:ACP 協議的 `session/new`/`session/prompt` 沒有
-   * effort/reasoning 參數,思考程度完全由被 spawn 出來的外部 agent/CLI 自行
-   * 決定與管理,呼叫端(我們)沒有介面可以介入——明確拋出錯誤,不可靜默
-   * 忽略成功(見 packages/adapters/src/types.ts 的 `AgentAdapter.setEffort()`
-   * 介面註解)。
+   * `session/new` 之後、第一則訊息之前套用建立時指定的 model / 思考程度(先 model:可選的思考程度可能隨 model 變)。
+   *   - 明確值(`launch.model`/`launch.effort`):agent 沒宣告或值不在清單裡 → 丟明確錯誤,session 建立失敗
+   *     (spawn 的 catch 會收掉子程序與 token)——不能悄悄用別的 model 跑使用者指定的任務。
+   *   - 軟性偏好(`launch.preferredModel`/`preferredEffort`,這個 provider 上次的選擇或續接時 session 記得的值):
+   *     做不到就略過,只記 log。
+   * 回傳套用後的完整 configOptions。
    */
-  async setEffort(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "acp", operation: "setEffort" },
-      'software="acp" 不支援變更思考程度(思考程度由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
-    );
+  private async applyLaunchOptions(
+    connection: acp.ClientConnection,
+    sessionId: string,
+    initial: acp.SessionConfigOption[],
+    launch: AgentLaunchSpec,
+    agentLabel: string,
+  ): Promise<acp.SessionConfigOption[]> {
+    let configOptions = initial;
+    const wanted: Array<{ kind: AgentOptionKind; explicit?: string; preferred?: string }> = [
+      { kind: "model", explicit: launch.model, preferred: launch.preferredModel },
+      { kind: "effort", explicit: launch.effort, preferred: launch.preferredEffort },
+    ];
+    for (const { kind, explicit, preferred } of wanted) {
+      const value = explicit ?? preferred;
+      if (!value) continue;
+      const option = findAcpConfigOption(configOptions, kind);
+      const allowed = option ? acpOptionChoices(option).map((c) => c.value) : [];
+      if (!option || !allowed.includes(value)) {
+        if (explicit) throw option ? invalidOptionError(kind, agentLabel, value, allowed) : optionNotOfferedError(kind, agentLabel);
+        console.warn(`[acp-adapter] ${agentLabel}:記住的${kind === "model" ? " model" : "思考程度"}「${value}」這次不在 agent 提供的選項裡,略過。`);
+        continue;
+      }
+      if (option.currentValue === value) continue;
+      const response = await connection.agent.request(acp.methods.agent.session.setConfigOption, { sessionId, configId: option.id, value });
+      configOptions = response.configOptions;
+    }
+    return configOptions;
+  }
+
+  private pushSessionOptions(internal: InternalSession): void {
+    internal.outputQueue.push({ type: "session-options", options: acpSessionOptions(internal.configOptions) });
   }
 
   /**
@@ -831,6 +892,11 @@ export class AcpAdapter implements AgentAdapter {
       case "available_commands_update":
         internal.outputQueue.push({ type: "available-commands", commands: mapAvailableCommands(update.availableCommands) });
         break;
+      /** 2026-10-06:agent 主動更新選項(完整一份,REPLACE 語意),見 `setConfigValue()`/agent-options.ts。 */
+      case "config_option_update":
+        internal.configOptions = update.configOptions;
+        this.pushSessionOptions(internal);
+        break;
       default:
         // user_message_chunk / agent_thought_chunk / plan* / 其餘擴充型別:
         // M2 Round A 的 AgentEvent 尚未涵蓋,略過不轉發(見上方 class 註解的 TODO)。
@@ -978,6 +1044,13 @@ interface InternalSession {
    * `??=` lazily 建立,行為上與「一開始就是空 Map」完全等價。
    */
   pendingFileSnapshots?: Map<string, { path: string; before: string }>;
+  /**
+   * 2026-10-06:agent 最近一次回報的完整 `configOptions`(`session/new` 回應、`session/set_config_option` 回應、
+   * `config_option_update` 通知三個來源,一律整份覆蓋)。model / 思考程度選擇的唯一依據,見 agent-options.ts。
+   */
+  configOptions: acp.SessionConfigOption[];
+  /** 錯誤訊息裡的 agent 名稱(providerId)。 */
+  agentLabel: string;
 }
 
 /**

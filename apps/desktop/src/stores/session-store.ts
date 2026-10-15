@@ -7,7 +7,6 @@ import {
   type ConfigSetFilePatchInput,
   type DialogAnswer,
   type EffectiveCoreConfig,
-  type EffortLevel,
   type EnforcementNotificationPush,
   type GatewayCapabilities,
   type KnownClaudeModel,
@@ -173,7 +172,7 @@ export interface NewSessionRequest {
   workingDir: string;
   title?: string;
   model?: string;
-  effort?: EffortLevel;
+  effort?: string;
 }
 
 interface SessionStoreState {
@@ -313,7 +312,7 @@ interface SessionStoreState {
   createChildSession: (
     parentSessionId: string,
     prompt: string,
-    agent: { providerId: string; model?: string; effort?: EffortLevel },
+    agent: { providerId: string; model?: string; effort?: string },
     title?: string,
   ) => Promise<void>;
   /**
@@ -421,7 +420,7 @@ interface SessionStoreState {
    * 其餘 adapter 呼叫這個方法會讓回傳的 Promise reject,呼叫端(ChatView)
    * 需自行 catch 並顯示錯誤。
    */
-  setSessionEffort: (sessionId: string, effort: EffortLevel) => Promise<void>;
+  setSessionEffort: (sessionId: string, effort: string) => Promise<void>;
   /**
    * M5 Round E(需求4):載入目前啟用的 model 偏好(`settings.getEnabledModels`)。
    * `connect()` 會呼叫一次;SettingsDialog 儲存成功後也會呼叫(見
@@ -1604,6 +1603,9 @@ function handleSessionEvent(
     }));
     return;
   }
+  // 2026-10-06:agent 回報的 model/思考程度選項不在這裡處理——core 收到後會把它掛在 `Session.options`、
+  // 廣播 session-updated(上面 connect() 的 "session-updated" 分支整個替換 session 物件)。
+  if (event.type === "session-options") return;
 
   set((state) => {
     const items = [...(state.itemsBySession[sessionId] ?? [])];

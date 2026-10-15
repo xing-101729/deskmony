@@ -126,12 +126,14 @@ export const OpencodeAgentConfigSchema = z.object({
 export type OpencodeAgentConfig = z.infer<typeof OpencodeAgentConfigSchema>;
 
 /**
- * Reasoning effort(思考程度)。查證於 sdk.d.ts:`query()` 的 `Options.effort?:
- * EffortLevel` 欄位與執行中 `Query.applyFlagSettings({ effortLevel })` 都是 SDK
- * 正式公開 API(非 deprecated)。**只有 `software="claude-agent-sdk"` 驗證得到
- * 這個能力**——`claude-cli`(PTY 直通同一支 `claude` 執行檔)、`opencode`、
- * `acp`、`pty` 都沒有查到對應機制,因此其餘 adapter 一律不顯示控制項、呼叫
- * `setEffort()` 會拋出明確錯誤(比照 `setModel()` 對 acp/pty 的既有作法)。
+ * **Claude** 的思考程度(reasoning effort)5 級。查證於 sdk.d.ts:`query()` 的 `Options.effort?:
+ * EffortLevel` 欄位與執行中 `Query.applyFlagSettings({ effortLevel })` 都是 SDK 正式公開 API(非
+ * deprecated);`claude` CLI 2.1.199 的 `--effort <level>` 接受同樣這 5 個值(`claude --help` 實測)。
+ *
+ * 2026-10-06 起這**不再是**所有 agent 的思考程度型別——各 agent 的值由 agent 自己定義(見
+ * session-options.ts 的 `EffortValueSchema`:codex/opencode 有 `none`/`minimal`,Gemini 有
+ * `minimal`/`high`……)。session、gateway、`AgentLaunchSpec` 一律用字串;這個 enum 只用來驗證
+ * claude-agent-sdk 與 claude-cli 收到的值,以及作為那兩個 provider 的固定選項清單。
  */
 export const EffortLevelSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
@@ -162,8 +164,21 @@ export interface AgentLaunchSpec {
    * 介入該家族的預設權限策略——對 `software: "acp"` 這是**唯一**能分辨「這是 opencode acp」的資訊。
    */
   family?: AgentFamily;
+  /**
+   * 明確指定的 model / 思考程度(使用者或 agent 建立 session 時選的):adapter **必須**套用,做不到
+   * (agent 不支援、值不在 agent 回報的清單裡)就讓 spawn 失敗並給明確錯誤——不可悄悄用別的設定跑。
+   * effort 的值由各 agent 定義,見 session-options.ts。
+   */
   model?: string;
-  effort?: EffortLevel;
+  effort?: string;
+  /**
+   * 2026-10-06:**軟性偏好**——「這個 provider 上次選的」model / 思考程度(見 SessionManager 的
+   * provider 上次選擇),或續接時 session 自己記得的值。只給「要等 session 開起來才知道有哪些選項」的
+   * agent(ACP)用:adapter 拿到選項後,值在清單裡才套用,不在就略過(只記 log),**不讓 spawn 失敗**。
+   * 有明確的 `model`/`effort` 時以明確值為準。
+   */
+  preferredModel?: string;
+  preferredEffort?: string;
   /** 會與 process.env 合併傳給子程序(claude-agent-sdk 併入 SDK `Options.env`)。 */
   env?: Record<string, string>;
   /** 附加在 claude_code preset system prompt 尾端的文字(目前只放 `.deskmony/notes/` 指路段落)。 */

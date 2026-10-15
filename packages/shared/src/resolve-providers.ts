@@ -49,6 +49,32 @@ export interface ResolvedProvider {
    *  則是 undefined。 */
   defaultModelId?: string;
   supportsModelSelection: boolean;
+  /** 2026-10-06:見 `ProviderCatalogEntry.supportsEffortSelection`(省略 = false)。 */
+  supportsEffortSelection: boolean;
+  /** 2026-10-06:見 `ProviderCatalogEntry.efforts`(與 model 無關的固定思考程度清單)。 */
+  efforts?: string[];
+  /** 2026-10-06:見 `ProviderCatalogEntry.optionsAfterStart`(省略 = false)。 */
+  optionsAfterStart: boolean;
+}
+
+/**
+ * 2026-10-06:建立 session 之前就知道的「這個 provider(選了這個 model 時)可選的思考程度」。
+ *   - provider 不支援選思考程度 → `undefined`。
+ *   - 選了 model、而且那個 model 有自己的清單(OpenCode 的 variants)→ 那份清單(可能是空陣列 = 這個 model 沒得選)。
+ *   - 否則 → provider 的固定清單(Claude 的 low…max);沒有固定清單(例如 OpenCode 沒選 model、ACP agent)→ `undefined`
+ *     = 建立前不知道。
+ * core 的 `AgentCatalog.buildLaunch()` 用它驗證建立參數,桌面端的建立選單用它決定要不要顯示思考程度。
+ */
+export function providerEffortChoices(
+  provider: Pick<ResolvedProvider, "supportsEffortSelection" | "efforts" | "models">,
+  modelId: string | undefined,
+): string[] | undefined {
+  if (!provider.supportsEffortSelection) return undefined;
+  if (modelId) {
+    const model = provider.models.find((m) => m.id === modelId);
+    if (model?.efforts) return model.efforts;
+  }
+  return provider.efforts;
 }
 
 /** 以 model id 去重合併,`extra`(使用者的 additionalModels)優先——出現在
@@ -124,6 +150,9 @@ export function resolveProviders(
       models: finalModels,
       defaultModelId: defaultModel?.id,
       supportsModelSelection: entry.supportsModelSelection,
+      supportsEffortSelection: entry.supportsEffortSelection ?? false,
+      efforts: entry.efforts,
+      optionsAfterStart: entry.optionsAfterStart ?? false,
     };
   });
 
