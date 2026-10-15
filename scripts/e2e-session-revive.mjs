@@ -30,6 +30,11 @@
  *   P   PTY:重新啟動、系統說明「不保留記憶」、**不**把對話紀錄灌進終端。
  *   E   重新啟動失敗(agent 起不來):送出得到明確錯誤、DB 狀態還原成 closed(不卡 busy)、使用者訊息沒有被寫進去,之後修好還能用。
  *   X   agent 透過 send_to_session 傳給已關閉的 session:維持明確報錯,**不**自動 spawn。
+ *   M   model / 思考程度跟著復活(與 fix/codex-model-effort 整合,見 fake-acp-agent.mjs 的 `--config-options`):重啟前用
+ *       `session.setModel` / `setEffort` 換成非預設值 → 正常關閉 → 重啟 → 送訊息復活後,`Session.options` 回來(純記憶體,重啟後
+ *       復活前是空的)、目前值還是重啟前選的值;fake agent 重啟後一律回到預設設定(模擬真實 agent 不記得),所以這證明的是 Deskmony
+ *       自己把記住的選擇重新套用(`session/set_config_option` 真的被呼叫)。涵蓋 ACP resume / load / 退回新對話,以及 OpenCode
+ *       (沿用既有 opencode session、opencode 那邊 session 已不在)——OpenCode 靠回覆前面的 `[model:…] [variant:…]` 標記斷言 wire 上真的帶了。
  *   K   Claude Agent SDK:本機沒登入也能驗(spawn 攔截探針,見 probe-claude-sdk-resume.mjs)——對話檔還在才帶 `--resume=<id>`、
  *       不在就開全新對話並回報 `resumed:false`、handle.id 沿用 Deskmony session id。
  *
@@ -47,10 +52,11 @@ import {
   FAKE_ACP_REPLY_CHUNKS,
   REPLAY_FILLER_PER_TURN,
   REPLAY_MARKER,
+  REPORT_CONFIG_PREFIX,
   REVIVE_REPORT_MARKER,
 } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
-import { e2eProvidersEnv, FAKE_ACP, FAKE_OPENCODE, FAKE_PTY } from "./lib/e2e-providers.mjs";
+import { e2eProvidersEnv, fakeOpencodeVariantsProvider, FAKE_ACP, FAKE_OPENCODE, FAKE_OPENCODE_VARIANTS, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
 
@@ -72,11 +78,22 @@ const PROVIDER_LOAD_FORGET = "e2e-fake-acp-load-forget";
 function acpProvider(id, flags) {
   return { id, label: `E2E Fake ACP (${flags.join(" ") || "none"})`, software: "acp", command: process.execPath, args: [ACP_SCRIPT, ...flags] };
 }
+/** 會回報 configOptions 的 fake ACP(model / 思考程度可選,同 e2e-providers.mjs 的 fakeAcpOptionsProvider)+ 接回旗標。 */
+function acpOptionsProvider(id, flags) {
+  return { ...acpProvider(id, ["--config-options", ...flags]), supportsModelSelection: true, supportsEffortSelection: true, optionsAfterStart: true };
+}
+const PROVIDER_OPT_RESUME = "e2e-fake-acp-opt-resume";
+const PROVIDER_OPT_LOAD = "e2e-fake-acp-opt-load";
+const PROVIDER_OPT_NEW = "e2e-fake-acp-opt-new";
 const EXTRA_PROVIDERS = [
   acpProvider(PROVIDER_RESUME, ["--resume"]),
   acpProvider(PROVIDER_LOAD, ["--load"]),
   acpProvider(PROVIDER_RESUME_FORGET, ["--resume", "--forget"]),
   acpProvider(PROVIDER_LOAD_FORGET, ["--load", "--forget"]),
+  acpOptionsProvider(PROVIDER_OPT_RESUME, ["--resume"]),
+  acpOptionsProvider(PROVIDER_OPT_LOAD, ["--load"]),
+  acpOptionsProvider(PROVIDER_OPT_NEW, []),
+  fakeOpencodeVariantsProvider(),
 ];
 
 const results = [];
@@ -971,6 +988,131 @@ async function testNetworkDoesNotRevive() {
 }
 
 // =======================================================================
+// M:model / 思考程度跟著復活
+// =======================================================================
+const WANT_MODEL = "fake/gamma"; // 預設是 fake/beta(思考程度 low/high);gamma 的思考程度是 minimal/medium/max
+const WANT_EFFORT = "max";
+
+async function waitSession(client, sessionId, predicate, timeoutMs = 15_000) {
+  const start = Date.now();
+  for (;;) {
+    const s = await getSession(client, sessionId);
+    if (s && predicate(s)) return s;
+    if (Date.now() - start > timeoutMs) return s; // 讓呼叫端的斷言失敗並印出目前狀態,而不是在這裡丟一個沒有內容的逾時
+    await sleep(100);
+  }
+}
+
+/** ACP:重啟前換成非預設的 model + 思考程度 → 正常關閉 → 重啟 → 送訊息復活 → 選擇還在,且 fake agent 真的被重新設定。 */
+async function acpOptionsScenario(tag, providerId, expectedRestoreCalls) {
+  const dirs = newDirs(tag);
+  let c1;
+  let c2;
+  const label = `M-${tag}`;
+  try {
+    c1 = await boot(dirs, { graceful: true });
+    const sid = await createSession(c1.client, providerId, dirs.workspaceDir, `revive-${tag}`);
+    const initial = await waitSession(c1.client, sid, (s) => s.options?.model);
+    await c1.client.rpc("session.setModel", { sessionId: sid, model: WANT_MODEL });
+    await waitSession(c1.client, sid, (s) => s.options?.model?.current === WANT_MODEL);
+    await c1.client.rpc("session.setEffort", { sessionId: sid, effort: WANT_EFFORT });
+    const before = await waitSession(c1.client, sid, (s) => s.options?.effort?.current === WANT_EFFORT);
+    await turn(c1.client, sid, SECRET_PROMPT);
+    const pidsBefore = pidsOf(readCalls(dirs));
+    c1.client.close();
+    await gracefulShutdown(c1.proc);
+    c1 = undefined;
+
+    c2 = await boot(dirs, { graceful: true });
+    const closed = await getSession(c2.client, sid);
+    record(
+      `${label}-1 重啟前:預設是 fake/beta,換成 ${WANT_MODEL} / ${WANT_EFFORT} 後 Session.options 與 model/effort 都是新值;重啟後復活前 session 是 closed、options 是空的(純記憶體),model/effort 仍是存下來的值`,
+      initial?.options?.model?.current === "fake/beta" &&
+        before?.options?.model?.current === WANT_MODEL && before?.model === WANT_MODEL && before?.effort === WANT_EFFORT &&
+        closed?.status === "closed" && closed?.options === undefined && closed?.model === WANT_MODEL && closed?.effort === WANT_EFFORT,
+      `initial=${initial?.options?.model?.current}, before=${before?.model}/${before?.effort}, closed=${JSON.stringify({ status: closed?.status, options: closed?.options, model: closed?.model, effort: closed?.effort })}`,
+    );
+
+    const { sent, report: rep } = await report(c2.client, sid, "復活後");
+    const revived = await waitSession(c2.client, sid, (s) => s.options?.model?.current === WANT_MODEL && s.options?.effort?.current === WANT_EFFORT);
+    const newCalls = callsSince(dirs, pidsBefore);
+    const agentCfg = JSON.parse((await turn(c2.client, sid, REPORT_CONFIG_PREFIX)).reply.replace(/^CONFIG:/, ""));
+    const optionValues = (opt) => opt?.choices?.map((c) => c.value) ?? [];
+    record(
+      `${label}-2 復活後 Session.options 存在,目前 model/思考程度 = 重啟前設定的值,選項清單是該 model 的(minimal/medium/max),選的值也寫回 session.model/effort;走的路 = ${expectedRestoreCalls.join(" → ")}`,
+      JSON.stringify(callNames(newCalls)) === JSON.stringify(expectedRestoreCalls) &&
+        revived?.options?.model?.current === WANT_MODEL &&
+        revived?.options?.effort?.current === WANT_EFFORT &&
+        JSON.stringify(optionValues(revived?.options?.effort)) === JSON.stringify(["minimal", "medium", "max"]) &&
+        revived?.model === WANT_MODEL && revived?.effort === WANT_EFFORT &&
+        rep.prompt.includes(sent),
+      `calls=${JSON.stringify(callNames(newCalls))}, options=${JSON.stringify({ model: revived?.options?.model?.current, effort: revived?.options?.effort?.current })}, session=${revived?.model}/${revived?.effort}`,
+    );
+    record(
+      `${label}-3 這是 Deskmony 重新套用的,不是 agent 記得:fake agent 重啟後回到預設(fake/beta),agent 端實際的設定是被 session/set_config_option 改成記住的值(model 先、思考程度後)`,
+      agentCfg?.model === WANT_MODEL && agentCfg?.effort === WANT_EFFORT &&
+        JSON.stringify(agentCfg?.setCalls?.map((c) => [c.configId, c.value])) === JSON.stringify([["llm", WANT_MODEL], ["think", WANT_EFFORT]]),
+      `agent=${JSON.stringify(agentCfg)}`,
+    );
+  } catch (err) {
+    record(`${label} 執行過程發生未預期錯誤`, false, String(err?.stack ?? err));
+  } finally {
+    c1?.client.close();
+    c2?.client.close();
+    await killProcessTreeHard(c1?.proc);
+    await killProcessTreeHard(c2?.proc);
+    dirs.cleanup();
+  }
+}
+
+/** OpenCode(HTTP):model 與思考程度(variant)隨每則訊息送出——復活後第一則訊息的 wire 上就要帶記住的值。 */
+async function opencodeOptionsScenario(tag, { forget }) {
+  const dirs = newDirs(tag);
+  let c1;
+  let c2;
+  const label = `M-${tag}`;
+  try {
+    c1 = await boot(dirs, { graceful: true });
+    const sid = await createSession(c1.client, FAKE_OPENCODE_VARIANTS, dirs.workspaceDir, `revive-${tag}`);
+    await c1.client.rpc("session.setModel", { sessionId: sid, model: "fake/model-b" });
+    await c1.client.rpc("session.setEffort", { sessionId: sid, effort: "high" });
+    const before = await waitSession(c1.client, sid, (s) => s.options?.effort?.current === "high");
+    const first = await turn(c1.client, sid, SECRET_PROMPT);
+    const pidsBefore = pidsOf(readCalls(dirs));
+    c1.client.close();
+    await gracefulShutdown(c1.proc);
+    c1 = undefined;
+
+    c2 = await boot(dirs, { graceful: true, extraEnv: forget ? { FAKE_OPENCODE_FORGET: "1" } : {} });
+    const closed = await getSession(c2.client, sid);
+    const second = await turn(c2.client, sid, "復活後的普通訊息");
+    const revived = await waitSession(c2.client, sid, (s) => s.options?.effort?.current === "high");
+    const newCalls = callsSince(dirs, pidsBefore);
+    const expectedCalls = forget ? ["GET /session/:id miss", "POST /session"] : ["GET /session/:id hit"];
+    record(
+      `${label} OpenCode${forget ? "(opencode 那邊的 session 已不在 → 新建 + 對話紀錄)" : "(沿用既有 opencode session)"}:重啟前 model-b / high 的 wire 標記;復活前 options 為空;復活後第一則訊息的 wire 上帶 [model:fake/model-b] [variant:high]、Session.options 的目前思考程度是 high、model/effort 沒被重設`,
+      first.reply.startsWith("[model:fake/model-b] [variant:high] ") &&
+        before?.model === "fake/model-b" &&
+        closed?.status === "closed" && closed?.options === undefined && closed?.effort === "high" &&
+        JSON.stringify(callNames(newCalls)) === JSON.stringify(expectedCalls) &&
+        second.reply.startsWith("[model:fake/model-b] [variant:high] ") &&
+        revived?.options?.effort?.current === "high" &&
+        JSON.stringify(revived?.options?.effort?.choices?.map((c) => c.value)) === JSON.stringify(["low", "high"]) &&
+        revived?.model === "fake/model-b" && revived?.effort === "high",
+      `first=${clip(first.reply, 60)}, second=${clip(second.reply, 60)}, calls=${JSON.stringify(callNames(newCalls))}, closed=${JSON.stringify({ status: closed?.status, options: closed?.options, effort: closed?.effort })}, revived=${JSON.stringify({ model: revived?.model, effort: revived?.effort, options: revived?.options })}`,
+    );
+  } catch (err) {
+    record(`${label} 執行過程發生未預期錯誤`, false, String(err?.stack ?? err));
+  } finally {
+    c1?.client.close();
+    c2?.client.close();
+    await killProcessTreeHard(c1?.proc);
+    await killProcessTreeHard(c2?.proc);
+    dirs.cleanup();
+  }
+}
+
+// =======================================================================
 // K:Claude Agent SDK 的接回(探針,不需要登入)
 // =======================================================================
 async function testClaudeResumeProbe() {
@@ -990,7 +1132,7 @@ async function testClaudeResumeProbe() {
     if (!line) throw new Error(`探針沒有輸出結果: ${clip(probe.stderr ?? "", 300)}`);
     const result = JSON.parse(line.slice("PROBE_RESULT:".length));
     record(
-      "K Claude SDK:後端對話檔還在 → spawn 帶 --resume=<id>、handle.resumed=true;對話檔不在 → 不帶 --resume(不讓 CLI 在第一則訊息才報錯)、resumed=false;沒有後端識別碼 → 不帶 --resume;三種情況 handle.id 都沿用 Deskmony session id",
+      "K Claude SDK:後端對話檔還在 → spawn 帶 --resume=<id>、handle.resumed=true;對話檔不在 → 不帶 --resume(不讓 CLI 在第一則訊息才報錯)、resumed=false;沒有後端識別碼 → 不帶 --resume;三種情況 handle.id 都沿用 Deskmony session id,命令列都保留 session 的 --model / --effort",
       result.existing.resumeArg === result.sessionId &&
         result.existing.resumed === true &&
         result.existing.handleId === "deskmony-session-A" &&
@@ -999,7 +1141,9 @@ async function testClaudeResumeProbe() {
         result.missing.handleId === "deskmony-session-B" &&
         result.noBackendId.resumeArg === null &&
         result.noBackendId.handleId === "deskmony-session-C" &&
-        [result.existing, result.missing, result.noBackendId].every((r) => r.spawnObserved),
+        [result.existing, result.missing, result.noBackendId].every((r) => r.spawnObserved) &&
+        // 復活保留 session 記住的 model / 思考程度(三種情況命令列都帶著)。
+        [result.existing, result.missing, result.noBackendId].every((r) => r.modelArg === "sonnet" && r.effortArg === "high"),
       JSON.stringify(result),
     );
   } catch (err) {
@@ -1026,6 +1170,11 @@ const scenarios = [
   ["failure", () => testReviveFailure()],
   ["network", () => testNetworkDoesNotRevive()],
   ["claude", () => testClaudeResumeProbe()],
+  ["options-resume", () => acpOptionsScenario("opt-resume", PROVIDER_OPT_RESUME, ["initialize", "session/resume"])],
+  ["options-load", () => acpOptionsScenario("opt-load", PROVIDER_OPT_LOAD, ["initialize", "session/load", "session/load.replayed"])],
+  ["options-transcript", () => acpOptionsScenario("opt-new", PROVIDER_OPT_NEW, ["initialize", "session/new"])],
+  ["options-opencode-reuse", () => opencodeOptionsScenario("opt-oc-reuse", { forget: false })],
+  ["options-opencode-recreate", () => opencodeOptionsScenario("opt-oc-recreate", { forget: true })],
 ];
 for (const [name, run] of scenarios) {
   if (filters.length === 0 || filters.some((f) => name.includes(f))) await run();

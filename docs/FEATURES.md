@@ -302,6 +302,10 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   讀——對話裡會留一則系統說明講清楚「它是讀紀錄接續,不是真的記得」。DB 存的使用者訊息仍是原文。
   PTY 一律是全新的程序(說明「不保留記憶」),不把紀錄灌進終端。重新啟動失敗時 UI 會在對話裡顯示
   錯誤,session 狀態還原、不卡在忙碌。權限模式重啟後一律從 `always-ask` 開始。
+  復活後 model / 思考程度維持重啟前的選擇:ACP agent 重啟後常回到預設,Deskmony 在接回(或開新對話)之後、
+  第一則訊息之前把 session 記住的值重新套用(`session/set_config_option`;agent 這次不提供那個值就略過,不讓復活失敗),
+  OpenCode(HTTP)的 model / variant 隨每則訊息送出,Claude 的 `--model` / `--effort` 照舊。`Session.options` 只存記憶體,
+  復活前(closed 的 session)是空的,復活後才回來。
   agent 用 `send_to_session` 傳給已關閉的 session 則**不會**喚醒它,維持明確報錯。
 - (2026-10-02 移除:原本的「重跑」與髒 worktree 強制前置流程是任務 worktree
   專用,見 [`DECISIONS.md` §H](./DECISIONS.md)。)

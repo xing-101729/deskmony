@@ -62,7 +62,8 @@ syncBuiltinESMExports();
 
 const { ClaudeAgentSdkAdapter } = await import(pathToFileURL(adaptersEntry).href);
 const adapter = new ClaudeAgentSdkAdapter();
-const launch = { software: "claude-agent-sdk", providerId: "e2e-probe-claude" };
+// model / 思考程度:復活要保留 session 記住的值(AgentCatalog 對 claude 是明確值,見 buildLaunchSpecForSession)。
+const launch = { software: "claude-agent-sdk", providerId: "e2e-probe-claude", model: "sonnet", effort: "high" };
 
 async function attempt(resume) {
   capturedArgs = undefined;
@@ -71,7 +72,15 @@ async function attempt(resume) {
   const args = capturedArgs ?? [];
   // SDK 把 resume 組成單一個 `--resume=<id>` 參數。
   const resumeFlag = args.find((a) => a.startsWith("--resume="));
+  const argAfter = (flag) => {
+    const eq = args.find((a) => a.startsWith(`${flag}=`));
+    if (eq) return eq.slice(flag.length + 1);
+    const i = args.indexOf(flag);
+    return i >= 0 ? args[i + 1] : null;
+  };
   const outcome = {
+    modelArg: argAfter("--model"),
+    effortArg: argAfter("--effort"),
     handleId: handle.id,
     resumed: handle.resumed,
     resumeArg: resumeFlag ? resumeFlag.slice("--resume=".length) : null,
