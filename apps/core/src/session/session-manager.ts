@@ -2291,9 +2291,13 @@ export class SessionManager extends EventEmitter {
             // 不能走 this.resolvePermission():gateway 逾時前已刪除該筆 pending,
             // resolve() 會查不到而提前 return,adapter 的 deny 永遠不會送出,
             // SDK 的 canUseTool promise 將永久懸置(SDK 明言 fail-closed、無 deadline)。
-            const rt = this.runtime.get(sid);
-            if (rt) rt.adapter.resolvePermission(rt.handle, requestId, "deny");
-            void this.setStatus(sid, "busy");
+            // 2026-10-15:只對發出這筆請求的那個 agent 回覆、把狀態翻回 busy——它在等回覆期間停止執行的話,runtime 已經被拿掉
+            // (`detachEndedRuntime()`)或換成重新啟動的新 runtime:翻回 busy 會蓋掉 agent 已停止的 error(畫面卡在忙碌),
+            // 或干擾新 agent 的狀態。彈窗照樣通知關閉。
+            if (this.runtime.get(sid) === runtime) {
+              runtime.adapter.resolvePermission(runtime.handle, requestId, "deny");
+              void this.setStatus(sid, "busy");
+            }
             this.emitPermissionResolved({ sessionId: sid, requestId, decision: "deny", source: "timeout" });
           });
           break;
