@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { getSessionInfo, query } from "@anthropic-ai/claude-agent-sdk";
 import type {
   McpServerConfig,
   ModelUsage,
@@ -163,6 +163,15 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     const handle: AgentHandle = { id: resume?.sessionId ?? randomUUID(), launch, workspace };
     const agentLabel = launch.providerId ?? "claude-agent-sdk";
 
+    // 2026-10-15(session 自動復活):帶了 backendSessionId 時,先確認 SDK 那邊的對話檔還在才 `resume`。`resume` 指到不存在的
+    // session 時 CLI 要等第一則訊息送進去才報錯結束,session 會卡在 error、使用者的訊息也沒人回;提早知道就能改開全新的對話,
+    // 並由呼叫端(SessionManager)用 Deskmony 存的對話紀錄補上脈絡。`handle.resumed` 據實回報。
+    const resumeBackendSessionId =
+      resume?.backendSessionId && (await claudeSessionExists(resume.backendSessionId, workspace.path, agentLabel))
+        ? resume.backendSessionId
+        : undefined;
+    if (resume?.backendSessionId) handle.resumed = resumeBackendSessionId !== undefined;
+
     const inputQueue = new AsyncQueue<SDKUserMessage>();
     const outputQueue = new AsyncQueue<AgentEvent>({
       // 2026-09-04(稽核修補):緩衝溢位不靜默丟資料,至少讓它在 log 裡看得見。
@@ -248,7 +257,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // `DESKMONY_AUTH_TOKEN`,連上 gateway 就能自己核准權限/切 YOLO。完整理由見 agent-env.ts。
       env: buildAgentChildEnv(launch.env) as Record<string, string>,
       // S6(crash-recovery)L4 §4.1:「繼續(保有記憶)」——見檔案頂端查證說明。
-      ...(resume ? { resume: resume.backendSessionId } : {}),
+      ...(resumeBackendSessionId ? { resume: resumeBackendSessionId } : {}),
       // S8(agent-lifecycle)L4 §3.2 修正實作:`systemPrompt` 在這輪之前
       // **從未被任何 adapter 轉發過**(查證:acp-adapter.ts/opencode-adapter.ts/
       // pty-adapter.ts 均無 systemPrompt 相關程式碼)——是一個存在於 schema/DB/
@@ -1009,4 +1018,22 @@ function mapSlashCommands(commands: SlashCommand[]): SlashCommandInfo[] {
     description: c.description || undefined,
     argumentHint: c.argumentHint || undefined,
   }));
+}
+
+/**
+ * SDK 的磁碟對話檔(`~/.claude/projects/<專案目錄>/<sessionId>.jsonl`)還在嗎?`getSessionInfo()` 的官方註解:
+ * 找不到檔案(或是 sidechain、沒有可擷取摘要)回傳 `undefined`。查詢本身失敗(磁碟讀取錯誤等)不代表對話不在——
+ * 保守地當成存在、照舊走 `resume`(維持這個檢查出現之前的行為),只留一筆警告。
+ */
+async function claudeSessionExists(backendSessionId: string, cwd: string, agentLabel: string): Promise<boolean> {
+  try {
+    const info = await getSessionInfo(backendSessionId, { dir: cwd });
+    if (info === undefined) {
+      console.warn(`[claude-sdk-adapter] ${agentLabel} 的後端對話 ${backendSessionId} 在 ${cwd} 底下找不到,改開全新的對話`);
+    }
+    return info !== undefined;
+  } catch (err) {
+    console.warn(`[claude-sdk-adapter] ${agentLabel} 確認後端對話 ${backendSessionId} 是否存在時失敗,照常嘗試 resume: ${String(err)}`);
+    return true;
+  }
 }

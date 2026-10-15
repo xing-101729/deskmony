@@ -7,7 +7,15 @@ import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
 import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, TitleGenerationRequest, TitleGenerationResult, Workspace } from "./types.js";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
 import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
@@ -50,6 +58,16 @@ import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, wat
  *    結束子程序,並讓所有懸置的權限請求以「挑一個 reject 系列的 option
  *    (找不到就回 cancelled)」收場,不讓 agent 的 `requestPermission` 呼叫
  *    永久卡住。
+ *
+ * 接回既有對話(2026-10-15,session 自動復活;`spawn()` 帶 `ResumeOptions.backendSessionId` 時,見 `startAcpSession()`):
+ *  - `initialize` 回應的 `agentCapabilities.sessionCapabilities.resume` 有宣告 → `session/resume`(協議保證**不**重播歷史);
+ *    否則宣告了 `loadSession` → `session/load`(協議規定 agent 會用 `session/update` **重播整段歷史**,然後才回應);
+ *    都沒有、或呼叫失敗/逾時(例如 agent 那邊的歷史已經被清掉)→ 退回 `session/new`,`AgentHandle.resumed` 標 `false`,
+ *    由呼叫端用 Deskmony 存的對話紀錄補脈絡。接回失敗**不會**讓 `spawn()` 失敗。
+ *  - 重播絕不能當成新事件送出(否則 DB/UI 出現重複訊息):`ActiveSession` 是 `session/update` 的唯一出口,而我們在 resume/load
+ *    **回應回來、確認重播的通知都處理完之後**才把它掛上去(見 `attachResumedSession()`),在那之前的通知沒有人接,直接丟棄。
+ *  - resume/load 帶的 `mcpServers` 與 `session/new` 完全一樣(session 網路 bridge,新核發的 scoped token);子行程的環境變數過濾、
+ *    opencode 家族的「所有工具 ask」設定都在 spawn 子行程那一步套用,三種建立 session 的方式共用同一個子行程,沒有差別。
  *
  * 已知限制 / TODO(M2 Round A 範圍):
  *  - 只處理 `ContentBlock.type === "text"`,image/audio/resource(_link)
@@ -156,7 +174,7 @@ export class AcpAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
     const acpConfig = launch.acpConfig;
     const agentLabel = launch.providerId ?? "acp";
     if (!acpConfig) {
@@ -174,7 +192,9 @@ export class AcpAdapter implements AgentAdapter {
     // `mcpServers` 欄位),比 handshake 完成、正式建立 `AgentHandle` 都早,
     // 所以提前生成這個 id,下面 `const handle: AgentHandle = { id: handleId,
     // ... }` 沿用同一個值。
-    const handleId = randomUUID();
+    // 2026-10-15:復活既有 session 時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`)——scoped token 與 session
+    // 網路工具的呼叫者身分都綁這個 id,必須等於 SessionManager 登記這條 session 的 id。
+    const handleId = resume?.sessionId ?? randomUUID();
 
     const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
 
@@ -324,11 +344,17 @@ export class AcpAdapter implements AgentAdapter {
         spawnFailure,
       ]);
 
-      let sessionBuilder = connection.agent.buildSession(workspace.path);
-      if (bridgeMcpServer) {
-        sessionBuilder = sessionBuilder.withMcpServer(bridgeMcpServer);
-      }
-      const session = await Promise.race([sessionBuilder.start(), spawnFailure]);
+      const { session, resumed } = await Promise.race([
+        startAcpSession({
+          cx: connection.agent,
+          capabilities: initialized.agentCapabilities ?? undefined,
+          cwd: workspace.path,
+          bridgeMcpServer,
+          backendSessionId: resume?.backendSessionId,
+          agentLabel,
+        }),
+        spawnFailure,
+      ]);
 
       // 2026-09-17:handshake 與 session/new 都成功 = 真正的 agent 行程一定已經在
       // 回應了。`child.pid` 可能只是外殼 —— `.cmd` shim 的 cmd.exe、`.ps1` 的
@@ -338,7 +364,7 @@ export class AcpAdapter implements AgentAdapter {
       // (查詢要 1 秒多)。見 child-registry.ts 的 registerChildDescendants()。
       void registerChildDescendants(child.pid);
 
-      const handle: AgentHandle = { id: handleId, launch, workspace };
+      const handle: AgentHandle = { id: handleId, launch, workspace, ...(resume?.backendSessionId ? { resumed } : {}) };
       const internal: InternalSession = {
         handle,
         child,
@@ -413,6 +439,15 @@ export class AcpAdapter implements AgentAdapter {
 
   events(handle: AgentHandle): AsyncIterable<AgentEvent> {
     return this.mustGet(handle).outputQueue;
+  }
+
+  /**
+   * ACP 的 `sessionId`(2026-10-15,session 自動復活)——agent 端(codex-acp、opencode、gemini 等)把對話存在自己的磁碟上,
+   * 下次 `spawn()` 帶這個值就能用 `session/resume` / `session/load` 接回。`session/new` 回應之後立刻就有值(不像 Claude SDK
+   * 要等第一則訊息),所以沒有「還沒捕捉到」的空窗。
+   */
+  getBackendSessionId(handle: AgentHandle): string | undefined {
+    return this.sessions.get(handle.id)?.session.sessionId;
   }
 
   /**
@@ -1134,6 +1169,107 @@ function mapAvailableCommands(commands: acp.AvailableCommand[]): SlashCommandInf
     description: c.description || undefined,
     argumentHint: c.input?.hint || undefined,
   }));
+}
+
+/** `session/resume` / `session/load` 的等待上限;超過就當作接回失敗,退回 `session/new`(不讓一次送出卡住)。 */
+const RESUME_REQUEST_TIMEOUT_MS = 60_000;
+
+interface StartAcpSessionArgs {
+  cx: acp.ClientContext;
+  /** `initialize` 回應裡 agent 宣告的能力(決定走 resume / load / 都不支援)。 */
+  capabilities: acp.AgentCapabilities | undefined;
+  cwd: string;
+  bridgeMcpServer: acp.McpServer | undefined;
+  /** 有值 = 嘗試接回這個 ACP session;省略 = 直接 `session/new`。 */
+  backendSessionId: string | undefined;
+  agentLabel: string;
+}
+
+/**
+ * 建立這條連線的主 session:有 `backendSessionId` 先嘗試接回既有的 ACP session,不行就 `session/new`。
+ *
+ * 選擇順序(2026-10-15):`sessionCapabilities.resume` → `session/resume`(不重播歷史,最乾淨);沒有再看 `loadSession` →
+ * `session/load`(會重播歷史,由 `attachResumedSession()` 擋掉);兩者都沒宣告,或呼叫失敗/逾時 → `session/new`。
+ * 任何接回失敗都只留一筆警告,**不丟錯**(呼叫端的這次送出不能因此失敗),`resumed` 據實回報。
+ * 連線本身已經斷了的話,後面的 `session/new` 也會失敗,那個錯誤會照常往外丟。
+ */
+async function startAcpSession(args: StartAcpSessionArgs): Promise<{ session: acp.ActiveSession; resumed: boolean }> {
+  const { cx, capabilities, cwd, bridgeMcpServer, backendSessionId, agentLabel } = args;
+  if (backendSessionId) {
+    const method: "resume" | "load" | undefined = capabilities?.sessionCapabilities?.resume
+      ? "resume"
+      : capabilities?.loadSession
+        ? "load"
+        : undefined;
+    if (method) {
+      try {
+        const session = await attachResumedSession(cx, method, backendSessionId, cwd, bridgeMcpServer ? [bridgeMcpServer] : []);
+        console.log(`[acp-adapter] ${agentLabel} 已用 session/${method} 接回既有對話 ${backendSessionId}`);
+        return { session, resumed: true };
+      } catch (err) {
+        console.warn(
+          `[acp-adapter] ${agentLabel} 的 session/${method}(${backendSessionId}) 失敗,改開全新的 session(由呼叫端補對話紀錄): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    } else {
+      console.warn(`[acp-adapter] ${agentLabel} 沒有宣告 session/resume 或 loadSession,無法接回既有對話,改開全新的 session`);
+    }
+  }
+  let builder = cx.buildSession(cwd);
+  if (bridgeMcpServer) builder = builder.withMcpServer(bridgeMcpServer);
+  return { session: await builder.start(), resumed: false };
+}
+
+/**
+ * `session/resume` / `session/load` 成功後,取得一個接回該 session 的 `ActiveSession`(`consume()`/`sendPrompt()` 都靠它)。
+ *
+ * ## 為什麼自己 attach、為什麼要等一個 macrotask
+ *
+ * ACP SDK(1.2.1、1.3.0 都一樣)只有 `buildSession().start()`(= `session/new`)會替回應建立 `ActiveSession`,沒有公開 API 能對
+ * 既有的 session id 做同一件事;而 `ClientContext.attachSession()` 正是 `start()` 在回應回來時呼叫的內部方法,TypeScript 標成
+ * private、執行期可呼叫。這裡用型別轉換呼叫它,找不到就丟錯(→ 呼叫端退回 `session/new`,不會壞)。e2e-session-revive 用真的 SDK 跑,
+ * SDK 升級改掉這個方法時會立刻紅燈。
+ *
+ * **重播的擋法**:SDK 把 `session/update` 分流給「已 attach 的 ActiveSession」,沒有 attach 的 session id 的通知直接沒人接。
+ * `session/load` 的重播通知全部在回應**之前**送達;但 SDK 處理通知是非同步的(每個通知要經過好幾個 handler 的 `await`),
+ * 回應的 promise 卻是同步 resolve 的——理論上回應回來時,最後幾筆重播通知可能還在 microtask 佇列裡排隊、尚未分流。所以回應回來之後
+ * 先等一個 macrotask(`setImmediate`),讓所有已經收到的通知處理完(它們沒有人接,被丟棄),**才** attach。之後才抵達的通知(下一輪
+ * 對話的新事件)一定來自後面的 I/O,不會被誤丟。`session/resume` 協議上不重播,同樣的流程無害。
+ *
+ * 誠實記錄:這一步是防禦性的。實測(假 agent 在回應前重播 132 個 update、真實 codex-acp / `opencode acp` 的 `session/load`)把它拿掉
+ * 也沒有漏——SDK 目前的實際分流時序已經讓「回應 resolve」晚於先前通知的分流。真正擋住重播的是「回應回來之後才 attach」;
+ * 先 attach 再發請求(最直覺的寫法)則會把整段歷史當成新事件送出(e2e-session-revive 的 L2 會抓到)。
+ */
+async function attachResumedSession(
+  cx: acp.ClientContext,
+  method: "resume" | "load",
+  backendSessionId: string,
+  cwd: string,
+  mcpServers: acp.McpServer[],
+): Promise<acp.ActiveSession> {
+  const attach = (cx as unknown as { attachSession?: (response: acp.NewSessionResponse) => acp.ActiveSession }).attachSession;
+  if (typeof attach !== "function") {
+    throw new Error("ACP SDK 沒有 ClientContext.attachSession(),無法接回既有 session(SDK 版本不相容)");
+  }
+
+  const request = { sessionId: backendSessionId, cwd, mcpServers };
+  const pending: Promise<acp.ResumeSessionResponse | acp.LoadSessionResponse> =
+    method === "resume" ? cx.request(acp.methods.agent.session.resume, request) : cx.request(acp.methods.agent.session.load, request);
+  pending.catch(() => undefined); // 逾時後才失敗的請求不能變成 unhandled rejection
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`session/${method} 等待逾時(${RESUME_REQUEST_TIMEOUT_MS}ms)`)), RESUME_REQUEST_TIMEOUT_MS);
+  });
+  let response: acp.ResumeSessionResponse | acp.LoadSessionResponse;
+  try {
+    response = await Promise.race([pending, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return attach.call(cx, { ...response, sessionId: backendSessionId });
 }
 
 /**

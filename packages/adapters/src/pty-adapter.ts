@@ -4,7 +4,7 @@ import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { AgentEvent, AgentLaunchSpec, PromptInput } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { buildAgentChildEnv } from "./agent-env.js";
@@ -92,7 +92,7 @@ export class GenericPtyAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
     const ptyConfig = launch.ptyConfig;
     if (!ptyConfig) {
       const agentLabel = launch.providerId ?? "pty";
@@ -135,7 +135,10 @@ export class GenericPtyAdapter implements AgentAdapter {
       );
     }
 
-    const handle: AgentHandle = { id: randomUUID(), launch, workspace };
+    // 2026-10-15(session 自動復活):終端程式沒有「後端 session」可以接回,重新啟動就是一個全新的程序,`resumed` 恆為 false
+    // (呼叫端據此在對話裡說明「這個 agent 不保留先前的記憶」,且不把對話紀錄灌進終端)。只沿用呼叫端指定的 Deskmony
+    // session id,讓 handle.id 與 DB 的 session id 一致。
+    const handle: AgentHandle = { id: resume?.sessionId ?? randomUUID(), launch, workspace, resumed: false };
     const internal: InternalSession = {
       handle,
       ptyProcess,

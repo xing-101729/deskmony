@@ -4,7 +4,15 @@ import type { Readable } from "node:stream";
 import path from "node:path";
 import type { AgentEvent, AgentLaunchSpec, DialogAnswer, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, TitleGenerationRequest, TitleGenerationResult, Workspace } from "./types.js";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
 import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
@@ -249,7 +257,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     };
   }
 
-  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
     const config = launch.opencodeConfig;
     const agentLabel = launch.providerId ?? "opencode";
     if (!config) {
@@ -267,7 +275,8 @@ export class OpenCodeAdapter implements AgentAdapter {
     // `AgentHandle.id` 提前在這裡生成(同 acp-adapter.ts 的做法):scoped token 要綁定「這一個 session」,而核發必須在
     // spawn 子程序之前(token 要放進子程序的 OPENCODE_CONFIG_CONTENT)。session 網路工具的**呼叫者身分**由 token 綁定的
     // 這個 id 決定,不是任何工具參數——所以它必須等於 SessionManager 登記的 session id(= handle.id)。
-    const handleId = randomUUID();
+    // 2026-10-15(session 自動復活):復活既有 session 時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`)。
+    const handleId = resume?.sessionId ?? randomUUID();
     const bridgeLaunch = mintMcpBridgeLaunch(
       { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
       handleId,
@@ -381,10 +390,36 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 建立;查不到只是少一層保護。見 child-registry.ts 的 registerChildDescendants()。
     void registerChildDescendants(child.pid);
 
-    let opencodeSessionId: string;
+    // 2026-10-15(session 自動復活):opencode 把 session 存在磁碟(它自己的資料目錄),新的 `opencode serve` 行程用同一個 session id
+    // 就能接著聊。先 `GET /session/{id}` 確認它還在(被使用者在 opencode 裡刪掉、資料目錄換了都會 404),在就沿用;不在、查詢失敗
+    // 一律退回 `POST /session` 開新的並把 `handle.resumed` 標 false(由呼叫端用 Deskmony 的對話紀錄補脈絡)——接回失敗不能讓 spawn 失敗。
+    let opencodeSessionId: string | undefined;
+    let resumed = false;
+    if (resume?.backendSessionId) {
+      try {
+        const existing = await getJson<{ id?: string } | undefined>(
+          `${baseUrl}/session/${encodeURIComponent(resume.backendSessionId)}`,
+          authorization,
+        );
+        if (existing?.id === resume.backendSessionId) {
+          opencodeSessionId = existing.id;
+          resumed = true;
+          console.log(`[opencode-adapter] ${agentLabel} 沿用既有的 opencode session ${opencodeSessionId}`);
+        } else {
+          console.warn(`[opencode-adapter] ${agentLabel} 的 GET /session/${resume.backendSessionId} 回應對不上,改開新的 opencode session`);
+        }
+      } catch (err) {
+        console.warn(
+          `[opencode-adapter] ${agentLabel} 找不到既有的 opencode session ${resume.backendSessionId},改開新的(由呼叫端補對話紀錄): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
     try {
-      const created = await postJson<{ id: string }>(`${baseUrl}/session`, {}, authorization);
-      opencodeSessionId = created.id;
+      if (opencodeSessionId === undefined) {
+        const created = await postJson<{ id: string }>(`${baseUrl}/session`, {}, authorization);
+        opencodeSessionId = created.id;
+      }
     } catch (err) {
       this.killChild(child);
       revokeBridgeToken();
@@ -430,7 +465,7 @@ export class OpenCodeAdapter implements AgentAdapter {
             "否則 completed 事件永遠進不來,session 會卡在 busy。",
         ),
     });
-    const handle: AgentHandle = { id: handleId, launch, workspace };
+    const handle: AgentHandle = { id: handleId, launch, workspace, ...(resume?.backendSessionId ? { resumed } : {}) };
     const sseController = new AbortController();
 
     const internal: InternalSession = {
@@ -618,6 +653,14 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   events(handle: AgentHandle): AsyncIterable<AgentEvent> {
     return this.mustGet(handle).outputQueue;
+  }
+
+  /**
+   * opencode 自己的 session id(2026-10-15,session 自動復活)——opencode 把 session 存在磁碟,`spawn()` 帶這個值就沿用同一個
+   * session(見 `spawn()` 的 `GET /session/{id}` 確認)。`POST /session` 回應之後立刻就有值。
+   */
+  getBackendSessionId(handle: AgentHandle): string | undefined {
+    return this.sessions.get(handle.id)?.opencodeSessionId;
   }
 
   /**
