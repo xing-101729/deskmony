@@ -5,14 +5,17 @@
  * 2026-10-15:session 自動復活的**真實 agent 手動驗證**(不是 `pnpm test` 的一部分——會呼叫真實模型、花真的錢,
  * 需要本機已登入的 agent;決定性的假後端版本是 e2e-session-revive.mjs)。
  *
- * 對一個 provider 做:建 session → 送「請記住暗號是 紫色長頸鹿,只回覆 OK」→ 走 `shutdownAll()` 的正常關閉 → 用同樣的隔離目錄重啟 core
- * → 對同一個 session 送「剛才的暗號是什麼?」→ 確認回答包含暗號;並印出走的是哪條路(從 core 的 log 與 DB 裡的系統說明判斷)。
+ * 對一個 provider 做:建 session → 送「請記住:我的幸運數字是 7391。只回覆 OK」→ 走 `shutdownAll()` 的正常關閉 → 用同樣的隔離目錄重啟 core
+ * → 對同一個 session 送「我的幸運數字是多少?只回答數字」→ 確認回答包含暗號;並印出走的是哪條路(從 core 的 log 與 DB 裡的系統說明判斷)。
  *
  * 隔離:core 的 `DESKMONY_HOME` / `DESKMONY_DATA_DIR` / `DESKMONY_WORKSPACE` / `DESKMONY_CORE_PORT` 全部指到暫存目錄與專用 port,
  * 啟動後檢查 log 第一行 `[db] using sqlite file at ...` 真的在暫存目錄——不是的話立刻停掉,絕不碰使用者真實的 ~/.deskmony。
  * 只會殺它自己啟動的 core 行程(用 PID),不會碰使用者桌面 app 的 core。
  *
  * 用法:node scripts/verify-session-revive-real.mjs <providerId> [port] [暫存根目錄] [bogus-backend-id]
+ *   model=<id> effort=<值>:建立後、送第一則訊息前用 session.setModel / session.setEffort 換成這組(非預設)選擇,重啟復活後
+ *     檢查 `Session.options` 的目前值還是這組、model/effort 沒被重設,並且 agent 仍然記得暗號。例:
+ *     `node scripts/verify-session-revive-real.mjs codex 4911 D:\\tmp model=gpt-5.6-luna effort=low`
  *   bogus-backend-id:兩個 core 之間把 DB 裡的後端識別碼改成一個不存在的值,模擬「agent 那邊的歷史已經不在」——驗證退回
  *     對話紀錄的路(真實 agent 讀到 Deskmony 附上的紀錄後能不能答出暗號)。
  *   providerId:`codex`(ACP)、`opencode`(HTTP)、`claude-agent-sdk`、`opencode-acp`、`gemini`……(provider 目錄裡的 id)
@@ -34,15 +37,19 @@ const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const providerId = process.argv[2];
 const basePort = Number(process.argv[3] ?? 4911);
 const tmpRoot = process.argv[4] ?? os.tmpdir();
-const bogusBackendId = process.argv[5] === "bogus-backend-id";
+const extraArgs = process.argv.slice(5);
+const bogusBackendId = extraArgs.includes("bogus-backend-id");
+const wantModel = extraArgs.find((a) => a.startsWith("model="))?.slice("model=".length);
+const wantEffort = extraArgs.find((a) => a.startsWith("effort="))?.slice("effort=".length);
 if (!providerId || !Number.isInteger(basePort) || basePort < 4911 || basePort > 4918) {
   console.error("用法: node scripts/verify-session-revive-real.mjs <providerId> [port 4911~4918] [暫存根目錄]");
   process.exit(2);
 }
 
-const SECRET = "紫色長頸鹿";
-const FIRST_PROMPT = `請記住暗號是 ${SECRET}，只回覆 OK`;
-const SECOND_PROMPT = "剛才的暗號是什麼？";
+// 2026-10-15:原本用「暗號」,gpt-5.6-luna 會把它當機密拒答("我不能透露暗號")——那是模型行為,不是記憶問題;改用中性的事實。
+const SECRET = "7391";
+const FIRST_PROMPT = `請記住:我的幸運數字是 ${SECRET}。只回覆 OK`;
+const SECOND_PROMPT = "我的幸運數字是多少？只回答數字";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const log = (...args) => console.log(`[verify:${providerId}]`, ...args);
@@ -192,6 +199,23 @@ try {
     title: `real-revive-${providerId}`, // 明確給標題,避免第一則訊息觸發 AI 自動命名(多花一次推論)
   });
   log(`session=${session.id} adapterType=${session.adapterType} model=${session.model ?? "(agent 預設)"}`);
+  {
+    // ACP 的選項要等 session 開起來才知道(options 在記憶體裡,稍後才到);沒指定要換的值時也印出來,方便挑合法的值。
+    const listOptions = async () => (await core.client.rpc("session.list", {})).sessions.find((x) => x.id === session.id);
+    const waitMs = wantModel || wantEffort ? 10_000 : 3_000;
+    for (let i = 0; i < waitMs / 100 && !(await listOptions())?.options?.model && !(await listOptions())?.options?.effort; i++) await sleep(100);
+    const initial = await listOptions();
+    log(`建立後 options: model=${initial?.options?.model?.current} (${initial?.options?.model?.choices?.map((c) => c.value).join(",")}) effort=${initial?.options?.effort?.current} (${initial?.options?.effort?.choices?.map((c) => c.value).join(",")})`);
+    if (!wantModel && !wantEffort) {
+      // 不換,只看選項。
+    } else {
+    if (wantModel) await core.client.rpc("session.setModel", { sessionId: session.id, model: wantModel });
+    if (wantEffort) await core.client.rpc("session.setEffort", { sessionId: session.id, effort: wantEffort });
+    await sleep(500);
+    const changed = await listOptions();
+    log(`換成非預設後: session.model=${changed?.model} session.effort=${changed?.effort}; options.model=${changed?.options?.model?.current} options.effort=${changed?.options?.effort?.current}`);
+    }
+  }
   const first = await turn(core.client, session.id, FIRST_PROMPT);
   log(`第一輪(${first.final.type}) agent 回覆: ${JSON.stringify(first.reply)}`);
   if (first.final.type !== "completed") throw new Error(`第一輪沒有正常結束: ${JSON.stringify(first.final)}`);
@@ -221,6 +245,7 @@ try {
   const { sessions: after } = await core.client.rpc("session.list", {});
   const reopened = after.find((s) => s.id === session.id);
   log(`重啟後: status=${reopened?.status}(預期 closed) backendSessionId=${reopened?.backendSessionId ?? "(無)"}`);
+  log(`重啟後復活前: options=${JSON.stringify(reopened?.options ?? null)}(純記憶體,預期是空的) model=${reopened?.model} effort=${reopened?.effort}`);
   const mark = core.lines.length;
   const second = await turn(core.client, session.id, SECOND_PROMPT);
   log(`第二輪(${second.final.type}) agent 回覆: ${JSON.stringify(second.reply)}`);
@@ -240,7 +265,24 @@ try {
   log(`DB 的使用者訊息(必須是原文): ${JSON.stringify(userMessages)}`);
   const originals = userMessages[0] === FIRST_PROMPT && userMessages[1] === SECOND_PROMPT;
   log(`結論: 回答包含暗號=${hasSecret}; 使用者訊息維持原文=${originals}; session 最終狀態=${(await core.client.rpc("session.list", {})).sessions.find((s) => s.id === session.id)?.status}`);
-  failed = !(hasSecret && originals && second.final.type === "completed");
+  let optionsOk = true;
+  if (wantModel || wantEffort) {
+    let revived;
+    for (let i = 0; i < 100; i++) {
+      revived = (await core.client.rpc("session.list", {})).sessions.find((x) => x.id === session.id);
+      if (revived?.options && (!wantModel || !revived.options.model || revived.options.model.current === wantModel) && (!wantEffort || revived.options.effort?.current === wantEffort)) break;
+      await sleep(100);
+    }
+    log(`復活後: session.model=${revived?.model} session.effort=${revived?.effort}; options.model=${revived?.options?.model?.current} options.effort=${revived?.options?.effort?.current}`);
+    // OpenCode(HTTP)不回報 model 選項(只有思考程度),所以 options.model 可能不存在:有就必須等於,沒有就只看 session.model。
+    optionsOk =
+      (!wantModel || (revived?.model === wantModel && (!revived.options?.model || revived.options.model.current === wantModel))) &&
+      (!wantEffort || (revived?.effort === wantEffort && revived.options?.effort?.current === wantEffort));
+    log(`model/effort 保留=${optionsOk}`);
+    const setLines = core.lines.filter((l) => /set_config_option|session\/set|記住的/.test(l));
+    for (const l of setLines) log("   ", l.length > 200 ? `${l.slice(0, 200)}…` : l);
+  }
+  failed = !(hasSecret && originals && optionsOk && second.final.type === "completed");
 
   // 收尾:先 session.delete 讓 adapter 收掉 agent 子行程,再停 core。
   await core.client.rpc("session.delete", { sessionId: session.id });
