@@ -46,6 +46,12 @@
  *         S7    OpenCode:server 行程被殺 → 送訊息後重新啟動 server、沿用同一個 opencode session。
  *         S8    Claude Agent SDK(探針,見 probe-claude-sdk-exit.mjs):CLI 子行程以非 0 結束時 adapter 的事件串流送出 error 並結束
  *               (修正前永遠不結束,core 偵測不到)。
+ *   S9-S12 agent 在等使用者回覆(waiting)時不在了:修正前 PermissionGateway 的待決項目(連同逾時計時器)與 UI 的彈窗永遠不會
+ *       被清掉,按「允許/拒絕」也沒反應(`resolvePermission()` 找不到 runtime 直接 return)、client 收不到 permission-resolved。
+ *         S9-S10 ACP 權限請求等回覆時行程被殺 → permission-resolved(deny、source=agent-stopped);復活後對舊請求按允許沒有作用、
+ *               等過舊請求的逾時時間也沒有逾時推播(計時器清掉了)。
+ *         S11   OpenCode 提問(user-dialog-request,不經過 PermissionGateway)等回答時 server 被殺 → user-dialog-resolved(cancelled)。
+ *         S12   等權限回覆時刪除 session → 同樣收到 permission-resolved(agent-stopped)。
  *
  * 前置需求:`pnpm build` 已跑過。用法:node scripts/e2e-session-revive.mjs
  */
@@ -64,7 +70,9 @@ import {
   REPORT_CONFIG_PREFIX,
   REVIVE_REPORT_MARKER,
   SLEEP_TURN_PREFIX,
+  WRITE_FILE_PREFIX,
 } from "./fake-acp-agent.mjs";
+import { QUESTION_PREFIX } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 import { e2eProvidersEnv, fakeOpencodeVariantsProvider, FAKE_ACP, FAKE_OPENCODE, FAKE_OPENCODE_VARIANTS, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
@@ -124,6 +132,8 @@ class MiniGatewayClient {
     this.events = [];
     this.sessionUpdates = [];
     this.sessionMessages = [];
+    this.permissionResolved = [];
+    this.userDialogResolved = [];
   }
 
   async connect() {
@@ -175,6 +185,8 @@ class MiniGatewayClient {
       if (msg.channel === "session-event") this.events.push(msg.payload);
       else if (msg.channel === "session-updated") this.sessionUpdates.push(msg.payload);
       else if (msg.channel === "session-message") this.sessionMessages.push(msg.payload);
+      else if (msg.channel === "permission-resolved") this.permissionResolved.push(msg.payload);
+      else if (msg.channel === "user-dialog-resolved") this.userDialogResolved.push(msg.payload);
     }
   }
 
@@ -1422,6 +1434,171 @@ async function testClaudeExitProbe() {
 }
 
 // =======================================================================
+// S9-S12:agent 在等使用者回覆(waiting)時不在了 → 待決的權限請求 / 提問一起收掉
+// =======================================================================
+/** S9/S10 的權限逾時(attended)。夠長,不會在殺掉 agent 之前先觸發;S10 會等過這個時間,確認舊請求的計時器真的清掉了。 */
+const WAITING_PERMISSION_TIMEOUT_MS = 12_000;
+
+/** 讓 fake ACP agent 對工作目錄裡的一個檔案發出寫檔權限請求,等到 core 廣播 permission-request、session 進入 waiting。 */
+async function askWritePermission(client, sessionId, targetPath) {
+  const from = client.events.length;
+  const posixPath = targetPath.split(path.sep).join("/");
+  await client.rpc("session.sendPrompt", {
+    sessionId,
+    prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath, content: "should never be written" })}` },
+  });
+  const request = await client.waitFor(client.events, (e) => e.sessionId === sessionId && e.event.type === "permission-request", 15_000, from);
+  const waiting = await waitStatus(client, sessionId, "waiting", 10_000);
+  return { requestId: request.event.requestId, waiting };
+}
+
+const resolvedPushesFor = (client, sessionId, requestId) =>
+  client.permissionResolved.filter((p) => p.sessionId === sessionId && p.requestId === requestId);
+
+async function testAgentCrashWhileWaitingPermission() {
+  const dirs = newDirs("crash-waiting");
+  let c;
+  try {
+    c = await boot(dirs, { extraEnv: { DESKMONY_PERMISSION_TIMEOUT_MS: String(WAITING_PERMISSION_TIMEOUT_MS) } });
+    const sid = await createSession(c.client, FAKE_ACP, dirs.workspaceDir, "revive-crash-waiting");
+    await turn(c.client, sid, SECRET_PROMPT);
+    const agentPid = onlyAgentPid(dirs);
+    const pidsBefore = pidsOf(readCalls(dirs));
+    const target = path.join(dirs.workspaceDir, "crash-waiting.txt");
+    const { requestId, waiting } = await askWritePermission(c.client, sid, target);
+    const requestedAt = Date.now();
+    const resolvedFrom = c.client.permissionResolved.length;
+    const pushFrom = c.client.sessionMessages.length;
+
+    killAgentProcess(agentPid);
+    const resolved = await c.client.waitFor(
+      c.client.permissionResolved,
+      (p) => p.sessionId === sid && p.requestId === requestId,
+      15_000,
+      resolvedFrom,
+    );
+    const resolvedAfterMs = Date.now() - requestedAt;
+    const { stopped, history: stoppedHistory, pushed } = await waitAgentStopped(c.client, sid, pushFrom);
+    record(
+      "S9 agent 在等權限回覆(waiting)時行程被殺:所有 client 收到這筆請求的 permission-resolved(deny、source=agent-stopped)關閉彈窗;session 轉 error 並留下 session.agentStopped 說明;檔案沒有被寫入",
+      waiting.status === "waiting" &&
+        resolved.decision === "deny" &&
+        resolved.source === "agent-stopped" &&
+        resolvedAfterMs < WAITING_PERMISSION_TIMEOUT_MS &&
+        stopped.status === "error" &&
+        JSON.stringify(noticesWithoutAdapterErrors(stoppedHistory)) === JSON.stringify(["session.agentStopped"]) &&
+        pushed &&
+        !existsSync(target),
+      `waiting=${waiting.status}, resolved=${JSON.stringify(resolved)} (${resolvedAfterMs}ms after the request), status=${stopped.status}, notices=${noticeEvents(stoppedHistory).map((e) => e.event).join(",")}, pushed=${pushed}, fileWritten=${existsSync(target)}`,
+    );
+
+    // ---- 人類送訊息讓 agent 復活之後:舊的請求什麼都沒留下 ----
+    const { reply } = await turn(c.client, sid, "剛才那個寫檔請求不用了,回個話就好");
+    const revived = await waitStatus(c.client, sid, "idle", 10_000);
+    const newCalls = callsSince(dirs, pidsBefore);
+    // 錯過推播、畫面上還留著彈窗的 client 對舊請求按「允許」:core 已經沒有這筆登記,不會轉給復活的新 agent、也不會再推播一次
+    await c.client.rpc("permission.resolve", { sessionId: sid, requestId, decision: "allow" });
+    // 等過舊請求的逾時時間:計時器有清掉的話,不會再冒出一筆 source=timeout 的 permission-resolved
+    await sleep(Math.max(0, requestedAt + WAITING_PERMISSION_TIMEOUT_MS + 1_500 - Date.now()));
+    const pushes = resolvedPushesFor(c.client, sid, requestId);
+    const after = await getSession(c.client, sid);
+    record(
+      "S10 送訊息 → agent 復活並回覆(只 spawn 一個新行程)、回到 idle;之後對舊請求按「允許」沒有任何作用(不轉給新 agent、不再推播),等過舊請求的逾時時間也沒有逾時推播——這筆請求從頭到尾只收到一次 permission-resolved;狀態維持 idle,檔案沒有被寫入",
+      reply === FAKE_ACP_REPLY &&
+        revived.status === "idle" &&
+        pidsOf(newCalls).size === 1 &&
+        pushes.length === 1 &&
+        pushes[0].source === "agent-stopped" &&
+        after?.status === "idle" &&
+        !existsSync(target),
+      `reply=${clip(reply, 60)}, revived=${revived.status}, newAgentPids=${pidsOf(newCalls).size}, pushesForOldRequest=${JSON.stringify(pushes)}, after=${after?.status}, fileWritten=${existsSync(target)}`,
+    );
+  } catch (err) {
+    record("S9-S10 執行過程發生未預期錯誤", false, String(err?.stack ?? err));
+  } finally {
+    c?.client.close();
+    await killProcessTreeHard(c?.proc);
+    dirs.cleanup();
+  }
+}
+
+async function testOpencodeCrashWhileQuestion() {
+  const dirs = newDirs("crash-question");
+  let c;
+  try {
+    c = await boot(dirs);
+    const sid = await createSession(c.client, FAKE_OPENCODE, dirs.workspaceDir, "revive-crash-question");
+    await turn(c.client, sid, SECRET_PROMPT);
+    const serverPid = onlyAgentPid(dirs);
+    const from = c.client.events.length;
+    await c.client.rpc("session.sendPrompt", { sessionId: sid, prompt: { text: `${QUESTION_PREFIX} crash` } });
+    const dialog = await c.client.waitFor(c.client.events, (e) => e.sessionId === sid && e.event.type === "user-dialog-request", 15_000, from);
+    const { requestId } = dialog.event;
+    const waiting = await waitStatus(c.client, sid, "waiting", 10_000);
+    const dialogFrom = c.client.userDialogResolved.length;
+    const pushFrom = c.client.sessionMessages.length;
+
+    killAgentProcess(serverPid);
+    const resolved = await c.client.waitFor(
+      c.client.userDialogResolved,
+      (p) => p.sessionId === sid && p.requestId === requestId,
+      15_000,
+      dialogFrom,
+    );
+    const { stopped, pushed } = await waitAgentStopped(c.client, sid, pushFrom);
+    const { reply } = await turn(c.client, sid, "問題不用回答了");
+    const revived = await waitStatus(c.client, sid, "idle", 10_000);
+    const pushes = c.client.userDialogResolved.filter((p) => p.sessionId === sid && p.requestId === requestId);
+    record(
+      "S11 OpenCode:server 在等使用者回答提問(waiting)時被殺 → 所有 client 收到 user-dialog-resolved(cancelled)收掉待答表單;session 轉 error + agentStopped 說明;送訊息後復活、回到 idle,這筆提問只收到一次推播",
+      waiting.status === "waiting" &&
+        resolved.result?.behavior === "cancelled" &&
+        stopped.status === "error" &&
+        pushed &&
+        reply.length > 0 &&
+        revived.status === "idle" &&
+        pushes.length === 1,
+      `waiting=${waiting.status}, resolved=${JSON.stringify(resolved)}, status=${stopped.status}, pushed=${pushed}, reply=${clip(reply, 60)}, revived=${revived.status}, pushes=${pushes.length}`,
+    );
+  } catch (err) {
+    record("S11 執行過程發生未預期錯誤", false, String(err?.stack ?? err));
+  } finally {
+    c?.client.close();
+    await killProcessTreeHard(c?.proc);
+    dirs.cleanup();
+  }
+}
+
+async function testDeleteWhileWaitingPermission() {
+  const dirs = newDirs("delete-waiting");
+  let c;
+  try {
+    c = await boot(dirs);
+    const sid = await createSession(c.client, FAKE_ACP, dirs.workspaceDir, "revive-delete-waiting");
+    const target = path.join(dirs.workspaceDir, "delete-waiting.txt");
+    const { requestId, waiting } = await askWritePermission(c.client, sid, target);
+    const resolvedFrom = c.client.permissionResolved.length;
+
+    await c.client.rpc("session.delete", { sessionId: sid });
+    const resolved = await c.client
+      .waitFor(c.client.permissionResolved, (p) => p.sessionId === sid && p.requestId === requestId, 10_000, resolvedFrom)
+      .catch(() => undefined);
+    const listed = await getSession(c.client, sid);
+    record(
+      "S12 session 在等權限回覆(waiting)時被刪除:所有 client 收到這筆請求的 permission-resolved(deny、source=agent-stopped)關閉彈窗;session 已不在清單、檔案沒有被寫入",
+      waiting.status === "waiting" && resolved?.decision === "deny" && resolved?.source === "agent-stopped" && !listed && !existsSync(target),
+      `waiting=${waiting.status}, resolved=${JSON.stringify(resolved)}, stillListed=${Boolean(listed)}, fileWritten=${existsSync(target)}`,
+    );
+  } catch (err) {
+    record("S12 執行過程發生未預期錯誤", false, String(err?.stack ?? err));
+  } finally {
+    c?.client.close();
+    await killProcessTreeHard(c?.proc);
+    dirs.cleanup();
+  }
+}
+
+// =======================================================================
 // 可以只跑名稱含這些片段的 scenario:node scripts/e2e-session-revive.mjs load double
 const filters = process.argv.slice(2);
 const scenarios = [
@@ -1447,6 +1624,9 @@ const scenarios = [
   ["crash-busy", () => testAgentCrashMidTurn()],
   ["crash-opencode", () => testOpencodeServerCrash()],
   ["crash-claude", () => testClaudeExitProbe()],
+  ["crash-waiting-permission", () => testAgentCrashWhileWaitingPermission()],
+  ["crash-waiting-question", () => testOpencodeCrashWhileQuestion()],
+  ["delete-waiting", () => testDeleteWhileWaitingPermission()],
 ];
 for (const [name, run] of scenarios) {
   if (filters.length === 0 || filters.some((f) => name.includes(f))) await run();

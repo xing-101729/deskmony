@@ -1398,7 +1398,11 @@ function handlePermissionResolved(
 ): void {
   set((state) => {
     const next: Partial<SessionStoreState> = {
-      pendingPermissions: state.pendingPermissions.filter((p) => p.requestId !== payload.requestId),
+      // `requestId` 只保證在同一個 session 內唯一(同 `resolvePermission()` 的說明)——只比 requestId 會把別的 session
+      // 剛好同號、還在等回覆的彈窗一起關掉(例如某個 session 的 agent 停止時,core 以 source "agent-stopped" 收掉它的請求)。
+      pendingPermissions: state.pendingPermissions.filter(
+        (p) => !(p.sessionId === payload.sessionId && p.requestId === payload.requestId),
+      ),
     };
     if (payload.source === "timeout") {
       const items = [...(state.itemsBySession[payload.sessionId] ?? [])];
