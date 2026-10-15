@@ -20,7 +20,7 @@
  *      method);**gateway 不接受任何 command/args**(帶了也被忽略,啟動方式只由 provider 決定);壞掉的
  *      `DESKMONY_E2E_EXTRA_PROVIDERS` 不會讓 core 起不來。
  *   C. 【§P2.7 #3】續接重建:用 ACP provider 建 session → kill -9 core → 重啟 → 接手(`recovery.takeover`,
- *      ACP 後端唯一能重新 spawn 既有 session 的路徑;`recovery.continue` 只支援 claude-agent-sdk)後
+ *      換一個全新的 agent 重新 spawn;2026-10-15 起 `recovery.continue` 對 ACP 也可用,見 C1b)後
  *      `adapterType` 仍是 `acp`(不是 claude-agent-sdk)、`providerId` 不變、新 session 真的能跑;再把 core 重啟成
  *      「provider 已不在偵測清單」(沒設 extras)——接手仍成功,證明退回的是 session 自己存的
  *      `adapterType + launch_command + launch_args`,而且 `agent_profiles` 表完全沒被讀(它根本不存在)。
@@ -723,17 +723,23 @@ async function rebuildAfterRestart() {
     record(
       "C1【§P2.7 #3】重啟後接手(recovery.takeover):新 session 的 adapterType 仍是 acp(不是 claude-agent-sdk)、providerId 不變、真的能跑一輪(回覆是 fake ACP agent 的固定文字);復原視圖顯示的 agent 名稱是 provider label",
       takeover1.adapterType === "acp" && takeover1.providerId === FAKE_ACP && takeover1.id !== s1.id &&
-        run1.final.type === "completed" && run1.reply === FAKE_REPLY && info1?.agentLabel === "E2E Fake ACP" && info1?.canContinue === false,
+        run1.final.type === "completed" && run1.reply === FAKE_REPLY && info1?.agentLabel === "E2E Fake ACP" && info1?.canContinue === true,
       `takeover.adapterType=${takeover1.adapterType}, providerId=${takeover1.providerId}, reply=${JSON.stringify(run1.reply)}, agentLabel=${info1?.agentLabel}`,
     );
-    // ACP 後端不支援「繼續(保有記憶)」,明確拒絕(沿用既有保證)
+    // 2026-10-15:ACP session 也能「繼續」(fake ACP agent 沒宣告 resume/load → 退回新的 session/new + 對話紀錄,仍然成功;
+    // 原生接回/退路的各種組合見 e2e-session-revive.mjs)。這裡只確認 provider 目錄 + session 自帶 launch 資訊的重建路徑對 continue 也成立。
     let continueCode;
+    let continued;
     try {
-      await client.rpc("recovery.continue", { sessionId: s2.id });
+      continued = (await client.rpc("recovery.continue", { sessionId: s2.id }, 40_000)).session;
     } catch (err) {
       continueCode = err.errorCode;
     }
-    record("C1b ACP session 的 recovery.continue 仍然明確拒絕(只有 claude-agent-sdk + backendSessionId 能「繼續」)", continueCode === "sessionManager.continueUnsupportedBackend", `code=${continueCode}`);
+    record(
+      "C1b ACP session 的 recovery.continue 可用(從 session 自己的資料重建啟動規格;後端沒有 resume/load 時退回新對話):session 回到 idle、adapterType 仍是 acp、providerId 不變",
+      continued?.status === "idle" && continued?.adapterType === "acp" && continued?.providerId === FAKE_ACP && continued?.id === s2.id,
+      `code=${continueCode}, status=${continued?.status}, adapterType=${continued?.adapterType}`,
+    );
     client.close();
     await killHard(coreB);
     coreB = null;

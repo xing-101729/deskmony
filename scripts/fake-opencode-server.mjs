@@ -124,12 +124,22 @@
  *     `message.updated` 帶 `cost`/`tokens`(真實 opencode 的形狀);`TITLE_MODE_TOOL`:bash 工具 pending → running →
  *     `permission.asked`,**被允許**才寫 `TITLE_TOOL_MARKER_FILE`;`TITLE_MODE_HANG`:等到 `/abort` 或 `DELETE`;
  *     `TITLE_MODE_REFUSE`:`session.error`。新增 `DELETE /session/{id}`(真實 opencode 1.18.7 實測回 `true`)。
+ *   - 2026-10-15(session 自動復活,scripts/e2e-session-revive.mjs 用):模擬「opencode 把 session 存在磁碟、新的 server 行程
+ *     用同一個 session id 就能接著聊」。環境變數 `FAKE_OPENCODE_STATE_DIR` 有設時,每個 session 存成 `<dir>/ses-<id>.json`
+ *     (每一輪收到的 prompt),`GET /session/{id}` 找得到(命中就在這個行程裡還原,回 `{id, directory}`)就沿用;找不到回 404
+ *     `NotFoundError`(真實 opencode 的形狀)。**沒設時完全不持久化**,所以新行程的 `GET /session/{id}` 一律 404——模擬
+ *     「opencode 那邊的 session 已經不在」,adapter 要退回 `POST /session` 開新的。`FAKE_OPENCODE_FORGET=1` 同樣讓 `GET /session/{id}`
+ *     一律 404(即使 STATE_DIR 有檔案,仍記 calls.log)——「有持久化、但這個 session 在 opencode 那邊已被清掉」。`<dir>/calls.log` 每個 `POST /session`、
+ *     `GET /session/{id}`(`hit`/`miss`)附加一行 JSON `{pid, call}`,e2e 靠它斷言「走了哪條路」。
+ *     prompt 文字**結尾**是 `REVIVE_REPORT_MARKER`(結尾,所以夾在對話紀錄裡的舊標記不會誤觸)→ 回 `REVIVE_REPORT:` + JSON
+ *     `{agentSessionId, mode, priorPrompts, prompt}`:這個 session 在**這個伺服器自己的狀態**裡先前收過的 prompt、這一輪收到的完整文字。
  *   - `REPORT_SESSIONS_PREFIX`:回 `SESSIONS:` + JSON——每個 session 的 `{id, kind, parentID, deleted, abortCount,
  *     permissionReplies}`(只回統計,不回對話內容)。
  */
 
 import http from "node:http";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -139,6 +149,45 @@ import { parseTitleRequestPrompt } from "../packages/shared/dist/session-title.j
 import { TITLE_MODE_HANG, TITLE_MODE_REFUSE, TITLE_MODE_TOOL, TITLE_TOOL_MARKER_FILE, fakeTitleReplyFor } from "./lib/fake-title-modes.mjs";
 
 export const FAKE_OPENCODE_REPLY_CHUNKS = ["Hello", " from", " fake", " OpenCode", " server"];
+/** 2026-10-15(session 自動復活)e2e 用,見檔頭註解(與 fake-acp-agent.mjs 的同名常數同值)。 */
+export const REVIVE_REPORT_MARKER = "[[E2E_REVIVE_REPORT]]";
+/** 有設才持久化 session、才記 calls.log,見檔頭「2026-10-15」。 */
+const STATE_DIR = process.env.FAKE_OPENCODE_STATE_DIR || undefined;
+
+function appendCall(call) {
+  if (!STATE_DIR) return;
+  mkdirSync(STATE_DIR, { recursive: true });
+  appendFileSync(path.join(STATE_DIR, "calls.log"), `${JSON.stringify({ pid: process.pid, call })}\n`, "utf8");
+}
+
+function stateFile(sessionId) {
+  return path.join(STATE_DIR, `ses-${sessionId}.json`);
+}
+
+function persistSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!STATE_DIR || !session) return;
+  mkdirSync(STATE_DIR, { recursive: true });
+  writeFileSync(stateFile(sessionId), JSON.stringify({ id: sessionId, turns: session.turns }), "utf8");
+}
+
+/** 一個全新的 session 記錄(`POST /session` 與從磁碟還原共用)。 */
+function newSessionRecord(overrides = {}) {
+  return {
+    aborted: false,
+    pendingPermission: new Map(),
+    pendingQuestion: new Map(),
+    // 2026-10-06:REPORT_SESSIONS_PREFIX 回報用的統計。
+    kind: "main",
+    parentID: undefined,
+    deleted: false,
+    abortCount: 0,
+    permissionReplies: [],
+    // 2026-10-15:這個伺服器「記得」的對話(每一輪收到的 prompt),見檔頭。
+    turns: [],
+    ...overrides,
+  };
+}
 export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
 /** TOOL_CALL_PREFIX 流程裡 `running`/`completed` 帶的完整參數(`pending` 一律是 `{}`)。 */
 export const TOOL_CALL_INPUT = { command: "echo hello-fake-opencode" };
@@ -288,6 +337,10 @@ async function streamTextReply(sessionId, messageId, chunks, { chunkDelayMs = 5 
 
 async function handlePrompt(sessionId, text, model) {
   const session = sessions.get(sessionId);
+  // 2026-10-15:這個伺服器自己「記得」的對話——先取出這一輪之前的(給 REVIVE_REPORT 用),再把這一輪記進去並落地。
+  const priorPrompts = session.turns.map((turn) => turn.prompt);
+  session.turns.push({ prompt: text });
+  persistSession(sessionId);
   const userMessageId = `msg_${randomUUID()}`;
   const assistantMessageId = `msg_${randomUUID()}`;
   broadcast("message.updated", { sessionID: sessionId, info: { id: userMessageId, role: "user", sessionID: sessionId } });
@@ -310,6 +363,11 @@ async function handlePrompt(sessionId, text, model) {
   if (titleRequest) {
     session.kind = "title";
     await handleTitlePrompt(session, sessionId, assistantMessageId, titleRequest.firstMessage);
+  } else if (text.trimEnd().endsWith(REVIVE_REPORT_MARKER)) {
+    // 2026-10-15:回報這個伺服器自己的記憶(見檔頭)。
+    const report = { agentSessionId: sessionId, mode: STATE_DIR ? "persisted" : "memory", priorPrompts, prompt: text };
+    await streamTextReply(sessionId, assistantMessageId, [`REVIVE_REPORT:${JSON.stringify(report)}`]);
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   } else if (text.startsWith(SLOW_PREFIX)) {
     session.aborted = false;
     // 真實 opencode 實測:一個 text part 的「建立」事件(message.part.updated,
@@ -777,18 +835,30 @@ async function route(req, res, url) {
   if (req.method === "POST" && url.pathname === "/session") {
     const id = `ses_${randomUUID()}`;
     const body = await readJsonBody(req).catch(() => ({}));
-    sessions.set(id, {
-      aborted: false,
-      pendingPermission: new Map(),
-      pendingQuestion: new Map(),
-      // 2026-10-06:REPORT_SESSIONS_PREFIX 回報用的統計。
-      kind: "main",
-      parentID: typeof body.parentID === "string" ? body.parentID : undefined,
-      deleted: false,
-      abortCount: 0,
-      permissionReplies: [],
-    });
+    sessions.set(id, newSessionRecord({ parentID: typeof body.parentID === "string" ? body.parentID : undefined }));
+    appendCall("POST /session");
+    persistSession(id);
     sendJson(res, 200, { id, directory: process.cwd(), ...(typeof body.title === "string" ? { title: body.title } : {}) });
+    return;
+  }
+
+  // 2026-10-15:`GET /session/{id}`——OpenCodeAdapter 復活既有 session 時先確認它還在。命中(這個行程記得,或 STATE_DIR 的磁碟上有)
+  // 回 `{id, directory}`,否則 404 NotFoundError(見檔頭)。
+  const getSessionMatch = url.pathname.match(/^\/session\/([^/]+)$/);
+  if (req.method === "GET" && getSessionMatch) {
+    const sessionId = getSessionMatch[1];
+    let session = process.env.FAKE_OPENCODE_FORGET === "1" ? undefined : sessions.get(sessionId);
+    if (!session && process.env.FAKE_OPENCODE_FORGET !== "1" && STATE_DIR && existsSync(stateFile(sessionId))) {
+      const saved = JSON.parse(readFileSync(stateFile(sessionId), "utf8"));
+      session = newSessionRecord({ turns: saved.turns ?? [] });
+      sessions.set(sessionId, session);
+    }
+    appendCall(`GET /session/:id ${session ? "hit" : "miss"}`);
+    if (!session) {
+      sendJson(res, 404, { name: "NotFoundError", data: { message: `Session not found: ${sessionId}` } });
+      return;
+    }
+    sendJson(res, 200, { id: sessionId, directory: process.cwd() });
     return;
   }
 

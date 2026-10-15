@@ -21,7 +21,7 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十八支是**決定性**
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這二十支是**決定性**
  * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
@@ -89,6 +89,10 @@ const SUITES = [
   // 1.4 秒),所以不算快。
   "e2e-child-registry",
   "e2e-crash-recovery",
+  // 2026-10-15:app 關閉/崩潰重開之後,對沒有活 runtime 的 session 送訊息會自動重新啟動 agent(ACP resume/load、OpenCode 沿用 session、
+  // Claude resume、PTY 全新程序;接不回時退回對話紀錄),復原視圖的「繼續」走同一個流程。十幾個 core 開關,約 1~2 分鐘;
+  // 放在 e2e-crash-recovery 之後:它疊在崩潰對帳(interrupted/closed 的分類)之上。
+  "e2e-session-revive",
   "e2e-auto-mode-yolo",
   // 2026-09-09(cli_hld.md §9):驅動編譯後的 `apps/cli/dist/bin.js` 子程序,
   // 疊在其餘每一支都假設能正常運作的 gateway/adapters/policy-engine 之上

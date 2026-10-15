@@ -17,8 +17,8 @@
  *      kill -9(強制終止) → interrupted 且出現在復原視圖;同時驗證
  *      idle/busy/waiting 三種狀態都算孤兒,error/closed 兩種既有終態不受對帳
  *      影響(§3)。
- *   B. §4.1:ACP 後端 canContinue=false,`recovery.continue` 明確拒絕(不靜默
- *      退化)。
+ *   B. §4.1:沒有後端 session 可接的後端(PTY)canContinue=false,`recovery.continue` 明確拒絕(不靜默
+ *      退化)。(2026-10-15 前這裡用 ACP 後端;ACP/OpenCode 現在也能「繼續」,見 e2e-session-revive.mjs。)
  *   C. §5.2「放棄」:標記 closed,對話紀錄保留(回收 ≠ 丟棄)。
  *   D. §4.2「接手」:新 session + 注入摘要(只讀 DB,內容含關鍵欄位),
  *      舊 session 收尾成 closed。
@@ -40,7 +40,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
-import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
+import { e2eProvidersEnv, FAKE_ACP, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -400,14 +400,16 @@ async function testShutdownVsCrash() {
     const recoveryIds = new Set(recoverySessions.map((s) => s.sessionId));
     const allThreeInRecovery = recoveryIds.has(idleId) && recoveryIds.has(busyId) && recoveryIds.has(waitingId);
     const syntheticNotInRecovery = !recoveryIds.has(syntheticErrorId) && !recoveryIds.has(syntheticClosedId);
-    const allCanContinueFalse = recoverySessions
-      .filter((s) => recoveryIds.has(s.sessionId))
-      .every((s) => s.canContinue === false); // ACP 後端,§4.1 查證結論:不支援「繼續」
+    // 2026-10-15:ACP 也能「繼續」(session/resume|load,接不回就用對話紀錄),且後端識別碼在 spawn 完就寫進 DB——
+    // 連第一輪還沒送出任何事件(busy/waiting 那兩個)的 session 都有,所以三個都是 canContinue=true。
+    const allCanContinueTrue = recoverySessions
+      .filter((s) => [idleId, busyId, waitingId].includes(s.sessionId))
+      .every((s) => s.canContinue === true);
 
     record(
-      "A2(核心驗收標準:kill -9 → 出現在復原視圖): recovery.list 包含三個崩潰的 session,不包含既有 error/closed 紀錄,且 ACP 後端 canContinue 皆為 false",
-      allThreeInRecovery && syntheticNotInRecovery && allCanContinueFalse,
-      `recoveryIds=${[...recoveryIds].join(",")}, allCanContinueFalse=${allCanContinueFalse}`,
+      "A2(核心驗收標準:kill -9 → 出現在復原視圖): recovery.list 包含三個崩潰的 session,不包含既有 error/closed 紀錄,且 ACP 後端(已捕捉後端 session id)canContinue 皆為 true",
+      allThreeInRecovery && syntheticNotInRecovery && allCanContinueTrue,
+      `recoveryIds=${[...recoveryIds].join(",")}, allCanContinueTrue=${allCanContinueTrue}`,
     );
 
     const auditRows = await readAuditKinds(dataDir);
@@ -504,11 +506,14 @@ async function testContinueAbandonTakeover() {
     client = new MiniGatewayClient("ws://127.0.0.1:4384");
     await client.connect();
 
-    const { sessionId: sessionForContinue } = await createAcpSession(client, workspaceDir, "B-continue-target");
+    // B 的目標是 PTY session:終端程式沒有後端 session 可接,是 `recovery.continue` 仍然明確拒絕的後端
+    // (2026-10-15 前這裡用 ACP session;ACP 現在也能「繼續」)。
+    const { session: ptySession } = await client.rpc("session.create", { providerId: FAKE_PTY, workingDir: workspaceDir, title: "B-continue-target" }, 30_000);
+    const sessionForContinue = ptySession.id;
     const { sessionId: sessionForAbandon } = await createAcpSession(client, workspaceDir, "C-abandon-target");
     const { sessionId: sessionForTakeover } = await createAcpSession(client, workspaceDir, "D-takeover-target");
 
-    for (const sid of [sessionForContinue, sessionForAbandon, sessionForTakeover]) {
+    for (const sid of [sessionForAbandon, sessionForTakeover]) {
       const idx = client.events.length;
       await client.rpc("session.sendPrompt", { sessionId: sid, prompt: { text: "some prior work happened here" } });
       await client.waitForEvent((e) => e.sessionId === sid && e.event.type === "completed", 15_000, idx);
@@ -524,7 +529,7 @@ async function testContinueAbandonTakeover() {
     const clientB = new MiniGatewayClient("ws://127.0.0.1:4385");
     await clientB.connect();
 
-    // ---- B: §4.1 continue 明確拒絕(ACP 不支援「繼續」)---------------------
+    // ---- B: §4.1 continue 明確拒絕(PTY 沒有後端 session 可接)---------------------
     let continueRejected = false;
     let continueErr = "";
     try {
@@ -533,10 +538,12 @@ async function testContinueAbandonTakeover() {
       continueRejected = true;
       continueErr = String(err);
     }
+    const { sessions: recoveryForB } = await clientB.rpc("recovery.list", {});
+    const ptyCanContinue = recoveryForB.find((s) => s.sessionId === sessionForContinue)?.canContinue;
     record(
-      "B(§4.1: 不支援「繼續」的後端明確拒絕,不靜默退化): ACP 後端的 interrupted session 呼叫 recovery.continue 得到明確錯誤",
-      continueRejected,
-      `continueRejected=${continueRejected}, err=${continueErr}`,
+      "B(§4.1: 不支援「繼續」的後端明確拒絕,不靜默退化): PTY 後端的 interrupted session canContinue=false,呼叫 recovery.continue 得到明確錯誤",
+      continueRejected && ptyCanContinue === false,
+      `continueRejected=${continueRejected}, canContinue=${ptyCanContinue}, err=${continueErr}`,
     );
 
     // ---- C: §5.2 放棄——標記 closed,對話紀錄保留(驗證 session 本身的收尾

@@ -196,11 +196,27 @@
  *     initialize 宣告 `sessionCapabilities.close`,`session/close` 會把 session 標成 closed。
  *   - `REPORT_SESSIONS_PREFIX`(不接受參數):回 `SESSIONS:` + JSON——這個 agent 行程裡每個 session 的
  *     `{sessionId, kind:"main"|"title", closed, cancelled, permissionOutcomes, prompts}`(只回這些統計,不回對話內容)。
+ *   - 2026-10-15(session 自動復活,scripts/e2e-session-revive.mjs 用):模擬「agent 把對話存在自己的磁碟上、重啟後能接回」。
+ *     `FAKE_ACP_STATE_DIR`(環境變數,由啟動 core 的 e2e 設;子行程繼承)有設時,每個 session 的狀態(cwd + 每一輪收到的 prompt)
+ *     存成 `<dir>/session-<id>.json`,每個 ACP 呼叫(initialize / session/new|resume|load)附加一行 JSON 到 `<dir>/calls.log`
+ *     ——e2e 靠它斷言「走了哪條路」「agent 行程啟動了幾次」。沒設時完全維持原本的行為(只在記憶體、不支援接回)。
+ *     命令列旗標決定宣告的能力:
+ *       - (無旗標)`loadSession: false`、沒有 `sessionCapabilities.resume`——**不支援接回**(退路:對話紀錄)。
+ *       - `--resume`:宣告 `sessionCapabilities.resume`,`session/resume` 接回(不重播)。
+ *       - `--load`:宣告 `loadSession: true`,`session/load` 接回,並在回應**之前**用 `session/update` 把每一輪歷史重播一次
+ *         (user_message_chunk + agent_message_chunk + tool_call + tool_call_update,文字都帶 `REPLAY_MARKER`)——重播
+ *         絕不能出現在 core 的事件串流/DB(e2e 逐項斷言)。
+ *       - `--forget`:搭配上面兩個旗標之一,宣告了能力但 agent 那邊的歷史已經不在(resume/load 一律回 resource not found)
+ *         ——退路:接回失敗改開 `session/new` + 對話紀錄。
+ *     `REVIVE_REPORT_MARKER` 結尾的 prompt(文字**結尾**是這個標記,所以夾在對話紀錄裡的舊標記不會誤觸)→ 回 `REVIVE_REPORT:` + JSON
+ *     `{agentSessionId, mode, priorPrompts, prompt}`:這個 session 在**這個 agent 自己的狀態**裡先前收過的所有 prompt、這一輪收到的完整
+ *     文字——e2e 用它區分「agent 真的記得」(priorPrompts 含重啟前的訊息)與「agent 只是讀了對話紀錄」(prompt 開頭有 Deskmony 附的紀錄)。
  */
 
 import * as acp from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
-import { writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { loadConfigPlugins, simulateShellEnv, presenceIn } from "./lib/fake-opencode-plugin-host.mjs";
@@ -212,6 +228,12 @@ import { parseTitleRequestPrompt } from "../packages/shared/dist/session-title.j
 import { TITLE_MODE_HANG, TITLE_MODE_REFUSE, TITLE_MODE_TOOL, TITLE_TOOL_MARKER_FILE, fakeTitleReplyFor } from "./lib/fake-title-modes.mjs";
 
 export const FAKE_ACP_REPLY_CHUNKS = ["Hello", " from", " fake ACP agent"];
+/** 2026-10-15(session 自動復活)e2e 用,見檔頭註解。 */
+export const REVIVE_REPORT_MARKER = "[[E2E_REVIVE_REPORT]]";
+/** `--load` 模式重播歷史時,每一段重播文字都帶這個標記——e2e 斷言它**絕不**出現在 core 的事件串流與 DB。 */
+export const REPLAY_MARKER = "REPLAYED-FROM-LOAD";
+/** `--load` 重播時每一輪額外補幾個填充片段(總 update 數 = 輪數 × (4 + 這個值)),e2e 用同一個常數算預期值。 */
+export const REPLAY_FILLER_PER_TURN = 40;
 /** 回報這個 agent 行程裡每個 session 的統計,見檔頭。 */
 export const REPORT_SESSIONS_PREFIX = "ACP_REPORT_SESSIONS";
 export const WRITE_FILE_PREFIX = "ACP_WRITE_FILE ";
@@ -324,17 +346,98 @@ export function delayEchoMarker(delayMs) {
 const DELAY_ECHO_PATTERN = /\[\[E2E_DELAY_ECHO:(\d+)\]\]/;
 
 class FakeAcpAgent {
-  constructor() {
+  /**
+   * @param {{ resume?: boolean, load?: boolean, forget?: boolean, stateDir?: string }} [options] 見檔頭「2026-10-15」段落。
+   */
+  constructor(options = {}) {
     /** @type {Map<string, { abort: AbortController | null }>} */
     this.sessions = new Map();
+    this.options = options;
+  }
+
+  /** 附加一行 JSON 到 calls.log(沒設 stateDir 就不記)。 */
+  appendCall(record) {
+    if (!this.options.stateDir) return;
+    appendFileSync(path.join(this.options.stateDir, "calls.log"), `${JSON.stringify({ pid: process.pid, ...record })}\n`, "utf8");
+  }
+
+  statePath(sessionId) {
+    return path.join(this.options.stateDir, `session-${sessionId}.json`);
+  }
+
+  /** 把這個 session 的狀態(cwd + 每一輪收到的 prompt)存到磁碟——沒設 stateDir 時不存。 */
+  persistSession(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!this.options.stateDir || !session) return;
+    mkdirSync(this.options.stateDir, { recursive: true });
+    writeFileSync(this.statePath(sessionId), JSON.stringify({ sessionId, cwd: session.cwd, turns: session.turns }), "utf8");
+  }
+
+  /** resume/load 共用:從磁碟還原 session 狀態並登記進這個行程。找不到(或 `--forget`)就丟 resource not found。 */
+  restoreSession(params) {
+    const sessionId = params.sessionId;
+    if (this.options.forget || !this.options.stateDir || !existsSync(this.statePath(sessionId))) {
+      throw acp.RequestError.resourceNotFound(sessionId);
+    }
+    const saved = JSON.parse(readFileSync(this.statePath(sessionId), "utf8"));
+    this.sessions.set(sessionId, {
+      abort: null,
+      mcpServers: params?.mcpServers ?? [],
+      kind: "main",
+      closed: false,
+      cancelled: 0,
+      permissionOutcomes: [],
+      prompts: 0,
+      cwd: params.cwd ?? saved.cwd,
+      turns: saved.turns ?? [],
+    });
+    return saved;
   }
 
   async initialize() {
+    this.appendCall({ call: "initialize" });
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
       // 2026-10-06:宣告支援 session/close(命名用臨時 session 收尾時會用到,見 closeSession())。
-      agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+      // 2026-10-15:`--resume` 加宣告 sessionCapabilities.resume、`--load` 宣告 loadSession(見檔頭)。
+      agentCapabilities: {
+        loadSession: this.options.load === true,
+        sessionCapabilities: { close: {}, ...(this.options.resume ? { resume: {} } : {}) },
+      },
     };
+  }
+
+  /** `session/resume`:接回既有 session,**不**重播歷史。 */
+  async resumeSession(params) {
+    this.appendCall({ call: "session/resume", sessionId: params.sessionId, mcpServers: (params?.mcpServers ?? []).length });
+    this.restoreSession(params);
+    return {};
+  }
+
+  /** `session/load`:接回既有 session,並在回應**之前**用 session/update 把每一輪歷史重播一次(協議規定的行為)。 */
+  async loadSession(params, cx) {
+    this.appendCall({ call: "session/load", sessionId: params.sessionId, mcpServers: (params?.mcpServers ?? []).length });
+    const saved = this.restoreSession(params);
+    let replayedUpdates = 0;
+    const notify = (update) => {
+      replayedUpdates += 1;
+      return cx.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update });
+    };
+    for (const [index, turn] of saved.turns.entries()) {
+      const text = typeof turn.prompt === "string" ? turn.prompt.slice(0, 60) : "";
+      await notify({ sessionUpdate: "user_message_chunk", messageId: `replay-user-${index}`, content: { type: "text", text: `${REPLAY_MARKER} user ${index}: ${text}` } });
+      await notify({ sessionUpdate: "agent_message_chunk", messageId: `replay-agent-${index}`, content: { type: "text", text: `${REPLAY_MARKER} agent ${index}` } });
+      await notify({ sessionUpdate: "tool_call", toolCallId: `replay-tool-${index}`, title: `${REPLAY_MARKER} tool`, kind: "other", status: "pending", rawInput: { replay: index } });
+      await notify({ sessionUpdate: "tool_call_update", toolCallId: `replay-tool-${index}`, status: "completed", rawOutput: { replay: index } });
+      // 每一輪再補一批填充的文字片段:一大串 session/update 緊接著 session/load 的回應,是最容易在「回應已 resolve、通知還在排隊分流」
+      // 的競態裡漏出去的情境(真實 agent 重播長對話時就是這樣)。
+      for (let filler = 0; filler < REPLAY_FILLER_PER_TURN; filler++) {
+        await notify({ sessionUpdate: "agent_message_chunk", messageId: `replay-agent-${index}`, content: { type: "text", text: `${REPLAY_MARKER} filler ${index}.${filler}` } });
+      }
+    }
+    // e2e 用:證明重播真的發生過(重播的 update 總數),再回應 session/load。
+    this.appendCall({ call: "session/load.replayed", sessionId: params.sessionId, updates: replayedUpdates });
+    return {};
   }
 
   async newSession(params) {
@@ -354,7 +457,12 @@ class FakeAcpAgent {
       cancelled: 0,
       permissionOutcomes: [],
       prompts: 0,
+      // 2026-10-15:這個 agent 自己「記得」的對話(每一輪收到的 prompt),見檔頭。
+      cwd: params?.cwd,
+      turns: [],
     });
+    this.appendCall({ call: "session/new", sessionId, mcpServers: (params?.mcpServers ?? []).length });
+    this.persistSession(sessionId);
     return { sessionId };
   }
 
@@ -406,6 +514,24 @@ class FakeAcpAgent {
       return { stopReason: stopReason ?? (abort.signal.aborted ? "cancelled" : "end_turn") };
     }
 
+    // 2026-10-15:回報這個 agent 自己的記憶(見檔頭 REVIVE_REPORT_MARKER);命名請求之後、其他判斷之前。
+    if (text.trimEnd().endsWith(REVIVE_REPORT_MARKER)) {
+      const priorPrompts = session.turns.map((turn) => turn.prompt);
+      session.turns.push({ prompt: text });
+      this.persistSession(params.sessionId);
+      try {
+        const mode = this.options.load ? "load" : this.options.resume ? "resume" : "none";
+        await this.say(
+          params.sessionId,
+          cx,
+          `REVIVE_REPORT:${JSON.stringify({ agentSessionId: params.sessionId, mode, priorPrompts, prompt: text })}`,
+        );
+      } finally {
+        session.abort = null;
+      }
+      return { stopReason: abort.signal.aborted ? "cancelled" : "end_turn" };
+    }
+
     try {
       // 2026-10-02(P3):呼叫 bridge 工具的三條路徑**排在最前面**——它們的內文(`message` 參數、巢狀標記)本來就會
       // 含 `[[E2E_DELAY_ECHO:...]]` 這類標記,先比對 DELAY_ECHO 的話,A 的「呼叫 send_to_session」prompt 會被當成
@@ -453,7 +579,18 @@ class FakeAcpAgent {
       session.abort = null;
     }
 
+    // 2026-10-15:這一輪結束,記進這個 agent 自己的記憶(並落地,讓重啟後的 resume/load 找得到)。
+    session.turns.push({ prompt: text });
+    this.persistSession(params.sessionId);
     return { stopReason: abort.signal.aborted ? "cancelled" : "end_turn" };
+  }
+
+  /** 把一段文字當成這一輪的回覆(單一 agent_message_chunk)。 */
+  async say(sessionId, cx, text) {
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text } },
+    });
   }
 
   /** 2026-10-06:命名請求(見檔頭)。回傳值有給就當 stopReason。 */
@@ -1118,12 +1255,20 @@ async function main() {
   const input = Writable.toWeb(process.stdout);
   const output = Readable.toWeb(process.stdin);
   const stream = acp.ndJsonStream(input, output);
-  const agent = new FakeAcpAgent();
+  const flags = new Set(process.argv.slice(2));
+  const agent = new FakeAcpAgent({
+    resume: flags.has("--resume"),
+    load: flags.has("--load"),
+    forget: flags.has("--forget"),
+    stateDir: process.env.FAKE_ACP_STATE_DIR || undefined,
+  });
 
   acp
     .agent({ name: "deskmony-fake-acp-agent" })
     .onRequest(acp.methods.agent.initialize, () => agent.initialize())
     .onRequest(acp.methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
+    .onRequest(acp.methods.agent.session.resume, (ctx) => agent.resumeSession(ctx.params))
+    .onRequest(acp.methods.agent.session.load, (ctx) => agent.loadSession(ctx.params, ctx.client))
     .onRequest(acp.methods.agent.authenticate, () => agent.authenticate())
     .onRequest(acp.methods.agent.session.setMode, () => agent.setSessionMode())
     .onRequest(acp.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))

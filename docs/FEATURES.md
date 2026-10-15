@@ -261,9 +261,18 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
 - Core 每次啟動,在接受任何連線之前先做對帳:上次沒乾淨關閉的 session 一律
   標記 `interrupted`。
 - 復原視圖提供三種動作,**全部要人主動點,沒有任何背景自動觸發**:
-  - **繼續**(保有記憶重啟,僅限真正支援磁碟持久化 session 的後端)
+  - **繼續**(重啟 agent 並接回原本的對話:Claude SDK 的 `resume`、ACP 的 `session/resume`
+    或 `session/load`、OpenCode 沿用同一個 session;PTY 沒有後端 session 可接,不提供)
   - **接手**(讀摘要重啟,一律可用)
   - **放棄**(session 標記關閉,對話紀錄原封不動保留)
+- **對 `closed` / `interrupted` 的 session 直接送訊息會自動復活**(2026-10-15):關閉 app 再開,
+  對話還在畫面上,在聊天框送出訊息就會透明地重新啟動 agent 並送達,不必先走復原視圖。接回的方式
+  依後端而定;**接不回(agent 不支援、或它那邊的歷史已經不在)不會讓這次送出失敗**,改成把 Deskmony
+  存的先前對話(user/assistant 文字,上限約 12000 字元、從最舊的開始截)附在第一則訊息前面讓 agent
+  讀——對話裡會留一則系統說明講清楚「它是讀紀錄接續,不是真的記得」。DB 存的使用者訊息仍是原文。
+  PTY 一律是全新的程序(說明「不保留記憶」),不把紀錄灌進終端。重新啟動失敗時 UI 會在對話裡顯示
+  錯誤,session 狀態還原、不卡在忙碌。權限模式重啟後一律從 `always-ask` 開始。
+  agent 用 `send_to_session` 傳給已關閉的 session 則**不會**喚醒它,維持明確報錯。
 - (2026-10-02 移除:原本的「重跑」與髒 worktree 強制前置流程是任務 worktree
   專用,見 [`DECISIONS.md` §H](./DECISIONS.md)。)
 
@@ -358,6 +367,10 @@ session、agent、model 等技術詞)依詞彙表刻意保留原文,不強行本
   主動傳(`canUseTools: false`)。(OpenCode(HTTP)原本也在這裡,2026-10-03 起掛上了
   同一個 bridge,與 OpenCode(ACP)的差別只剩對接方式。)
 - **排給忙碌 session 的訊息只存在記憶體**,core 重啟會遺失;訊息鏈計數也一樣。
+- **自動復活只處理「沒有 runtime」的 session**:core 沒重啟、但 agent 行程自己死掉的 session
+  (runtime 還在、狀態 `error`)不會被復活;終端(PTY)session 在 xterm 裡直接敲鍵不會觸發復活,
+  要用下方輸入框送出一行。ACP `session/load` 重播期間送來的 `available_commands_update` 會連同
+  歷史一起被丟掉(slash command 選單要等 agent 下一次推送)。
 - **偵測清單是固定的**(Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、
   Codex、Aider)。手動輸入 command 的入口已移除;支援其他 ACP-native CLI(如
   qwen-code、goose 等)要在目錄裡加一項,而且需要先在實機上驗證啟動旗標。
