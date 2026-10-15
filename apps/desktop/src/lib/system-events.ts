@@ -67,6 +67,8 @@ export function systemEventTone(raw: string): SystemEventTone {
       case "session.revivedFromTranscript":
       case "session.revivedFromTranscriptTruncated":
       case "session.revivedWithoutMemory":
+      // agent 自己停止執行:不是使用者做錯了什麼,下一則訊息就會重新啟動它——要留意,但不是錯誤。
+      case "session.agentStopped":
         return "warn";
     }
   } catch {

@@ -14,6 +14,7 @@
     "revivedFromTranscriptTruncated": "已重新啟動 agent,但它的後端沒辦法接回先前的對話狀態。Deskmony 會把先前的對話紀錄(最近 {{count}} 則訊息,更早的因為太長已省略)附在 agent 收到的第一則訊息前面讓它閱讀——它是讀紀錄接續,不是真的記得。",
     "revivedWithoutMemory": "已重新啟動 agent。這個 agent(終端程式)不保留先前對話的記憶,從頭開始。",
     "revivedFresh": "已重新啟動 agent。",
+    "agentStopped": "agent 已停止執行(它的行程結束了,或與 Deskmony 的連線中斷)。送出下一則訊息時會自動重新啟動它。",
     "sendFailed": {
       "label": "[訊息未送出]"
     }

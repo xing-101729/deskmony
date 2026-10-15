@@ -275,6 +275,12 @@ interface RuntimeState {
    * **下一則一般 prompt** 交給 adapter 時附在最前面,附完就清掉(只附一次)。DB 存的使用者訊息仍是原文。純記憶體。
    */
   pendingTranscript?: string;
+  /**
+   * 2026-10-15(agent 自己結束時的自動復活):這個 runtime 已經有人負責收掉——core 自己在 dispose 它(刪除 session、閒置回收、
+   * 關閉 core),或它的事件迴圈結束時已被當成「agent 停止執行」處理過(`detachEndedRuntime()`)。設了之後事件迴圈結束
+   * 就不再是意外,不會被當成 agent 自己結束再處理一次。
+   */
+  retired?: boolean;
 }
 
 /** 重新啟動 session 的 agent 之後,後端接回先前對話的程度——決定要在對話裡留哪一則系統說明(`reviveNoticeEvent()`)。 */
@@ -894,7 +900,8 @@ export class SessionManager extends EventEmitter {
 
   private async sendPromptInner(sessionId: string, prompt: PromptInput, delivery: PromptDelivery): Promise<void> {
     const existing = this.runtime.get(sessionId);
-    // 2026-10-15(session 自動復活):沒有活的 runtime(app 重開後的 closed/interrupted、閒置回收後的 error……)時,**人類輸入**
+    // 2026-10-15(session 自動復活):沒有活的 runtime(app 重開後的 closed/interrupted、閒置回收後的 error、agent 行程自己結束後的
+    // error——事件迴圈結束時 runtime 已被拿掉,見 `detachEndedRuntime()`……)時,**人類輸入**
     // 會重新啟動這條 session 的 agent 再送出——使用者看得到的對話還在,送出訊息卻什麼事都沒發生才是 bug。別的 session 送來的訊息
     // (`delivery.origin`)**絕不**喚醒 agent(`deliverNetworkMessage()`/`assertDeliverable()` 已經擋掉,這裡是「檢查之後 runtime 才消失」的
     // 競態防線):是不是要為一個 agent 的請求啟動另一個 agent,不是 agent 能替使用者決定的事。
@@ -1584,6 +1591,7 @@ export class SessionManager extends EventEmitter {
     const runtime = this.runtime.get(sessionId);
     if (runtime) {
       if (runtime.ptyIdleTimer) clearTimeout(runtime.ptyIdleTimer);
+      runtime.retired = true; // dispose 會讓事件迴圈結束——那是我們收掉的,不是 agent 自己結束(見 detachEndedRuntime())
       await runtime.adapter.dispose(runtime.handle);
       this.runtime.delete(sessionId);
     }
@@ -1627,6 +1635,7 @@ export class SessionManager extends EventEmitter {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) return; // 已經不在跑(例如剛好被使用者手動刪除),視為已完成。
     if (runtime.ptyIdleTimer) clearTimeout(runtime.ptyIdleTimer);
+    runtime.retired = true; // 同 deleteSession():回收造成的事件迴圈結束不是 agent 自己結束
     await runtime.adapter.dispose(runtime.handle);
     this.runtime.delete(sessionId);
     this.turnLimiter.endTurn(sessionId);
@@ -1702,6 +1711,7 @@ export class SessionManager extends EventEmitter {
         const runtime = this.runtime.get(id);
         if (!runtime) return;
         if (runtime.ptyIdleTimer) clearTimeout(runtime.ptyIdleTimer);
+        runtime.retired = true; // 同 deleteSession():關閉 core 造成的事件迴圈結束不是 agent 自己結束
         try {
           await runtime.adapter.dispose(runtime.handle);
         } catch (err) {
@@ -1991,39 +2001,96 @@ export class SessionManager extends EventEmitter {
    * 而不是看著一條再也不會更新、狀態卻停在 busy 的對話。
    */
   private async consumeEvents(sessionId: string): Promise<void> {
+    const runtime = this.runtime.get(sessionId);
+    if (!runtime) return;
+    let abortMessage: string | undefined;
     try {
-      await this.consumeEventsInner(sessionId);
+      await this.consumeEventsInner(sessionId, runtime);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      abortMessage = err instanceof Error ? err.message : String(err);
       console.error(
         `[session-manager] session ${sessionId} 的事件迴圈因未預期例外中止(core 不會因此退出):`,
         err instanceof Error ? err.stack : err,
       );
-      // 收尾本身也可能失敗(例如例外的成因就是 DB 掛了)——絕不能讓錯誤處理
-      // 又拋一次,那會把這道圍籬原本要防的 unhandled rejection 再造出來。
-      try {
-        await this.persistMessage(
-          sessionId,
-          "system",
-          JSON.stringify({
-            event: "session.adapterError",
-            params: { message, detail: "event-loop-aborted" },
-          }),
-        );
-        await this.setStatus(sessionId, "error", message);
-      } catch (cleanupErr) {
-        console.error(
-          `[session-manager] session ${sessionId} 標記 error 狀態時再次失敗(已放棄):`,
-          cleanupErr instanceof Error ? cleanupErr.stack : cleanupErr,
-        );
-      }
+    }
+    // 2026-10-15:迴圈結束(agent 行程結束、事件串流斷了,或上面的例外)= 這個 runtime 再也收不到事件——不是 core 自己收掉的話,
+    // 立刻(同步,不 await)把它拿掉,下一則人類訊息就會重新啟動 agent。見 `detachEndedRuntime()`。
+    const stopped = this.detachEndedRuntime(sessionId, runtime);
+    if (abortMessage === undefined && !stopped) return;
+    // 收尾本身也可能失敗(例如例外的成因就是 DB 掛了)——絕不能讓錯誤處理
+    // 又拋一次,那會把這道圍籬原本要防的 unhandled rejection 再造出來。
+    // 在 per-session 鎖裡做(同步排進去,之前沒有 await):正在送出的訊息先完成(它可能剛把狀態標成 busy),之後才進來的訊息
+    // 排在這則說明後面——對話順序 = 「agent 已停止」→ 使用者訊息 → 「已重新啟動」說明 → 回覆。
+    try {
+      await this.withSessionLock(sessionId, async () => {
+        if (abortMessage !== undefined) {
+          await this.persistMessage(
+            sessionId,
+            "system",
+            JSON.stringify({
+              event: "session.adapterError",
+              params: { message: abortMessage, detail: "event-loop-aborted" },
+            }),
+          );
+          await this.setStatus(sessionId, "error", abortMessage);
+        }
+        if (stopped) await this.announceAgentStopped(sessionId);
+      });
+    } catch (cleanupErr) {
+      console.error(
+        `[session-manager] session ${sessionId} 標記 error 狀態時再次失敗(已放棄):`,
+        cleanupErr instanceof Error ? cleanupErr.stack : cleanupErr,
+      );
     }
   }
 
-  private async consumeEventsInner(sessionId: string): Promise<void> {
-    const runtime = this.runtime.get(sessionId);
-    if (!runtime) return;
+  /**
+   * 2026-10-15(agent 自己結束時的自動復活):runtime 的事件迴圈結束了——agent 行程崩潰/被殺、它的事件串流斷了(adapter 這時一律
+   * 關掉事件佇列,見各 adapter 子行程 exit / 串流結束的處理),或迴圈因 core 端的例外中止。不管哪一種,這個 runtime 都不會再有事件,
+   * 送進去的訊息也沒人處理。修正前 runtime 留在 `this.runtime` 裡,人類訊息照樣送進死掉的 adapter(錯誤事件推進已關閉的佇列,
+   * 直接消失),session 卡在 busy、什麼都不會發生。
+   *
+   * 除非 core 自己正在收掉它(`retired`)或它已經被新的 runtime 取代,這裡**同步**把它從 `this.runtime` 拿掉(之間沒有 await):之後進來的
+   * 人類訊息一定看到「沒有 runtime」,走和 app 重開後相同的 `reviveRuntimeForPrompt()` → `respawnRuntime()`;跨 session 的
+   * `send_to_session` 照舊被 `assertDeliverable()` 擋下,不會喚醒它。並收掉 adapter 那邊殘留的狀態(撤銷 MCP bridge token、清掉 handle、
+   * 殺掉還沒死透的行程樹)。
+   *
+   * dispose 必須在這裡同步**開始**:adapter 以 session id 當 handle id,重新啟動的 agent 會用同一個 id 登記——dispose 要在那之前抓住
+   * 舊的那一份並撤銷舊的 token(各 adapter 的 dispose 結尾也只刪除仍是同一份的登記)。不 await:行程樹可能要幾秒才收乾淨,不該拖住任何人。
+   *
+   * 回傳 true = agent 自己停止執行了(呼叫端要留系統說明、把狀態標成 error,見 `announceAgentStopped()`)。
+   */
+  private detachEndedRuntime(sessionId: string, runtime: RuntimeState): boolean {
+    if (runtime.retired || this.runtime.get(sessionId) !== runtime) return false;
+    runtime.retired = true;
+    this.runtime.delete(sessionId);
+    this.clearPtyIdleTimer(runtime);
+    this.turnLimiter.endTurn(sessionId);
+    console.warn(`[session-manager] session ${sessionId} 的 agent 已停止執行(事件串流結束),下一則人類訊息會重新啟動它`);
+    void runtime.adapter.dispose(runtime.handle).catch((err: unknown) => {
+      console.error(`[session-manager] 收掉已停止的 agent(session ${sessionId})失敗(忽略): ${String(err)}`);
+    });
+    return true;
+  }
 
+  /**
+   * agent 停止執行之後(`detachEndedRuntime()` 已經把 runtime 拿掉):在對話裡留一則系統說明(送出下一則訊息會重新啟動它),狀態標成
+   * error——adapter 自己回報的錯誤已經標成 error 時保留它的 lastError。沒有這一步,錯誤事件被丟掉的情況(例如 ACP 連線比子行程的
+   * exit 事件先關)session 會停在 busy/idle,使用者看不出 agent 已經不在。呼叫端必須在 per-session 鎖裡呼叫:排在前面的送出訊息
+   * 可能已經把 agent 重新啟動了(有新的 runtime),或 session 已被刪除、core 正在關閉——這些情況都不需要再說明。
+   */
+  private async announceAgentStopped(sessionId: string): Promise<void> {
+    if (this.shuttingDown || this.runtime.has(sessionId)) return;
+    const session = await this.getSession(sessionId);
+    if (!session) return;
+    const message = await this.persistMessageRow(sessionId, "system", JSON.stringify({ event: "session.agentStopped" }));
+    this.emit("session-message", { sessionId, message });
+    if (session.status !== "error") {
+      await this.setStatus(sessionId, "error", "agent 已停止執行(行程結束或事件串流中斷);直接送出訊息會重新啟動 agent 續行");
+    }
+  }
+
+  private async consumeEventsInner(sessionId: string, runtime: RuntimeState): Promise<void> {
     for await (const event of runtime.adapter.events(runtime.handle)) {
       const envelope: SessionEventEnvelope = {
         sessionId,

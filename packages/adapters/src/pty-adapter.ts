@@ -247,7 +247,9 @@ export class GenericPtyAdapter implements AgentAdapter {
     await this.waitForPtyExit(internal, 3_000);
     // 2026-09-04(稽核修補):同上。
     unregisterChild(internal.ptyProcess.pid);
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——終端程式自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   /** 見 `dispose()`:`IPty` 版的 `waitForChildExit()`。逾時放棄等待且不丟錯

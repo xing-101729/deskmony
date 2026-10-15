@@ -357,6 +357,11 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         message: "Claude Agent SDK 串流中斷",
         detail: err instanceof Error ? err.message : String(err),
       });
+      // 2026-10-15:CLI 子行程被殺/崩潰時(非 0 結束),SDK 的訊息串流就是從這裡丟出 `Claude Code process exited with code N`
+      // (sdk.mjs `ProcessTransport.readMessages()`),之後不會再有任何訊息。修正前佇列沒關,core 的事件迴圈永遠等下去,
+      // runtime 一直留著、送出的訊息進了沒人讀的 inputQueue。關掉佇列讓 core 收掉它,下一則人類訊息重新啟動(--resume 接回),
+      // 見 SessionManager.detachEndedRuntime()。
+      outputQueue.close();
     });
 
     // 這輪(slash command)新增:取得這個 session 目前的 "/" 指令清單(已用
@@ -523,7 +528,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
       unregisterChild(child.pid);
     }
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——CLI 自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   /**

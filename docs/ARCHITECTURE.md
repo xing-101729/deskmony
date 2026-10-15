@@ -771,6 +771,15 @@ session、且是**人類輸入**(`delivery.origin` 為空)時,在 per-session �
 `revivedFromTranscript` / `revivedWithoutMemory` …)用 `session-message` push 即時送到所有 client。後端識別碼在 spawn 完
 (ACP/OpenCode)就寫進 DB;接不回而開了新對話時會更新成新的識別碼。
 
+**agent 自己結束時(core 沒重啟)**:adapter 在子行程 exit、或事件串流因錯誤中斷時一律關掉事件佇列(Claude SDK 的
+`Claude Code process exited with code N`、ACP 更新迴圈中斷、OpenCode `/event` 中斷都算;修正前這幾條錯誤路徑只推 error 不關,
+core 的事件迴圈永遠等下去)。`consumeEvents()` 的迴圈一結束,`detachEndedRuntime()` 就**同步**把 runtime 從 `SessionManager.runtime`
+拿掉並收掉 adapter 殘留的 handle(撤銷 bridge token、殺掉沒死透的行程樹),除非是 core 自己在收(`RuntimeState.retired`:刪除、
+閒置回收、關閉 core)。接著在 per-session 鎖裡留 `session.agentStopped` 說明、把狀態標成 `error`(adapter 自己的錯誤已經標過就保留
+它的 lastError)——ACP 的連線關閉常比子行程的 exit 事件先到,那則 exit 錯誤會被丟掉,沒有這一步 session 會停在 idle/busy。
+之後就是上面「沒有 runtime」的情況:人類訊息走 `respawnRuntime()`,`send_to_session` 照舊被擋。adapter 以 session id 當 handle id,
+所以各 adapter 的 `dispose()` 結尾只刪除仍是同一份的登記(舊 handle 的 dispose 可能晚於新 agent 的登記)。
+
 **孤兒有兩種,處理方式不同**(2026-09-04 釐清):
 
 | | 是什麼 | 誰處理 |

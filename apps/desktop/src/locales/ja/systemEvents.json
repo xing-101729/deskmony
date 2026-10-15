@@ -14,6 +14,7 @@
     "revivedFromTranscriptTruncated": "agent を再起動しましたが、バックエンドが以前の会話を復元できませんでした。Deskmony は以前の会話記録(直近 {{count}} 件。長すぎるため、それより古い分は省略しました)を agent が最初に受け取るメッセージに添付します。agent は記録を読んで続けるだけで、実際に覚えているわけではありません。",
     "revivedWithoutMemory": "agent を再起動しました。この agent(ターミナルプログラム)は以前の会話の記憶を保持しないため、最初からの開始になります。",
     "revivedFresh": "agent を再起動しました。",
+    "agentStopped": "agent が停止しました(プロセスが終了したか、Deskmony との接続が切れました)。次のメッセージを送信すると自動的に再起動します。",
     "sendFailed": {
       "label": "[未送信]"
     }
