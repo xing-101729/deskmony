@@ -4,7 +4,7 @@
   "emptyTitle": "現在、中断された session はありません",
   "unknownAgent": "(agent 不明)",
   "sessionMetaLine": "{{agent}} · 中断:{{interruptedAt}} · 最終アクティビティ:{{lastSeenAt}}",
-  "continueTitle": "バックエンドの session に再接続——agent は以前の文脈を覚えています",
+  "continueTitle": "agent を再起動して以前の会話に再接続します。バックエンドで復元できない場合は、Deskmony が保存した会話記録から続けます",
   "continueLabel": "続行(記憶を保持)",
   "takeoverTitle": "要約を注入して新しい session を開始——agent の記憶は真っさらで、ノートを読んだだけの状態です",
   "takeoverLabel": "引き継ぎ(要約から再開)",

@@ -4,7 +4,7 @@
   "emptyTitle": "No interrupted sessions right now",
   "unknownAgent": "(unknown agent)",
   "sessionMetaLine": "{{agent}} · interrupted at {{interruptedAt}} · last seen {{lastSeenAt}}",
-  "continueTitle": "Reconnect the backend session — the agent remembers prior context",
+  "continueTitle": "Restart the agent and reconnect to its earlier conversation; if the backend can't, it continues from the conversation record Deskmony kept",
   "continueLabel": "Continue (keep memory)",
   "takeoverTitle": "Start a new session with a summary injected — the agent's mind is fresh, it has only read the notes",
   "takeoverLabel": "Take over (restart from summary)",

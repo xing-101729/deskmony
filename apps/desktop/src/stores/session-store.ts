@@ -38,6 +38,7 @@ import {
   ConfigGetEffectiveResultSchema,
   ConfigSetFileResultSchema,
   CostGetSummaryResultSchema,
+  DeskmonyError,
   DetectAgentsResultSchema,
   EnforcementNotificationPushSchema,
   formatEnforcementNotificationText,
@@ -1028,21 +1029,31 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         ],
       },
     }));
-    await client.call("session.sendPrompt", {
-      sessionId,
-      prompt: {
-        text,
-        // `PendingAttachment` 與 wire payload 形狀一致(見型別註解),不需要
-        // 再組一次。
-        ...(validAttachments ? { attachments: validAttachments } : {}),
-      },
-    });
+    // 2026-10-15:過去 ChatView 是 `void sendPrompt(...)`,這個 RPC 被 core 拒絕(session 無法重新啟動、被預算擋下……)時
+    // rejection 直接被吞掉——使用者只看到自己那則樂觀回顯的訊息,什麼事都沒發生。現在失敗時在對話裡插入一則錯誤提示。
+    // 這裡自己接住而不是往外丟:呼叫端(ChatView)沒有地方顯示,往外丟只會變成 unhandled rejection。
+    try {
+      await client.call("session.sendPrompt", {
+        sessionId,
+        prompt: {
+          text,
+          // `PendingAttachment` 與 wire payload 形狀一致(見型別註解),不需要
+          // 再組一次。
+          ...(validAttachments ? { attachments: validAttachments } : {}),
+        },
+      });
+    } catch (err) {
+      appendSendFailure(set, sessionId, err);
+    }
   },
 
   sendTerminalInput: (text) => {
     const sessionId = get().currentSessionId;
     if (!sessionId) return;
-    void client.call("session.sendPrompt", { sessionId, prompt: { text } });
+    // 2026-10-15:同 `sendPrompt()`——送出失敗(例如已關閉的終端 session 無法重新啟動)要讓使用者看到。
+    void client.call("session.sendPrompt", { sessionId, prompt: { text } }).catch((err: unknown) => {
+      appendSendFailure(set, sessionId, err);
+    });
   },
 
   sendTerminalRawInput: (data) => {
@@ -1470,26 +1481,60 @@ function handleSessionMessage(
   push: SessionMessagePush,
 ): void {
   const { sessionId, message } = push;
-  if (message.role !== "user") return;
+  // 2026-10-15:除了別的 session 送來的 user 訊息,也接 core 在 agent 重新啟動後留下的系統說明(`role: "system"`,
+  // content 是 `{event, params}` JSON,由 `resolveSystemEventText()` 在渲染時翻譯)。
+  if (message.role !== "user" && message.role !== "system") return;
   set((state) => {
     const items = state.itemsBySession[sessionId] ?? [];
     if (items.some((item) => item.id === message.id)) return {};
-    return {
-      itemsBySession: {
-        ...state.itemsBySession,
-        [sessionId]: capItems([
-          ...items,
-          {
+    const item: ChatItem =
+      message.role === "system"
+        ? { kind: "system", id: message.id, content: message.content, createdAt: message.createdAt }
+        : {
             kind: "user",
             id: message.id,
             content: message.content,
             createdAt: message.createdAt,
             ...(message.origin ? { origin: message.origin } : {}),
-          },
-        ]),
+          };
+    return {
+      itemsBySession: {
+        ...state.itemsBySession,
+        [sessionId]: capItems([...items, item]),
       },
     };
   });
+}
+
+/**
+ * 2026-10-15:`session.sendPrompt` 失敗時在對話裡插入一則本地的錯誤提示(系統訊息,不落地——重新載入歷史就沒了,
+ * 因為 core 那邊沒有任何東西需要保留:這則訊息根本沒有送出)。內容是 `{event: "session.sendFailed", params}` JSON,
+ * 由 `resolveSystemEventText()` 在渲染時翻譯:`DeskmonyError` 帶 code/params(用 `errors:<code>` 翻譯,例如
+ * `session.reviveFailed`、`agent.notInstalled`),其餘錯誤只有 message。
+ */
+function appendSendFailure(
+  set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
+  sessionId: string,
+  err: unknown,
+): void {
+  const message = err instanceof Error ? err.message : String(err);
+  const params: Record<string, unknown> =
+    err instanceof DeskmonyError ? { code: err.code, errorParams: err.params ?? {}, message } : { message };
+  console.error("[session] session.sendPrompt 失敗:", err);
+  set((state) => ({
+    itemsBySession: {
+      ...state.itemsBySession,
+      [sessionId]: capItems([
+        ...(state.itemsBySession[sessionId] ?? []),
+        {
+          kind: "system",
+          id: crypto.randomUUID(),
+          content: JSON.stringify({ event: "session.sendFailed", params }),
+          createdAt: Date.now(),
+        },
+      ]),
+    },
+  }));
 }
 
 function handleSessionEvent(

@@ -17,7 +17,7 @@ import { Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
 import { shortenPath } from "../lib/workspaces.js";
-import { resolveSystemEventText } from "../lib/system-events.js";
+import { resolveSystemEventText, systemEventTone, type SystemEventTone } from "../lib/system-events.js";
 // 2026-09-04(稽核修補):ModelControl/EffortControl 的錯誤訊息原本繞過了
 // translateError(),在非中文介面會顯示未翻譯的原文——與 app 其餘幾乎所有
 // 錯誤處理不一致(那些在 error-i18n 重構時都改過了,這兩處被漏掉)。
@@ -38,6 +38,13 @@ import { SessionTitleHeading } from "./SessionTitle.js";
  * `useSyncExternalStore` 認為狀態一直在變,導致無限重繪。
  */
 const EMPTY_ITEMS: readonly ChatItem[] = [];
+
+/** 系統訊息泡泡各色調的底色/文字色(色調怎麼決定見 `systemEventTone()`)。 */
+const SYSTEM_TONE_CLASS: Record<SystemEventTone, string> = {
+  info: "bg-info/10 text-info",
+  warn: "bg-warn/10 text-warn",
+  danger: "bg-danger/10 text-danger",
+};
 
 /**
  * 顯示目前 session 的 model,並(`software="claude-agent-sdk"` 或
@@ -472,7 +479,7 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
     // systemEvents.json 翻譯早就寫好了,`resolveSystemEventText` 也一直被 import
     // 著,只是從來沒有被呼叫過(dead import)。
     return (
-      <div className="my-1.5 rounded-md bg-danger/10 px-2.5 py-1.5 text-xs leading-relaxed text-danger">
+      <div className={`my-1.5 rounded-md px-2.5 py-1.5 text-xs leading-relaxed ${SYSTEM_TONE_CLASS[systemEventTone(item.content)]}`}>
         {resolveSystemEventText(item.content, t)}
       </div>
     );
