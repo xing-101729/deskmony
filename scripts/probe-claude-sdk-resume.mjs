@@ -18,6 +18,7 @@
 import cp from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -32,7 +33,10 @@ process.env.CLAUDE_CONFIG_DIR = configDir;
 mkdirSync(workspace, { recursive: true });
 
 const sessionId = "11111111-2222-4333-8444-555555555555";
-const projectDir = path.join(configDir, "projects", path.resolve(workspace).replace(/[^a-zA-Z0-9]/g, "-"));
+// 專案目錄名稱要和 SDK 的 `getSessionInfo({ dir })` 算法一致:SDK 先用 `fs/promises` 的 `realpath()` 取真實路徑再把非英數字元換成 `-`。
+// 原生 realpath 會展開 Windows 的 8.3 短檔名——CI runner 的暫存目錄是 `C:\Users\RUNNER~1\...`,直接用 `path.resolve()` 算出的目錄
+// SDK 找不到(本機路徑沒有短檔名,所以只有 CI 會踩到)。
+const projectDir = path.join(configDir, "projects", (await realpath(path.resolve(workspace))).replace(/[^a-zA-Z0-9]/g, "-"));
 mkdirSync(projectDir, { recursive: true });
 const line = (entry) => `${JSON.stringify(entry)}\n`;
 const now = new Date().toISOString();
