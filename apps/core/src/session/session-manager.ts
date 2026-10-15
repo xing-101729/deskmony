@@ -10,6 +10,7 @@ import {
   DeskmonyError,
   ErrorCodes,
   type AdapterCapabilities,
+  type AgentEvent,
   type AgentLaunchSpec,
   type AgentSoftware,
   type CreateSessionInput,
@@ -276,6 +277,10 @@ interface RuntimeState {
    */
   pendingUserDialogs: Map<string, string>;
   /**
+   * 2026-10-15:這個 runtime 對外的 requestId 前綴(見 `clientRequestId()`)。每次建立 runtime(新 session、重新啟動 agent)都換新的。
+   */
+  requestIdPrefix: string;
+  /**
    * 2026-10-15(session 自動復活):重新啟動這條 session 的 agent 時,後端沒有接回先前的對話(`AgentHandle.resumed !== true`,
    * 例如 agent 不支援 resume、那邊的歷史已經不在)——這裡放 Deskmony 用 DB 對話組好的紀錄區塊(見 session-transcript.ts),
    * **下一則一般 prompt** 交給 adapter 時附在最前面,附完就清掉(只附一次)。DB 存的使用者訊息仍是原文。純記憶體。
@@ -287,6 +292,47 @@ interface RuntimeState {
    * 就不再是意外,不會被當成 agent 自己結束再處理一次。
    */
   retired?: boolean;
+}
+
+/**
+ * 2026-10-15:client 看到的權限請求 / 提問 requestId = `<runtime 前綴>:<adapter 自己的編號>`。
+ *
+ * adapter 的編號只在**同一個 agent 行程**內唯一——ACP 用 JSON-RPC 的 request id,每個 agent 行程從 0 數起。agent 在同一條 session 裡
+ * 重新啟動(`respawnRuntime()`)之後,新 agent 的第一筆請求會跟死掉那個的最後一筆同號:錯過 agent-stopped 推播(斷線、點擊與推播
+ * 交錯)的 client 對舊彈窗按「允許」,core 以 (sessionId, requestId) 認,就會批准使用者根本沒看過的新請求。core 在事件迴圈收到
+ * 請求時就換成帶前綴的編號(`consumeEventsInner()` 迴圈頂端),廣播、PermissionGateway 登記、稽核、通知、`pendingUserDialogs`
+ * 全部用它;只有回覆 adapter 時換回 adapter 的編號(`adapterRequestId()`),前綴不是目前這個 runtime 的就不轉給 adapter。
+ * 前綴是 8 碼 hex,不含 `:`,所以第一個 `:` 之後原封不動就是 adapter 的編號;各 adapter 的編號是數字、UUID 或 opencode 的
+ * `per_…`/`que_…`,組合起來也不含 `::`(PermissionGateway / notifier 組合鍵的分隔字串)。
+ */
+function newRequestIdPrefix(): string {
+  return randomUUID().slice(0, 8);
+}
+
+function clientRequestId(runtime: RuntimeState, adapterRequestId: string): string {
+  return `${runtime.requestIdPrefix}:${adapterRequestId}`;
+}
+
+/** client 送回的 requestId → adapter 的編號;不是這個 runtime 發出的(前綴不符,例如已經停止的 agent 的請求)回傳 undefined。 */
+function adapterRequestId(runtime: RuntimeState, requestId: string): string | undefined {
+  const head = `${runtime.requestIdPrefix}:`;
+  return requestId.startsWith(head) ? requestId.slice(head.length) : undefined;
+}
+
+/** 權限請求 / 提問事件換成 client 看到的 requestId(見 `clientRequestId()`),其餘事件原樣傳回。 */
+function withClientRequestId(runtime: RuntimeState, event: AgentEvent): AgentEvent {
+  if (event.type === "permission-request" || event.type === "user-dialog-request") {
+    return { ...event, requestId: clientRequestId(runtime, event.requestId) };
+  }
+  return event;
+}
+
+/** 把決定回覆給發出請求的 adapter;requestId 不是這個 runtime 發出的就不回覆,回傳 false。 */
+function answerAdapterPermission(runtime: RuntimeState, requestId: string, decision: "allow" | "deny"): boolean {
+  const id = adapterRequestId(runtime, requestId);
+  if (id === undefined) return false;
+  runtime.adapter.resolvePermission(runtime.handle, id, decision);
+  return true;
 }
 
 /** 重新啟動 session 的 agent 之後,後端接回先前對話的程度——決定要在對話裡留哪一則系統說明(`reviveNoticeEvent()`)。 */
@@ -842,6 +888,7 @@ export class SessionManager extends EventEmitter {
       slashCommandsObserved: false,
       openToolCalls: new Map(),
       pendingUserDialogs: new Map(),
+      requestIdPrefix: newRequestIdPrefix(),
     });
     // S7:一律從 "always-ask" 開始(見上方 createSession() 說明)。
     this.permissions.initialize(session.id, "always-ask");
@@ -1135,15 +1182,16 @@ export class SessionManager extends EventEmitter {
     rememberRule?: PolicyRule,
   ): void {
     const resolved = this.permissionGateway.resolve(sessionId, requestId);
-    if (!resolved) return;
-    const { strong } = resolved;
     const runtime = this.runtime.get(sessionId);
-    if (!runtime) {
-      // 發出請求的 agent 已經不在(正常情況下它的待決請求在 runtime 拿掉時就清掉了,見 `releasePendingRequests()`):
-      // 決定送不出去,但彈窗照樣要關,不然按了沒反應。
-      this.emitPermissionResolved({ sessionId, requestId, decision: "deny", source: "agent-stopped" });
+    const fromLiveRuntime = runtime !== undefined && adapterRequestId(runtime, requestId) !== undefined;
+    if (!resolved || !runtime || !fromLiveRuntime) {
+      // 沒有登記、但前綴是目前這個 runtime 的:已經有人回覆過(重複點擊、另一個 client 先答、逾時、政策自動判定),什麼都不做。
+      // 其餘情況都是發出請求的 agent 已經不在了(2026-10-15):它的待決請求在 runtime 拿掉時就清掉並推播過,這是錯過那次推播的
+      // client 留著的舊彈窗——決定不轉給任何 agent(復活後的新 agent 可能有同號的請求,見 `clientRequestId()`),再推播一次讓它關掉。
+      if (!fromLiveRuntime) this.emitPermissionResolved({ sessionId, requestId, decision: "deny", source: "agent-stopped" });
       return;
     }
+    const { strong } = resolved;
 
     if (rememberRule !== undefined) {
       if (strong) {
@@ -1180,7 +1228,7 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    runtime.adapter.resolvePermission(runtime.handle, requestId, decision);
+    answerAdapterPermission(runtime, requestId, decision);
     this.emitPermissionResolved({ sessionId, requestId, decision, source: "user" });
   }
 
@@ -1197,9 +1245,14 @@ export class SessionManager extends EventEmitter {
    */
   resolveUserDialog(sessionId: string, requestId: string, result: DialogAnswer): void {
     const runtime = this.runtime.get(sessionId);
-    if (!runtime) return;
+    const id = runtime && adapterRequestId(runtime, requestId);
+    if (!runtime || id === undefined) {
+      // 2026-10-15:發問的 agent 已經不在了(同 `resolvePermission()`):答案不轉給任何 agent,通知 client 收掉這份舊表單。
+      this.emitUserDialogCancelled(sessionId, requestId);
+      return;
+    }
     runtime.pendingUserDialogs.delete(requestId);
-    runtime.adapter.resolveUserDialog?.(runtime.handle, requestId, result);
+    runtime.adapter.resolveUserDialog?.(runtime.handle, id, result);
     const payload: UserDialogResolvedPush = { sessionId, requestId, result };
     this.emit("user-dialog-resolved", payload);
   }
@@ -1849,6 +1902,7 @@ export class SessionManager extends EventEmitter {
       slashCommandsObserved: false,
       openToolCalls: new Map(),
       pendingUserDialogs: new Map(),
+      requestIdPrefix: newRequestIdPrefix(),
     };
     let outcome: ReviveOutcome;
     try {
@@ -2128,7 +2182,9 @@ export class SessionManager extends EventEmitter {
   }
 
   private async consumeEventsInner(sessionId: string, runtime: RuntimeState): Promise<void> {
-    for await (const event of runtime.adapter.events(runtime.handle)) {
+    for await (const adapterEvent of runtime.adapter.events(runtime.handle)) {
+      // 2026-10-15:權限請求 / 提問的 requestId 在這裡就換成 client 看到的編號,下面的廣播、登記、稽核、通知都用它(見 `clientRequestId()`)。
+      const event = withClientRequestId(runtime, adapterEvent);
       const envelope: SessionEventEnvelope = {
         sessionId,
         event,
@@ -2299,7 +2355,7 @@ export class SessionManager extends EventEmitter {
           });
 
           if (decision.effect === "allow" || decision.effect === "deny") {
-            runtime.adapter.resolvePermission(runtime.handle, event.requestId, decision.effect);
+            answerAdapterPermission(runtime, event.requestId, decision.effect);
             this.emitPermissionResolved({ sessionId, requestId: event.requestId, decision: decision.effect, source: "policy" });
             break; // 不進 waiting,agent 不停頓。
           }
@@ -2349,7 +2405,7 @@ export class SessionManager extends EventEmitter {
             // 或干擾新 agent 的狀態。彈窗照樣通知關閉。(runtime 拿掉時 `releasePendingRequests()` 就會清掉這個計時器,
             // 這裡是防線。)
             if (this.runtime.get(sid) === runtime) {
-              runtime.adapter.resolvePermission(runtime.handle, requestId, "deny");
+              answerAdapterPermission(runtime, requestId, "deny");
               void this.setStatus(sid, "busy");
             }
             this.emitPermissionResolved({ sessionId: sid, requestId, decision: "deny", source: "timeout" });
