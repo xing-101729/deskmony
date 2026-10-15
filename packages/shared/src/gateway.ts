@@ -510,6 +510,9 @@ export const ServerPushSchema = z.object({
      * `MessageOriginSchema`)剛被寫進某個 session 的歷史——payload 是 `SessionMessagePushSchema`。
      * 讓正在看那個 session 的 UI 即時顯示「來自 <title>」的訊息(人類自己輸入的訊息不走這條,
      * 桌面端是樂觀回顯)。取代 S12 的 `child-result`(「子完成 → 結果自動注入父」已整個移除)。
+     * 2026-10-15 起同一條 push 也載運 core 在 session 的 agent 重新啟動後留下的**系統說明**(`role: "system"`,沒有 `origin`,
+     * content 是 `{event, params}` JSON,見 session-manager.ts 的 `announceRevive()`)——它不是 adapter 事件,沒有別的管道能讓
+     * 正在看那條 session 的 UI 立刻顯示。
      */
     "session-message",
     /**
@@ -779,8 +782,8 @@ export const SessionSendFromAgentResultSchema = z.object({ ok: z.literal(true) }
 export const SessionForwardMessageResultSchema = z.object({ ok: z.literal(true) });
 
 /**
- * `session-message` push 的 payload:別的 session 送來的訊息(`message.origin` 一定有值)剛被寫進
- * `sessionId` 的歷史。見上方 `ServerPushSchema.channel` 的說明。
+ * `session-message` push 的 payload:別的 session 送來的訊息(`message.origin` 一定有值),或 agent 重新啟動後的系統說明
+ * (`message.role === "system"`)剛被寫進 `sessionId` 的歷史。見上方 `ServerPushSchema.channel` 的說明。
  */
 export const SessionMessagePushSchema = z.object({
   sessionId: z.string(),

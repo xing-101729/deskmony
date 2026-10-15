@@ -46,6 +46,7 @@ import {
   checkManualTitle,
   fallbackTitleFromText,
   sanitizeGeneratedTitle,
+  softwareCanResumeBackend,
   softwareCanUseTools,
 } from "@deskmony/shared";
 import { storedLaunchFromSpec, type AgentCatalog, type StoredLaunchInfo } from "../agents/agent-catalog.js";
@@ -59,6 +60,13 @@ import type { TurnLimiter } from "../cost/turn-limiter.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
 import { MessageChainBudget } from "./message-chain-budget.js";
 import { buildEnvelopeForOrigin } from "./session-envelope.js";
+import {
+  TRANSCRIPT_MAX_MESSAGES,
+  buildTranscript,
+  looksLikeSlashCommand,
+  prependTranscript,
+  type TranscriptMessage,
+} from "./session-transcript.js";
 import {
   DEFAULT_YOLO_DURATION_MS as YOLO_DEFAULT,
   SessionPermissionCoordinator,
@@ -255,7 +263,24 @@ interface RuntimeState {
    * 繞過斷路器的缺口。
    */
   openToolCalls: Map<string, OpenToolCall>;
+  /**
+   * 2026-10-15(session 自動復活):重新啟動這條 session 的 agent 時,後端沒有接回先前的對話(`AgentHandle.resumed !== true`,
+   * 例如 agent 不支援 resume、那邊的歷史已經不在)——這裡放 Deskmony 用 DB 對話組好的紀錄區塊(見 session-transcript.ts),
+   * **下一則一般 prompt** 交給 adapter 時附在最前面,附完就清掉(只附一次)。DB 存的使用者訊息仍是原文。純記憶體。
+   */
+  pendingTranscript?: string;
 }
+
+/** 重新啟動 session 的 agent 之後,後端接回先前對話的程度——決定要在對話裡留哪一則系統說明(`reviveNoticeEvent()`)。 */
+type ReviveOutcome =
+  /** 後端原生接回了先前的對話(Claude resume、ACP session/resume|load、OpenCode 沿用 session)。 */
+  | { kind: "resumed" }
+  /** 後端沒接回,下一則 prompt 會附上 Deskmony 存的對話紀錄(`includedCount` 則;`truncated` = 有因長度被省略的部分)。 */
+  | { kind: "transcript"; includedCount: number; truncated: boolean }
+  /** 終端程式(PTY):沒有後端 session 可接,也不把對話紀錄灌進終端——重新啟動就是全新的程序。 */
+  | { kind: "terminal" }
+  /** 後端沒接回,但這條 session 本來就沒有可以補的對話內容。 */
+  | { kind: "fresh" };
 
 /** `RuntimeState.openToolCalls` 的值:那筆 `tool` 訊息的 row id,與目前已寫進
  *  DB 的 toolName/input(補資訊時拿來合併,不需要回頭讀 DB)。 */
@@ -354,6 +379,8 @@ export class SessionManager extends EventEmitter {
    * `clearPerSessionState()`),避免無限增長。
    */
   private readonly pendingIdleInjection = new Map<string, PendingNetworkMessage[]>();
+  /** `shutdownAll()` 開始後為 true:這之後不再替任何 session 重新啟動 agent(否則會在 core 要退出時多出一個沒人收的子行程)。 */
+  private shuttingDown = false;
   /** 訊息鏈預算(第三條斷路器),見 `message-chain-budget.ts`。 */
   private readonly chainBudget: MessageChainBudget;
 
@@ -725,6 +752,10 @@ export class SessionManager extends EventEmitter {
 
     const providerId = spec.providerId ?? spec.software;
     const now = Date.now();
+    // 2026-10-15:ACP/OpenCode 的後端識別碼在 spawn 完就有——跟著 session 列一起寫進 DB,不等第一個事件(`consumeEventsInner()` 的
+    // 惰性捕捉)。否則第一輪還沒送出任何事件就被關掉/崩潰的 session(長時間的第一輪很常見)下次沒有識別碼可接,
+    // 「繼續」與自動復活都只能退回對話紀錄。Claude 要等 SDK 的 init 訊息,仍走惰性捕捉。
+    const backendSessionId = adapter.getBackendSessionId?.(handle);
     // 2026-10-06:明確給了(非空白)標題 → `user`(不自動命名);沒給 → 預設標題 + `default`(第一則人類輸入後自動命名)。
     const explicitTitle = opts.title !== undefined && opts.title.trim().length > 0 ? opts.title : undefined;
     const session: Session = {
@@ -744,6 +775,7 @@ export class SessionManager extends EventEmitter {
       effort: spec.effort,
       // 從哪個 session 底下開出來的(只用於 UI 巢狀顯示與溯源)
       parentSessionId: opts.parentSessionId,
+      backendSessionId,
     };
 
     await this.db.insert(sessionsTable).values(sessionToRow(session, storedLaunchFromSpec(spec))).run();
@@ -753,6 +785,7 @@ export class SessionManager extends EventEmitter {
       streamingText: "",
       providerId,
       workingDir: opts.workingDir,
+      backendSessionId,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
     });
@@ -796,8 +829,17 @@ export class SessionManager extends EventEmitter {
   }
 
   private async sendPromptSerialized(sessionId: string, prompt: PromptInput, delivery: PromptDelivery): Promise<void> {
+    return this.withSessionLock(sessionId, () => this.sendPromptInner(sessionId, prompt, delivery));
+  }
+
+  /**
+   * per-session 鎖:同一個 session 上的 prompt 投遞、重新啟動 agent(自動復活、復原視圖的「繼續」)一次只跑一個。
+   * 2026-10-15:從 `sendPromptSerialized()` 抽出來,讓「重新啟動」也在同一把鎖裡——連按兩次送出、或送出訊息的同時按下復原視圖的
+   * 「繼續」,都不會 spawn 兩個 agent。
+   */
+  private withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.sendPromptLocks.get(sessionId) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => this.sendPromptInner(sessionId, prompt, delivery));
+    const run = previous.catch(() => undefined).then(fn);
     this.sendPromptLocks.set(
       sessionId,
       run.catch(() => undefined),
@@ -806,14 +848,16 @@ export class SessionManager extends EventEmitter {
     // 另一個 race)。清理跟著 session 生命週期走,見 `deleteSession()` 等處
     // 一併呼叫的 `clearPerSessionState()` —— 與 `waitingSince`/`permissionState`
     // 這些 per-session Map 的既有慣例一致。
-    return (await run) as void;
+    return run;
   }
 
   private async sendPromptInner(sessionId: string, prompt: PromptInput, delivery: PromptDelivery): Promise<void> {
-    const runtime = this.runtime.get(sessionId);
-    if (!runtime) {
-      throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
-    }
+    const existing = this.runtime.get(sessionId);
+    // 2026-10-15(session 自動復活):沒有活的 runtime(app 重開後的 closed/interrupted、閒置回收後的 error……)時,**人類輸入**
+    // 會重新啟動這條 session 的 agent 再送出——使用者看得到的對話還在,送出訊息卻什麼事都沒發生才是 bug。別的 session 送來的訊息
+    // (`delivery.origin`)**絕不**喚醒 agent(`deliverNetworkMessage()`/`assertDeliverable()` 已經擋掉,這裡是「檢查之後 runtime 才消失」的
+    // 競態防線):是不是要為一個 agent 的請求啟動另一個 agent,不是 agent 能替使用者決定的事。
+    const reviveTarget = existing ? undefined : await this.requireReviveTarget(sessionId, delivery);
 
     // S3b(CostGovernor)L4 §2/§3.3:每日 kill-switch 越線後,只擋
     // 「後續 prompt」——這裡是唯一的送出前檢查點(gateway 的 `session.
@@ -834,6 +878,13 @@ export class SessionManager extends EventEmitter {
       throw new DeskmonyError("sessionManager.promptBlockedByBudget", { reason }, reason);
     }
 
+    // 預算檢查通過之後才花錢啟動 agent(被每日 kill-switch 擋下的 prompt 不該順便 spawn 一個行程)。
+    const revived = !existing && reviveTarget ? await this.reviveRuntimeForPrompt(reviveTarget) : undefined;
+    const runtime = existing ?? revived?.runtime;
+    if (!runtime) {
+      throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
+    }
+
     // 這一輪屬於哪條訊息鏈:人類輸入 = 剛產生的新鏈;跨 session 訊息 = 訊息自己帶的鏈(見 `PromptDelivery`)。
     // agent 這一輪經 create_session/send_to_session 送出的訊息會沿用它(`chainOfCaller()`)。
     runtime.currentChainId = delivery.chainId;
@@ -848,13 +899,93 @@ export class SessionManager extends EventEmitter {
     // 別的 session 送來的訊息:通知所有 client(讓正在看這條 session 的 UI 即時顯示「來自 <title>」)。
     // 人類自己輸入的不推播——桌面端是樂觀回顯。
     if (delivery.origin) this.emit("session-message", { sessionId, message: persisted });
+    // 剛重新啟動過 agent:在使用者這則訊息之後留下系統說明(對話裡的順序 = 使用者訊息 → 說明 → agent 回覆,
+    // 即時畫面與重新載入的歷史一致)。
+    if (revived) await this.announceRevive(sessionId, revived.outcome, "session.revivedResumed");
     await this.setStatus(sessionId, "busy");
     // S3b:回合開始,見 turn-limiter.ts 的 `startTurn()` 註解——不依賴 usage,
     // 對所有 adapter 種類(含 pty)一律起算。
     this.turnLimiter.startTurn(sessionId);
 
-    runtime.adapter.sendPrompt(runtime.handle, prompt);
+    // 後端沒接回先前對話時,第一則一般 prompt 前面附上對話紀錄(DB 存的仍是上面的原文)。
+    const outgoing = this.attachPendingTranscript(runtime, prompt);
+    runtime.adapter.sendPrompt(runtime.handle, outgoing);
+    if (outgoing !== prompt) runtime.pendingTranscript = undefined;
     this.scheduleIdleIfTerminal(sessionId, runtime);
+  }
+
+  /**
+   * `runtime.pendingTranscript` 還在、且這則不是 slash command → 回傳前面附了對話紀錄的新 prompt(附件原樣保留);否則原樣回傳同一個物件
+   * (呼叫端用「是不是同一個物件」判斷有沒有附,附了才清掉 pendingTranscript)。slash command 要在開頭才認得,前面塞東西會讓它失效,
+   * 所以紀錄留給下一則一般訊息。
+   */
+  private attachPendingTranscript(runtime: RuntimeState, prompt: PromptInput): PromptInput {
+    if (!runtime.pendingTranscript || looksLikeSlashCommand(prompt.text)) return prompt;
+    return { ...prompt, text: prependTranscript(runtime.pendingTranscript, prompt.text) };
+  }
+
+  /**
+   * 沒有 runtime 時,這則 prompt 能不能「重新啟動 agent 再送出」?回傳要重新啟動的 session;不行就丟 `SESSION_NOT_RUNNING`
+   * (別的 session 送來的訊息,或根本沒有這條 session)。
+   */
+  private async requireReviveTarget(sessionId: string, delivery: PromptDelivery): Promise<Session> {
+    const notRunning = (): DeskmonyError =>
+      new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 尚未啟動或已結束: ${sessionId}`);
+    if (delivery.origin) throw notRunning();
+    const session = await this.getSession(sessionId);
+    if (!session) throw notRunning();
+    return session;
+  }
+
+  /**
+   * 人類輸入遇到沒有 runtime 的 session:把狀態標成忙碌(spawn agent 要幾秒,UI 這段時間顯示忙碌而不是「已關閉」)→ 重新啟動
+   * (`respawnRuntime()`)。系統說明(`announceRevive()`)由呼叫端在使用者訊息寫進 DB 之後再留。失敗時**把狀態還原成原本的樣子**(closed/interrupted/error,連同
+   * interruptedAt/lastError),不卡在 busy,並丟出明確的錯誤讓 UI 顯示。
+   */
+  private async reviveRuntimeForPrompt(session: Session): Promise<{ runtime: RuntimeState; outcome: ReviveOutcome }> {
+    await this.setStatus(session.id, "busy");
+    try {
+      const revived = await this.respawnRuntime(session, { statusAfter: "busy" });
+      console.log(`[session-manager] session ${session.id}(原本 ${session.status})已重新啟動 agent: ${revived.outcome.kind}`);
+      this.emit("session-list-updated");
+      return revived;
+    } catch (err) {
+      await this.restoreStatusAfterFailedRevive(session);
+      throw this.toReviveError(session, err);
+    }
+  }
+
+  /** 重新啟動失敗:把 DB 狀態寫回啟動前的樣子(`setStatus()` 會清掉 interruptedAt/lastError,這裡要保留)。本身失敗只記 log。 */
+  private async restoreStatusAfterFailedRevive(before: Session): Promise<void> {
+    try {
+      this.waitingSince.delete(before.id);
+      await this.db
+        .update(sessionsTable)
+        .set({
+          status: before.status,
+          lastError: before.lastError ?? null,
+          interruptedAt: before.interruptedAt ?? null,
+          lastSeenAt: before.lastSeenAt ?? null,
+          updatedAt: Date.now(),
+        })
+        .where(eq(sessionsTable.id, before.id))
+        .run();
+      const restored = await this.getSession(before.id);
+      if (restored) this.emit("session-updated", restored);
+    } catch (restoreErr) {
+      console.error(`[session-manager] 重新啟動 session ${before.id} 失敗後還原狀態也失敗: ${String(restoreErr)}`);
+    }
+  }
+
+  /** adapter/catalog 丟的 `DeskmonyError` 原樣往外(已有 code 與翻譯);其餘未預期的錯誤包成 `session.reviveFailed`。 */
+  private toReviveError(session: Session, err: unknown): Error {
+    if (err instanceof DeskmonyError) return err;
+    const detail = err instanceof Error ? err.message : String(err);
+    return new DeskmonyError(
+      "session.reviveFailed",
+      { sessionId: session.id, detail },
+      `無法重新啟動 session ${session.id} 的 agent: ${detail}`,
+    );
   }
 
   /**
@@ -1440,9 +1571,9 @@ export class SessionManager extends EventEmitter {
    * 並決定續/棄,同 S6 復原視圖的既有 UX,見 cost-governor_detail.md §4「回收
    * ≠ 丟棄」)。
    *
-   * 回收後這個 session 在 `this.runtime` 裡已經不存在,`sendPrompt()`/
-   * `interrupt()` 等方法會如常丟出「session 尚未啟動或已結束」的錯誤——這正是
-   * 「需要人工重新建立 session 才能續行」的預期行為,不需要新增一個
+   * 回收後這個 session 在 `this.runtime` 裡已經不存在,`interrupt()` 等方法會如常
+   * 視為「沒有在跑」;人類對它送訊息時,`sendPrompt()` 會重新啟動 agent 再送出
+   * (2026-10-15,見 `reviveRuntimeForPrompt()`),不需要新增一個
    * `SessionStatus` 列舉值(`SessionStatusSchema` 目前只有 idle/busy/
    * waiting/error 四種,見 packages/shared/src/session.ts)。這裡把 DB 狀態
    * 設成既有的 `"error"`,`lastError` 說明原因,是目前 schema 下最貼近語意的
@@ -1459,7 +1590,7 @@ export class SessionManager extends EventEmitter {
     await this.setStatus(
       sessionId,
       "error",
-      "已閒置等待超過 72 小時,資源已自動回收(子程序已釋放);對話紀錄仍保留,可重新建立 session 續行或放棄此 session",
+      "已閒置等待超過 72 小時,資源已自動回收(子程序已釋放);對話紀錄仍保留,直接送出訊息會重新啟動 agent 續行,或放棄此 session",
     );
   }
 
@@ -1520,6 +1651,7 @@ export class SessionManager extends EventEmitter {
    * dispose 失敗頂多留下一個沒被清乾淨的子程序,不影響下次啟動的對帳分類)。
    */
   async shutdownAll(): Promise<void> {
+    this.shuttingDown = true; // 之後不再替任何 session 重新啟動 agent(見 respawnRuntime())
     const ids = [...this.runtime.keys()];
     await Promise.all(
       ids.map(async (id) => {
@@ -1544,38 +1676,81 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * S6(crash-recovery)L4 §4:「繼續(保有記憶)」——只有 `adapterType ===
-   * "claude-agent-sdk"` 且已捕捉過 `backendSessionId` 的 `interrupted` session
-   * 才能呼叫(見 `RecoveryService.continueSession()` 的前置檢查;這裡仍重新
-   * 檢查一次,不信任呼叫端已經驗證過)。
+   * S6(crash-recovery)L4 §4:「繼續(保有記憶)」——`interrupted` 的 session、後端有持久化對話可接(`softwareCanResumeBackend()`:
+   * claude-agent-sdk、acp、opencode;2026-10-15 起不再限定 claude)且已捕捉過 `backendSessionId` 才能呼叫(見
+   * `RecoveryService.continueSession()` 的前置檢查;這裡仍重新檢查一次,不信任呼叫端已經驗證過)。
    *
    * 與 `createSession()` 的關鍵差異:**沿用既有的 DB session id**(不是
-   * `handle.id`)——`this.runtime` 這次改用既有的 `sessionId` 當 key(見下方
-   * `this.runtime.set(sessionId, ...)`),讓 `messages` 表的既有歷史紀錄自然
-   * 延續在同一個 session 底下,UI 不需要切換到一個新的聊天串。`consumeEvents()`
-   * 本身不需要任何修改就能重用——它只依賴 `this.runtime.get(sessionId)`,不
-   * 關心這個 key 背後的 handle 是不是重新 spawn 出來的。
+   * `handle.id`)——`this.runtime` 這次改用既有的 `sessionId` 當 key,讓 `messages` 表的既有歷史紀錄自然
+   * 延續在同一個 session 底下,UI 不需要切換到一個新的聊天串。實際的重新啟動(組啟動規格、spawn、登記 runtime、
+   * 後端接不回時的對話紀錄退路)與「使用者對沒有 runtime 的 session 送訊息」的自動復活共用 `respawnRuntime()`,
+   * 兩條路徑不會各自長出不同的行為。在 per-session 鎖裡進行:不會和同一個 session 上的送出訊息同時 spawn 兩個 agent。
+   *
+   * 「繼續」是盡力接回:後端那邊的對話已經不在(agent 清掉了歷史)時,`respawnRuntime()` 會改用對話紀錄接續並在對話裡說明,
+   * 而不是讓這個動作失敗。
    */
   async continueSession(sessionId: string): Promise<Session> {
-    const session = await this.getSession(sessionId);
-    if (!session) {
-      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
-    }
-    if (session.status !== "interrupted") {
-      throw new DeskmonyError(
-        "sessionManager.continueRequiresInterrupted",
-        { sessionId, status: session.status },
-        `session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted",無法「繼續」`,
-      );
-    }
-    if (session.adapterType !== "claude-agent-sdk" || !session.backendSessionId) {
-      throw new DeskmonyError(
-        "sessionManager.continueUnsupportedBackend",
-        { sessionId, adapterType: session.adapterType },
-        `session ${sessionId} 的後端(${session.adapterType})不支援「繼續(保有記憶)」,或這條 session 崩潰前還沒捕捉到後端 session 識別碼,請改用「接手」`,
-      );
-    }
+    return this.withSessionLock(sessionId, async () => {
+      const session = await this.getSession(sessionId);
+      if (!session) {
+        throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
+      }
+      if (session.status !== "interrupted") {
+        throw new DeskmonyError(
+          "sessionManager.continueRequiresInterrupted",
+          { sessionId, status: session.status },
+          `session ${sessionId} 目前狀態是 "${session.status}",不是 "interrupted",無法「繼續」`,
+        );
+      }
+      if (!softwareCanResumeBackend(session.adapterType) || !session.backendSessionId) {
+        throw new DeskmonyError(
+          "sessionManager.continueUnsupportedBackend",
+          { sessionId, adapterType: session.adapterType },
+          `session ${sessionId} 的後端(${session.adapterType})不支援「繼續(保有記憶)」,或這條 session 崩潰前還沒捕捉到後端 session 識別碼,請改用「接手」`,
+        );
+      }
 
+      // 失敗(spawn 不起來)時狀態維持 interrupted、什麼都沒改,人可以再試或改用「接手」。
+      const { outcome } = await this.respawnRuntime(session, { statusAfter: "idle" });
+      await this.announceRevive(sessionId, outcome, "session.continuedAfterInterrupt");
+      this.emit("session-list-updated");
+
+      const updated = await this.getSession(sessionId);
+      if (!updated) {
+        throw new DeskmonyError(
+          "sessionManager.vanishedDuringContinue",
+          { sessionId },
+          `session ${sessionId} 於「繼續」流程中意外消失`,
+        );
+      }
+      return updated;
+    });
+  }
+
+  /**
+   * 重新啟動一條既有 session 的 agent——復原視圖的「繼續」(`continueSession()`)與使用者對沒有 runtime 的 session 送訊息的
+   * 自動復活(`reviveRuntimeForPrompt()`)共用這一份。**呼叫端必須已經在 per-session 鎖裡**(`withSessionLock()`)。
+   *
+   * 步驟:
+   *  1. 從 session 自己的資料重建啟動規格(`AgentCatalog.buildLaunchSpecForSession()` + session 列存的 launch_command/args),
+   *     併 provider env、確保筆記目錄(`prepareSpawnSpec()`)。
+   *  2. spawn adapter,**沿用既有的 DB session id 當 handle.id**(session 網路工具的呼叫者身分綁它,見 `ResumeOptions.sessionId`);
+   *     後端有持久化對話可接(`softwareCanResumeBackend()`)且已捕捉過 `backendSessionId` 時一併交給 adapter 嘗試接回。
+   *     接回失敗 adapter 不會丟錯,而是開全新的後端對話並在 `handle.resumed` 據實回報。
+   *  3. 登記 runtime、權限模式**一律重設為 `"always-ask"`**(和新建 session 相同;絕不悄悄沿用或提高先前的 auto/YOLO)。
+   *  4. 沒接回且不是終端程式 → 用 DB 的對話組紀錄區塊(`pendingTranscript`),附在下一則一般 prompt 前面。
+   *  5. 狀態寫成 `statusAfter`、開始消費 adapter 事件。系統說明(`announceRevive()`)由呼叫端在適當的時間點留。
+   *
+   * spawn 之後任何一步失敗都會把剛 spawn 的 agent 收掉、清掉 runtime 再丟錯,不留孤兒行程。
+   */
+  private async respawnRuntime(
+    session: Session,
+    opts: { statusAfter: "idle" | "busy" },
+  ): Promise<{ runtime: RuntimeState; outcome: ReviveOutcome }> {
+    const sessionId = session.id;
+    if (this.shuttingDown) {
+      throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `core 正在關閉,無法重新啟動 session: ${sessionId}`);
+    }
     // 2026-10-02(P2:移除 profile):一律從 session 自己的資料重建啟動規格——先用 providerId 走
     // `AgentCatalog.buildLaunchSpec(providerId, session.model, session.effort)`,provider 已不存在/
     // 未安裝時退回 `adapterType + launch_command + launch_args`,**不再讀 agent_profiles 表**。
@@ -1585,50 +1760,114 @@ export class SessionManager extends EventEmitter {
     const effectiveSpec = await this.prepareSpawnSpec(spec, session.workingDir, toNoteFileName(label));
 
     const adapter = this.adapters.get(spec.software);
-    // `sessionId`:沿用既有的 DB session id 當 handle.id(見 `ResumeOptions.sessionId`)——session 網路工具的
-    // 呼叫者身分是 adapter 以 handle.id 閉包捕捉的,必須等於這條 session 的 id。
-    const handle = await adapter.spawn(effectiveSpec, { path: session.workingDir }, {
-      backendSessionId: session.backendSessionId,
-      sessionId,
-    });
+    const backendSessionId = softwareCanResumeBackend(spec.software) ? session.backendSessionId : undefined;
+    const handle = await adapter.spawn(
+      effectiveSpec,
+      { path: session.workingDir },
+      { sessionId, ...(backendSessionId ? { backendSessionId } : {}) },
+    );
+    const resumed = backendSessionId !== undefined && handle.resumed === true;
 
-    this.runtime.set(sessionId, {
+    const runtime: RuntimeState = {
       handle,
       adapter,
       streamingText: "",
       providerId: session.providerId,
       workingDir: session.workingDir,
-      backendSessionId: session.backendSessionId,
+      // 沒接回(開了全新的後端對話)時舊的識別碼已經沒用了:留空,讓下面的立即捕捉/`consumeEventsInner()` 的惰性捕捉把新的寫進 DB。
+      backendSessionId: resumed ? backendSessionId : undefined,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
-    });
-    this.permissions.initialize(sessionId, "always-ask");
+    };
+    let outcome: ReviveOutcome;
+    try {
+      // spawn 期間(最多數秒)這條 session 可能已被刪除,或 core 已開始關閉:不留下沒人管的 agent。
+      if (this.shuttingDown || !(await this.getSession(sessionId))) {
+        throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `session 在重新啟動期間已被刪除或 core 正在關閉: ${sessionId}`);
+      }
+      this.runtime.set(sessionId, runtime);
+      this.permissions.initialize(sessionId, "always-ask");
 
-    await this.db
-      .update(sessionsTable)
-      .set({ status: "idle", interruptedAt: null, lastSeenAt: Date.now(), updatedAt: Date.now() })
-      .where(eq(sessionsTable.id, sessionId))
-      .run();
-    // i18n 專案:改存 JSON 結構化事件,理由同 setSessionModel() 內的說明。
-    await this.persistMessage(
-      sessionId,
-      "system",
-      JSON.stringify({ event: "session.continuedAfterInterrupt" }),
-    );
+      // ACP/OpenCode 的後端識別碼在 spawn 完就有:立刻寫進 DB(接回失敗時是全新的識別碼,不能等第一個事件才寫,
+      // 否則在那之前崩潰,下次還是拿著已經失效的舊識別碼)。Claude 要等 SDK 的 init 訊息,走惰性捕捉。
+      const currentBackendId = adapter.getBackendSessionId?.(handle);
+      if (currentBackendId) {
+        runtime.backendSessionId = currentBackendId;
+        if (currentBackendId !== session.backendSessionId) {
+          await this.persistBackendSessionId(sessionId, currentBackendId);
+        }
+      }
+
+      outcome = await this.planReviveOutcome(runtime, resumed);
+      await this.setStatus(sessionId, opts.statusAfter);
+    } catch (err) {
+      this.runtime.delete(sessionId);
+      await adapter.dispose(handle).catch((disposeErr: unknown) => {
+        console.error(`[session-manager] 重新啟動 session ${sessionId} 失敗後收掉 agent 也失敗(忽略): ${String(disposeErr)}`);
+      });
+      throw err;
+    }
 
     void this.consumeEvents(sessionId);
-    this.emit("session-list-updated");
+    return { runtime, outcome };
+  }
 
-    const updated = await this.getSession(sessionId);
-    if (!updated) {
-      throw new DeskmonyError(
-        "sessionManager.vanishedDuringContinue",
-        { sessionId },
-        `session ${sessionId} 於「繼續」流程中意外消失`,
-      );
-    }
-    this.emit("session-updated", updated);
-    return updated;
+  /**
+   * 在對話裡留一則系統說明,告訴使用者 agent 剛被重新啟動、以及它對先前對話的「記憶」是怎麼來的(原生接回 / 讀對話紀錄 /
+   * 沒有記憶)。寫進 DB(重新載入歷史看得到),同時用 `session-message` push 即時推給所有 client——系統說明不是 adapter 事件,
+   * 沒有別的管道能讓正在看這條 session 的 UI 立刻顯示。
+   */
+  private async announceRevive(sessionId: string, outcome: ReviveOutcome, resumedEvent: string): Promise<void> {
+    const message = await this.persistMessageRow(sessionId, "system", JSON.stringify(reviveNoticeEvent(outcome, resumedEvent)));
+    this.emit("session-message", { sessionId, message });
+  }
+
+  /**
+   * 決定這次重新啟動的結果,並在需要時把對話紀錄區塊放進 `runtime.pendingTranscript`:
+   *   - 後端接回了 → `resumed`,不需要紀錄。
+   *   - 終端程式(PTY)→ `terminal`:沒有後端 session 可接,而且**不把對話紀錄灌進終端**(那會被當成鍵盤輸入)。
+   *   - 其餘 → DB 有 user/assistant 文字就組紀錄(`transcript`),沒有就 `fresh`。
+   * 紀錄在這裡(送出新訊息**之前**)就組好,所以不會包含正要送出的那一則。
+   */
+  private async planReviveOutcome(runtime: RuntimeState, resumed: boolean): Promise<ReviveOutcome> {
+    if (resumed) return { kind: "resumed" };
+    if (runtime.adapter.capabilities().terminal) return { kind: "terminal" };
+    const loaded = await this.loadTranscriptMessages(runtime.handle.id);
+    const built = buildTranscript(loaded.messages, { olderNotLoaded: loaded.olderNotLoaded });
+    if (!built) return { kind: "fresh" };
+    runtime.pendingTranscript = built.text;
+    return { kind: "transcript", includedCount: built.includedCount, truncated: built.truncated };
+  }
+
+  /**
+   * 撈最近的 user/assistant 文字訊息(由舊到新)組對話紀錄。只問需要的欄位,附件只問「有沒有」(不把 base64 讀進記憶體);
+   * 多撈一則用來判斷「更舊的還有」。工具與 system 訊息不是對話,不納入。
+   */
+  private async loadTranscriptMessages(sessionId: string): Promise<{ messages: TranscriptMessage[]; olderNotLoaded: boolean }> {
+    const rows = await this.db
+      .select({
+        role: messagesTable.role,
+        content: messagesTable.content,
+        origin: messagesTable.origin,
+        hasAttachments: sql<number>`(${messagesTable.attachments} IS NOT NULL)`,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.sessionId, sessionId), inArray(messagesTable.role, ["user", "assistant"])))
+      // 同 readSessionForAgent():同一毫秒寫入的訊息用 rowid 當次排序,保持寫入順序。
+      .orderBy(desc(messagesTable.createdAt), sql`rowid DESC`)
+      .limit(TRANSCRIPT_MAX_MESSAGES + 1)
+      .all();
+    const olderNotLoaded = rows.length > TRANSCRIPT_MAX_MESSAGES;
+    const messages = rows
+      .slice(0, TRANSCRIPT_MAX_MESSAGES)
+      .reverse()
+      .map((row): TranscriptMessage => ({
+        role: row.role as "user" | "assistant",
+        content: row.content,
+        ...(row.origin ? { fromOtherSession: true } : {}),
+        ...(row.hasAttachments ? { hasAttachments: true } : {}),
+      }));
+    return { messages, olderNotLoaded };
   }
 
   /**
@@ -2246,6 +2485,28 @@ export class SessionManager extends EventEmitter {
    */
   private async updateMessageContent(messageId: string, content: string): Promise<void> {
     await this.db.update(messagesTable).set({ content }).where(eq(messagesTable.id, messageId)).run();
+  }
+}
+
+/**
+ * 重新啟動 agent 之後留在對話裡的系統說明——JSON 結構化事件(理由同 `setSessionModel()` 內的 i18n 說明),桌面端在
+ * `systemEvents` namespace 翻譯,event key 必須和 apps/desktop/src/locales 底下各語系的 systemEvents.json 一致。
+ * `resumedEvent`:後端原生接回時用的 event(復原視圖的「繼續」沿用既有的 `session.continuedAfterInterrupt`,
+ * 自動復活用 `session.revivedResumed`)。
+ */
+function reviveNoticeEvent(outcome: ReviveOutcome, resumedEvent: string): { event: string; params?: Record<string, unknown> } {
+  switch (outcome.kind) {
+    case "resumed":
+      return { event: resumedEvent };
+    case "transcript":
+      return {
+        event: outcome.truncated ? "session.revivedFromTranscriptTruncated" : "session.revivedFromTranscript",
+        params: { count: outcome.includedCount },
+      };
+    case "terminal":
+      return { event: "session.revivedWithoutMemory" };
+    case "fresh":
+      return { event: "session.revivedFresh" };
   }
 }
 

@@ -1,4 +1,4 @@
-import { DeskmonyError, ErrorCodes, type RecoverySessionInfo, type Session } from "@deskmony/shared";
+import { DeskmonyError, ErrorCodes, softwareCanResumeBackend, type RecoverySessionInfo, type Session } from "@deskmony/shared";
 import type { SessionManager } from "../session/session-manager.js";
 import type { AgentCatalog } from "../agents/agent-catalog.js";
 
@@ -52,7 +52,11 @@ export class RecoveryService {
     return results;
   }
 
-  /** §4:「繼續(保有記憶)」——直接委派給 `SessionManager.continueSession()`,那裡有完整的前置檢查。 */
+  /**
+   * §4:「繼續(保有記憶)」——直接委派給 `SessionManager.continueSession()`,那裡有完整的前置檢查。
+   * 與「使用者對 closed/interrupted session 送訊息」的自動復活共用同一個重新啟動流程(`SessionManager.respawnRuntime()`);
+   * 差別只在這裡是人在復原視圖明確按下「繼續」,還沒有送任何訊息。
+   */
   async continueSession(sessionId: string): Promise<Session> {
     // 2026-09-04(稽核修補):見 withRecoveryClaim()。
     return this.withRecoveryClaim(sessionId, async () => {
@@ -163,9 +167,14 @@ export class RecoveryService {
   }
 }
 
-/** §4.1:目前唯一支援「繼續(保有記憶)」的後端——見查證結論。 */
+/**
+ * §4.1:這條 session 能不能「繼續(保有記憶)」——後端有持久化對話可接(claude-agent-sdk、acp、opencode;PTY 沒有)且崩潰前已捕捉過
+ * 後端 session 識別碼。2026-10-15 起不再只認 claude:ACP(`session/resume`/`session/load`)與 OpenCode(沿用 session id)
+ * 也會把識別碼存下來並嘗試接回,接不回時改用對話紀錄接續(見 `SessionManager.respawnRuntime()`)。
+ * 和 `SessionManager.continueSession()` 的前置檢查是同一個條件(共用 `softwareCanResumeBackend()`)。
+ */
 function computeCanContinue(session: Session): boolean {
-  return session.adapterType === "claude-agent-sdk" && Boolean(session.backendSessionId);
+  return softwareCanResumeBackend(session.adapterType) && Boolean(session.backendSessionId);
 }
 
 const SUMMARY_CHAR_LIMIT = 4000;
