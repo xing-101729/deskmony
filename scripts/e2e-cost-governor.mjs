@@ -544,7 +544,11 @@ async function testWaitingWatchdog() {
       sessionId,
       prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath, content: "x" })}` },
     });
-    await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "permission-request", 15_000, startIdx);
+    const permissionRequest = await client.waitForEvent(
+      (e) => e.sessionId === sessionId && e.event.type === "permission-request",
+      15_000,
+      startIdx,
+    );
     await client.waitForSessionUpdate((u) => u.id === sessionId && u.status === "waiting", 5_000);
 
     // ---- E: T1(800ms)→ 只發通知,session 仍維持 waiting(不 halt)----
@@ -568,6 +572,11 @@ async function testWaitingWatchdog() {
     await sleep(500);
     const sessionAfterT2 = (await client.rpc("session.list", {})).sessions.find((s) => s.id === sessionId);
     const reclaimedToError = sessionAfterT2?.status === "error" && (sessionAfterT2?.lastError ?? "").includes("回收");
+    // 2026-10-15:回收的正是在等權限回覆的 agent——那筆請求要一起收掉,client 才會關閉彈窗(修正前彈窗一直留著、按了也沒反應)。
+    const releasedPush = client.permissionResolvedEvents.find(
+      (p) => p.sessionId === sessionId && p.requestId === permissionRequest.event.requestId,
+    );
+    const pendingReleased = releasedPush?.decision === "deny" && releasedPush?.source === "agent-stopped";
 
     // 子程序已經被 dispose、runtime 已移除。2026-10-15 之前 sendPrompt 在這裡會得到 SESSION_NOT_RUNNING
     // (「需要人工重新建立 session 才能續行」);現在人類對沒有 runtime 的 session 送訊息會重新啟動 agent 再送出
@@ -590,10 +599,10 @@ async function testWaitingWatchdog() {
     const sessionStillListed = Boolean(sessionAfterT2);
 
     record(
-      "F: T2 資源回收(waiting 超過 2000ms 短版 T2)→ 真 trip(收到 trip 通知,reason=waiting-ttl),session 狀態變成 error(lastError 說明已回收)、子程序已釋放(人類再送訊息會重新啟動 agent 並跑完一輪、回到 idle),但 session 記錄本身仍保留(回收 ≠ 丟棄)",
-      t2Tripped && reclaimedToError && revivedAfterReclaim && sessionStillListed,
+      "F: T2 資源回收(waiting 超過 2000ms 短版 T2)→ 真 trip(收到 trip 通知,reason=waiting-ttl),session 狀態變成 error(lastError 說明已回收)、子程序已釋放(人類再送訊息會重新啟動 agent 並跑完一輪、回到 idle),但 session 記錄本身仍保留(回收 ≠ 丟棄);等待中的權限請求一起收掉(permission-resolved deny、source=agent-stopped)",
+      t2Tripped && reclaimedToError && revivedAfterReclaim && sessionStillListed && pendingReleased,
       `t2Tripped=${t2Tripped}, status=${sessionAfterT2?.status}, lastError=${sessionAfterT2?.lastError}, ` +
-        `revivedAfterReclaim=${revivedAfterReclaim}, sessionStillListed=${sessionStillListed}`,
+        `revivedAfterReclaim=${revivedAfterReclaim}, sessionStillListed=${sessionStillListed}, releasedPush=${JSON.stringify(releasedPush)}`,
     );
   } catch (err) {
     record("E/F 執行過程發生未預期錯誤", false, String(err));

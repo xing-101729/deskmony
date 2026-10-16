@@ -270,6 +270,12 @@ interface RuntimeState {
    */
   openToolCalls: Map<string, OpenToolCall>;
   /**
+   * 2026-10-15:這個 agent 發出、還沒有答案的 `user-dialog-request`(AskUserQuestion / opencode question),
+   * requestId → toolUseID。它們不經過 `PermissionGateway`,agent 不在了時要靠這份清單通知 client 收掉表單(見
+   * `releasePendingRequests()`)。有人回答(`resolveUserDialog()`)或那個提問工具已有結果(tool-result)就移除。
+   */
+  pendingUserDialogs: Map<string, string>;
+  /**
    * 2026-10-15(session 自動復活):重新啟動這條 session 的 agent 時,後端沒有接回先前的對話(`AgentHandle.resumed !== true`,
    * 例如 agent 不支援 resume、那邊的歷史已經不在)——這裡放 Deskmony 用 DB 對話組好的紀錄區塊(見 session-transcript.ts),
    * **下一則一般 prompt** 交給 adapter 時附在最前面,附完就清掉(只附一次)。DB 存的使用者訊息仍是原文。純記憶體。
@@ -835,6 +841,7 @@ export class SessionManager extends EventEmitter {
       backendSessionId,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
+      pendingUserDialogs: new Map(),
     });
     // S7:一律從 "always-ask" 開始(見上方 createSession() 說明)。
     this.permissions.initialize(session.id, "always-ask");
@@ -1131,7 +1138,12 @@ export class SessionManager extends EventEmitter {
     if (!resolved) return;
     const { strong } = resolved;
     const runtime = this.runtime.get(sessionId);
-    if (!runtime) return;
+    if (!runtime) {
+      // 發出請求的 agent 已經不在(正常情況下它的待決請求在 runtime 拿掉時就清掉了,見 `releasePendingRequests()`):
+      // 決定送不出去,但彈窗照樣要關,不然按了沒反應。
+      this.emitPermissionResolved({ sessionId, requestId, decision: "deny", source: "agent-stopped" });
+      return;
+    }
 
     if (rememberRule !== undefined) {
       if (strong) {
@@ -1186,6 +1198,7 @@ export class SessionManager extends EventEmitter {
   resolveUserDialog(sessionId: string, requestId: string, result: DialogAnswer): void {
     const runtime = this.runtime.get(sessionId);
     if (!runtime) return;
+    runtime.pendingUserDialogs.delete(requestId);
     runtime.adapter.resolveUserDialog?.(runtime.handle, requestId, result);
     const payload: UserDialogResolvedPush = { sessionId, requestId, result };
     this.emit("user-dialog-resolved", payload);
@@ -1594,6 +1607,7 @@ export class SessionManager extends EventEmitter {
       runtime.retired = true; // dispose 會讓事件迴圈結束——那是我們收掉的,不是 agent 自己結束(見 detachEndedRuntime())
       await runtime.adapter.dispose(runtime.handle);
       this.runtime.delete(sessionId);
+      this.releasePendingRequests(sessionId, runtime);
     }
     await this.db.delete(messagesTable).where(eq(messagesTable.sessionId, sessionId)).run();
     await this.db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId)).run();
@@ -1638,6 +1652,7 @@ export class SessionManager extends EventEmitter {
     runtime.retired = true; // 同 deleteSession():回收造成的事件迴圈結束不是 agent 自己結束
     await runtime.adapter.dispose(runtime.handle);
     this.runtime.delete(sessionId);
+    this.releasePendingRequests(sessionId, runtime); // 回收的正是等回覆等了 72 小時的 session:那個權限彈窗/提問要一起收掉
     this.turnLimiter.endTurn(sessionId);
     this.clearPerSessionState(sessionId); // 避免無限增長(含待送佇列與訊息鏈狀態)。
     await this.setStatus(
@@ -1718,6 +1733,7 @@ export class SessionManager extends EventEmitter {
           console.error(`[session-manager] shutdown 時 dispose session ${id} 失敗(忽略,仍標記為 closed): ${String(err)}`);
         }
         this.runtime.delete(id);
+        this.releasePendingRequests(id, runtime);
         this.turnLimiter.endTurn(id);
         this.clearPerSessionState(id); // 避免無限增長(含待送佇列與訊息鏈狀態)。
         try {
@@ -1832,6 +1848,7 @@ export class SessionManager extends EventEmitter {
       backendSessionId: resumed ? backendSessionId : undefined,
       slashCommandsObserved: false,
       openToolCalls: new Map(),
+      pendingUserDialogs: new Map(),
     };
     let outcome: ReviveOutcome;
     try {
@@ -2064,6 +2081,7 @@ export class SessionManager extends EventEmitter {
     if (runtime.retired || this.runtime.get(sessionId) !== runtime) return false;
     runtime.retired = true;
     this.runtime.delete(sessionId);
+    this.releasePendingRequests(sessionId, runtime);
     this.clearPtyIdleTimer(runtime);
     this.turnLimiter.endTurn(sessionId);
     console.warn(`[session-manager] session ${sessionId} 的 agent 已停止執行(事件串流結束),下一則人類訊息會重新啟動它`);
@@ -2071,6 +2089,25 @@ export class SessionManager extends EventEmitter {
       console.error(`[session-manager] 收掉已停止的 agent(session ${sessionId})失敗(忽略): ${String(err)}`);
     });
     return true;
+  }
+
+  /**
+   * 2026-10-15:runtime 拿掉了(agent 自己停止、session 被刪除或回收、core 關閉)——它還在等回覆的權限請求與提問再也沒有人能
+   * 回覆給它。清掉(權限請求連同 PermissionGateway 的逾時計時器)並推播給所有 client 關閉彈窗/表單:權限以 deny +
+   * `source: "agent-stopped"`、提問以 `cancelled`。修正前這些項目一直留著:session 停在 waiting 時 agent 死掉,彈窗按了也沒反應
+   * (`resolvePermission()` 找不到 runtime 直接 return),client 永遠收不到 `permission-resolved`。
+   *
+   * 呼叫時機:`this.runtime` 剛拿掉這個 runtime、新的 runtime 還不可能存在(同一段同步程式碼裡)——gateway 以 session 為單位清,
+   * 才不會清到重新啟動後的新 agent 的請求。之後才被事件迴圈消化的請求,由 `consumeEventsInner()` 看 `runtime.retired` 擋下。
+   */
+  private releasePendingRequests(sessionId: string, runtime: RuntimeState): void {
+    for (const requestId of this.permissionGateway.releaseSession(sessionId)) {
+      this.emitPermissionResolved({ sessionId, requestId, decision: "deny", source: "agent-stopped" });
+    }
+    for (const requestId of runtime.pendingUserDialogs.keys()) {
+      this.emitUserDialogCancelled(sessionId, requestId);
+    }
+    runtime.pendingUserDialogs.clear();
   }
 
   /**
@@ -2195,6 +2232,10 @@ export class SessionManager extends EventEmitter {
           // 這個呼叫已經有結果,移出 openToolCalls:之後同一個 toolCallId 再出現
           // 就是後端重複使用 id 的新呼叫,照樣計數(見 RuntimeState.openToolCalls)。
           runtime.openToolCalls.delete(event.toolCallId);
+          // 提問工具有了結果就不可能再作答(同桌面端以 toolUseID 收掉待答表單的規則),不必在 agent 停止時再通知一次。
+          for (const [requestId, toolUseID] of runtime.pendingUserDialogs) {
+            if (toolUseID === event.toolCallId) runtime.pendingUserDialogs.delete(requestId);
+          }
           await this.ensureBusy(sessionId);
           await this.persistMessage(
             sessionId,
@@ -2263,6 +2304,14 @@ export class SessionManager extends EventEmitter {
             break; // 不進 waiting,agent 不停頓。
           }
 
+          // 2026-10-15:core 已經在收掉這個 agent(刪除/回收/關閉,`retired`),事件迴圈還在消化那之前送出的事件:不升級、不進
+          // waiting、不登記——`releasePendingRequests()` 可能已經跑過,登記了就沒有人會清。只通知 client 關閉剛廣播出去的彈窗。
+          // `setStatus()` 的 await 期間也可能開始收掉,登記前再看一次。
+          if (runtime.retired) {
+            this.emitPermissionResolved({ sessionId, requestId: event.requestId, decision: "deny", source: "agent-stopped" });
+            break;
+          }
+
           // escalate / escalate-strong:維持既有 waiting + register 路徑,逾時
           // 語意見 §6(attended → 短逾時 deny;非 attended → 不設計時器)。
           // (`strong` 已在上面算好,見廣播 permission-request 事件那段。)
@@ -2283,6 +2332,10 @@ export class SessionManager extends EventEmitter {
             });
 
           await this.setStatus(sessionId, "waiting");
+          if (runtime.retired) {
+            this.emitPermissionResolved({ sessionId, requestId: event.requestId, decision: "deny", source: "agent-stopped" });
+            break;
+          }
           const timeoutMs = ctx.attended ? this.permissionGateway.defaultTimeoutMs : null;
           this.permissionGateway.register(sessionId, event.requestId, strong, timeoutMs, (sid, requestId) => {
             // 逾時自動拒絕,避免 agent 永遠卡在 waiting(只有 attended 才會走到
@@ -2293,7 +2346,8 @@ export class SessionManager extends EventEmitter {
             // SDK 的 canUseTool promise 將永久懸置(SDK 明言 fail-closed、無 deadline)。
             // 2026-10-15:只對發出這筆請求的那個 agent 回覆、把狀態翻回 busy——它在等回覆期間停止執行的話,runtime 已經被拿掉
             // (`detachEndedRuntime()`)或換成重新啟動的新 runtime:翻回 busy 會蓋掉 agent 已停止的 error(畫面卡在忙碌),
-            // 或干擾新 agent 的狀態。彈窗照樣通知關閉。
+            // 或干擾新 agent 的狀態。彈窗照樣通知關閉。(runtime 拿掉時 `releasePendingRequests()` 就會清掉這個計時器,
+            // 這裡是防線。)
             if (this.runtime.get(sid) === runtime) {
               runtime.adapter.resolvePermission(runtime.handle, requestId, "deny");
               void this.setStatus(sid, "busy");
@@ -2316,8 +2370,15 @@ export class SessionManager extends EventEmitter {
          * `"permission-request"` 被排除在外),這裡只需要把狀態轉成
          * waiting——既有的 `ensureBusy()` 會在後續事件(例如答案送出後的
          * tool-result)自動把狀態轉回 busy,不需要額外處理。
+         * 2026-10-15:記進 `runtime.pendingUserDialogs`,agent 在等答案期間停止時才能通知 client 收掉表單(見
+         * `releasePendingRequests()`);core 已經在收掉這個 agent 時(`retired`,同上面 permission-request 的說明)直接通知收掉。
          */
         case "user-dialog-request": {
+          if (runtime.retired) {
+            this.emitUserDialogCancelled(sessionId, event.requestId);
+            break;
+          }
+          runtime.pendingUserDialogs.set(event.requestId, event.toolUseID);
           await this.setStatus(sessionId, "waiting");
           break;
         }
@@ -2535,6 +2596,12 @@ export class SessionManager extends EventEmitter {
   /** 廣播一筆權限請求已被解決(使用者回覆或逾時自動 deny),讓所有 client 的彈窗同步關閉。 */
   private emitPermissionResolved(payload: PermissionResolvedPush): void {
     this.emit("permission-resolved", payload);
+  }
+
+  /** 發問的 agent 已經不在了:以 `cancelled` 廣播,讓所有 client 收掉那份沒人等的待答表單(見 `releasePendingRequests()`)。 */
+  private emitUserDialogCancelled(sessionId: string, requestId: string): void {
+    const payload: UserDialogResolvedPush = { sessionId, requestId, result: { behavior: "cancelled" } };
+    this.emit("user-dialog-resolved", payload);
   }
 
   private async ensureBusy(sessionId: string): Promise<void> {
