@@ -4,7 +4,15 @@ import type { Readable } from "node:stream";
 import path from "node:path";
 import type { AgentEvent, AgentLaunchSpec, DialogAnswer, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, TitleGenerationRequest, TitleGenerationResult, Workspace } from "./types.js";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
 import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
@@ -14,6 +22,7 @@ import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./openc
 import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
 import { buildAgentChildEnv } from "./agent-env.js";
 import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded } from "./opencode-shell-env.js";
+import { invalidOptionError, optionNotOfferedError } from "./agent-options.js";
 
 /**
  * OpenCodeAdapter — 對接 opencode 的 headless server API(ARCHITECTURE.md
@@ -172,13 +181,19 @@ import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, wat
  *  - `interrupt`:true(見上方)。`terminal`:false(這不是 PTY 直通)。
  *
  * ---- 已知限制 / TODO ----
- *  - `setModel()`(對話中途換 model)已實作,但用的是「session 記憶體內的
- *    覆寫值,下一則訊息才套用」這個折衷方案——opencode 沒有「設定當前
- *    model」的獨立端點可呼叫,也沒有機會本機驗證 `/provider`/
- *    `/config/providers` 這兩個端點的實際形狀(見檔案開頭的對接策略,一貫
- *    要求「以實際觀察到的行為為準,不臆測」),所以不驗證這組
- *    providerID/modelID 是否真的存在。完整取捨說明見 `setModel()` 方法本身
- *    的註解。
+ *  - `setModel()`(對話中途換 model)用的是「session 記憶體內的覆寫值,下一則
+ *    訊息才套用」——opencode 沒有「設定當前 model」的獨立端點,model 是每則
+ *    訊息各自帶的欄位。完整取捨說明見 `setModel()` 方法本身的註解。
+ *  - **思考程度(2026-10-06)**:opencode 的「思考程度」是 model 的 **variants**。
+ *    1.18.7 實測:`GET /config/providers` 回 `{providers, default}`,每個 model 有
+ *    `variants`(物件,key 是 variant 名稱,例如 `none`/`low`/`medium`/`high`/`xhigh`,
+ *    Gemini 是 `minimal`/`low`/`high`;各 model 不同,部分 model 例如 `opencode/big-pickle`
+ *    是空的);`prompt_async`/`message` 的 body 有 `variant?: string`(讀 1.18.7
+ *    內附 SDK 的參數表與伺服器端 schema 確認)。spawn 時讀一次清單(失敗不影響
+ *    對話,只是不能選思考程度,也不驗證 model),選定的 variant 存在 session 裡、
+ *    隨每則訊息送出;可選的清單以 `session-options` 事件回報(只回報思考程度——
+ *    model 清單沿用 provider 目錄,同一個 `opencode models` 來源,而且會套用使用者的
+ *    provider 偏好)。
  *  - **每個 session 各自 spawn 一個獨立的 `opencode serve` 子程序**(與
  *    AcpAdapter/GenericPtyAdapter 每個 session 各自 spawn 一個子程序的既有
  *    模式一致,換取實作簡單、session 之間互不干擾),而非在這個 adapter
@@ -246,10 +261,13 @@ export class OpenCodeAdapter implements AgentAdapter {
       // 宣告為 "unknown",實際結果依 `spawn()` 內那次 `GET /command` 是否成功
       // 收斂(見該處呼叫點註解)。
       slashCommands: "unknown",
+      // 2026-10-06:model 是每則訊息自帶的欄位,adapter 自己保證做得到;思考程度要看目前 model 有沒有 variants。
+      modelSwitching: "supported",
+      effortSwitching: "unknown",
     };
   }
 
-  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
     const config = launch.opencodeConfig;
     const agentLabel = launch.providerId ?? "opencode";
     if (!config) {
@@ -267,7 +285,8 @@ export class OpenCodeAdapter implements AgentAdapter {
     // `AgentHandle.id` 提前在這裡生成(同 acp-adapter.ts 的做法):scoped token 要綁定「這一個 session」,而核發必須在
     // spawn 子程序之前(token 要放進子程序的 OPENCODE_CONFIG_CONTENT)。session 網路工具的**呼叫者身分**由 token 綁定的
     // 這個 id 決定,不是任何工具參數——所以它必須等於 SessionManager 登記的 session id(= handle.id)。
-    const handleId = randomUUID();
+    // 2026-10-15(session 自動復活):復活既有 session 時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`)。
+    const handleId = resume?.sessionId ?? randomUUID();
     const bridgeLaunch = mintMcpBridgeLaunch(
       { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
       handleId,
@@ -381,10 +400,36 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 建立;查不到只是少一層保護。見 child-registry.ts 的 registerChildDescendants()。
     void registerChildDescendants(child.pid);
 
-    let opencodeSessionId: string;
+    // 2026-10-15(session 自動復活):opencode 把 session 存在磁碟(它自己的資料目錄),新的 `opencode serve` 行程用同一個 session id
+    // 就能接著聊。先 `GET /session/{id}` 確認它還在(被使用者在 opencode 裡刪掉、資料目錄換了都會 404),在就沿用;不在、查詢失敗
+    // 一律退回 `POST /session` 開新的並把 `handle.resumed` 標 false(由呼叫端用 Deskmony 的對話紀錄補脈絡)——接回失敗不能讓 spawn 失敗。
+    let opencodeSessionId: string | undefined;
+    let resumed = false;
+    if (resume?.backendSessionId) {
+      try {
+        const existing = await getJson<{ id?: string } | undefined>(
+          `${baseUrl}/session/${encodeURIComponent(resume.backendSessionId)}`,
+          authorization,
+        );
+        if (existing?.id === resume.backendSessionId) {
+          opencodeSessionId = existing.id;
+          resumed = true;
+          console.log(`[opencode-adapter] ${agentLabel} 沿用既有的 opencode session ${opencodeSessionId}`);
+        } else {
+          console.warn(`[opencode-adapter] ${agentLabel} 的 GET /session/${resume.backendSessionId} 回應對不上,改開新的 opencode session`);
+        }
+      } catch (err) {
+        console.warn(
+          `[opencode-adapter] ${agentLabel} 找不到既有的 opencode session ${resume.backendSessionId},改開新的(由呼叫端補對話紀錄): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
     try {
-      const created = await postJson<{ id: string }>(`${baseUrl}/session`, {}, authorization);
-      opencodeSessionId = created.id;
+      if (opencodeSessionId === undefined) {
+        const created = await postJson<{ id: string }>(`${baseUrl}/session`, {}, authorization);
+        opencodeSessionId = created.id;
+      }
     } catch (err) {
       this.killChild(child);
       revokeBridgeToken();
@@ -420,6 +465,20 @@ export class OpenCodeAdapter implements AgentAdapter {
       );
     }
 
+    // 2026-10-06:各 model 的思考程度(variants)與 opencode 設定的預設 model(見檔案頂端「思考程度」段落)。
+    // 查不到不影響對話:只是不能選思考程度、也不驗證 model(退回這個功能之前的行為)。建立時指定的值在這裡驗證——
+    // 指定了做不到的 model/思考程度要讓建立失敗,不能悄悄用別的設定跑。
+    const modelCatalog = await fetchOpencodeModelCatalog(baseUrl, authorization, agentLabel);
+    let initialVariant: string | undefined;
+    try {
+      initialVariant = resolveLaunchVariant(launch, modelCatalog, agentLabel);
+    } catch (err) {
+      this.killChild(child);
+      revokeBridgeToken();
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
+      throw err;
+    }
+
     const outputQueue = new AsyncQueue<AgentEvent>({
       // 2026-09-04(稽核修補):緩衝溢位不靜默丟資料,至少讓它在 log 裡看得見。
       // 見 packages/adapters/src/async-queue.ts 的 DEFAULT_MAX_BUFFERED 註解。
@@ -430,7 +489,7 @@ export class OpenCodeAdapter implements AgentAdapter {
             "否則 completed 事件永遠進不來,session 會卡在 busy。",
         ),
     });
-    const handle: AgentHandle = { id: handleId, launch, workspace };
+    const handle: AgentHandle = { id: handleId, launch, workspace, ...(resume?.backendSessionId ? { resumed } : {}) };
     const sseController = new AbortController();
 
     const internal: InternalSession = {
@@ -457,6 +516,9 @@ export class OpenCodeAdapter implements AgentAdapter {
       titleSessionIds: new Set(),
       titleCollectors: new Map(),
       titleAborts: new Set(),
+      modelCatalog,
+      variant: initialVariant,
+      agentLabel,
     };
     this.sessions.set(handle.id, internal);
 
@@ -495,6 +557,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (availableCommandsFetched) {
       outputQueue.push({ type: "available-commands", commands: mapOpencodeCommands(availableCommands) });
     }
+    this.pushSessionOptions(internal);
 
     return handle;
   }
@@ -553,9 +616,11 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 記在記憶體裡,並不會呼叫任何 opencode API(沒有對應的端點),真正「生效」永遠是靠這裡
     // 讀到覆寫值的下一次 sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
     const modelField = internal.modelOverride ?? parseModelString(handle.launch.model);
+    // 2026-10-06:思考程度 = 這則訊息要用的 variant(見 `setEffort()`);沒選就不帶,用 model 自己的預設。
     void this.submitPrompt(internal, {
       parts: [{ type: "text", text: prompt.text }],
       ...(modelField ? { model: modelField } : {}),
+      ...(internal.variant ? { variant: internal.variant } : {}),
     });
   }
 
@@ -618,6 +683,14 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   events(handle: AgentHandle): AsyncIterable<AgentEvent> {
     return this.mustGet(handle).outputQueue;
+  }
+
+  /**
+   * opencode 自己的 session id(2026-10-15,session 自動復活)——opencode 把 session 存在磁碟,`spawn()` 帶這個值就沿用同一個
+   * session(見 `spawn()` 的 `GET /session/{id}` 確認)。`POST /session` 回應之後立刻就有值。
+   */
+  getBackendSessionId(handle: AgentHandle): string | undefined {
+    return this.sessions.get(handle.id)?.opencodeSessionId;
   }
 
   /**
@@ -740,15 +813,10 @@ export class OpenCodeAdapter implements AgentAdapter {
    * sendPrompt() 會用到,不需要、也沒有 API 可以呼叫去讓它「立即」生效),
    * 符合 `AgentAdapter.setModel()` 介面註解「不可靜默忽略成功」的要求。
    *
-   * 唯一會拋錯的情況是 `model` 本身不是合法的 "providerID/modelID" 形狀,
-   * 無法解析(與 `parseModelString()` 判斷 `launch.model` 是否合法的規則
-   * 完全一致)。刻意不做的部分:呼叫 `/config/providers`(或 `/provider`)
-   * 驗證這組 providerID/modelID 是否真的存在——本檔案的對接策略一貫要求
-   * 「以實際觀察到的 opencode 行為為準,不臆測」,這輪沒有機會對這兩個端點
-   * 做本機驗證。若使用者傳入語法正確但實際不存在的 model,opencode 會在
-   * 下一次 `POST /session/{id}/message` 時自行判定失敗,經由既有的
-   * `message.updated` 錯誤事件轉發路徑浮現(見 `handleEvent()`)——與
-   * 「`launch.model` 打錯字」的既有行為完全一致,不需要另外處理。
+   * 會拋錯的情況:`model` 不是合法的 "providerID/modelID" 形狀(與 `parseModelString()` 判斷 `launch.model`
+   * 是否合法的規則完全一致);2026-10-06 起,spawn 時查得到 `/config/providers` 的話,不在清單裡的 model 也直接
+   * 回明確錯誤(查不到清單時維持舊行為:不存在的 model 在下一則訊息經 `session.error` 浮現,見 `handleEvent()`)。
+   * 換 model 時,目前選的思考程度(variant)若新 model 沒有,就清掉(回到 model 自己的預設),並重送選項。
    */
   async setModel(handle: AgentHandle, model: string): Promise<void> {
     const internal = this.mustGet(handle);
@@ -761,25 +829,51 @@ export class OpenCodeAdapter implements AgentAdapter {
           `"anthropic/claude-sonnet-4-20250514"),收到的值 "${model}" 無法解析`,
       );
     }
+    const catalog = internal.modelCatalog;
+    if (catalog && !catalog.variants.has(model)) {
+      throw invalidOptionError("model", internal.agentLabel, model, [...catalog.variants.keys()]);
+    }
     internal.modelOverride = parsed;
+    if (internal.variant && !(catalog?.variants.get(model) ?? []).includes(internal.variant)) {
+      internal.variant = undefined;
+    }
+    this.pushSessionOptions(internal);
   }
 
   /**
-   * 思考程度(reasoning effort)——與上面的 `setModel()`**不同**,這裡**不**
-   * 採用「存進 session 覆寫、下一則訊息才生效」的 workaround:沒有查證到
-   * opencode API(`POST /session/{id}/message` 或其他端點)有任何
-   * reasoning-effort 相關欄位或機制可用(見本檔案頂端對接策略「以實際觀察到
-   * 的行為為準,不臆測」的一貫要求),不可臆測一個不存在的能力。明確拋出
-   * 錯誤,不可靜默忽略成功(見 packages/adapters/src/types.ts 的
-   * `AgentAdapter.setEffort()` 介面註解)。
+   * 2026-10-06:思考程度 = 目前 model 的 variant(見檔案頂端「思考程度」段落)。比照 `setModel()` 存進 session、
+   * 下一則訊息的 `variant` 欄位才真正送出。目前 model 不知道(沒指定、opencode 設定也沒寫)、沒有 variants、
+   * 或 spawn 時查不到清單 → 明確錯誤(不可靜默忽略成功,見 types.ts 的 `AgentAdapter.setEffort()` 介面註解)。
    */
-  async setEffort(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "opencode", operation: "setEffort" },
-      'software="opencode" 不支援變更思考程度(未查得到 opencode 有對應的 reasoning-effort 機制)',
-    );
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
+    const internal = this.mustGet(handle);
+    const variants = this.currentVariants(internal);
+    if (variants.length === 0) throw optionNotOfferedError("effort", internal.agentLabel);
+    if (!variants.includes(effort)) throw invalidOptionError("effort", internal.agentLabel, effort, variants);
+    internal.variant = effort;
+    this.pushSessionOptions(internal);
+  }
+
+  /** 目前 model 的 variants(不知道目前 model 或查不到清單 = 空陣列)。 */
+  private currentVariants(internal: InternalSession): string[] {
+    const catalog = internal.modelCatalog;
+    if (!catalog) return [];
+    const override = internal.modelOverride;
+    const model = override ? `${override.providerID}/${override.modelID}` : (internal.handle.launch.model ?? catalog.defaultModel);
+    return model ? (catalog.variants.get(model) ?? []) : [];
+  }
+
+  /** 送 `session-options`(只有思考程度,model 清單沿用 provider 目錄——見檔案頂端「思考程度」段落)。查不到清單就不送。 */
+  private pushSessionOptions(internal: InternalSession): void {
+    if (!internal.modelCatalog) return;
+    const variants = this.currentVariants(internal);
+    internal.outputQueue.push({
+      type: "session-options",
+      options:
+        variants.length > 0
+          ? { effort: { current: internal.variant, choices: variants.map((v) => ({ value: v, label: v })) } }
+          : {},
+    });
   }
 
   /**
@@ -1517,6 +1611,21 @@ interface InternalSession {
   titleCollectors: Map<string, TitleCollector>;
   /** 進行中的命名臨時對話,`dispose()` 時一併中止。 */
   titleAborts: Set<AbortController>;
+  /** 2026-10-06:spawn 時查到的各 model variants 與預設 model;查不到是 undefined(見 `fetchOpencodeModelCatalog()`)。 */
+  modelCatalog?: OpencodeModelCatalog;
+  /** 2026-10-06:目前選的思考程度(variant),隨每則訊息送出;undefined = 用 model 自己的預設。 */
+  variant?: string;
+  /** 錯誤訊息裡的 agent 名稱(providerId)。 */
+  agentLabel: string;
+}
+
+/**
+ * 2026-10-06:`GET /config/providers` 整理出來的「每個 model(`providerID/modelID`)有哪些 variants」,
+ * 加上 `GET /config` 的 `model`(使用者 opencode 設定的預設 model,沒設就是 undefined)。
+ */
+interface OpencodeModelCatalog {
+  variants: Map<string, string[]>;
+  defaultModel?: string;
 }
 
 /**
@@ -1796,6 +1905,60 @@ async function getJson<T = unknown>(url: string, authorization: string): Promise
     );
   }
   return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/** `GET /config/providers` 用得到的部分(opencode 1.18.7 實測形狀,見檔案頂端「思考程度」段落)。 */
+interface OpencodeConfigProviders {
+  providers?: Array<{ id: string; models?: Record<string, { variants?: Record<string, unknown> }> }>;
+}
+
+/**
+ * 2026-10-06:查這個 opencode server 的 model 清單與各 model 的 variants。**永遠不丟例外**——查不到(舊版、e2e 替身沒有
+ * 這支端點……)回 undefined,呼叫端退回「不能選思考程度、不驗證 model」。預設 model 讀 `GET /config` 的 `model`
+ * (同一份設定裡有 Deskmony 自己注入的 `OPENCODE_CONFIG_CONTENT`,只在這個行程的記憶體裡讀,不外流)。
+ */
+async function fetchOpencodeModelCatalog(baseUrl: string, authorization: string, agentLabel: string): Promise<OpencodeModelCatalog | undefined> {
+  let providers: OpencodeConfigProviders;
+  try {
+    providers = await getJson<OpencodeConfigProviders>(`${baseUrl}/config/providers`, authorization);
+  } catch (err) {
+    console.error(
+      `[opencode-adapter] ${agentLabel} GET /config/providers 失敗(不影響對話,只是不能選思考程度): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
+  const variants = new Map<string, string[]>();
+  for (const provider of providers?.providers ?? []) {
+    for (const [modelId, model] of Object.entries(provider.models ?? {})) {
+      variants.set(`${provider.id}/${modelId}`, Object.keys(model?.variants ?? {}));
+    }
+  }
+  if (variants.size === 0) return undefined;
+  let defaultModel: string | undefined;
+  try {
+    const config = await getJson<{ model?: unknown }>(`${baseUrl}/config`, authorization);
+    if (typeof config?.model === "string" && config.model) defaultModel = config.model;
+  } catch {
+    // 沒有預設 model 只代表「沒指定 model 時不知道能選哪些思考程度」。
+  }
+  return { variants, defaultModel };
+}
+
+/**
+ * 2026-10-06:驗證建立時指定的 model / 思考程度,回傳要用的 variant。查不到清單時不驗證(舊行為),原樣採用指定的值。
+ * 指定了做不到的值 → 丟明確錯誤(呼叫端收掉子程序後往外丟,session 建立失敗)。
+ */
+function resolveLaunchVariant(launch: AgentLaunchSpec, catalog: OpencodeModelCatalog | undefined, agentLabel: string): string | undefined {
+  if (!catalog) return launch.effort;
+  if (launch.model && parseModelString(launch.model) && !catalog.variants.has(launch.model)) {
+    throw invalidOptionError("model", agentLabel, launch.model, [...catalog.variants.keys()]);
+  }
+  if (!launch.effort) return undefined;
+  const model = launch.model ?? catalog.defaultModel;
+  const variants = model ? (catalog.variants.get(model) ?? []) : [];
+  if (variants.length === 0) throw optionNotOfferedError("effort", agentLabel);
+  if (!variants.includes(launch.effort)) throw invalidOptionError("effort", agentLabel, launch.effort, variants);
+  return launch.effort;
 }
 
 /**

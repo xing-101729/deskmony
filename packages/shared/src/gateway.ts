@@ -2,7 +2,8 @@ import { z } from "zod";
 import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema, SessionTitleMethodSchema } from "./session.js";
 import { PromptInputSchema } from "./prompt.js";
 import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema, SlashCommandInfoSchema } from "./events.js";
-import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-launch.js";
+import { AgentSoftwareSchema, SessionPermissionModeSchema } from "./agent-launch.js";
+import { EffortValueSchema } from "./session-options.js";
 import { AdapterCapabilitiesSchema } from "./adapter-capabilities.js";
 import { AgentDetectionEntrySchema } from "./detect.js";
 import { MaskedProviderPrefsSchema, ProviderPrefsPatchInputSchema } from "./provider-catalog.js";
@@ -155,8 +156,9 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * M5 Round C 新增:對話中切換 model(見 apps/core/src/session/
    * session-manager.ts 的 `SessionManager.setSessionModel()`、
    * packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
-   * `software="claude-agent-sdk"` 與 `"opencode"` 的 session 支援;acp/pty
-   * 呼叫這個方法會得到明確的錯誤(而不是默默成功),見對應 adapter 的實作。
+   * `software="claude-agent-sdk"` 與 `"opencode"` 的 session 支援;acp 要看 agent 有沒有宣告 model 選項
+   * (`Session.options.model`,2026-10-06 起);pty 與沒宣告的 acp agent 呼叫這個方法會得到明確的錯誤
+   * (而不是默默成功),見對應 adapter 的實作。
    */
   z.object({
     ...baseRequest,
@@ -167,13 +169,14 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    * 比照上面的 `session.setModel`:對話中切換 effort(思考程度,見
    * apps/core/src/session/session-manager.ts 的
    * `SessionManager.setSessionEffort()`、packages/adapters/src/types.ts 的
-   * `AgentAdapter.setEffort()` 介面註解)。只有 `software="claude-agent-sdk"`
-   * 的 session 支援;其餘 adapter 呼叫這個方法會得到明確的錯誤。
+   * `AgentAdapter.setEffort()` 介面註解)。2026-10-06 起值由各 agent 定義(見 session-options.ts):
+   * claude-agent-sdk 只收 Claude 的 5 級;acp/opencode 要在 agent 回報的清單裡(`Session.options.effort`);
+   * 不支援的 session 會得到明確的錯誤。
    */
   z.object({
     ...baseRequest,
     method: z.literal("session.setEffort"),
-    params: z.object({ sessionId: z.string(), effort: EffortLevelSchema }),
+    params: z.object({ sessionId: z.string(), effort: EffortValueSchema }),
   }),
   /**
    * 2026-10-06:手動改名。`title` 在 core 端正規化(換行/控制字元換成空白、去頭尾空白)後必須是
@@ -299,7 +302,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     params: z.object({ sessionId: z.string().min(1), limit: z.number().int().positive().optional() }),
   }),
   /**
-   * `create_session` 的 gateway 入口。參數只有 agent/prompt/model/title/workingDir(`agent` = providerId);
+   * `create_session` 的 gateway 入口。參數只有 agent/prompt/model/effort/title/workingDir(`agent` = providerId);
    * 新 session 的 `parentSessionId` 由 core 以 token 綁定的呼叫者帶入(**不是參數**)。`workingDir` 省略時沿用
    * 呼叫者的資料夾。
    */
@@ -310,6 +313,7 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
       agent: z.string().min(1),
       prompt: z.string().min(1),
       model: z.string().optional(),
+      effort: EffortValueSchema.optional(),
       title: z.string().optional(),
       workingDir: z.string().optional(),
     }),
@@ -510,6 +514,9 @@ export const ServerPushSchema = z.object({
      * `MessageOriginSchema`)剛被寫進某個 session 的歷史——payload 是 `SessionMessagePushSchema`。
      * 讓正在看那個 session 的 UI 即時顯示「來自 <title>」的訊息(人類自己輸入的訊息不走這條,
      * 桌面端是樂觀回顯)。取代 S12 的 `child-result`(「子完成 → 結果自動注入父」已整個移除)。
+     * 2026-10-15 起同一條 push 也載運 core 在 session 的 agent 重新啟動後留下的**系統說明**(`role: "system"`,沒有 `origin`,
+     * content 是 `{event, params}` JSON,見 session-manager.ts 的 `announceRevive()`)——它不是 adapter 事件,沒有別的管道能讓
+     * 正在看那條 session 的 UI 立刻顯示。
      */
     "session-message",
     /**
@@ -779,8 +786,8 @@ export const SessionSendFromAgentResultSchema = z.object({ ok: z.literal(true) }
 export const SessionForwardMessageResultSchema = z.object({ ok: z.literal(true) });
 
 /**
- * `session-message` push 的 payload:別的 session 送來的訊息(`message.origin` 一定有值)剛被寫進
- * `sessionId` 的歷史。見上方 `ServerPushSchema.channel` 的說明。
+ * `session-message` push 的 payload:別的 session 送來的訊息(`message.origin` 一定有值),或 agent 重新啟動後的系統說明
+ * (`message.role === "system"`)剛被寫進 `sessionId` 的歷史。見上方 `ServerPushSchema.channel` 的說明。
  */
 export const SessionMessagePushSchema = z.object({
   sessionId: z.string(),

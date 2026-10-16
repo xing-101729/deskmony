@@ -541,6 +541,7 @@ export class WsGateway {
     });
     // 2026-10-02(P3):別的 session 送來的訊息(`origin` 有值的 user 訊息)剛寫進某個 session 的歷史——
     // 轉播給所有已認證 client,讓正在看那個 session 的 UI 即時顯示「來自 <title>」。
+    // (2026-10-15:也轉播 agent 重新啟動後的系統說明,`role: "system"`。)
     // (取代 S12 的 `child-result` push:「子完成 → 結果自動注入父」已整個移除。)
     this.sessionManager.on("session-message", (payload: SessionMessagePush) => {
       this.broadcast({ kind: "event", channel: "session-message", payload });

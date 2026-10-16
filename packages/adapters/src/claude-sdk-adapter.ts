@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { getSessionInfo, query } from "@anthropic-ai/claude-agent-sdk";
 import type {
   McpServerConfig,
   ModelUsage,
@@ -15,7 +15,7 @@ import type {
 import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
 import type { SessionNetworkPort } from "@deskmony/shared";
-import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
+import { DeskmonyError, EffortLevelSchema, ErrorCodes } from "@deskmony/shared";
 import type {
   AdapterCapabilities,
   AgentAdapter,
@@ -30,6 +30,7 @@ import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
 import { buildAgentChildEnv } from "./agent-env.js";
+import { invalidOptionError } from "./agent-options.js";
 import {
   SESSION_NETWORK_MCP_SERVER_NAME,
   SESSION_NETWORK_ALLOWED_TOOL_NAMES,
@@ -150,6 +151,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // 憑證實測,見 spawn() 內呼叫點的註解),可靠性等同上面的
       // usageReporting:"supported"。
       slashCommands: "supported",
+      // 2026-10-06:SDK 的 `Query.setModel()`/`applyFlagSettings({ effortLevel })`,adapter 自己保證做得到。
+      modelSwitching: "supported",
+      effortSwitching: "supported",
     };
   }
 
@@ -162,6 +166,15 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     // 是這個 handle.id 的閉包捕捉,必須等於 SessionManager 用來登記這條 session 的 id。
     const handle: AgentHandle = { id: resume?.sessionId ?? randomUUID(), launch, workspace };
     const agentLabel = launch.providerId ?? "claude-agent-sdk";
+
+    // 2026-10-15(session 自動復活):帶了 backendSessionId 時,先確認 SDK 那邊的對話檔還在才 `resume`。`resume` 指到不存在的
+    // session 時 CLI 要等第一則訊息送進去才報錯結束,session 會卡在 error、使用者的訊息也沒人回;提早知道就能改開全新的對話,
+    // 並由呼叫端(SessionManager)用 Deskmony 存的對話紀錄補上脈絡。`handle.resumed` 據實回報。
+    const resumeBackendSessionId =
+      resume?.backendSessionId && (await claudeSessionExists(resume.backendSessionId, workspace.path, agentLabel))
+        ? resume.backendSessionId
+        : undefined;
+    if (resume?.backendSessionId) handle.resumed = resumeBackendSessionId !== undefined;
 
     const inputQueue = new AsyncQueue<SDKUserMessage>();
     const outputQueue = new AsyncQueue<AgentEvent>({
@@ -206,7 +219,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     const options: SdkOptions = {
       cwd: workspace.path,
       model: launch.model,
-      effort: launch.effort,
+      effort: toClaudeEffort(launch.effort),
       includePartialMessages: true,
       permissionMode: "default",
       spawnClaudeCodeProcess: (spawnOptions) => {
@@ -248,7 +261,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // `DESKMONY_AUTH_TOKEN`,連上 gateway 就能自己核准權限/切 YOLO。完整理由見 agent-env.ts。
       env: buildAgentChildEnv(launch.env) as Record<string, string>,
       // S6(crash-recovery)L4 §4.1:「繼續(保有記憶)」——見檔案頂端查證說明。
-      ...(resume ? { resume: resume.backendSessionId } : {}),
+      ...(resumeBackendSessionId ? { resume: resumeBackendSessionId } : {}),
       // S8(agent-lifecycle)L4 §3.2 修正實作:`systemPrompt` 在這輪之前
       // **從未被任何 adapter 轉發過**(查證:acp-adapter.ts/opencode-adapter.ts/
       // pty-adapter.ts 均無 systemPrompt 相關程式碼)——是一個存在於 schema/DB/
@@ -662,9 +675,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
    * `applyFlagSettings()` 的官方文件)。同樣不需要 dispose 現有連線或重新
    * spawn,對話上下文原封不動保留。
    */
-  async setEffort(handle: AgentHandle, effort: EffortLevel): Promise<void> {
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
     const internal = this.mustGet(handle);
-    await internal.sdkQuery.applyFlagSettings({ effortLevel: effort });
+    await internal.sdkQuery.applyFlagSettings({ effortLevel: toClaudeEffort(effort) });
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {
@@ -1009,4 +1022,33 @@ function mapSlashCommands(commands: SlashCommand[]): SlashCommandInfo[] {
     description: c.description || undefined,
     argumentHint: c.argumentHint || undefined,
   }));
+}
+
+/**
+ * SDK 的磁碟對話檔(`~/.claude/projects/<專案目錄>/<sessionId>.jsonl`)還在嗎?`getSessionInfo()` 的官方註解:
+ * 找不到檔案(或是 sidechain、沒有可擷取摘要)回傳 `undefined`。查詢本身失敗(磁碟讀取錯誤等)不代表對話不在——
+ * 保守地當成存在、照舊走 `resume`(維持這個檢查出現之前的行為),只留一筆警告。
+ */
+async function claudeSessionExists(backendSessionId: string, cwd: string, agentLabel: string): Promise<boolean> {
+  try {
+    const info = await getSessionInfo(backendSessionId, { dir: cwd });
+    if (info === undefined) {
+      console.warn(`[claude-sdk-adapter] ${agentLabel} 的後端對話 ${backendSessionId} 在 ${cwd} 底下找不到,改開全新的對話`);
+    }
+    return info !== undefined;
+  } catch (err) {
+    console.warn(`[claude-sdk-adapter] ${agentLabel} 確認後端對話 ${backendSessionId} 是否存在時失敗,照常嘗試 resume: ${String(err)}`);
+    return true;
+  }
+}
+
+/**
+ * 2026-10-06:思考程度的值改成各 agent 自己定義的字串(見 packages/shared/src/session-options.ts),Claude 只認
+ * `EffortLevelSchema` 的 5 級——其他值丟明確錯誤,不能原樣塞給 SDK。
+ */
+function toClaudeEffort(effort: string | undefined): EffortLevel | undefined {
+  if (effort === undefined) return undefined;
+  const parsed = EffortLevelSchema.safeParse(effort);
+  if (!parsed.success) throw invalidOptionError("effort", "Claude", effort, [...EffortLevelSchema.options]);
+  return parsed.data;
 }

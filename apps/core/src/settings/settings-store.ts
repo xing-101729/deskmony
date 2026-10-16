@@ -232,3 +232,50 @@ export async function migrateLegacyEnabledModelIds(store: SettingsStore): Promis
 
   await patchProviderPrefs(store, CLAUDE_AGENT_SDK_PROVIDER_ID, { enabledModelIds: legacyIds });
 }
+
+// ---- 2026-10-06:每個 provider「上次選的」model / 思考程度 -----------------------------------------
+
+/**
+ * 「要等 session 開起來才知道有哪些選項」的 agent(ACP:provider 目錄的 `optionsAfterStart`)在建立 session 的選單
+ * 裡沒有選項可選——使用者只能在 session 開起來之後從對話標題列選。這裡記住每個 provider 最近一次**由使用者**選的
+ * model / 思考程度,下次建立同一個 agent 的 session 時當成軟性偏好自動套用(agent 這次不提供那個值就略過,
+ * 見 `AgentLaunchSpec.preferredModel`)。
+ *
+ * 刻意**不放進** `providerPrefs`:那是使用者在設定頁編輯的偏好(patch 語意、gateway 會整份回傳給 client),
+ * 這裡是自動記錄的使用狀態,混在一起會讓「設定頁沒動,偏好卻自己變了」。
+ */
+const PROVIDER_LAST_SELECTION_KEY = "providerLastSelection";
+
+export interface ProviderLastSelection {
+  model?: string;
+  effort?: string;
+}
+
+export async function getProviderLastSelection(store: SettingsStore, providerId: string): Promise<ProviderLastSelection> {
+  const map = await readLastSelectionMap(store);
+  const entry = map[providerId];
+  if (!isRecord(entry)) return {};
+  return {
+    model: typeof entry.model === "string" && entry.model ? entry.model : undefined,
+    effort: typeof entry.effort === "string" && entry.effort ? entry.effort : undefined,
+  };
+}
+
+/** 合併寫入(只覆寫有提供的欄位)。 */
+export async function rememberProviderSelection(store: SettingsStore, providerId: string, patch: ProviderLastSelection): Promise<void> {
+  const map = await readLastSelectionMap(store);
+  const previous = isRecord(map[providerId]) ? (map[providerId] as ProviderLastSelection) : {};
+  map[providerId] = { ...previous, ...(patch.model ? { model: patch.model } : {}), ...(patch.effort ? { effort: patch.effort } : {}) };
+  await store.set(PROVIDER_LAST_SELECTION_KEY, JSON.stringify(map));
+}
+
+async function readLastSelectionMap(store: SettingsStore): Promise<Record<string, unknown>> {
+  const raw = await store.get(PROVIDER_LAST_SELECTION_KEY);
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}

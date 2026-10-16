@@ -12,5 +12,8 @@
     "chainBudgetExceeded": "This conversation chain has reached its message limit of {{limit}} and was halted — user intervention is needed (typing a new message in the UI starts a new chain)",
     "createdButNotDelivered": "Session {{sessionId}} was created, but sending its first message failed: {{detail}}",
     "cannotForwardToSelf": "A message cannot be forwarded to its own source session"
+  },
+  "session": {
+    "reviveFailed": "Could not restart the agent for session {{sessionId}}: {{detail}}"
   }
 }

@@ -12,5 +12,8 @@
     "chainBudgetExceeded": "この会話チェーンはメッセージ上限 {{limit}} に達して停止されました。ユーザーの介入が必要です(画面で新しいメッセージを入力すると新しいチェーンが始まります)",
     "createdButNotDelivered": "セッション {{sessionId}} は作成されましたが、最初のメッセージの送信に失敗しました:{{detail}}",
     "cannotForwardToSelf": "転送元のセッション自身にメッセージを転送することはできません"
+  },
+  "session": {
+    "reviveFailed": "セッション {{sessionId}} の agent を再起動できませんでした:{{detail}}"
   }
 }

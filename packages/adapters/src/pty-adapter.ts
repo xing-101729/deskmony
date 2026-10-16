@@ -4,7 +4,7 @@ import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { AgentEvent, AgentLaunchSpec, PromptInput } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { buildAgentChildEnv } from "./agent-env.js";
@@ -89,10 +89,14 @@ export class GenericPtyAdapter implements AgentAdapter {
       // 清單」這個概念本身都不存在,這是**結構上**的不可能。若底層 CLI 自己
       // 有互動式 "/" 選單,終端視圖裡直接打字就已經能用,不需要這裡額外支援。
       slashCommands: "unsupported",
+      // 2026-10-06:對話中換 model/思考程度結構上不可能——claude-cli 只能在建立時把 `--model`/`--effort` 烤進
+      // 啟動參數(見 AgentCatalog.buildLaunch())。
+      modelSwitching: "unsupported",
+      effortSwitching: "unsupported",
     };
   }
 
-  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
     const ptyConfig = launch.ptyConfig;
     if (!ptyConfig) {
       const agentLabel = launch.providerId ?? "pty";
@@ -135,7 +139,10 @@ export class GenericPtyAdapter implements AgentAdapter {
       );
     }
 
-    const handle: AgentHandle = { id: randomUUID(), launch, workspace };
+    // 2026-10-15(session 自動復活):終端程式沒有「後端 session」可以接回,重新啟動就是一個全新的程序,`resumed` 恆為 false
+    // (呼叫端據此在對話裡說明「這個 agent 不保留先前的記憶」,且不把對話紀錄灌進終端)。只沿用呼叫端指定的 Deskmony
+    // session id,讓 handle.id 與 DB 的 session id 一致。
+    const handle: AgentHandle = { id: resume?.sessionId ?? randomUUID(), launch, workspace, resumed: false };
     const internal: InternalSession = {
       handle,
       ptyProcess,
@@ -271,6 +278,7 @@ export class GenericPtyAdapter implements AgentAdapter {
    * M5 Round C:pty 是無結構化的終端直通,連「model」這個概念本身都不存在
    * (終端裡跑的可能根本不是任何 LLM CLI)——明確拋出錯誤,不可靜默忽略成功
    * (見 packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
+   * claude-cli 的 model/思考程度只能在建立 session 時決定(`--model`/`--effort`,見 AgentCatalog.buildLaunch())。
    */
   async setModel(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)

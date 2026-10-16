@@ -12,5 +12,8 @@
     "chainBudgetExceeded": "這條對話鏈已達訊息上限 {{limit}},已熔斷,需要使用者介入(在畫面上輸入新訊息就會開啟新的對話鏈)",
     "createdButNotDelivered": "已建立 session {{sessionId}},但第一則訊息送出失敗:{{detail}}",
     "cannotForwardToSelf": "不能把訊息轉傳給來源 session 自己"
+  },
+  "session": {
+    "reviveFailed": "無法重新啟動 session {{sessionId}} 的 agent:{{detail}}"
   }
 }

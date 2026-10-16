@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PolicyRuleSchema } from "./core-config.js";
+import { SessionOptionsSchema } from "./session-options.js";
 
 /**
  * AgentEvent:AgentAdapter.events() 串流出的統一事件型別。
@@ -230,6 +231,17 @@ export const AvailableCommandsEventSchema = z.object({
 });
 export type AvailableCommandsEvent = z.infer<typeof AvailableCommandsEventSchema>;
 
+/**
+ * 2026-10-06(各 agent 選 model 與思考程度):agent 回報「這個 session 現在能選哪些 model / 思考程度、目前是哪個」。
+ * 來源與各 agent 的查詢方式見 session-options.ts。**REPLACE 語意**(同 `available-commands`):每次都是完整一份,
+ * 消費端整份覆蓋;選項有變(例如換了 model,可選的思考程度跟著變)時 adapter 會再送一次。
+ */
+export const SessionOptionsEventSchema = z.object({
+  type: z.literal("session-options"),
+  options: SessionOptionsSchema,
+});
+export type SessionOptionsEvent = z.infer<typeof SessionOptionsEventSchema>;
+
 export const AgentEventSchema = z.discriminatedUnion("type", [
   MessageDeltaEventSchema,
   ToolCallEventSchema,
@@ -242,6 +254,7 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   UsageEventSchema,
   ContextUsageEventSchema,
   AvailableCommandsEventSchema,
+  SessionOptionsEventSchema,
 ]);
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 

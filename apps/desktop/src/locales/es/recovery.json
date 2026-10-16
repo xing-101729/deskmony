@@ -4,7 +4,7 @@
   "emptyTitle": "No hay sesiones interrumpidas por ahora",
   "unknownAgent": "(agent desconocido)",
   "sessionMetaLine": "{{agent}} · interrumpida a las {{interruptedAt}} · última actividad {{lastSeenAt}}",
-  "continueTitle": "Reconectar la sesión del backend: el agent recuerda el contexto anterior",
+  "continueTitle": "Reiniciar el agent y reconectar su conversación anterior; si el backend no puede, continúa a partir del registro de conversación que guardó Deskmony",
   "continueLabel": "Continuar (conservar memoria)",
   "takeoverTitle": "Iniciar una sesión nueva con un resumen inyectado: la mente del agent es nueva, solo ha leído las notas",
   "takeoverLabel": "Retomar (reiniciar desde el resumen)",

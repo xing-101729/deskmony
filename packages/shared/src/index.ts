@@ -6,6 +6,7 @@ export * from "./provider-catalog.js";
 export * from "./resolve-providers.js";
 export * from "./session.js";
 export * from "./session-title.js";
+export * from "./session-options.js";
 export * from "./prompt.js";
 export * from "./events.js";
 export * from "./adapter-capabilities.js";

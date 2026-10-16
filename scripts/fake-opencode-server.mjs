@@ -29,6 +29,12 @@
  *     覆寫,見該檔案),回覆文字前面會多一段 `[model:providerID/modelID]`
  *     標記——只用來讓 e2e(步驟24f)斷言「setModel() 之後,實際送出的請求
  *     真的帶新 model」,沒有帶 model 的既有呼叫方式完全不受影響。
+ *     2026-10-06:body 帶了 `variant`(思考程度,見 OpenCodeAdapter.setEffort())時,再加一段
+ *     `[variant:X]` 標記,同樣只用來讓 e2e 斷言 wire 上真的帶了選的思考程度。
+ *   - 2026-10-06:以 `--variants` 旗標啟動時(e2e 的 FAKE_OPENCODE_VARIANTS provider,見
+ *     scripts/lib/e2e-providers.mjs),模擬 opencode 1.18.7 的 `GET /config/providers`(FAKE_OPENCODE_VARIANT_PROVIDERS:
+ *     每個 model 的 `variants`)與 `GET /config` 的 `model`(使用者設定的預設 model,FAKE_OPENCODE_DEFAULT_MODEL)。
+ *     沒有這個旗標時兩者都維持「舊版沒有這支端點 / 設定裡沒寫 model」,既有測試不受影響。
  *   - 若 prompt 文字以 TOOL_CALL_PREFIX 開頭:照真實 opencode 1.18.7 實測到的
  *     形狀(2026-09-17,見 packages/adapters/src/opencode-adapter.ts 檔頭
  *     `type==="tool"` 的實測紀錄)送出一個 bash 工具——整個生命週期同一個
@@ -124,12 +130,22 @@
  *     `message.updated` 帶 `cost`/`tokens`(真實 opencode 的形狀);`TITLE_MODE_TOOL`:bash 工具 pending → running →
  *     `permission.asked`,**被允許**才寫 `TITLE_TOOL_MARKER_FILE`;`TITLE_MODE_HANG`:等到 `/abort` 或 `DELETE`;
  *     `TITLE_MODE_REFUSE`:`session.error`。新增 `DELETE /session/{id}`(真實 opencode 1.18.7 實測回 `true`)。
+ *   - 2026-10-15(session 自動復活,scripts/e2e-session-revive.mjs 用):模擬「opencode 把 session 存在磁碟、新的 server 行程
+ *     用同一個 session id 就能接著聊」。環境變數 `FAKE_OPENCODE_STATE_DIR` 有設時,每個 session 存成 `<dir>/ses-<id>.json`
+ *     (每一輪收到的 prompt),`GET /session/{id}` 找得到(命中就在這個行程裡還原,回 `{id, directory}`)就沿用;找不到回 404
+ *     `NotFoundError`(真實 opencode 的形狀)。**沒設時完全不持久化**,所以新行程的 `GET /session/{id}` 一律 404——模擬
+ *     「opencode 那邊的 session 已經不在」,adapter 要退回 `POST /session` 開新的。`FAKE_OPENCODE_FORGET=1` 同樣讓 `GET /session/{id}`
+ *     一律 404(即使 STATE_DIR 有檔案,仍記 calls.log)——「有持久化、但這個 session 在 opencode 那邊已被清掉」。`<dir>/calls.log` 每個 `POST /session`、
+ *     `GET /session/{id}`(`hit`/`miss`)附加一行 JSON `{pid, call}`,e2e 靠它斷言「走了哪條路」。
+ *     prompt 文字**結尾**是 `REVIVE_REPORT_MARKER`(結尾,所以夾在對話紀錄裡的舊標記不會誤觸)→ 回 `REVIVE_REPORT:` + JSON
+ *     `{agentSessionId, mode, priorPrompts, prompt}`:這個 session 在**這個伺服器自己的狀態**裡先前收過的 prompt、這一輪收到的完整文字。
  *   - `REPORT_SESSIONS_PREFIX`:回 `SESSIONS:` + JSON——每個 session 的 `{id, kind, parentID, deleted, abortCount,
  *     permissionReplies}`(只回統計,不回對話內容)。
  */
 
 import http from "node:http";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -139,6 +155,45 @@ import { parseTitleRequestPrompt } from "../packages/shared/dist/session-title.j
 import { TITLE_MODE_HANG, TITLE_MODE_REFUSE, TITLE_MODE_TOOL, TITLE_TOOL_MARKER_FILE, fakeTitleReplyFor } from "./lib/fake-title-modes.mjs";
 
 export const FAKE_OPENCODE_REPLY_CHUNKS = ["Hello", " from", " fake", " OpenCode", " server"];
+/** 2026-10-15(session 自動復活)e2e 用,見檔頭註解(與 fake-acp-agent.mjs 的同名常數同值)。 */
+export const REVIVE_REPORT_MARKER = "[[E2E_REVIVE_REPORT]]";
+/** 有設才持久化 session、才記 calls.log,見檔頭「2026-10-15」。 */
+const STATE_DIR = process.env.FAKE_OPENCODE_STATE_DIR || undefined;
+
+function appendCall(call) {
+  if (!STATE_DIR) return;
+  mkdirSync(STATE_DIR, { recursive: true });
+  appendFileSync(path.join(STATE_DIR, "calls.log"), `${JSON.stringify({ pid: process.pid, call })}\n`, "utf8");
+}
+
+function stateFile(sessionId) {
+  return path.join(STATE_DIR, `ses-${sessionId}.json`);
+}
+
+function persistSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!STATE_DIR || !session) return;
+  mkdirSync(STATE_DIR, { recursive: true });
+  writeFileSync(stateFile(sessionId), JSON.stringify({ id: sessionId, turns: session.turns }), "utf8");
+}
+
+/** 一個全新的 session 記錄(`POST /session` 與從磁碟還原共用)。 */
+function newSessionRecord(overrides = {}) {
+  return {
+    aborted: false,
+    pendingPermission: new Map(),
+    pendingQuestion: new Map(),
+    // 2026-10-06:REPORT_SESSIONS_PREFIX 回報用的統計。
+    kind: "main",
+    parentID: undefined,
+    deleted: false,
+    abortCount: 0,
+    permissionReplies: [],
+    // 2026-10-15:這個伺服器「記得」的對話(每一輪收到的 prompt),見檔頭。
+    turns: [],
+    ...overrides,
+  };
+}
 export const TOOL_CALL_PREFIX = "OPENCODE_TOOL_CALL";
 /** TOOL_CALL_PREFIX 流程裡 `running`/`completed` 帶的完整參數(`pending` 一律是 `{}`)。 */
 export const TOOL_CALL_INPUT = { command: "echo hello-fake-opencode" };
@@ -163,6 +218,21 @@ export const REPORT_PRESENCE_PREFIX = "OPENCODE_REPORT_PRESENCE:";
 export const REPORT_SHELL_ENV_PREFIX = "OPENCODE_REPORT_SHELL_ENV:";
 /** 啟動時(isMainModule)載入的外掛宿主狀態。 */
 let pluginHost = { hooks: [], loaded: [], errors: [] };
+
+/** 2026-10-06:`--variants` 模式(見檔頭)回報的 provider/model/variants——形狀照 opencode 1.18.7 的 `/config/providers`。 */
+export const FAKE_OPENCODE_VARIANT_PROVIDERS = [
+  {
+    id: "fake",
+    models: {
+      "model-a": { id: "model-a", variants: {} },
+      "model-b": { id: "model-b", variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } } },
+      "model-c": { id: "model-c", variants: { minimal: {}, max: {} } },
+    },
+  },
+];
+/** `--variants` 模式下 `GET /config` 回報的預設 model。 */
+export const FAKE_OPENCODE_DEFAULT_MODEL = "fake/model-b";
+const VARIANTS_MODE = process.argv.includes("--variants");
 export const SUBAGENT_PERMISSION_PREFIX = "OPENCODE_SUBAGENT_PERMISSION";
 /** SUBAGENT_PERMISSION_PREFIX 流程裡子 session 說的話(e2e 斷言它**不會**出現在本 session 的對話)。 */
 export const SUBAGENT_CHILD_TEXT = "CHILD-SESSION-SECRET-TEXT";
@@ -286,8 +356,12 @@ async function streamTextReply(sessionId, messageId, chunks, { chunkDelayMs = 5 
   return partId;
 }
 
-async function handlePrompt(sessionId, text, model) {
+async function handlePrompt(sessionId, text, model, variant) {
   const session = sessions.get(sessionId);
+  // 2026-10-15:這個伺服器自己「記得」的對話——先取出這一輪之前的(給 REVIVE_REPORT 用),再把這一輪記進去並落地。
+  const priorPrompts = session.turns.map((turn) => turn.prompt);
+  session.turns.push({ prompt: text });
+  persistSession(sessionId);
   const userMessageId = `msg_${randomUUID()}`;
   const assistantMessageId = `msg_${randomUUID()}`;
   broadcast("message.updated", { sessionID: sessionId, info: { id: userMessageId, role: "user", sessionID: sessionId } });
@@ -310,6 +384,11 @@ async function handlePrompt(sessionId, text, model) {
   if (titleRequest) {
     session.kind = "title";
     await handleTitlePrompt(session, sessionId, assistantMessageId, titleRequest.firstMessage);
+  } else if (text.trimEnd().endsWith(REVIVE_REPORT_MARKER)) {
+    // 2026-10-15:回報這個伺服器自己的記憶(見檔頭)。
+    const report = { agentSessionId: sessionId, mode: STATE_DIR ? "persisted" : "memory", priorPrompts, prompt: text };
+    await streamTextReply(sessionId, assistantMessageId, [`REVIVE_REPORT:${JSON.stringify(report)}`]);
+    broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   } else if (text.startsWith(SLOW_PREFIX)) {
     session.aborted = false;
     // 真實 opencode 實測:一個 text part 的「建立」事件(message.part.updated,
@@ -562,9 +641,11 @@ async function handlePrompt(sessionId, text, model) {
     // OpenCodeAdapter.sendPrompt()/setModel())在回覆前面加一段可觀察的
     // 標記——只用來讓 e2e(步驟24f)能斷言「收到的 model 欄位真的變了」,
     // 不影響既有沒有帶 model 的呼叫(該分支維持與之前完全相同的純文字回覆)。
-    const chunks = model
-      ? [`[model:${model.providerID}/${model.modelID}] `, ...FAKE_OPENCODE_REPLY_CHUNKS]
-      : FAKE_OPENCODE_REPLY_CHUNKS;
+    const chunks = [
+      ...(model ? [`[model:${model.providerID}/${model.modelID}] `] : []),
+      ...(variant ? [`[variant:${variant}] `] : []),
+      ...FAKE_OPENCODE_REPLY_CHUNKS,
+    ];
     await streamTextReply(sessionId, assistantMessageId, chunks);
     broadcast("message.updated", { sessionID: sessionId, info: { id: assistantMessageId, role: "assistant", sessionID: sessionId } });
   }
@@ -758,7 +839,14 @@ async function route(req, res, url) {
     } catch {
       // 設定壞掉就回空物件
     }
-    sendJson(res, 200, config);
+    // 2026-10-06:`--variants` 模式模擬使用者 opencode 設定裡寫了預設 model。
+    sendJson(res, 200, VARIANTS_MODE ? { ...config, model: FAKE_OPENCODE_DEFAULT_MODEL } : config);
+    return;
+  }
+
+  // 2026-10-06:只有 `--variants` 模式才有這支端點(其餘情況落到最後的 404,模擬舊版)。
+  if (VARIANTS_MODE && req.method === "GET" && url.pathname === "/config/providers") {
+    sendJson(res, 200, { providers: FAKE_OPENCODE_VARIANT_PROVIDERS, default: { fake: "model-a" } });
     return;
   }
 
@@ -777,18 +865,30 @@ async function route(req, res, url) {
   if (req.method === "POST" && url.pathname === "/session") {
     const id = `ses_${randomUUID()}`;
     const body = await readJsonBody(req).catch(() => ({}));
-    sessions.set(id, {
-      aborted: false,
-      pendingPermission: new Map(),
-      pendingQuestion: new Map(),
-      // 2026-10-06:REPORT_SESSIONS_PREFIX 回報用的統計。
-      kind: "main",
-      parentID: typeof body.parentID === "string" ? body.parentID : undefined,
-      deleted: false,
-      abortCount: 0,
-      permissionReplies: [],
-    });
+    sessions.set(id, newSessionRecord({ parentID: typeof body.parentID === "string" ? body.parentID : undefined }));
+    appendCall("POST /session");
+    persistSession(id);
     sendJson(res, 200, { id, directory: process.cwd(), ...(typeof body.title === "string" ? { title: body.title } : {}) });
+    return;
+  }
+
+  // 2026-10-15:`GET /session/{id}`——OpenCodeAdapter 復活既有 session 時先確認它還在。命中(這個行程記得,或 STATE_DIR 的磁碟上有)
+  // 回 `{id, directory}`,否則 404 NotFoundError(見檔頭)。
+  const getSessionMatch = url.pathname.match(/^\/session\/([^/]+)$/);
+  if (req.method === "GET" && getSessionMatch) {
+    const sessionId = getSessionMatch[1];
+    let session = process.env.FAKE_OPENCODE_FORGET === "1" ? undefined : sessions.get(sessionId);
+    if (!session && process.env.FAKE_OPENCODE_FORGET !== "1" && STATE_DIR && existsSync(stateFile(sessionId))) {
+      const saved = JSON.parse(readFileSync(stateFile(sessionId), "utf8"));
+      session = newSessionRecord({ turns: saved.turns ?? [] });
+      sessions.set(sessionId, session);
+    }
+    appendCall(`GET /session/:id ${session ? "hit" : "miss"}`);
+    if (!session) {
+      sendJson(res, 404, { name: "NotFoundError", data: { message: `Session not found: ${sessionId}` } });
+      return;
+    }
+    sendJson(res, 200, { id: sessionId, directory: process.cwd() });
     return;
   }
 
@@ -827,7 +927,7 @@ async function route(req, res, url) {
     const body = await readJsonBody(req);
     res.writeHead(204);
     res.end();
-    void handlePrompt(sessionId, textOfParts(body), body.model).catch((err) => console.error("[fake-opencode] prompt_async 回合失敗:", err));
+    void handlePrompt(sessionId, textOfParts(body), body.model, body.variant).catch((err) => console.error("[fake-opencode] prompt_async 回合失敗:", err));
     return;
   }
 
@@ -846,10 +946,10 @@ async function route(req, res, url) {
     const body = await readJsonBody(req);
     if (MESSAGE_HANG) {
       // 回合照跑(事件走 SSE),HTTP 回應永遠不送——模擬「超過 undici 300 秒逾時才會回」的長回合。
-      void handlePrompt(sessionId, textOfParts(body), body.model).catch((err) => console.error("[fake-opencode] message 回合失敗:", err));
+      void handlePrompt(sessionId, textOfParts(body), body.model, body.variant).catch((err) => console.error("[fake-opencode] message 回合失敗:", err));
       return;
     }
-    const result = await handlePrompt(sessionId, textOfParts(body), body.model);
+    const result = await handlePrompt(sessionId, textOfParts(body), body.model, body.variant);
     sendJson(res, 200, result);
     return;
   }

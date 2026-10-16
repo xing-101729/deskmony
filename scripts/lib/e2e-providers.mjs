@@ -43,6 +43,49 @@ export function fakeAcpOpencodeProvider() {
   };
 }
 
+/**
+ * 2026-10-06(各 agent 選 model 與思考程度):會回報 `configOptions` 的 fake ACP agent(`--config-options` 模式,
+ * 見 scripts/fake-acp-agent.mjs 檔頭)。宣告成「要等 session 開起來才知道選項」(`optionsAfterStart`),同真實的
+ * codex / gemini / opencode-acp。不在 `standardFakeProviders()` 裡,用 `e2eProvidersEnv([fakeAcpOptionsProvider()])` 加入。
+ */
+export const FAKE_ACP_OPTIONS = "e2e-fake-acp-options";
+export function fakeAcpOptionsProvider() {
+  return {
+    id: FAKE_ACP_OPTIONS,
+    label: "E2E Fake ACP (config options)",
+    software: "acp",
+    supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
+    command: process.execPath,
+    args: [path.join(SCRIPTS_DIR, "fake-acp-agent.mjs"), "--config-options"],
+  };
+}
+
+/**
+ * 2026-10-06:回報各 model variants(思考程度)的 fake opencode server(`--variants` 模式,見
+ * scripts/fake-opencode-server.mjs 檔頭)。model 清單與 `efforts` 對應 fake server 的 `/config/providers`——真實環境
+ * 這份清單來自偵測時的 `opencode models --verbose`(見 apps/core/src/detect/agent-detector.ts)。
+ */
+export const FAKE_OPENCODE_VARIANTS = "e2e-fake-opencode-variants";
+export const FAKE_OPENCODE_VARIANT_MODELS = [
+  { id: "fake/model-a", label: "Fake Model A", efforts: [] },
+  { id: "fake/model-b", label: "Fake Model B", efforts: ["low", "high"] },
+  { id: "fake/model-c", label: "Fake Model C", efforts: ["minimal", "max"] },
+];
+export function fakeOpencodeVariantsProvider() {
+  return {
+    id: FAKE_OPENCODE_VARIANTS,
+    label: "E2E Fake OpenCode (variants)",
+    software: "opencode",
+    supportsModelSelection: true,
+    supportsEffortSelection: true,
+    models: FAKE_OPENCODE_VARIANT_MODELS,
+    command: process.execPath,
+    args: [path.join(SCRIPTS_DIR, "fake-opencode-server.mjs"), "--variants"],
+  };
+}
+
 /** fake opencode 的 model 清單(給需要 `session.setModel`/model 選單的測試用,沒有它 supportsModelSelection 為 false)。 */
 export const FAKE_OPENCODE_MODELS = [
   { id: "fake/model-a", label: "Fake Model A" },

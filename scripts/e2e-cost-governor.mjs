@@ -569,13 +569,20 @@ async function testWaitingWatchdog() {
     const sessionAfterT2 = (await client.rpc("session.list", {})).sessions.find((s) => s.id === sessionId);
     const reclaimedToError = sessionAfterT2?.status === "error" && (sessionAfterT2?.lastError ?? "").includes("回收");
 
-    // 子程序已經被 dispose、runtime 已移除——sendPrompt 應得到明確錯誤(而非
-    // 靜默失敗),證明「需要人工重新建立 session 才能續行」這個預期行為。
-    let sendPromptFailsAfterReclaim = false;
+    // 子程序已經被 dispose、runtime 已移除。2026-10-15 之前 sendPrompt 在這裡會得到 SESSION_NOT_RUNNING
+    // (「需要人工重新建立 session 才能續行」);現在人類對沒有 runtime 的 session 送訊息會重新啟動 agent 再送出
+    // (自動復活,見 e2e-session-revive.mjs)——能收到新一輪的 completed、狀態離開 error 回到 idle,同樣證明舊的
+    // runtime 確實已被釋放(新的回合是由一個新啟動的 agent 完成的)。
+    const reviveIdx = client.events.length;
+    let revivedAfterReclaim = false;
     try {
-      await client.rpc("session.sendPrompt", { sessionId, prompt: { text: "should fail" } });
+      await client.rpc("session.sendPrompt", { sessionId, prompt: { text: "after reclaim" } }, 60_000);
+      await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "completed", 15_000, reviveIdx);
+      await sleep(300);
+      const revived = (await client.rpc("session.list", {})).sessions.find((s) => s.id === sessionId);
+      revivedAfterReclaim = revived?.status === "idle";
     } catch {
-      sendPromptFailsAfterReclaim = true;
+      revivedAfterReclaim = false;
     }
 
     // session 記錄本身(DB)仍然保留——不是被 deleteSession() 那種連 DB 都清掉
@@ -583,10 +590,10 @@ async function testWaitingWatchdog() {
     const sessionStillListed = Boolean(sessionAfterT2);
 
     record(
-      "F: T2 資源回收(waiting 超過 2000ms 短版 T2)→ 真 trip(收到 trip 通知,reason=waiting-ttl),session 狀態變成 error(lastError 說明已回收)、子程序已釋放(sendPrompt 明確失敗),但 session 記錄本身仍保留(回收 ≠ 丟棄)",
-      t2Tripped && reclaimedToError && sendPromptFailsAfterReclaim && sessionStillListed,
+      "F: T2 資源回收(waiting 超過 2000ms 短版 T2)→ 真 trip(收到 trip 通知,reason=waiting-ttl),session 狀態變成 error(lastError 說明已回收)、子程序已釋放(人類再送訊息會重新啟動 agent 並跑完一輪、回到 idle),但 session 記錄本身仍保留(回收 ≠ 丟棄)",
+      t2Tripped && reclaimedToError && revivedAfterReclaim && sessionStillListed,
       `t2Tripped=${t2Tripped}, status=${sessionAfterT2?.status}, lastError=${sessionAfterT2?.lastError}, ` +
-        `sendPromptFailsAfterReclaim=${sendPromptFailsAfterReclaim}, sessionStillListed=${sessionStillListed}`,
+        `revivedAfterReclaim=${revivedAfterReclaim}, sessionStillListed=${sessionStillListed}`,
     );
   } catch (err) {
     record("E/F 執行過程發生未預期錯誤", false, String(err));

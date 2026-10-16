@@ -36,7 +36,7 @@ Deskmony 是一個桌面控制室,讓 AI coding agent(不是單一聊天視窗)�
   Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider;固定清單,偵測**不阻塞
   啟動**),桌面側欄、設定與 CLI 的 `doctor` 都能「重新偵測」。
 - **沒有 profile**:開 session = 從偵測到的 agent 挑一個(`providerId`)+ 選填
-  model / effort + 工作資料夾。桌面側欄有這四個選單加上「新對話」鈕(上次選的
+  model / effort(思考程度,見 §1.6)+ 工作資料夾。桌面側欄有這四個選單加上「新對話」鈕(上次選的
   組合記在 `localStorage`,`Ctrl/⌘+N` 沿用);CLI 用 `--agent <providerId>`
   (預設 `claude-agent-sdk`)+ `--model` / `--effort`。偵測不到任何 agent 時,UI
   會說明並提供「重新偵測」。
@@ -136,16 +136,46 @@ agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
   自己的 session 清單裡(Deskmony 這邊已關閉、丟棄,不影響任何對話)。臨時對話與主對話同時進行,慢的免費模型
   命名可能要二、三十秒。
 
+### 1.6 每個 agent 都能選 model 與思考程度(2026-10-06)
+
+> 過去只有 Claude 能選 model 與思考程度,其他 agent 一律「由 agent 自行管理」。
+> 對應測試:`scripts/e2e-agent-options.mjs`、`scripts/e2e-agent-catalog.mjs`(A3/A3b)。
+
+- **向 agent 本身查詢,不寫死**:agent 回報「這個 session 能選哪些 model / 思考程度、
+  目前是哪個」(`session-options` 事件,掛在 `Session.options`),UI 只顯示真的提供的。
+  思考程度的值由各 agent 定義(Claude 是 low…max,codex/opencode 有 none/minimal……)。
+
+  | Agent | model | 思考程度 | 什麼時候能選 |
+  |---|---|---|---|
+  | Claude(內嵌 SDK) | provider 目錄清單 | 固定 5 級 | 建立時、對話中 |
+  | Claude Code CLI | 別名清單(`--model`) | 固定 5 級(`--effort`) | 只有建立時 |
+  | Codex / Gemini / OpenCode ACP | agent 在 `session/new` 回報的 `configOptions`(category `model`) | 同上(category `thought_level`) | 建立後在對話標題列;`session/set_config_option` |
+  | OpenCode(HTTP) | `opencode models` 清單 | 目前 model 的 variants(`opencode models --verbose` / `/config/providers`),隨每則訊息的 `variant` 送出 | 建立時、對話中 |
+  | Aider | — | — | — |
+
+- **記住上次的選擇**:要等 session 開起來才知道選項的 agent(ACP),建立選單會說明「建立後在
+  對話標題列選」,並把使用者上次對這個 agent 的選擇記下來(core 設定 `providerLastSelection`),
+  下次建立時自動套用;agent 這次不提供那個值就略過,建立不會失敗。agent 自己改的設定不算。
+- **不支援就明確報錯**:agent 不提供的 model / 思考程度(`agent.modelNotOffered`、
+  `agent.effortNotOffered`、`agent.invalidModel`、`agent.invalidEffort`)一律回明確錯誤;建立時
+  明確指定卻做不到,建立失敗、不留 session。換 model 後新 model 沒有的思考程度會被清掉。
+- `list_agents` 的摘要帶上可選的思考程度(`efforts`、`models[].efforts`)與 `optionsAfterStart`;
+  `create_session` 可帶 `effort`。
+- **真實 Codex 實測**(2026-10-15,codex-acp 1.4.0,本機 ChatGPT 登入):建立後 `Session.options` 有 codex 回報的
+  model 清單(`gpt-5.6-terra`、`gpt-5.6-luna`)與思考程度(`low…max`,`terra` 另有 `ultra`——換 model 後清單跟著變);
+  對話中換 model/思考程度後回合照常回覆、建立時指定的值有套用、不在清單的值回 `agent.invalidModel`/`agent.invalidEffort`;
+  自動命名(§1.5)的臨時對話不會動到主 session 的選項。桌面端建立選單對 Codex 只顯示說明、對話標題列顯示兩個選擇器。
+
 ## 2. 多後端 Adapter,一套介面
 
 | Provider | 對接方式 | 能力層級 |
 |---|---|---|
 | Claude Code(內嵌 SDK) | Claude Agent SDK,程式內嵌 | 最深——hooks、in-process session 工具、細粒度權限事件、對話中即時切換 model/effort |
 | Claude Code CLI | PTY 原始直通 | 相容層,無權限事件 |
-| Codex | ACP(經 `@agentclientprotocol/codex-acp` 橋接套件) | 結構化事件 |
-| Gemini CLI | ACP | 結構化事件 |
-| OpenCode(HTTP) | HTTP + SSE(原生 server) | 結構化事件,可遠端;能用 session 工具、主動傳訊息 |
-| OpenCode(ACP) | `opencode acp`,ACP | 結構化事件;能用 session 工具、主動傳訊息(subagent 工具停用) |
+| Codex | ACP(經 `@agentclientprotocol/codex-acp` 橋接套件) | 結構化事件;可換 model 與思考程度 |
+| Gemini CLI | ACP | 結構化事件;agent 有提供時可換 model 與思考程度 |
+| OpenCode(HTTP) | HTTP + SSE(原生 server) | 結構化事件,可遠端;能用 session 工具、主動傳訊息;可換 model 與思考程度(variant) |
+| OpenCode(ACP) | `opencode acp`,ACP | 結構化事件;能用 session 工具、主動傳訊息(subagent 工具停用);可換 model 與思考程度 |
 | Aider | PTY | 相容層,無權限事件 |
 
 - **能力探測誠實分級**:每個 adapter 回報 streaming / 工具事件 / 權限請求 /
@@ -261,9 +291,22 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
 - Core 每次啟動,在接受任何連線之前先做對帳:上次沒乾淨關閉的 session 一律
   標記 `interrupted`。
 - 復原視圖提供三種動作,**全部要人主動點,沒有任何背景自動觸發**:
-  - **繼續**(保有記憶重啟,僅限真正支援磁碟持久化 session 的後端)
+  - **繼續**(重啟 agent 並接回原本的對話:Claude SDK 的 `resume`、ACP 的 `session/resume`
+    或 `session/load`、OpenCode 沿用同一個 session;PTY 沒有後端 session 可接,不提供)
   - **接手**(讀摘要重啟,一律可用)
   - **放棄**(session 標記關閉,對話紀錄原封不動保留)
+- **對 `closed` / `interrupted` 的 session 直接送訊息會自動復活**(2026-10-15):關閉 app 再開,
+  對話還在畫面上,在聊天框送出訊息就會透明地重新啟動 agent 並送達,不必先走復原視圖。接回的方式
+  依後端而定;**接不回(agent 不支援、或它那邊的歷史已經不在)不會讓這次送出失敗**,改成把 Deskmony
+  存的先前對話(user/assistant 文字,上限約 12000 字元、從最舊的開始截)附在第一則訊息前面讓 agent
+  讀——對話裡會留一則系統說明講清楚「它是讀紀錄接續,不是真的記得」。DB 存的使用者訊息仍是原文。
+  PTY 一律是全新的程序(說明「不保留記憶」),不把紀錄灌進終端。重新啟動失敗時 UI 會在對話裡顯示
+  錯誤,session 狀態還原、不卡在忙碌。權限模式重啟後一律從 `always-ask` 開始。
+  復活後 model / 思考程度維持重啟前的選擇:ACP agent 重啟後常回到預設,Deskmony 在接回(或開新對話)之後、
+  第一則訊息之前把 session 記住的值重新套用(`session/set_config_option`;agent 這次不提供那個值就略過,不讓復活失敗),
+  OpenCode(HTTP)的 model / variant 隨每則訊息送出,Claude 的 `--model` / `--effort` 照舊。`Session.options` 只存記憶體,
+  復活前(closed 的 session)是空的,復活後才回來。
+  agent 用 `send_to_session` 傳給已關閉的 session 則**不會**喚醒它,維持明確報錯。
 - (2026-10-02 移除:原本的「重跑」與髒 worktree 強制前置流程是任務 worktree
   專用,見 [`DECISIONS.md` §H](./DECISIONS.md)。)
 
@@ -295,8 +338,8 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   ACP、OpenCode 三種來源都支援,清單即時更新)。
 - **Command Palette**(`Ctrl+K`):快速搜尋與執行指令。
 - **Session 標題**:就地改名、第一則訊息後由 session 自己的 agent 在臨時對話裡自動命名、「AI 重新命名」(見 1.5)。
-- 對話中可即時切換 model 與 effort(思考程度)——依後端能力優雅降級,不支援
-  的後端會得到明確錯誤而不是靜默失敗。
+- 對話中可即時切換 model 與 effort(思考程度)——選項由 agent 本身回報(見 §1.6),
+  不支援的後端會得到明確錯誤而不是靜默失敗。
 
 ## 8. 設定系統
 
@@ -358,6 +401,10 @@ session、agent、model 等技術詞)依詞彙表刻意保留原文,不強行本
   主動傳(`canUseTools: false`)。(OpenCode(HTTP)原本也在這裡,2026-10-03 起掛上了
   同一個 bridge,與 OpenCode(ACP)的差別只剩對接方式。)
 - **排給忙碌 session 的訊息只存在記憶體**,core 重啟會遺失;訊息鏈計數也一樣。
+- **自動復活只處理「沒有 runtime」的 session**:core 沒重啟、但 agent 行程自己死掉的 session
+  (runtime 還在、狀態 `error`)不會被復活;終端(PTY)session 在 xterm 裡直接敲鍵不會觸發復活,
+  要用下方輸入框送出一行。ACP `session/load` 重播期間送來的 `available_commands_update` 會連同
+  歷史一起被丟掉(slash command 選單要等 agent 下一次推送)。
 - **偵測清單是固定的**(Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、
   Codex、Aider)。手動輸入 command 的入口已移除;支援其他 ACP-native CLI(如
   qwen-code、goose 等)要在目錄裡加一項,而且需要先在實機上驗證啟動旗標。

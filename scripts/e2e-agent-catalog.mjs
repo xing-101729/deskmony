@@ -20,7 +20,7 @@
  *      method);**gateway 不接受任何 command/args**(帶了也被忽略,啟動方式只由 provider 決定);壞掉的
  *      `DESKMONY_E2E_EXTRA_PROVIDERS` 不會讓 core 起不來。
  *   C. 【§P2.7 #3】續接重建:用 ACP provider 建 session → kill -9 core → 重啟 → 接手(`recovery.takeover`,
- *      ACP 後端唯一能重新 spawn 既有 session 的路徑;`recovery.continue` 只支援 claude-agent-sdk)後
+ *      換一個全新的 agent 重新 spawn;2026-10-15 起 `recovery.continue` 對 ACP 也可用,見 C1b)後
  *      `adapterType` 仍是 `acp`(不是 claude-agent-sdk)、`providerId` 不變、新 session 真的能跑;再把 core 重啟成
  *      「provider 已不在偵測清單」(沒設 extras)——接手仍成功,證明退回的是 session 自己存的
  *      `adapterType + launch_command + launch_args`,而且 `agent_profiles` 表完全沒被讀(它根本不存在)。
@@ -304,13 +304,13 @@ async function catalogUnitTests() {
   // ---- A1:各 software 的啟動規格映射 ----
   try {
     const c = catalogWith();
-    const sdk = await c.buildLaunchSpec("claude-agent-sdk", "opus", "high");
+    const sdk = await c.buildLaunchSpec("claude-agent-sdk", { model: "opus", effort: "high" });
     const sdkNoModel = await c.buildLaunchSpec("claude-agent-sdk");
     const gemini = await c.buildLaunchSpec("gemini");
-    const oc = await c.buildLaunchSpec("opencode", "anthropic/claude-x");
+    const oc = await c.buildLaunchSpec("opencode", { model: "anthropic/claude-x" });
     const ocAcp = await c.buildLaunchSpec("opencode-acp");
     const codex = await c.buildLaunchSpec("codex");
-    const cli = await c.buildLaunchSpec("claude-cli", "sonnet");
+    const cli = await c.buildLaunchSpec("claude-cli", { model: "sonnet" });
     const cliNoModel = await c.buildLaunchSpec("claude-cli");
     const aider = await c.buildLaunchSpec("aider");
     const ok =
@@ -355,22 +355,80 @@ async function catalogUnitTests() {
   }
 
   // ---- A3:model/effort 的忽略規則 ----
+  // 2026-10-06:codex / opencode-acp / gemini(ACP)改成向 agent 查選項——建立時的 model/effort 照樣帶給 adapter,
+  // 由 adapter 在 `session/new` 之後依 agent 回報的清單驗證(這裡不知道清單,不驗證);aider 兩者都不支援,一律忽略。
   try {
     const c = catalogWith();
-    const codex = await c.buildLaunchSpec("codex", "gpt-whatever", "max"); // supportsModelSelection=false、非 sdk
-    const gemini = await c.buildLaunchSpec("gemini", "some-model", "low"); // supportsModelSelection=true 但 effort 只有 sdk
+    const codex = await c.buildLaunchSpec("codex", { model: "gpt-whatever", effort: "max" });
+    const gemini = await c.buildLaunchSpec("gemini", { model: "some-model", effort: "low" });
+    const aider = await c.buildLaunchSpec("aider", { model: "gpt-4", effort: "high" });
     // 預設 model:opencode 的 `opencode models` 清單沒有任何 isDefault 標記 → 不退回第一項(否則會悄悄換掉使用者的預設)
     const ocDefault = await c.buildLaunchSpec("opencode");
     const withDefault = catalogWith({ prefs: { opencode: { models: [{ id: "a/x", label: "x" }, { id: "a/y", label: "y", isDefault: true }] } } });
     const ocFlagged = await withDefault.buildLaunchSpec("opencode");
     record(
-      "A3 不支援選 model 的 provider(codex)忽略 model、非 claude-agent-sdk 忽略 effort;沒給 model 時只用 provider 明確標記 isDefault 的 model(不退回清單第一項)",
-      codex.model === undefined && codex.effort === undefined && gemini.model === "some-model" && gemini.effort === undefined &&
+      "A3 ACP agent(codex/gemini)的 model/effort 照樣帶給 adapter(建立前不知道清單,交給 adapter 驗證);不支援的 provider(aider)兩者都忽略;" +
+        "沒給 model 時只用 provider 明確標記 isDefault 的 model(不退回清單第一項)",
+      codex.model === "gpt-whatever" && codex.effort === "max" && gemini.model === "some-model" && gemini.effort === "low" &&
+        aider.model === undefined && aider.effort === undefined && aider.ptyConfig?.args === undefined &&
         ocDefault.model === undefined && ocFlagged.model === "a/y",
-      `codex=${JSON.stringify({ m: codex.model, e: codex.effort })}, gemini=${JSON.stringify({ m: gemini.model, e: gemini.effort })}, ocDefault=${ocDefault.model}, ocFlagged=${ocFlagged.model}`,
+      `codex=${JSON.stringify({ m: codex.model, e: codex.effort })}, gemini=${JSON.stringify({ m: gemini.model, e: gemini.effort })}, ` +
+        `aider=${JSON.stringify({ m: aider.model, e: aider.effort })}, ocDefault=${ocDefault.model}, ocFlagged=${ocFlagged.model}`,
     );
   } catch (err) {
     record("A3 model/effort 規則", false, String(err));
+  }
+
+  // ---- A3b:思考程度的建立前驗證、claude-cli 的 --effort、軟性偏好、list_agents 摘要(2026-10-06) ----
+  try {
+    const ocDetection = detection.map((d) =>
+      d.key === "opencode-cli"
+        ? { ...d, models: [{ id: "a/plain", label: "plain", efforts: [] }, { id: "a/think", label: "think", efforts: ["low", "high"] }] }
+        : d,
+    );
+    const c = catalogWith({ detection: ocDetection });
+    const sdkBad = await code(c.buildLaunchSpec("claude-agent-sdk", { effort: "turbo" }));
+    const cli = await c.buildLaunchSpec("claude-cli", { model: "sonnet", effort: "xhigh" });
+    const cliBad = await code(c.buildLaunchSpec("claude-cli", { effort: "turbo" }));
+    const ocOk = await c.buildLaunchSpec("opencode", { model: "a/think", effort: "high" });
+    const ocBad = await code(c.buildLaunchSpec("opencode", { model: "a/think", effort: "max" }));
+    const ocNoVariants = await code(c.buildLaunchSpec("opencode", { model: "a/plain", effort: "low" }));
+    // 沒選 model 時 OpenCode 不知道清單(要看 opencode 自己的預設 model)→ 交給 adapter,不在這裡擋。
+    const ocNoModel = await c.buildLaunchSpec("opencode", { effort: "whatever" });
+    const codexPreferred = await c.buildLaunchSpec("codex", { preferredModel: "gpt-x", preferredEffort: "low" });
+    const aiderPreferred = await c.buildLaunchSpec("aider", { preferredModel: "gpt-x", preferredEffort: "low" });
+    c.noteLiveOptions("codex", { model: { current: "gpt-x", choices: [{ value: "gpt-x", label: "GPT X" }] }, effort: { choices: [{ value: "low", label: "Low" }] } });
+    c.noteLiveOptions("gemini", {}); // 空的回報不覆蓋
+    const summary = Object.fromEntries((await c.summarizeAvailable()).map((p) => [p.id, p]));
+    const after = {
+      codex: await c.optionsAfterStart("codex"),
+      opencodeAcp: await c.optionsAfterStart("opencode-acp"),
+      gemini: await c.optionsAfterStart("gemini"),
+      sdk: await c.optionsAfterStart("claude-agent-sdk"),
+      opencode: await c.optionsAfterStart("opencode"),
+    };
+    record(
+      "A3b 思考程度:Claude 只收 5 級(agent.invalidEffort)、claude-cli 把 --effort 烤進參數、OpenCode 依所選 model 的 variants 驗證(沒選 model 交給 adapter);" +
+        "軟性偏好只帶給支援的 provider;list_agents 摘要帶 efforts / models[].efforts / optionsAfterStart,ACP agent 有回報過就列出最近一份",
+      sdkBad === "agent.invalidEffort" &&
+        JSON.stringify(cli.ptyConfig?.args) === '["--model","sonnet","--effort","xhigh"]' && cli.effort === "xhigh" &&
+        cliBad === "agent.invalidEffort" &&
+        ocOk.model === "a/think" && ocOk.effort === "high" && ocBad === "agent.invalidEffort" && ocNoVariants === "agent.invalidEffort" &&
+        ocNoModel.effort === "whatever" &&
+        codexPreferred.preferredModel === "gpt-x" && codexPreferred.preferredEffort === "low" && codexPreferred.model === undefined &&
+        aiderPreferred.preferredModel === undefined && aiderPreferred.preferredEffort === undefined &&
+        JSON.stringify(summary["claude-agent-sdk"]?.efforts) === '["low","medium","high","xhigh","max"]' &&
+        JSON.stringify(summary.opencode?.models.find((m) => m.id === "a/think")?.efforts) === '["low","high"]' &&
+        summary.opencode?.efforts === undefined &&
+        summary.codex?.optionsAfterStart === true && JSON.stringify(summary.codex?.models) === '[{"id":"gpt-x","label":"GPT X"}]' &&
+        JSON.stringify(summary.codex?.efforts) === '["low"]' &&
+        summary.gemini?.optionsAfterStart === true && summary.gemini?.models.length === 0 && summary.gemini?.efforts === undefined &&
+        summary.aider?.efforts === undefined && summary.aider?.optionsAfterStart === undefined &&
+        after.codex && after.opencodeAcp && after.gemini && !after.sdk && !after.opencode,
+      JSON.stringify({ sdkBad, cliArgs: cli.ptyConfig?.args, cliBad, ocBad, ocNoVariants, codexPreferred: { m: codexPreferred.preferredModel, e: codexPreferred.preferredEffort }, summary: { sdk: summary["claude-agent-sdk"]?.efforts, codex: summary.codex, gemini: summary.gemini }, after }),
+    );
+  } catch (err) {
+    record("A3b 思考程度驗證與摘要", false, String(err));
   }
 
   // ---- A4:偵測快取的等待語意 ----
@@ -459,7 +517,9 @@ async function catalogUnitTests() {
     record(
       "A6 buildLaunchSpecForSession():provider 在 → 走目錄;provider 不存在/software 對不上 → 退回 session 存的 launch;claude-agent-sdk 不需要 command;沒有任何退路 → agent.launchInfoMissing;storedLaunchFromSpec 只取 command/args(不含 env)",
       viaCatalog.spec.acpConfig?.command === "C:\\fake\\gemini.cmd" &&
-        fallback.spec.software === "acp" && fallback.spec.acpConfig?.command === "C:\\old\\agent.exe" && JSON.stringify(fallback.spec.acpConfig?.args) === '["--x"]' && fallback.spec.model === "m" &&
+        fallback.spec.software === "acp" && fallback.spec.acpConfig?.command === "C:\\old\\agent.exe" && JSON.stringify(fallback.spec.acpConfig?.args) === '["--x"]' &&
+        // 2026-10-06:ACP 續接時 session 記得的 model 改成軟性偏好(agent 這次不提供就略過,不讓續接整個失敗)。
+        fallback.spec.model === undefined && fallback.spec.preferredModel === "m" &&
         mismatch.spec.software === "pty" && mismatch.spec.ptyConfig?.command === "C:\\old\\gemini.exe" &&
         sdkLegacy.spec.software === "claude-agent-sdk" && sdkLegacy.spec.model === "opus" &&
         noLaunch === "agent.launchInfoMissing" &&
@@ -723,17 +783,23 @@ async function rebuildAfterRestart() {
     record(
       "C1【§P2.7 #3】重啟後接手(recovery.takeover):新 session 的 adapterType 仍是 acp(不是 claude-agent-sdk)、providerId 不變、真的能跑一輪(回覆是 fake ACP agent 的固定文字);復原視圖顯示的 agent 名稱是 provider label",
       takeover1.adapterType === "acp" && takeover1.providerId === FAKE_ACP && takeover1.id !== s1.id &&
-        run1.final.type === "completed" && run1.reply === FAKE_REPLY && info1?.agentLabel === "E2E Fake ACP" && info1?.canContinue === false,
+        run1.final.type === "completed" && run1.reply === FAKE_REPLY && info1?.agentLabel === "E2E Fake ACP" && info1?.canContinue === true,
       `takeover.adapterType=${takeover1.adapterType}, providerId=${takeover1.providerId}, reply=${JSON.stringify(run1.reply)}, agentLabel=${info1?.agentLabel}`,
     );
-    // ACP 後端不支援「繼續(保有記憶)」,明確拒絕(沿用既有保證)
+    // 2026-10-15:ACP session 也能「繼續」(fake ACP agent 沒宣告 resume/load → 退回新的 session/new + 對話紀錄,仍然成功;
+    // 原生接回/退路的各種組合見 e2e-session-revive.mjs)。這裡只確認 provider 目錄 + session 自帶 launch 資訊的重建路徑對 continue 也成立。
     let continueCode;
+    let continued;
     try {
-      await client.rpc("recovery.continue", { sessionId: s2.id });
+      continued = (await client.rpc("recovery.continue", { sessionId: s2.id }, 40_000)).session;
     } catch (err) {
       continueCode = err.errorCode;
     }
-    record("C1b ACP session 的 recovery.continue 仍然明確拒絕(只有 claude-agent-sdk + backendSessionId 能「繼續」)", continueCode === "sessionManager.continueUnsupportedBackend", `code=${continueCode}`);
+    record(
+      "C1b ACP session 的 recovery.continue 可用(從 session 自己的資料重建啟動規格;後端沒有 resume/load 時退回新對話):session 回到 idle、adapterType 仍是 acp、providerId 不變",
+      continued?.status === "idle" && continued?.adapterType === "acp" && continued?.providerId === FAKE_ACP && continued?.id === s2.id,
+      `code=${continueCode}, status=${continued?.status}, adapterType=${continued?.adapterType}`,
+    );
     client.close();
     await killHard(coreB);
     coreB = null;

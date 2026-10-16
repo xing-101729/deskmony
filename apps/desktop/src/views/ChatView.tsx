@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { EffortLevel, MessageOrigin, Session, SlashCommandInfo } from "@deskmony/shared";
-import { PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
+import type { MessageOrigin, Session, SessionOptionChoice, SlashCommandInfo } from "@deskmony/shared";
+import { EffortLevelSchema, PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
 import {
   useSessionStore,
   providerLabelOf,
@@ -17,7 +17,7 @@ import { Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
 import { shortenPath } from "../lib/workspaces.js";
-import { resolveSystemEventText } from "../lib/system-events.js";
+import { resolveSystemEventText, systemEventTone, type SystemEventTone } from "../lib/system-events.js";
 // 2026-09-04(稽核修補):ModelControl/EffortControl 的錯誤訊息原本繞過了
 // translateError(),在非中文介面會顯示未翻譯的原文——與 app 其餘幾乎所有
 // 錯誤處理不一致(那些在 error-i18n 重構時都改過了,這兩處被漏掉)。
@@ -39,14 +39,21 @@ import { SessionTitleHeading } from "./SessionTitle.js";
  */
 const EMPTY_ITEMS: readonly ChatItem[] = [];
 
+/** 系統訊息泡泡各色調的底色/文字色(色調怎麼決定見 `systemEventTone()`)。 */
+const SYSTEM_TONE_CLASS: Record<SystemEventTone, string> = {
+  info: "bg-info/10 text-info",
+  warn: "bg-warn/10 text-warn",
+  danger: "bg-danger/10 text-danger",
+};
+
 /**
- * 顯示目前 session 的 model,並(`software="claude-agent-sdk"` 或
- * `"opencode"`)提供切換用的下拉選單(功能3d)。兩者的 `AgentAdapter.
- * setModel()` 實作方式不同(前者呼叫 SDK 官方 API,後者是 adapter 內部的
- * session 覆寫,下一則訊息才生效),但對這裡是同一個 `session.setModel`
- * gateway 呼叫,不需要分流處理,見 packages/adapters/src/types.ts 的介面
- * 註解。acp/pty/codex 的 model 由外部 agent/CLI 自行管理,這裡只顯示唯讀
- * 資訊,不提供切換控制。
+ * 顯示目前 session 的 model,並提供切換用的下拉選單(功能3d)。選項來源:
+ *   - agent 自己回報了 model 選項(`session.options.model`,2026-10-06 起:ACP agent 的 `configOptions`,
+ *     見 packages/shared/src/session-options.ts)→ 用 agent 給的清單。
+ *   - `software="claude-agent-sdk"` 或 `"opencode"` → provider 目錄的清單(偵測結果 + 使用者偏好)。
+ * 兩者的 `AgentAdapter.setModel()` 實作方式不同,但對這裡是同一個 `session.setModel` gateway 呼叫,
+ * 不需要分流處理,見 packages/adapters/src/types.ts 的介面註解。其餘(pty、沒宣告 model 選項的 ACP agent、
+ * 沒在跑的 ACP session)只顯示唯讀資訊。
  */
 function ModelControl({ session }: { session: Session }): JSX.Element {
   const { t } = useTranslation(["chat"]);
@@ -66,8 +73,10 @@ function ModelControl({ session }: { session: Session }): JSX.Element {
     [session, detectedAgents, providerPrefs, enabledModelIds],
   );
 
-  const supportsModelSwitch = session.adapterType === "claude-agent-sdk" || session.adapterType === "opencode";
-  const currentModel = session.model ?? "";
+  const agentModelOption = session.options?.model;
+  const supportsModelSwitch =
+    Boolean(agentModelOption) || session.adapterType === "claude-agent-sdk" || session.adapterType === "opencode";
+  const currentModel = session.model ?? agentModelOption?.current ?? "";
 
   const handleChange = async (model: string): Promise<void> => {
     if (!model || model === currentModel) return;
@@ -90,11 +99,11 @@ function ModelControl({ session }: { session: Session }): JSX.Element {
     );
   }
 
-  const knownIds = new Set(availableModels.map((m) => m.id));
-  const options =
-    currentModel && !knownIds.has(currentModel)
-      ? [{ id: currentModel, label: currentModel }, ...availableModels]
-      : availableModels;
+  const listed = agentModelOption
+    ? agentModelOption.choices.map((c) => ({ id: c.value, label: c.label }))
+    : availableModels.map((m) => ({ id: m.id, label: m.label }));
+  const knownIds = new Set(listed.map((m) => m.id));
+  const options = currentModel && !knownIds.has(currentModel) ? [{ id: currentModel, label: currentModel }, ...listed] : listed;
 
   return (
     <div className="flex items-center gap-1.5">
@@ -122,12 +131,11 @@ function ModelControl({ session }: { session: Session }): JSX.Element {
 }
 
 /**
- * 比照上面的 `ModelControl`,但更簡單:思考程度固定 5 個等級,不需要 provider
- * 偵測清單(見 packages/shared/src/agent-launch.ts 的 `EffortLevelSchema`
- * 註解)。只有 `claude-agent-sdk` 驗證支援這個能力——
- * `session.adapterType !== "claude-agent-sdk"` 時直接 `return null`,不像
- * `ModelControl` 對 acp/pty 顯示唯讀 badge:「思考程度」對那些 adapter 根本
- * 不是一個存在的概念,不需要顯示任何東西。
+ * 比照上面的 `ModelControl`:思考程度。選項來源(2026-10-06 起不只 Claude):
+ *   - agent 自己回報了思考程度選項(`session.options.effort`:ACP 的 `thought_level`、OpenCode 目前 model 的
+ *     variants)→ 用 agent 給的清單(隨 model 變動,agent 會重新回報)。
+ *   - `claude-agent-sdk` → Claude 的固定 5 級(`EffortLevelSchema`)。
+ * 其餘直接 `return null`,不像 `ModelControl` 顯示唯讀 badge——這個 session 不能選思考程度,不需要顯示任何東西。
  */
 function EffortControl({ session }: { session: Session }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
@@ -135,11 +143,15 @@ function EffortControl({ session }: { session: Session }): JSX.Element | null {
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (session.adapterType !== "claude-agent-sdk") return null;
+  const choices: SessionOptionChoice[] | undefined =
+    session.options?.effort?.choices ??
+    (session.adapterType === "claude-agent-sdk" ? EffortLevelSchema.options.map((v) => ({ value: v, label: v })) : undefined);
+  if (!choices || choices.length === 0) return null;
 
   const currentEffort = session.effort ?? "";
+  const listed = currentEffort && !choices.some((c) => c.value === currentEffort) ? [{ value: currentEffort, label: currentEffort }, ...choices] : choices;
 
-  const handleChange = async (effort: EffortLevel | ""): Promise<void> => {
+  const handleChange = async (effort: string): Promise<void> => {
     if (!effort || effort === currentEffort) return;
     setSwitching(true);
     setError(null);
@@ -157,16 +169,16 @@ function EffortControl({ session }: { session: Session }): JSX.Element | null {
       <Select
         aria-label={t("chat:effort.switchAriaLabel")}
         value={currentEffort}
-        onChange={(e) => void handleChange(e.target.value as EffortLevel | "")}
+        onChange={(e) => void handleChange(e.target.value)}
         disabled={switching}
         className="!h-6 !text-2xs"
       >
         {!currentEffort && <option value="">{t("chat:control.notSpecifiedOption")}</option>}
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-        <option value="xhigh">xhigh</option>
-        <option value="max">max</option>
+        {listed.map((c) => (
+          <option key={c.value} value={c.value} title={c.description}>
+            {c.label}
+          </option>
+        ))}
       </Select>
       {error && (
         <span className="text-2xs text-danger" title={error}>
@@ -472,7 +484,7 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
     // systemEvents.json 翻譯早就寫好了,`resolveSystemEventText` 也一直被 import
     // 著,只是從來沒有被呼叫過(dead import)。
     return (
-      <div className="my-1.5 rounded-md bg-danger/10 px-2.5 py-1.5 text-xs leading-relaxed text-danger">
+      <div className={`my-1.5 rounded-md px-2.5 py-1.5 text-xs leading-relaxed ${SYSTEM_TONE_CLASS[systemEventTone(item.content)]}`}>
         {resolveSystemEventText(item.content, t)}
       </div>
     );

@@ -426,6 +426,7 @@ export function renderAgentEventPretty(event: AgentEvent, opts: PrettyRenderOpti
     case "terminal-data":
       return event.data;
     case "available-commands":
+    case "session-options":
     case "user-dialog-request":
     case "permission-request":
     case "completed":

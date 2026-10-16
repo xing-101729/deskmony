@@ -8,6 +8,14 @@
       "label": "[Error]"
     },
     "contextCheckpointRestarted": "[S8] El uso de contexto alcanzó el umbral: se reinició automáticamente mediante checkpoint (continúa a partir del resumen de la conversación anterior, misma sesión)",
-    "permissionTimeoutDenied": "La solicitud de permiso expiró y fue rechazada automáticamente"
+    "permissionTimeoutDenied": "La solicitud de permiso expiró y fue rechazada automáticamente",
+    "revivedResumed": "Se reinició el agent y se reconectó a su conversación anterior.",
+    "revivedFromTranscript": "Se reinició el agent, pero su backend no pudo retomar la conversación anterior. Deskmony adjunta la transcripción anterior ({{count}} mensajes) al primer mensaje que reciba el agent para que la lea: continúa a partir del registro, no recuerda realmente.",
+    "revivedFromTranscriptTruncated": "Se reinició el agent, pero su backend no pudo retomar la conversación anterior. Deskmony adjunta la transcripción anterior (los {{count}} mensajes más recientes; los más antiguos se omitieron por ser demasiado larga) al primer mensaje que reciba el agent para que la lea: continúa a partir del registro, no recuerda realmente.",
+    "revivedWithoutMemory": "Se reinició el agent. Este agent (un programa de terminal) no conserva memoria de la conversación anterior, así que empieza de cero.",
+    "revivedFresh": "Se reinició el agent.",
+    "sendFailed": {
+      "label": "[No enviado]"
+    }
   }
 }

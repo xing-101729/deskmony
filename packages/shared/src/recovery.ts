@@ -23,13 +23,28 @@ export const RecoverySessionInfoSchema = z.object({
   lastSeenAt: z.number().optional(),
   /**
    * §4.1:這條 session 的後端是否支援「繼續(保有記憶)」——**查證結論,不是
-   * UI 猜的**,見 crash-recovery_detail.md §4.1 表格。目前恆等於
-   * `adapterType === "claude-agent-sdk" && backendSessionId 存在`。UI 只顯示
-   * 這裡回報為 `true` 的那個「繼續」按鈕,`false` 時**整個按鈕不出現**(不是
-   * 灰掉,見 §4.1「避免使用者以為是暫時性問題」)。
+   * UI 猜的**,見 crash-recovery_detail.md §4.1 表格。恆等於
+   * `softwareCanResumeBackend(adapterType) && backendSessionId 存在`(2026-10-15 起不再限定
+   * claude-agent-sdk:ACP 與 OpenCode 也會把後端 session id 存下來並嘗試接回,PTY 沒有後端 session 可接)。
+   * 「繼續」是**盡力接回**:後端那邊的對話已經不在(agent 清掉了歷史、不支援 resume/load)時,會改用
+   * Deskmony 存的對話紀錄接續,並在對話裡留一則系統訊息說明——所以這裡的 `true` 代表「有機會原生接回、
+   * 且一定能繼續」,不是保證 agent 真的記得。UI 只顯示這裡回報為 `true` 的那個「繼續」按鈕,`false` 時
+   * **整個按鈕不出現**(不是灰掉,見 §4.1「避免使用者以為是暫時性問題」)。
    */
   canContinue: z.boolean(),
 });
 export type RecoverySessionInfo = z.infer<typeof RecoverySessionInfoSchema>;
+
+/**
+ * 這個 software 的 session 有沒有後端持久化的對話可以接回?`claude-agent-sdk`(SDK 的 `resume`)、`acp`
+ * (`session/resume` / `session/load`)與 `opencode`(opencode 把 session 存在磁碟,沿用同一個 session id)有;
+ * PTY 是一個終端程序,沒有「後端 session」這個概念,重新啟動就是全新的程序。
+ *
+ * 兩處共用同一個答案:`RecoveryService` 的 `canContinue`,以及 `SessionManager` 重新啟動 session 時
+ * 要不要帶 `ResumeOptions.backendSessionId` 給 adapter。
+ */
+export function softwareCanResumeBackend(software: string): boolean {
+  return software === "claude-agent-sdk" || software === "acp" || software === "opencode";
+}
 
 export const RecoveryListResultSchema = z.object({ sessions: z.array(RecoverySessionInfoSchema) });

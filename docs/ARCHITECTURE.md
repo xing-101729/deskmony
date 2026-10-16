@@ -734,7 +734,7 @@ core 啟動
 
 | 動作 | 語意 | 前提 |
 |---|---|---|
-| **繼續** | 保有記憶重啟 | 後端真的支援磁碟持久化 session(目前只有 Claude SDK 的 `resume`);Core 端會重新驗證,不採信 client 舊快照 |
+| **繼續** | 保有記憶重啟 | 後端有持久化對話可接(`softwareCanResumeBackend()`:Claude SDK `resume`、ACP `session/resume`/`session/load`、OpenCode 沿用 session;PTY 沒有)且已捕捉後端 session id;Core 端會重新驗證,不採信 client 舊快照。接不回時退回對話紀錄,見下方「自動復活」 |
 | **接手** | 讀摘要重啟 | 一律可用;摘要只讀 DB(最後幾輪對話),不呼叫 LLM |
 | **放棄** | session 標 `closed` | 對話紀錄保留(回收 ≠ 丟棄) |
 
@@ -748,6 +748,28 @@ core 啟動
 > (不等偵測結果)。
 
 優雅關閉 5 秒逾時保護:寧可留下孤兒讓下次啟動對帳抓到,也不卡住不關。
+
+**自動復活(2026-10-15)**:重開後 `SessionManager.runtime` 是空的,過去人類對 `closed`/`interrupted` 的 session
+送訊息只會得到 `SESSION_NOT_RUNNING`(桌面端還把 rejection 吞掉)。現在 `sendPromptInner()` 遇到沒有 runtime 的
+session、且是**人類輸入**(`delivery.origin` 為空)時,在 per-session 鎖(`withSessionLock()`,和「繼續」共用)裡走
+`respawnRuntime()`——這也是 `continueSession()` 用的同一份流程:從 session 自己的資料重建啟動規格、沿用 DB session id 當
+`handle.id`、有後端識別碼就交給 adapter 嘗試接回、權限模式重設為 `always-ask`。agent 對 `send_to_session` 的請求**不會**
+喚醒目標 session(`assertDeliverable()` 與 `requireReviveTarget()` 兩道)。
+
+各 adapter 的接回(`spawn(launch, workspace, { sessionId, backendSessionId? })`,結果在 `AgentHandle.resumed`):
+
+| 後端 | 接回方式 | 接不回時 |
+|---|---|---|
+| Claude SDK | `getSessionInfo()` 確認對話檔還在才帶 `resume` | 開全新對話 |
+| ACP | `initialize` 宣告 `sessionCapabilities.resume` → `session/resume`;否則 `loadSession` → `session/load`(agent 會用 `session/update` 重播歷史,**重播絕不當成新事件**:`ActiveSession` 在回應回來之後才掛上(再多等一個 macrotask 當防禦),見 `attachResumedSession()`);都帶同一個 session 網路 MCP server | `session/new` |
+| OpenCode(HTTP) | `GET /session/{id}` 確認還在,沿用同一個 opencode session | `POST /session` |
+| PTY | 無從接回,全新的終端程序 | — |
+
+接不回(`resumed !== true`、非 PTY)時,`planReviveOutcome()` 用 DB 的 user/assistant 文字組一段對話紀錄
+(`session-transcript.ts`,上限 12000 字元、從最舊的開始截並註明),存在 `runtime.pendingTranscript`,**附在下一則一般 prompt 前面**
+(slash command 不附,紀錄留給下一則)。DB 存的使用者訊息一律是原文。對話裡留的系統說明(`session.revivedResumed` /
+`revivedFromTranscript` / `revivedWithoutMemory` …)用 `session-message` push 即時送到所有 client。後端識別碼在 spawn 完
+(ACP/OpenCode)就寫進 DB;接不回而開了新對話時會更新成新的識別碼。
 
 **孤兒有兩種,處理方式不同**(2026-09-04 釐清):
 

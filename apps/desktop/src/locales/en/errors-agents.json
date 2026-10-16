@@ -3,6 +3,10 @@
     "notFound": "Agent \"{{providerId}}\" was not found — check the agent list for the available ids",
     "disabled": "Agent \"{{label}}\" is disabled in Settings",
     "notInstalled": "Agent \"{{label}}\" was not detected on this computer — install it, then re-detect in Settings",
-    "launchInfoMissing": "This session's agent \"{{providerId}}\" is no longer in the detected list, and the session kept no launch information (it was created by an older version), so it cannot be restarted — please use a new session"
+    "launchInfoMissing": "This session's agent \"{{providerId}}\" is no longer in the detected list, and the session kept no launch information (it was created by an older version), so it cannot be restarted — please use a new session",
+    "modelNotOffered": "{{agent}} does not offer a model choice",
+    "effortNotOffered": "{{agent}} does not offer a thinking-effort choice right now",
+    "invalidModel": "\"{{value}}\" is not a model {{agent}} offers (available: {{allowed}})",
+    "invalidEffort": "\"{{value}}\" is not a thinking-effort level {{agent}} offers (available: {{allowed}})"
   }
 }

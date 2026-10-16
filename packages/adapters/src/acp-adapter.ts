@@ -7,7 +7,15 @@ import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
 import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, TitleGenerationRequest, TitleGenerationResult, Workspace } from "./types.js";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
 import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
@@ -17,6 +25,7 @@ import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./openc
 import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
 import { buildAgentChildEnv } from "./agent-env.js";
 import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded, type OpencodeShellEnvPluginLaunch } from "./opencode-shell-env.js";
+import { acpOptionChoices, acpSessionOptions, findAcpConfigOption, invalidOptionError, optionNotOfferedError, type AgentOptionKind } from "./agent-options.js";
 
 /**
  * AcpAdapter — 對接 [Agent Client Protocol](https://agentclientprotocol.com)
@@ -51,16 +60,34 @@ import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, wat
  *    (找不到就回 cancelled)」收場,不讓 agent 的 `requestPermission` 呼叫
  *    永久卡住。
  *
+ * 接回既有對話(2026-10-15,session 自動復活;`spawn()` 帶 `ResumeOptions.backendSessionId` 時,見 `startAcpSession()`):
+ *  - `initialize` 回應的 `agentCapabilities.sessionCapabilities.resume` 有宣告 → `session/resume`(協議保證**不**重播歷史);
+ *    否則宣告了 `loadSession` → `session/load`(協議規定 agent 會用 `session/update` **重播整段歷史**,然後才回應);
+ *    都沒有、或呼叫失敗/逾時(例如 agent 那邊的歷史已經被清掉)→ 退回 `session/new`,`AgentHandle.resumed` 標 `false`,
+ *    由呼叫端用 Deskmony 存的對話紀錄補脈絡。接回失敗**不會**讓 `spawn()` 失敗。
+ *  - 重播絕不能當成新事件送出(否則 DB/UI 出現重複訊息):`ActiveSession` 是 `session/update` 的唯一出口,而我們在 resume/load
+ *    **回應回來、確認重播的通知都處理完之後**才把它掛上去(見 `attachResumedSession()`),在那之前的通知沒有人接,直接丟棄。
+ *  - resume/load 帶的 `mcpServers` 與 `session/new` 完全一樣(session 網路 bridge,新核發的 scoped token);子行程的環境變數過濾、
+ *    opencode 家族的「所有工具 ask」設定都在 spawn 子行程那一步套用,三種建立 session 的方式共用同一個子行程,沒有差別。
+ *
  * 已知限制 / TODO(M2 Round A 範圍):
  *  - 只處理 `ContentBlock.type === "text"`,image/audio/resource(_link)
  *    尚未轉發。
  *  - `session/update` 的 `plan`/`plan_update`/`current_mode_update`/
- *    `config_option_update`/`session_info_update`/`agent_thought_chunk`/
+ *    `session_info_update`/`agent_thought_chunk`/
  *    `user_message_chunk` 尚未有對應的 AgentEvent 型別(見
  *    packages/shared/src/events.ts),先略過不轉發。`usage_update` 已在 S3a
  *    (usage-metering)接上(見下方 `handleSessionUpdate()`),
- *    `available_commands_update` 已在這輪(slash command)接上,這裡的清單
+ *    `available_commands_update` 已在這輪(slash command)接上,
+ *    `config_option_update` 已在 2026-10-06(model/思考程度)接上,這裡的清單
  *    同步移除,避免文件與程式碼漂移。
+ *  - **model / 思考程度(2026-10-06)**:向 agent 查,不寫死。`session/new` 回應的 `configOptions`(與之後的
+ *    `config_option_update`)裡 `category: "model"` / `"thought_level"` 的選項轉成 `session-options` 事件;
+ *    `setModel()`/`setEffort()` 走 `session/set_config_option`。建立時指定的值在 `session/new` 之後立刻套用
+ *    (見 `applyLaunchOptions()`)。agent 沒宣告的項目就是不支援(UI 不顯示、呼叫回明確錯誤)。實測:
+ *    opencode 1.18.7 回 `model` + `mode`,目前 model 有 variants 時另有 `effort`;codex-acp 1.4.0 回 `model` +
+ *    `reasoning_effort`(讀它的原始碼確認,2026-10-15 以真實 Codex 實測:model 有 `gpt-5.6-terra`/`gpt-5.6-luna`,思考程度
+ *    隨 model 變——terra 有 low…max 與 ultra、luna 只到 max)。Gemini 本機未安裝,沒有實測。
  *  - `diff` 能力(Codex ACP 橋接切換 Phase 3 起回報為 true):
  *    `resolveDiffStructuredResult()` 用兩條路徑合成
  *    `ToolResultEvent.structuredResult`(消費端是既有機制,見
@@ -153,10 +180,13 @@ export class AcpAdapter implements AgentAdapter {
       // `available_commands_update`(已查證 `@agentclientprotocol/sdk@1.2.1`
       // 型別上這是一個 optional 的 session/update 變體,agent 不一定會送)。
       slashCommands: "unknown",
+      // 2026-10-06:要等 `session/new` 回報 `configOptions` 才知道 agent 宣告了哪些(見 agent-options.ts)。
+      modelSwitching: "unknown",
+      effortSwitching: "unknown",
     };
   }
 
-  async spawn(launch: AgentLaunchSpec, workspace: Workspace): Promise<AgentHandle> {
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
     const acpConfig = launch.acpConfig;
     const agentLabel = launch.providerId ?? "acp";
     if (!acpConfig) {
@@ -174,7 +204,9 @@ export class AcpAdapter implements AgentAdapter {
     // `mcpServers` 欄位),比 handshake 完成、正式建立 `AgentHandle` 都早,
     // 所以提前生成這個 id,下面 `const handle: AgentHandle = { id: handleId,
     // ... }` 沿用同一個值。
-    const handleId = randomUUID();
+    // 2026-10-15:復活既有 session 時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`)——scoped token 與 session
+    // 網路工具的呼叫者身分都綁這個 id,必須等於 SessionManager 登記這條 session 的 id。
+    const handleId = resume?.sessionId ?? randomUUID();
 
     const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
 
@@ -324,11 +356,24 @@ export class AcpAdapter implements AgentAdapter {
         spawnFailure,
       ]);
 
-      let sessionBuilder = connection.agent.buildSession(workspace.path);
-      if (bridgeMcpServer) {
-        sessionBuilder = sessionBuilder.withMcpServer(bridgeMcpServer);
-      }
-      const session = await Promise.race([sessionBuilder.start(), spawnFailure]);
+      const { session, resumed } = await Promise.race([
+        startAcpSession({
+          cx: connection.agent,
+          capabilities: initialized.agentCapabilities ?? undefined,
+          cwd: workspace.path,
+          bridgeMcpServer,
+          backendSessionId: resume?.backendSessionId,
+          agentLabel,
+        }),
+        spawnFailure,
+      ]);
+
+      // 2026-10-06:model / 思考程度。agent 回報的選項在 `session/new` 回應的 `configOptions`;建立時指定的值
+      // (明確值做不到就讓建立失敗,記住的上次選擇做不到就略過)在這裡、第一則訊息之前套用。
+      const configOptions = await Promise.race([
+        this.applyLaunchOptions(connection, session.sessionId, session.newSessionResponse.configOptions ?? [], launch, agentLabel),
+        spawnFailure,
+      ]);
 
       // 2026-09-17:handshake 與 session/new 都成功 = 真正的 agent 行程一定已經在
       // 回應了。`child.pid` 可能只是外殼 —— `.cmd` shim 的 cmd.exe、`.ps1` 的
@@ -338,7 +383,7 @@ export class AcpAdapter implements AgentAdapter {
       // (查詢要 1 秒多)。見 child-registry.ts 的 registerChildDescendants()。
       void registerChildDescendants(child.pid);
 
-      const handle: AgentHandle = { id: handleId, launch, workspace };
+      const handle: AgentHandle = { id: handleId, launch, workspace, ...(resume?.backendSessionId ? { resumed } : {}) };
       const internal: InternalSession = {
         handle,
         child,
@@ -352,8 +397,11 @@ export class AcpAdapter implements AgentAdapter {
         sessionCapabilities: initialized.agentCapabilities?.sessionCapabilities ?? undefined,
         titleSessionIds,
         titleAborts: new Set(),
+        configOptions,
+        agentLabel,
       };
       this.sessions.set(handle.id, internal);
+      this.pushSessionOptions(internal);
 
       // 2026-10-05:`session/new` 成功 = opencode 對這個資料夾的 instance(含外掛初始化)已建立——看載入標記檔:外掛沒載入只警告、
       // 不影響 session。背景執行,不拖慢 session 建立;必須在 session 登記**之後**(`isCancelled` 靠 `this.sessions` 判斷 session
@@ -413,6 +461,15 @@ export class AcpAdapter implements AgentAdapter {
 
   events(handle: AgentHandle): AsyncIterable<AgentEvent> {
     return this.mustGet(handle).outputQueue;
+  }
+
+  /**
+   * ACP 的 `sessionId`(2026-10-15,session 自動復活)——agent 端(codex-acp、opencode、gemini 等)把對話存在自己的磁碟上,
+   * 下次 `spawn()` 帶這個值就能用 `session/resume` / `session/load` 接回。`session/new` 回應之後立刻就有值(不像 Claude SDK
+   * 要等第一則訊息),所以沒有「還沒捕捉到」的空窗。
+   */
+  getBackendSessionId(handle: AgentHandle): string | undefined {
+    return this.sessions.get(handle.id)?.session.sessionId;
   }
 
   /**
@@ -488,34 +545,73 @@ export class AcpAdapter implements AgentAdapter {
   }
 
   /**
-   * M5 Round C:ACP 協議的 `session/new`/`session/prompt` 沒有 model 參數,
-   * model 完全由被 spawn 出來的外部 agent/CLI 自行決定與管理,呼叫端(我們)
-   * 沒有介面可以介入——明確拋出錯誤,不可靜默忽略成功(見
-   * packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
+   * 2026-10-06:向 agent 查——agent 在 `configOptions` 宣告了 `category: "model"` 的選項才支援,值必須在它給的
+   * 清單裡,用 `session/set_config_option` 切換(對話上下文不受影響)。沒宣告就丟明確錯誤,不可靜默忽略成功
+   * (見 packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
    */
-  async setModel(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "acp", operation: "setModel" },
-      'software="acp" 不支援變更 model(model 由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
-    );
+  async setModel(handle: AgentHandle, model: string): Promise<void> {
+    await this.setConfigValue(this.mustGet(handle), "model", model);
+  }
+
+  /** 比照上面的 `setModel()`:`category: "thought_level"` 的選項。 */
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
+    await this.setConfigValue(this.mustGet(handle), "effort", effort);
+  }
+
+  private async setConfigValue(internal: InternalSession, kind: AgentOptionKind, value: string): Promise<void> {
+    const option = findAcpConfigOption(internal.configOptions, kind);
+    if (!option) throw optionNotOfferedError(kind, internal.agentLabel);
+    const allowed = acpOptionChoices(option).map((c) => c.value);
+    if (!allowed.includes(value)) throw invalidOptionError(kind, internal.agentLabel, value, allowed);
+    const response = await internal.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+      sessionId: internal.session.sessionId,
+      configId: option.id,
+      value,
+    });
+    // 回應是**完整**的一份 configOptions(換 model 之後可選的思考程度可能跟著變,見 opencode 的實作)。
+    internal.configOptions = response.configOptions;
+    this.pushSessionOptions(internal);
   }
 
   /**
-   * 比照上面的 `setModel()`:ACP 協議的 `session/new`/`session/prompt` 沒有
-   * effort/reasoning 參數,思考程度完全由被 spawn 出來的外部 agent/CLI 自行
-   * 決定與管理,呼叫端(我們)沒有介面可以介入——明確拋出錯誤,不可靜默
-   * 忽略成功(見 packages/adapters/src/types.ts 的 `AgentAdapter.setEffort()`
-   * 介面註解)。
+   * `session/new` 之後、第一則訊息之前套用建立時指定的 model / 思考程度(先 model:可選的思考程度可能隨 model 變)。
+   *   - 明確值(`launch.model`/`launch.effort`):agent 沒宣告或值不在清單裡 → 丟明確錯誤,session 建立失敗
+   *     (spawn 的 catch 會收掉子程序與 token)——不能悄悄用別的 model 跑使用者指定的任務。
+   *   - 軟性偏好(`launch.preferredModel`/`preferredEffort`,這個 provider 上次的選擇或續接時 session 記得的值):
+   *     做不到就略過,只記 log。
+   * 回傳套用後的完整 configOptions。
    */
-  async setEffort(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "acp", operation: "setEffort" },
-      'software="acp" 不支援變更思考程度(思考程度由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
-    );
+  private async applyLaunchOptions(
+    connection: acp.ClientConnection,
+    sessionId: string,
+    initial: acp.SessionConfigOption[],
+    launch: AgentLaunchSpec,
+    agentLabel: string,
+  ): Promise<acp.SessionConfigOption[]> {
+    let configOptions = initial;
+    const wanted: Array<{ kind: AgentOptionKind; explicit?: string; preferred?: string }> = [
+      { kind: "model", explicit: launch.model, preferred: launch.preferredModel },
+      { kind: "effort", explicit: launch.effort, preferred: launch.preferredEffort },
+    ];
+    for (const { kind, explicit, preferred } of wanted) {
+      const value = explicit ?? preferred;
+      if (!value) continue;
+      const option = findAcpConfigOption(configOptions, kind);
+      const allowed = option ? acpOptionChoices(option).map((c) => c.value) : [];
+      if (!option || !allowed.includes(value)) {
+        if (explicit) throw option ? invalidOptionError(kind, agentLabel, value, allowed) : optionNotOfferedError(kind, agentLabel);
+        console.warn(`[acp-adapter] ${agentLabel}:記住的${kind === "model" ? " model" : "思考程度"}「${value}」這次不在 agent 提供的選項裡,略過。`);
+        continue;
+      }
+      if (option.currentValue === value) continue;
+      const response = await connection.agent.request(acp.methods.agent.session.setConfigOption, { sessionId, configId: option.id, value });
+      configOptions = response.configOptions;
+    }
+    return configOptions;
+  }
+
+  private pushSessionOptions(internal: InternalSession): void {
+    internal.outputQueue.push({ type: "session-options", options: acpSessionOptions(internal.configOptions) });
   }
 
   /**
@@ -796,6 +892,11 @@ export class AcpAdapter implements AgentAdapter {
       case "available_commands_update":
         internal.outputQueue.push({ type: "available-commands", commands: mapAvailableCommands(update.availableCommands) });
         break;
+      /** 2026-10-06:agent 主動更新選項(完整一份,REPLACE 語意),見 `setConfigValue()`/agent-options.ts。 */
+      case "config_option_update":
+        internal.configOptions = update.configOptions;
+        this.pushSessionOptions(internal);
+        break;
       default:
         // user_message_chunk / agent_thought_chunk / plan* / 其餘擴充型別:
         // M2 Round A 的 AgentEvent 尚未涵蓋,略過不轉發(見上方 class 註解的 TODO)。
@@ -943,6 +1044,13 @@ interface InternalSession {
    * `??=` lazily 建立,行為上與「一開始就是空 Map」完全等價。
    */
   pendingFileSnapshots?: Map<string, { path: string; before: string }>;
+  /**
+   * 2026-10-06:agent 最近一次回報的完整 `configOptions`(`session/new` 回應、`session/set_config_option` 回應、
+   * `config_option_update` 通知三個來源,一律整份覆蓋)。model / 思考程度選擇的唯一依據,見 agent-options.ts。
+   */
+  configOptions: acp.SessionConfigOption[];
+  /** 錯誤訊息裡的 agent 名稱(providerId)。 */
+  agentLabel: string;
 }
 
 /**
@@ -1134,6 +1242,107 @@ function mapAvailableCommands(commands: acp.AvailableCommand[]): SlashCommandInf
     description: c.description || undefined,
     argumentHint: c.input?.hint || undefined,
   }));
+}
+
+/** `session/resume` / `session/load` 的等待上限;超過就當作接回失敗,退回 `session/new`(不讓一次送出卡住)。 */
+const RESUME_REQUEST_TIMEOUT_MS = 60_000;
+
+interface StartAcpSessionArgs {
+  cx: acp.ClientContext;
+  /** `initialize` 回應裡 agent 宣告的能力(決定走 resume / load / 都不支援)。 */
+  capabilities: acp.AgentCapabilities | undefined;
+  cwd: string;
+  bridgeMcpServer: acp.McpServer | undefined;
+  /** 有值 = 嘗試接回這個 ACP session;省略 = 直接 `session/new`。 */
+  backendSessionId: string | undefined;
+  agentLabel: string;
+}
+
+/**
+ * 建立這條連線的主 session:有 `backendSessionId` 先嘗試接回既有的 ACP session,不行就 `session/new`。
+ *
+ * 選擇順序(2026-10-15):`sessionCapabilities.resume` → `session/resume`(不重播歷史,最乾淨);沒有再看 `loadSession` →
+ * `session/load`(會重播歷史,由 `attachResumedSession()` 擋掉);兩者都沒宣告,或呼叫失敗/逾時 → `session/new`。
+ * 任何接回失敗都只留一筆警告,**不丟錯**(呼叫端的這次送出不能因此失敗),`resumed` 據實回報。
+ * 連線本身已經斷了的話,後面的 `session/new` 也會失敗,那個錯誤會照常往外丟。
+ */
+async function startAcpSession(args: StartAcpSessionArgs): Promise<{ session: acp.ActiveSession; resumed: boolean }> {
+  const { cx, capabilities, cwd, bridgeMcpServer, backendSessionId, agentLabel } = args;
+  if (backendSessionId) {
+    const method: "resume" | "load" | undefined = capabilities?.sessionCapabilities?.resume
+      ? "resume"
+      : capabilities?.loadSession
+        ? "load"
+        : undefined;
+    if (method) {
+      try {
+        const session = await attachResumedSession(cx, method, backendSessionId, cwd, bridgeMcpServer ? [bridgeMcpServer] : []);
+        console.log(`[acp-adapter] ${agentLabel} 已用 session/${method} 接回既有對話 ${backendSessionId}`);
+        return { session, resumed: true };
+      } catch (err) {
+        console.warn(
+          `[acp-adapter] ${agentLabel} 的 session/${method}(${backendSessionId}) 失敗,改開全新的 session(由呼叫端補對話紀錄): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    } else {
+      console.warn(`[acp-adapter] ${agentLabel} 沒有宣告 session/resume 或 loadSession,無法接回既有對話,改開全新的 session`);
+    }
+  }
+  let builder = cx.buildSession(cwd);
+  if (bridgeMcpServer) builder = builder.withMcpServer(bridgeMcpServer);
+  return { session: await builder.start(), resumed: false };
+}
+
+/**
+ * `session/resume` / `session/load` 成功後,取得一個接回該 session 的 `ActiveSession`(`consume()`/`sendPrompt()` 都靠它)。
+ *
+ * ## 為什麼自己 attach、為什麼要等一個 macrotask
+ *
+ * ACP SDK(1.2.1、1.3.0 都一樣)只有 `buildSession().start()`(= `session/new`)會替回應建立 `ActiveSession`,沒有公開 API 能對
+ * 既有的 session id 做同一件事;而 `ClientContext.attachSession()` 正是 `start()` 在回應回來時呼叫的內部方法,TypeScript 標成
+ * private、執行期可呼叫。這裡用型別轉換呼叫它,找不到就丟錯(→ 呼叫端退回 `session/new`,不會壞)。e2e-session-revive 用真的 SDK 跑,
+ * SDK 升級改掉這個方法時會立刻紅燈。
+ *
+ * **重播的擋法**:SDK 把 `session/update` 分流給「已 attach 的 ActiveSession」,沒有 attach 的 session id 的通知直接沒人接。
+ * `session/load` 的重播通知全部在回應**之前**送達;但 SDK 處理通知是非同步的(每個通知要經過好幾個 handler 的 `await`),
+ * 回應的 promise 卻是同步 resolve 的——理論上回應回來時,最後幾筆重播通知可能還在 microtask 佇列裡排隊、尚未分流。所以回應回來之後
+ * 先等一個 macrotask(`setImmediate`),讓所有已經收到的通知處理完(它們沒有人接,被丟棄),**才** attach。之後才抵達的通知(下一輪
+ * 對話的新事件)一定來自後面的 I/O,不會被誤丟。`session/resume` 協議上不重播,同樣的流程無害。
+ *
+ * 誠實記錄:這一步是防禦性的。實測(假 agent 在回應前重播 132 個 update、真實 codex-acp / `opencode acp` 的 `session/load`)把它拿掉
+ * 也沒有漏——SDK 目前的實際分流時序已經讓「回應 resolve」晚於先前通知的分流。真正擋住重播的是「回應回來之後才 attach」;
+ * 先 attach 再發請求(最直覺的寫法)則會把整段歷史當成新事件送出(e2e-session-revive 的 L2 會抓到)。
+ */
+async function attachResumedSession(
+  cx: acp.ClientContext,
+  method: "resume" | "load",
+  backendSessionId: string,
+  cwd: string,
+  mcpServers: acp.McpServer[],
+): Promise<acp.ActiveSession> {
+  const attach = (cx as unknown as { attachSession?: (response: acp.NewSessionResponse) => acp.ActiveSession }).attachSession;
+  if (typeof attach !== "function") {
+    throw new Error("ACP SDK 沒有 ClientContext.attachSession(),無法接回既有 session(SDK 版本不相容)");
+  }
+
+  const request = { sessionId: backendSessionId, cwd, mcpServers };
+  const pending: Promise<acp.ResumeSessionResponse | acp.LoadSessionResponse> =
+    method === "resume" ? cx.request(acp.methods.agent.session.resume, request) : cx.request(acp.methods.agent.session.load, request);
+  pending.catch(() => undefined); // 逾時後才失敗的請求不能變成 unhandled rejection
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`session/${method} 等待逾時(${RESUME_REQUEST_TIMEOUT_MS}ms)`)), RESUME_REQUEST_TIMEOUT_MS);
+  });
+  let response: acp.ResumeSessionResponse | acp.LoadSessionResponse;
+  try {
+    response = await Promise.race([pending, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return attach.call(cx, { ...response, sessionId: backendSessionId });
 }
 
 /**
