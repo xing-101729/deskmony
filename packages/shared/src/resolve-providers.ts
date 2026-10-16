@@ -1,5 +1,6 @@
 import type { AgentDetectionEntry } from "./detect.js";
 import type { AgentFamily, ProviderCatalogEntry, ProviderModel, ProviderPrefs, RegisteredAgentSoftware } from "./provider-catalog.js";
+import type { SessionOptions } from "./session-options.js";
 
 /**
  * resolve-providers.ts(這輪新增):`resolveProviders()` 是「內建 provider 目錄
@@ -75,6 +76,60 @@ export function providerEffortChoices(
     if (model?.efforts) return model.efforts;
   }
   return provider.efforts;
+}
+
+/**
+ * 2026-10-16:建立選單(AgentPicker)的思考程度控制項該呈現什麼——在 `providerEffortChoices()` 之上多分辨
+ * 「為什麼沒有選項」,讓 UI 不必在「不支援」與「現在還不能選」之間整個消失(使用者回報「opencode 沒辦法選思考程度」:
+ * 預設 model `opencode/big-pickle` 本身沒有 variants,選單上完全看不到思考程度,不知道要換 model 才有)。
+ *   - `none`:provider 不支援選思考程度,或建立前根本不知道(ACP agent 要等對話開起來才回報,見 `optionsAfterStart`)→ 不顯示。
+ *   - `choices`:有可選項目。
+ *   - `pickModelFirst`:provider 的思考程度隨 model 而定(model 清單帶 `efforts`,例如 OpenCode 偵測到的 variants)、
+ *     也有 model 下拉可選,但使用者還沒選 model → 顯示 disabled 控制項,提示先選 model。
+ *   - `modelHasNone`:選了 model,但那個 model 沒有可選的思考程度(`efforts: []`)→ 顯示 disabled 控制項,提示這個 model 不支援。
+ */
+export type EffortSelectionState =
+  | { kind: "none" }
+  | { kind: "choices"; choices: string[] }
+  | { kind: "pickModelFirst" }
+  | { kind: "modelHasNone" };
+
+export function providerEffortSelectionState(
+  provider: Pick<ResolvedProvider, "supportsEffortSelection" | "supportsModelSelection" | "efforts" | "models">,
+  modelId: string | undefined,
+): EffortSelectionState {
+  const choices = providerEffortChoices(provider, modelId);
+  if (choices) return choices.length > 0 ? { kind: "choices", choices } : { kind: "modelHasNone" };
+  // `providerEffortChoices()` 回 undefined = provider 不支援,或建立前不知道。只有「清單確實隨 model 變、而且使用者看得到
+  // model 下拉卻還沒選」才算 pickModelFirst;codex/gemini 這類沒有 model 清單的 ACP agent 維持 none
+  // (它們的說明走 `optionsAfterStart` 那行字,不能叫使用者去選一個不存在的下拉)。
+  if (
+    provider.supportsEffortSelection &&
+    !modelId &&
+    provider.supportsModelSelection &&
+    provider.models.some((m) => m.efforts !== undefined)
+  ) {
+    return { kind: "pickModelFirst" };
+  }
+  return { kind: "none" };
+}
+
+/**
+ * 2026-10-16:對話標題列的思考程度控制項——「provider 本來就能選思考程度,但 agent 回報這個 session 目前(目前的
+ * model)沒有可選項目」時,UI 要顯示 disabled 的控制項說明原因,不能整個消失。
+ *
+ * 判斷依據是 agent **真的回報過選項**(`session.options` 有值,見 session-options.ts):
+ *   - 沒回報過(session 剛啟動 ACP 還沒送選項、PTY 這類永遠不回報、session 已結束)→ 不能斷言「沒有」,不顯示——
+ *     否則 ACP session 一開起來會閃一下「不支援」再變成真的下拉,PTY(`claude-cli` 也標了 supportsEffortSelection,
+ *     但中途不能換)會顯示一個永遠 disabled 的假控制項。
+ *   - 回報了、但沒有 `effort`(或選項是空的)→ 目前這個 model 沒有思考程度。
+ */
+export function effortUnavailableInSession(
+  provider: Pick<ResolvedProvider, "supportsEffortSelection"> | undefined,
+  options: SessionOptions | undefined,
+): boolean {
+  if (!provider?.supportsEffortSelection || !options) return false;
+  return (options.effort?.choices.length ?? 0) === 0;
 }
 
 /** 以 model id 去重合併,`extra`(使用者的 additionalModels)優先——出現在

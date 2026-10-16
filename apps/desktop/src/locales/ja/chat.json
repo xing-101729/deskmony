@@ -5,7 +5,10 @@
     "switchAriaLabel": "model を切り替え"
   },
   "effort": {
-    "switchAriaLabel": "思考の深さを切り替え"
+    "switchAriaLabel": "思考の深さを切り替え",
+    "unsupportedOption": "思考レベル:非対応",
+    "unsupportedTitle": "現在の model({{model}})には選択できる思考レベルがありません。対応している model に切り替えると選択できます。",
+    "unsupportedTitleNoModel": "現在の model には選択できる思考レベルがありません。対応している model に切り替えると選択できます。"
   },
   "control": {
     "notSpecifiedOption": "(未指定、CLI のデフォルトを使用)",

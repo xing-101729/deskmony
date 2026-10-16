@@ -1,11 +1,12 @@
 import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { MessageOrigin, Session, SessionOptionChoice, SlashCommandInfo } from "@deskmony/shared";
-import { EffortLevelSchema, PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
+import { EffortLevelSchema, PromptImageMediaTypeSchema, effortUnavailableInSession, type PromptImageMediaType } from "@deskmony/shared";
 import {
   useSessionStore,
   providerLabelOf,
   selectProviderModels,
+  selectResolvedProviders,
   selectUsageReporting,
   type ChatItem,
   type PendingAttachment,
@@ -135,18 +136,42 @@ function ModelControl({ session }: { session: Session }): JSX.Element {
  *   - agent 自己回報了思考程度選項(`session.options.effort`:ACP 的 `thought_level`、OpenCode 目前 model 的
  *     variants)→ 用 agent 給的清單(隨 model 變動,agent 會重新回報)。
  *   - `claude-agent-sdk` → Claude 的固定 5 級(`EffortLevelSchema`)。
- * 其餘直接 `return null`,不像 `ModelControl` 顯示唯讀 badge——這個 session 不能選思考程度,不需要顯示任何東西。
+ * 沒有選項時:
+ *   - 2026-10-16:provider 本來就能選思考程度、agent 也回報過選項,只是**目前的 model** 沒有可選項目(例如 OpenCode 的預設
+ *     model `opencode/big-pickle` 沒有 variants)→ 顯示 disabled 的控制項並說明原因,不能整個消失——使用者回報「opencode 沒辦法
+ *     選思考程度」,就是因為完全看不到這個控制項,不知道換成支援的 model 後就能選(判斷見 `effortUnavailableInSession()`)。
+ *   - 其餘(provider 不支援、agent 還沒回報選項)直接 `return null`,不像 `ModelControl` 顯示唯讀 badge——這個 session 不能選
+ *     思考程度,不需要顯示任何東西。
  */
 function EffortControl({ session }: { session: Session }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
   const setSessionEffort = useSessionStore((s) => s.setSessionEffort);
+  const detectedAgents = useSessionStore((s) => s.detectedAgents);
+  const providerPrefs = useSessionStore((s) => s.providerPrefs);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 與 ModelControl 同源:依 session.providerId 查 resolveProviders() 的結果(provider 已不在目錄裡 → undefined → 不顯示)。
+  const provider = useMemo(
+    () => selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === session.providerId),
+    [detectedAgents, providerPrefs, session.providerId],
+  );
 
   const choices: SessionOptionChoice[] | undefined =
     session.options?.effort?.choices ??
     (session.adapterType === "claude-agent-sdk" ? EffortLevelSchema.options.map((v) => ({ value: v, label: v })) : undefined);
-  if (!choices || choices.length === 0) return null;
+  if (!choices || choices.length === 0) {
+    if (!effortUnavailableInSession(provider, session.options)) return null;
+    const model = session.model ?? session.options?.model?.current ?? "";
+    const title = model ? t("chat:effort.unsupportedTitle", { model }) : t("chat:effort.unsupportedTitleNoModel");
+    return (
+      <div className="flex items-center gap-1.5" title={title}>
+        <Select aria-label={t("chat:effort.switchAriaLabel")} value="" disabled title={title} className="!h-6 !text-2xs">
+          <option value="">{t("chat:effort.unsupportedOption")}</option>
+        </Select>
+      </div>
+    );
+  }
 
   const currentEffort = session.effort ?? "";
   const listed = currentEffort && !choices.some((c) => c.value === currentEffort) ? [{ value: currentEffort, label: currentEffort }, ...choices] : choices;
