@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, access, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { NexusDb } from "@deskmony/db";
 import { sessions as sessionsTable, messages as messagesTable } from "@deskmony/db";
 import type { AdapterRegistry, AgentAdapter, AgentHandle } from "@deskmony/adapters";
@@ -29,6 +29,8 @@ import {
   type ReadSessionResult,
   type Session,
   type SessionEventEnvelope,
+  type SessionHistoryResetPush,
+  type SessionMessageDraft,
   type SessionPermissionMode,
   type SessionStatus,
   type SessionTitleMethod,
@@ -45,10 +47,12 @@ import {
   TITLE_GENERATION_TIMEOUT_MS,
   buildTitleRequestPrompt,
   checkManualTitle,
+  countTitleChars,
   fallbackTitleFromText,
   sanitizeGeneratedTitle,
   softwareCanResumeBackend,
   softwareCanUseTools,
+  truncateTitle,
 } from "@deskmony/shared";
 import { storedLaunchFromSpec, type AgentCatalog, type LaunchChoices, type StoredLaunchInfo } from "../agents/agent-catalog.js";
 import type { PermissionGateway } from "../permissions/permission-gateway.js";
@@ -66,6 +70,7 @@ import {
   buildTranscript,
   looksLikeSlashCommand,
   prependTranscript,
+  type TranscriptIntro,
   type TranscriptMessage,
 } from "./session-transcript.js";
 import {
@@ -199,6 +204,8 @@ interface PromptDelivery {
   origin?: MessageOrigin;
   /** 持久化用的原始 message 本體(送給 adapter 的是信封包裝後的 `prompt.text`)。省略時存 `prompt.text`。 */
   persistedText?: string;
+  /** 2026-10-16:呼叫端指定的 `messages.id`(只有人類輸入,見 gateway `session.sendPrompt` 的 `messageId`)。省略時 core 自己產生。 */
+  messageId?: string;
 }
 
 interface RuntimeState {
@@ -569,9 +576,11 @@ export class SessionManager extends EventEmitter {
       .select()
       .from(messagesTable)
       .where(eq(messagesTable.sessionId, sessionId))
+      // 2026-10-16:排序鍵明確寫成 (created_at, rowid),和「倒回/分支」找出「M 之前/M 及之後」用的鍵(`messageAtOrAfter()`)
+      // 是同一個。過去靠 JS 穩定排序保留 DB 回傳的順序(實際上就是 rowid 順序),結果相同,但那是巧合而不是保證——
+      // 兩邊的鍵一旦不同,畫面上看到的「M 之後」和被刪掉的「M 之後」就會對不上。      .orderBy(messagesTable.createdAt, sql`rowid`)
       .all();
     return rows
-      .sort((a, b) => a.createdAt - b.createdAt)
       .map((row) => ({
         id: row.id,
         sessionId: row.sessionId,
@@ -922,8 +931,11 @@ export class SessionManager extends EventEmitter {
    *     也不可能挑一條現成的鏈來繞過鏈預算。
    *   - 跨 session 投遞:沿用訊息自己帶的 `chainId` 與 `origin`(只有 core 內部能組出來)。
    */
-  async sendPrompt(sessionId: string, prompt: PromptInput): Promise<void> {
-    await this.sendPromptSerialized(sessionId, prompt, { chainId: randomUUID() });
+  async sendPrompt(sessionId: string, prompt: PromptInput, options: { messageId?: string } = {}): Promise<void> {
+    await this.sendPromptSerialized(sessionId, prompt, {
+      chainId: randomUUID(),
+      ...(options.messageId ? { messageId: options.messageId } : {}),
+    });
     // 2026-10-06:人類輸入送出成功之後,標題還是預設的就在背景自動命名(見 `maybeAutoTitleAfterHumanPrompt()`)。
     // 只有這個入口(人類輸入)會觸發——跨 session 投遞走 `deliverNetworkMessage()`,不經過這裡。
     this.maybeAutoTitleAfterHumanPrompt(sessionId);
@@ -997,6 +1009,7 @@ export class SessionManager extends EventEmitter {
       delivery.persistedText ?? prompt.text,
       prompt.attachments,
       delivery.origin,
+      delivery.messageId,
     );
     // 別的 session 送來的訊息:通知所有 client(讓正在看這條 session 的 UI 即時顯示「來自 <title>」)。
     // 人類自己輸入的不推播——桌面端是樂觀回顯。
@@ -1868,7 +1881,11 @@ export class SessionManager extends EventEmitter {
    */
   private async respawnRuntime(
     session: Session,
-    opts: { statusAfter: "idle" | "busy" },
+    /**
+     * `intro`(2026-10-16):對話紀錄開頭說明為什麼 agent 不記得——預設 `revive`;倒回(`rewindSession()`)傳 `rewind`。
+     * 倒回時 `session.backendSessionId` 已先清成空(舊的後端對話含被移除的內容,不能被接回),所以這裡一定走「全新後端對話」。
+     */
+    opts: { statusAfter: "idle" | "busy"; intro?: TranscriptIntro },
   ): Promise<{ runtime: RuntimeState; outcome: ReviveOutcome }> {
     const sessionId = session.id;
     if (this.shuttingDown) {
@@ -1923,7 +1940,7 @@ export class SessionManager extends EventEmitter {
         }
       }
 
-      outcome = await this.planReviveOutcome(runtime, resumed);
+      outcome = await this.planReviveOutcome(runtime, resumed, opts.intro ?? "revive");
       await this.setStatus(sessionId, opts.statusAfter);
     } catch (err) {
       this.runtime.delete(sessionId);
@@ -1954,11 +1971,11 @@ export class SessionManager extends EventEmitter {
    *   - 其餘 → DB 有 user/assistant 文字就組紀錄(`transcript`),沒有就 `fresh`。
    * 紀錄在這裡(送出新訊息**之前**)就組好,所以不會包含正要送出的那一則。
    */
-  private async planReviveOutcome(runtime: RuntimeState, resumed: boolean): Promise<ReviveOutcome> {
+  private async planReviveOutcome(runtime: RuntimeState, resumed: boolean, intro: TranscriptIntro = "revive"): Promise<ReviveOutcome> {
     if (resumed) return { kind: "resumed" };
     if (runtime.adapter.capabilities().terminal) return { kind: "terminal" };
     const loaded = await this.loadTranscriptMessages(runtime.handle.id);
-    const built = buildTranscript(loaded.messages, { olderNotLoaded: loaded.olderNotLoaded });
+    const built = buildTranscript(loaded.messages, { olderNotLoaded: loaded.olderNotLoaded, intro });
     if (!built) return { kind: "fresh" };
     runtime.pendingTranscript = built.text;
     return { kind: "transcript", includedCount: built.includedCount, truncated: built.truncated };
@@ -2011,6 +2028,236 @@ export class SessionManager extends EventEmitter {
     const session = await this.spawnNewSession(spec, label, { workingDir: source.workingDir, title });
     await this.sendPrompt(session.id, { text: summary });
     return session;
+  }
+
+  // ==========================================================================================
+  // 2026-10-16:訊息 hover 動作列的「倒回」(`session.rewind`)與「分支」(`session.fork`)。語意與取捨見
+  // docs/DECISIONS.md「訊息倒回與分支」。重點:
+  //   - 兩者都是「**全新的後端對話** + 讀文字紀錄接續」,重用 session 自動復活的對話紀錄機制(`pendingTranscript`、
+  //     `session-transcript.ts`),不碰 adapter 層——各家 agent 沒有統一的「把對話改寫到某個點」或「從某個點分支」能力。
+  //   - **只倒對話,不碰檔案**:agent 已經改過的檔案不會還原(UI 的確認框與對話裡的系統說明都明講)。
+  //   - 目標訊息必須是**人類在這個 session 輸入的 user 訊息**(沒有 `origin`);只在閒置時可用;終端程式(pty)沒有對話可言。
+  //   - 「M 之前/M 及之後」用跟載入歷史相同的排序鍵 `(created_at, rowid)`:同一毫秒寫入的訊息(user 與 assistant 常常同一個
+  //     createdAt)只靠 createdAt 會切錯邊。
+  // ==========================================================================================
+
+  /**
+   * 倒回到使用者訊息 `messageId`:M 及之後的所有訊息從 DB 移除,agent 換成全新的後端對話,M 之前的對話改成文字紀錄附在下一則
+   * prompt 前面。在 per-session 鎖裡進行(和送出訊息、重新啟動 agent 互斥)。
+   *
+   * 步驟:
+   *  1. 驗證(session 存在、非終端程式、閒置;M 屬於這個 session 且是人類輸入的 user 訊息)——失敗什麼都不動。
+   *  2. 有 runtime → 狀態標成忙碌(收掉 agent、重新啟動要幾秒,UI 這段時間顯示忙碌,也擋住重複操作)→ 收掉目前的 agent
+   *     (子行程、待決權限/提問、MCP bridge token、事件迴圈,和 `reclaimSession()` 同一套)。
+   *  3. DB:刪掉 M 及之後的訊息,**並清掉 `backendSessionId`**——舊的後端對話含被移除的內容,任何路徑(重新啟動、復原視圖的
+   *     「繼續」、core 重啟後的自動復活)都不能再把它接回來。
+   *  4. 有 runtime → 立刻用 `respawnRuntime()` 以全新後端對話重新啟動(model / 思考程度取自 session 列,所以保留),紀錄附在
+   *     下一則 prompt 前面;失敗就把 session 標成 error(DB 已倒回,下一則訊息會再試一次重新啟動)。沒有 runtime
+   *     (core 重啟後的 closed/interrupted、被回收的 error)→ 只改 DB,不替使用者啟動 agent;下次送出訊息時由自動復活
+   *     補上紀錄(`backendSessionId` 已清,所以一定是全新對話)。
+   *  5. 留系統說明、推播 `session-history-reset`(其他 client 重新載入歷史)。
+   * 回傳 M 的原文與附件(UI 放回輸入框)。
+   */
+  async rewindSession(sessionId: string, messageId: string): Promise<{ session: Session; message: SessionMessageDraft }> {
+    return this.withSessionLock(sessionId, async () => {
+      const session = await this.requireEditableHistory(sessionId);
+      const target = await this.locateHumanUserMessage(sessionId, messageId);
+      const draft = draftOfMessage(target);
+
+      const live = this.runtime.get(sessionId);
+      let notice: { event: string; params?: Record<string, unknown> };
+      try {
+        if (live) {
+          await this.setStatus(sessionId, "busy");
+          await this.retireRuntime(sessionId, live);
+        }
+        this.db.transaction((tx) => {
+          tx.delete(messagesTable).where(and(eq(messagesTable.sessionId, sessionId), messageAtOrAfter(target))).run();
+          tx.update(sessionsTable).set({ backendSessionId: null, updatedAt: Date.now() }).where(eq(sessionsTable.id, sessionId)).run();
+        });
+        notice = { event: "session.rewoundDeferred" };
+        if (live) {
+          const rewound = (await this.getSession(sessionId)) ?? session;
+          try {
+            const { outcome } = await this.respawnRuntime(rewound, { statusAfter: "idle", intro: "rewind" });
+            notice = rewindNoticeEvent(outcome);
+          } catch (err) {
+            // DB 已經倒回,只是新的 agent 起不來(沒裝了、core 正在關閉……):session 沒有 runtime,標 error——
+            // 下一則人類訊息走自動復活再試一次(`backendSessionId` 已清,仍是全新對話)。倒回本身是成功的,不丟錯。
+            const detail = err instanceof Error ? err.message : String(err);
+            console.error(`[session-manager] session ${sessionId} 倒回後重新啟動 agent 失敗(倒回已生效,下一則訊息會再試): ${detail}`);
+            await this.setStatus(sessionId, "error", `倒回已完成,但重新啟動 agent 失敗:${detail};直接送出訊息會再試一次`);
+          }
+        }
+      } catch (err) {
+        // 收掉 agent / 改 DB 中途出事:不讓 session 卡在我們標的忙碌狀態。
+        if (live && !this.runtime.has(sessionId)) {
+          await this.setStatus(sessionId, "error", "倒回過程中發生錯誤,agent 已停止;直接送出訊息會重新啟動它").catch(() => undefined);
+        }
+        throw err;
+      }
+
+      // 系統說明不另外走 `session-message` push:緊接著的 `session-history-reset` 會讓每個 client 重新載入整段歷史(已含這則說明),
+      // 兩條都推,先到的追加會被後到的重新載入蓋掉(或反過來漏掉),沒有任何好處。
+      await this.persistMessageRow(sessionId, "system", JSON.stringify(notice));
+      const updated = await this.getSession(sessionId);
+      if (!updated) {
+        throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
+      }
+      this.emit("session-updated", updated);
+      const reset: SessionHistoryResetPush = { sessionId };
+      this.emit("session-history-reset", reset);
+      return { session: updated, message: draft };
+    });
+  }
+
+  /**
+   * 在使用者訊息 `messageId` 分支:建一個新 session(同 provider、model、思考程度、工作資料夾),把原 session 中 M **之前**的
+   * 訊息(所有角色)複製過去,新 session 的 agent 是全新的後端對話,第一則 prompt 附上那段對話的文字紀錄。**原 session 完全
+   * 不動**(只讀;持有它的鎖只是為了複製期間沒人改它的歷史)。標題 = 原標題 + `titleSuffix`,標題來源沿用原 session 的:
+   * 預設標題的 session 分支後仍是預設標題(第一則人類輸入後自動命名),使用者改過/AI 取過的名字不會被降級成可被自動覆蓋。
+   * 新 session 不掛在原 session 底下(`parentSessionId` 留空):它是獨立的對話,不是原 session 開出來幫忙的子 session。
+   */
+  async forkSession(
+    sessionId: string,
+    messageId: string,
+    titleSuffix?: string,
+  ): Promise<{ session: Session; message: SessionMessageDraft }> {
+    return this.withSessionLock(sessionId, async () => {
+      const source = await this.requireEditableHistory(sessionId);
+      const target = await this.locateHumanUserMessage(sessionId, messageId);
+      const draft = draftOfMessage(target);
+
+      const { spec, label } = await this.catalog.buildLaunchSpecForSession(source, await this.getStoredLaunch(sessionId));
+      const naming = forkTitleOf(source, titleSuffix);
+      const forked = await this.spawnNewSession(spec, label, {
+        workingDir: source.workingDir,
+        title: naming.title,
+        titleSource: naming.titleSource,
+      });
+      try {
+        await this.copyMessagesBefore(sessionId, target, forked.id);
+        const runtime = this.runtime.get(forked.id);
+        const loaded = await this.loadTranscriptMessages(forked.id);
+        const built = buildTranscript(loaded.messages, { olderNotLoaded: loaded.olderNotLoaded, intro: "fork" });
+        if (runtime && built) runtime.pendingTranscript = built.text;
+        const notice = built
+          ? {
+              event: built.truncated ? "session.forkedFromTranscriptTruncated" : "session.forkedFromTranscript",
+              params: { count: built.includedCount, title: source.title },
+            }
+          : { event: "session.forkedFresh", params: { title: source.title } };
+        await this.persistMessageRow(forked.id, "system", JSON.stringify(notice));
+      } catch (err) {
+        // 複製到一半失敗:不留下一個半套的分支(連同剛 spawn 的 agent)。
+        await this.deleteSession(forked.id).catch((cleanupErr: unknown) => {
+          console.error(`[session-manager] 分支失敗後清掉新 session ${forked.id} 也失敗(忽略): ${String(cleanupErr)}`);
+        });
+        throw err;
+      }
+      const session = await this.getSession(forked.id);
+      if (!session) {
+        throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: forked.id }, `找不到 session: ${forked.id}`);
+      }
+      return { session, message: draft };
+    });
+  }
+
+  /** 倒回/分支共用的前置檢查:session 存在、不是終端程式(pty 沒有對話)、閒置(非 busy/waiting)。 */
+  private async requireEditableHistory(sessionId: string): Promise<Session> {
+    const session = await this.getSession(sessionId);
+    if (!session) {
+      throw new DeskmonyError(ErrorCodes.ENTITY_NOT_FOUND, { entityType: "session", id: sessionId }, `找不到 session: ${sessionId}`);
+    }
+    if (this.adapters.get(session.adapterType).capabilities().terminal) {
+      throw new DeskmonyError(
+        "sessionHistory.unsupported",
+        { sessionId, adapterType: session.adapterType },
+        `終端程式(${session.adapterType})沒有可以倒回或分支的對話: ${sessionId}`,
+      );
+    }
+    if (session.status === "busy" || session.status === "waiting") {
+      throw new DeskmonyError(
+        "sessionHistory.busy",
+        { sessionId, status: session.status },
+        `session ${sessionId} 正在執行(${session.status}),請等它閒置後再倒回或分支`,
+      );
+    }
+    return session;
+  }
+
+  /**
+   * 找出倒回/分支的目標訊息(連同排序用的 rowid)。必須屬於這個 session(別的 session 的 messageId 一律視為不存在,
+   * 不洩漏它存在與否),而且是**人類在這個 session 輸入的 user 訊息**——別的 session 送來/轉傳的訊息(有 `origin`)、
+   * assistant/tool/system 訊息都不是「使用者說的話」,不能當成倒回點。
+   */
+  private async locateHumanUserMessage(sessionId: string, messageId: string): Promise<LocatedMessage> {
+    const rows = await this.db
+      .select({
+        id: messagesTable.id,
+        role: messagesTable.role,
+        content: messagesTable.content,
+        attachments: messagesTable.attachments,
+        origin: messagesTable.origin,
+        createdAt: messagesTable.createdAt,
+        rowid: sql<number>`rowid`,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.id, messageId), eq(messagesTable.sessionId, sessionId)))
+      .all();
+    const row = rows[0];
+    if (!row) {
+      throw new DeskmonyError("sessionHistory.messageNotFound", { sessionId, messageId }, `session ${sessionId} 裡找不到訊息 ${messageId}`);
+    }
+    if (row.role !== "user" || row.origin) {
+      throw new DeskmonyError(
+        "sessionHistory.messageNotRewindable",
+        { sessionId, messageId },
+        `訊息 ${messageId} 不是你在這個 session 輸入的訊息,不能當成倒回或分支的位置`,
+      );
+    }
+    return {
+      id: row.id,
+      createdAt: row.createdAt,
+      rowid: row.rowid,
+      content: row.content,
+      attachments: row.attachments ? (JSON.parse(row.attachments) as PromptAttachment[]) : undefined,
+    };
+  }
+
+  /** 把 `sourceId` 裡 M 之前的所有訊息複製進 `targetSessionId`(新 id、其餘欄位原樣、依 `(created_at, rowid)` 順序寫入保持順序)。 */
+  private async copyMessagesBefore(sourceId: string, target: LocatedMessage, targetSessionId: string): Promise<number> {
+    const rows = await this.db
+      .select()
+      .from(messagesTable)
+      .where(and(eq(messagesTable.sessionId, sourceId), messageBefore(target)))
+      .orderBy(messagesTable.createdAt, sql`rowid`)
+      .all();
+    if (rows.length === 0) return 0;
+    this.db.transaction((tx) => {
+      for (const row of rows) {
+        tx.insert(messagesTable).values({ ...row, id: randomUUID(), sessionId: targetSessionId }).run();
+      }
+    });
+    return rows.length;
+  }
+
+  /**
+   * 收掉一個 runtime(倒回用):停 pty 計時器、標 `retired`(事件迴圈結束不是 agent 自己停止)、dispose adapter、拿掉 runtime、
+   * 清掉待決權限/提問並推播、結束回合——和 `reclaimSession()` 同一套,差別是 dispose 失敗只記 log 不中斷(runtime 無論如何都已拿掉,
+   * 中斷只會讓 DB 與記憶體處在更難判斷的半套狀態)。
+   */
+  private async retireRuntime(sessionId: string, runtime: RuntimeState): Promise<void> {
+    this.clearPtyIdleTimer(runtime);
+    runtime.retired = true;
+    try {
+      await runtime.adapter.dispose(runtime.handle);
+    } catch (err) {
+      console.error(`[session-manager] 收掉 session ${sessionId} 的 agent 失敗(忽略,仍繼續): ${String(err)}`);
+    }
+    if (this.runtime.get(sessionId) === runtime) this.runtime.delete(sessionId);
+    this.releasePendingRequests(sessionId, runtime);
+    this.turnLimiter.endTurn(sessionId);
   }
 
   /** session 列自己存的 `launch_command`/`launch_args`(續接/接手的退路,見 `AgentCatalog.buildLaunchSpecForSession()`)。 */
@@ -2738,9 +2985,11 @@ export class SessionManager extends EventEmitter {
     content: string,
     attachments?: PromptAttachment[],
     origin?: MessageOrigin,
+    /** 2026-10-16:指定 `messages.id`(人類輸入的訊息用 client 在樂觀回顯時就有的 id,見 `PromptDelivery.messageId`)。 */
+    id?: string,
   ): Promise<MessageRecord> {
     const row = {
-      id: randomUUID(),
+      id: id ?? randomUUID(),
       sessionId,
       role,
       content,
@@ -2792,6 +3041,64 @@ function reviveNoticeEvent(outcome: ReviveOutcome, resumedEvent: string): { even
     case "fresh":
       return { event: "session.revivedFresh" };
   }
+}
+
+/** 倒回/分支的目標訊息(含排序用的隱含 rowid,見 `messageBefore()`)。 */
+interface LocatedMessage {
+  id: string;
+  createdAt: number;
+  rowid: number;
+  content: string;
+  attachments?: PromptAttachment[];
+}
+
+/**
+ * 2026-10-16:「在 M **之前**」的 SQL 條件。訊息的全序是 `(created_at, rowid)`——和 `getHistory()`/`loadTranscriptMessages()`
+ * 同一個排序鍵。同一毫秒寫入的訊息(user 與 assistant 常常同一個 createdAt)只比 created_at 會把它們全算成「同時」,
+ * 切錯邊;`rowid` 是寫入順序(messages 是 TEXT 主鍵表,仍有隱含 rowid)。條件只能用在查詢單一 `messages` 表的語句裡
+ * (`rowid` 不帶表名)。
+ */
+function messageBefore(m: { createdAt: number; rowid: number }): SQL {
+  return sql`(${messagesTable.createdAt} < ${m.createdAt} OR (${messagesTable.createdAt} = ${m.createdAt} AND rowid < ${m.rowid}))`;
+}
+
+/** 「M 及之後」的 SQL 條件——`messageBefore()` 的補集(同一個排序鍵)。 */
+function messageAtOrAfter(m: { createdAt: number; rowid: number }): SQL {
+  return sql`(${messagesTable.createdAt} > ${m.createdAt} OR (${messagesTable.createdAt} = ${m.createdAt} AND rowid >= ${m.rowid}))`;
+}
+
+/** 倒回/分支回傳給 UI、要放回輸入框的那則訊息(以 DB 存的原文與附件為準)。 */
+function draftOfMessage(m: LocatedMessage): SessionMessageDraft {
+  return { content: m.content, ...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments } : {}) };
+}
+
+/** 倒回後 agent 重新啟動的結果 → 留在對話裡的系統說明(桌面端 `systemEvents` namespace 翻譯,key 要和各語系 systemEvents.json 一致)。 */
+function rewindNoticeEvent(outcome: ReviveOutcome): { event: string; params?: Record<string, unknown> } {
+  if (outcome.kind === "transcript") {
+    return {
+      event: outcome.truncated ? "session.rewoundFromTranscriptTruncated" : "session.rewoundFromTranscript",
+      params: { count: outcome.includedCount },
+    };
+  }
+  // fresh(倒回點之前沒有任何文字對話)。resumed / terminal 不會出現:倒回清掉了 backendSessionId,pty 被擋在前置檢查。
+  return { event: "session.rewoundFresh" };
+}
+
+/** 分支標題後綴的預設值(core 的固定字串用中文,同 `「X」開的 session`;桌面端會傳目前語言的後綴)。 */
+const DEFAULT_FORK_TITLE_SUFFIX = "(分支)";
+
+/**
+ * 分支出來的 session 的標題與標題來源:
+ *   - 原 session 還是預設標題(`default`)→ 分支也用預設標題,第一則人類輸入後照常自動命名。
+ *   - `auto` / `user` → 原標題 + 後綴,來源沿用(使用者取的名字不會被降級成可被自動覆蓋;AI 取的維持 AI 取的)。
+ * 原標題太長時先截短,讓加上後綴後不超過 `SESSION_TITLE_MAX_CHARS`。
+ */
+function forkTitleOf(source: Session, rawSuffix: string | undefined): { title?: string; titleSource: SessionTitleSource } {
+  if (source.titleSource === "default") return { titleSource: "default" };
+  const checked = rawSuffix === undefined ? undefined : checkManualTitle(rawSuffix);
+  const suffix = checked?.ok ? checked.title : DEFAULT_FORK_TITLE_SUFFIX;
+  const room = Math.max(SESSION_TITLE_MAX_CHARS - countTitleChars(suffix) - 1, 1);
+  return { title: `${truncateTitle(source.title, room)} ${suffix}`, titleSource: source.titleSource };
 }
 
 /** `messages.origin` 欄位(JSON 字串或 NULL)→ `MessageOrigin`;壞掉的資料當作沒有來源,不讓讀歷史因此失敗。 */
