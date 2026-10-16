@@ -331,6 +331,9 @@ export class OpenCodeAdapter implements AgentAdapter {
         env: childEnv,
         stdio: ["ignore", "pipe", "pipe"],
         shell: useShell,
+        // 2026-10-16:打包版 core 沒有主控台(GUI subsystem 的 Deskmony.exe),不帶這個旗標時 shell:true 的 cmd.exe 與 opencode 本身
+        // 可能各自開出主控台視窗。同 acp-adapter.ts 既有的 spawn。
+        windowsHide: true,
       });
     } catch (err) {
       // spawn 本身同步丟例外(例如 Windows 上 `.cmd` 沒走 shell 的 EINVAL):token 已核發,不能留成孤兒。
@@ -1092,7 +1095,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       // 的 opencode 程序;用 taskkill /T 連同子程序樹一起結束(與
       // acp-adapter.ts/pty-adapter.ts 的既有做法一致)。
       if (child.pid) {
-        spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+        spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
       }
     } else {
       child.kill("SIGTERM");
