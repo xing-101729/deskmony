@@ -28,6 +28,8 @@ import { DiffHunkView, parseDiffResult } from "./chat/DiffHunkView.js";
 import { ToolImage, parseImageBlock } from "./chat/ToolImage.js";
 import { AskUserQuestionWidget, PendingUserDialogsDock, isQuestionToolName } from "./chat/AskUserQuestionWidget.js";
 import { ForwardMessageDialog } from "./chat/ForwardMessageDialog.js";
+import { ToolCallGroup } from "./chat/ToolCallGroup.js";
+import { groupChatItems, type ToolItem } from "../lib/chat-groups.js";
 import { SessionTitleHeading } from "./SessionTitle.js";
 
 /**
@@ -732,6 +734,15 @@ function SlashCommandMenu({
   );
 }
 
+/**
+ * 2026-10-16:`ToolCallGroup` 展開後渲染每一張工具卡片的方式——走跟時間軸上單獨的工具一模一樣的
+ * `ChatBubble` 分派(TodoListView / DiffHunkView / ToolCallBubble)。放在模組層級是為了讓這個函式
+ * 的引用永遠不變,`ToolCallGroup` 的 memo 比較才不會因為它而失效。
+ */
+function renderToolItem(item: ToolItem): JSX.Element {
+  return <ChatBubble key={item.id} item={item} />;
+}
+
 export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.Element {
   const { t } = useTranslation(["chat"]);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
@@ -772,6 +783,11 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [items]);
+
+  // 2026-10-16:連續的工具呼叫收成一組(規則見 lib/chat-groups.ts)。依 `items` 重算——串流中每個 token 都會產生新的
+  // `items`,但分組只是 O(n) 掃一遍;沒變動的組靠 `ToolCallGroup` 的比較函式、沒變動的單則訊息靠 `ChatBubble` 的 memo
+  // 跳過重繪。互動式提問工具(isQuestionToolName)不進組,否則使用者看不到要他作答的表單。
+  const entries = useMemo(() => groupChatItems(items, isQuestionToolName), [items]);
 
   // 這輪(slash command)新增:對話框掛載/切換 session 時拉一次這個 session
   // 目前已知的 "/" 指令清單——純 push 補的缺口(見 session-store.ts 的
@@ -992,9 +1008,13 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 sm:px-5">
         {items.length === 0 && <p className="mt-6 text-center text-xs text-fg-faint">{t("chat:empty.startTyping")}</p>}
-        {items.map((item) => (
-          <ChatBubble key={item.id} item={item} />
-        ))}
+        {entries.map((entry) =>
+          entry.type === "toolGroup" ? (
+            <ToolCallGroup key={entry.key} items={entry.items} renderItem={renderToolItem} />
+          ) : (
+            <ChatBubble key={entry.key} item={entry.item} />
+          ),
+        )}
         <PendingUserDialogsDock sessionId={currentSessionId} items={items} />
       </div>
 

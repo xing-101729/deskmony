@@ -16,7 +16,17 @@
     "statusFailed": "Fallido",
     "statusDone": "Completado",
     "inputLabel": "Entrada",
-    "outputLabel": "Salida"
+    "outputLabel": "Salida",
+    "group": {
+      "usedTools_one": "Usó {{count}} herramienta",
+      "usedTools_many": "Usó {{count}} herramientas",
+      "usedTools_other": "Usó {{count}} herramientas",
+      "runningNow": "Ejecutando {{name}}",
+      "failedCount_one": "{{count}} fallida",
+      "failedCount_many": "{{count}} fallidas",
+      "failedCount_other": "{{count}} fallidas",
+      "nameSeparator": ", "
+    }
   },
   "code": {
     "copyAriaLabel": "Copiar código",

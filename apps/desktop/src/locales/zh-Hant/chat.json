@@ -16,7 +16,13 @@
     "statusFailed": "失敗",
     "statusDone": "完成",
     "inputLabel": "輸入",
-    "outputLabel": "輸出"
+    "outputLabel": "輸出",
+    "group": {
+      "usedTools_other": "使用了 {{count}} 個工具",
+      "runningNow": "正在執行 {{name}}",
+      "failedCount_other": "{{count}} 個失敗",
+      "nameSeparator": "、"
+    }
   },
   "code": {
     "copyAriaLabel": "複製程式碼",

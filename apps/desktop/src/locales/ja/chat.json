@@ -16,7 +16,13 @@
     "statusFailed": "失敗",
     "statusDone": "完了",
     "inputLabel": "入力",
-    "outputLabel": "出力"
+    "outputLabel": "出力",
+    "group": {
+      "usedTools_other": "{{count}} 個のツールを使用",
+      "runningNow": "{{name}} を実行中",
+      "failedCount_other": "{{count}} 件失敗",
+      "nameSeparator": "、"
+    }
   },
   "code": {
     "copyAriaLabel": "コードをコピー",
