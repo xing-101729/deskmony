@@ -95,5 +95,24 @@
     "submit": "Reenviar",
     "sending": "Reenviando…",
     "tooLong": "Este mensaje es demasiado largo para reenviarlo (el límite es de {{max}} caracteres)"
+  },
+  "messageActions": {
+    "copy": "Copiar",
+    "copyTitle": "Copiar el texto de este mensaje",
+    "copied": "Copiado",
+    "copyFailed": "No se pudo copiar",
+    "rewind": "Rebobinar",
+    "rewindTitle": "Rebobinar hasta justo antes de enviar este mensaje; su texto vuelve al cuadro de entrada para que lo edites y lo reenvíes",
+    "rewinding": "Rebobinando…",
+    "fork": "Bifurcar",
+    "forkTitle": "Crear una conversación nueva a partir de justo antes de este mensaje (la original no cambia)",
+    "forking": "Bifurcando…",
+    "forkTitleSuffix": "(bifurcación)",
+    "busyTitle": "El agent se está ejecutando: espera a que esté inactivo para rebobinar o bifurcar",
+    "rewindConfirm": {
+      "title": "¿Rebobinar hasta antes de este mensaje?",
+      "message": "La conversación vuelve a justo antes de enviar este mensaje: este mensaje y todo lo posterior se eliminan de esta sesión, y el texto del mensaje vuelve al cuadro de entrada para que lo edites y lo reenvíes.\n\nEl agent se sustituye por una conversación nueva. Solo recibe una transcripción de texto de los mensajes anteriores (sin los resultados de las herramientas de entonces): los lee, no los recuerda.\n\nLos archivos que el agent ya haya modificado no se restauran.",
+      "confirm": "Rebobinar"
+    }
   }
 }

@@ -15,5 +15,11 @@
   },
   "session": {
     "reviveFailed": "No se pudo reiniciar el agent de la sesión {{sessionId}}: {{detail}}"
+  },
+  "sessionHistory": {
+    "unsupported": "Un programa de terminal ({{adapterType}}) no tiene una conversación que rebobinar o bifurcar",
+    "busy": "La sesión {{sessionId}} se está ejecutando (estado: {{status}}): espera a que esté inactiva para rebobinar o bifurcar",
+    "messageNotFound": "No se encontró ese mensaje en esta sesión (puede que se haya eliminado)",
+    "messageNotRewindable": "Solo puedes rebobinar o bifurcar en un mensaje que hayas escrito tú en esta sesión"
   }
 }

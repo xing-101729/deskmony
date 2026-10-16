@@ -15,5 +15,11 @@
   },
   "session": {
     "reviveFailed": "Could not restart the agent for session {{sessionId}}: {{detail}}"
+  },
+  "sessionHistory": {
+    "unsupported": "A terminal program ({{adapterType}}) has no conversation to rewind or fork",
+    "busy": "Session {{sessionId}} is running (status: {{status}}) — wait until it is idle to rewind or fork",
+    "messageNotFound": "That message could not be found in this session (it may have been removed)",
+    "messageNotRewindable": "You can only rewind or fork at a message you typed in this session"
   }
 }

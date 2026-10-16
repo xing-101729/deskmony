@@ -15,5 +15,11 @@
   },
   "session": {
     "reviveFailed": "無法重新啟動 session {{sessionId}} 的 agent:{{detail}}"
+  },
+  "sessionHistory": {
+    "unsupported": "終端程式({{adapterType}})沒有可以倒回或分支的對話",
+    "busy": "Session {{sessionId}} 正在執行(狀態:{{status}}),請等它閒置後再倒回或分支",
+    "messageNotFound": "這個 session 裡找不到那則訊息(可能已被移除)",
+    "messageNotRewindable": "只能倒回或分支到你自己在這個 session 輸入的訊息"
   }
 }

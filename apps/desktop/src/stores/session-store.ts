@@ -24,6 +24,8 @@ import {
   type ResolvedProvider,
   type Session,
   type SessionEventEnvelope,
+  type SessionHistoryResetPush,
+  type SessionMessageDraft,
   type SessionMessagePush,
   type SessionPermissionMode,
   type SessionTitleMethod,
@@ -50,10 +52,12 @@ import {
   resolveProviders,
   SessionAutoTitleResultSchema,
   SessionCreateResultSchema,
+  SessionForkResultSchema,
   SessionGetSlashCommandsResultSchema,
   SessionHistoryResultSchema,
   SessionListResultSchema,
   SessionRenameResultSchema,
+  SessionRewindResultSchema,
   SessionSetEffortResultSchema,
   SessionSetModelResultSchema,
   SessionSetPermissionModeResultSchema,
@@ -166,6 +170,16 @@ export interface SessionUsage {
   contextSeen?: boolean;
 }
 
+/**
+ * 2026-10-16(訊息 hover 動作列):倒回/分支之後要放進某個 session 輸入框的內容(被倒回/分支的那則使用者訊息的原文與
+ * 附件)。ChatView 的輸入框 state 是元件本地的,store 不能直接寫進去——改成 store 暫存一份「這個 session 待填的草稿」,
+ * ChatView 看到目前 session 有就取走(`takePendingDraft()`)並填進輸入框。
+ */
+export interface PendingDraft {
+  text: string;
+  attachments: PendingAttachment[];
+}
+
 /** `session.create` 的輸入(2026-10-02 P2:取代原本的 `agentProfileId` + `agentOverride`)。 */
 export interface NewSessionRequest {
   providerId: string;
@@ -268,6 +282,8 @@ interface SessionStoreState {
   policyRules: PolicyRule[];
   /** 2026-10-06:正在「AI 重新命名」的 session(側欄與對話標題列共用,顯示進行中狀態、避免重複觸發)。 */
   titleGenerating: Record<string, true>;
+  /** 2026-10-16:倒回/分支後待填進輸入框的草稿,見 `PendingDraft`。key = sessionId。 */
+  pendingDraftBySession: Record<string, PendingDraft>;
 
   connect: () => void;
   refreshSessions: () => Promise<void>;
@@ -322,6 +338,19 @@ interface SessionStoreState {
    * messageId、對不上 DB 那一筆,比對會在 ACP 一輪有多個氣泡時轉錯)。
    */
   forwardMessage: (sourceSessionId: string, text: string, targetSessionId: string, note?: string) => Promise<void>;
+  /**
+   * 2026-10-16(訊息 hover 動作列):倒回到使用者訊息 `messageId`(`session.rewind`)。成功後重新載入該 session 的歷史
+   * (M 與之後的訊息消失,多一則系統說明),並把 M 的原文與附件放進該 session 的待填草稿。失敗時在對話裡插入一則本地的
+   * 錯誤提示(`appendActionFailure()`),回傳 false;確認框由呼叫端(`MessageActions`)負責。
+   */
+  rewindToMessage: (sessionId: string, messageId: string) => Promise<boolean>;
+  /**
+   * 2026-10-16:在使用者訊息 `messageId` 分支(`session.fork`)。成功後切到新 session、載入它的歷史、把 M 的原文與附件放進
+   * 新 session 的待填草稿;原 session 不變。`titleSuffix` = 目前語言的標題後綴(「(分支)」之類)。失敗同 `rewindToMessage()`。
+   */
+  forkFromMessage: (sessionId: string, messageId: string, titleSuffix: string) => Promise<boolean>;
+  /** 取走(並移除)某個 session 的待填草稿;沒有就回傳 undefined。 */
+  takePendingDraft: (sessionId: string) => PendingDraft | undefined;
   /** Phase 6:`attachments` 選填——composer 沒有待送附件時省略/傳空陣列皆可,
    *  action 內部一律正規化成「非空才附加」,樂觀回顯與 wire payload 兩處共用
    *  同一份判斷(見下方實作)。 */
@@ -835,6 +864,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
   },
   policyRules: [],
   titleGenerating: {},
+  pendingDraftBySession: {},
 
   connect: () => {
     client.onStatus((status) => set({ status }));
@@ -858,6 +888,10 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         handleEnforcementNotification(push.payload as EnforcementNotificationPush);
       } else if (push.channel === "session-message") {
         handleSessionMessage(set, push.payload as SessionMessagePush);
+      } else if (push.channel === "session-history-reset") {
+        // 2026-10-16:某個 session 被倒回(別的 client 或這個 client 自己觸發的),手上有載入過它的歷史就丟掉重新載入。
+        const { sessionId } = push.payload as SessionHistoryResetPush;
+        if (get().itemsBySession[sessionId]) void reloadHistory(set, sessionId).catch(() => undefined);
       } else if (push.channel === "policy-updated") {
         const { action, rule } = push.payload as PolicyUpdatedPush;
         set((state) => ({
@@ -977,15 +1011,17 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     });
     const { session } = SessionCreateResultSchema.parse(raw);
     // 樂觀回顯第一則訊息(人類輸入,沒有 origin)——與 `sendPrompt()` action 同一種處理。
+    // 2026-10-16:本地 id 同時當 `messages.id`(`session.sendPrompt` 的 `messageId`),這則訊息才倒回得了/分支得了。
+    const messageId = crypto.randomUUID();
     set((state) => ({
       sessions: state.sessions.some((s) => s.id === session.id) ? state.sessions : [...state.sessions, session],
       itemsBySession: {
         ...state.itemsBySession,
-        [session.id]: [{ kind: "user", id: crypto.randomUUID(), content: prompt, createdAt: Date.now() }],
+        [session.id]: [{ kind: "user", id: messageId, content: prompt, createdAt: Date.now() }],
       },
     }));
     void get().fetchCapabilities(session.adapterType);
-    await client.call("session.sendPrompt", { sessionId: session.id, prompt: { text: prompt } });
+    await client.call("session.sendPrompt", { sessionId: session.id, prompt: { text: prompt }, messageId });
   },
 
   forwardMessage: async (sourceSessionId, text, targetSessionId, note) => {
@@ -995,6 +1031,56 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       text,
       ...(note && note.trim() ? { note: note.trim() } : {}),
     });
+  },
+
+  rewindToMessage: async (sessionId, messageId) => {
+    try {
+      const raw = await client.call("session.rewind", { sessionId, messageId });
+      const { session, message } = SessionRewindResultSchema.parse(raw);
+      // 先重新載入歷史(M 與之後的訊息消失、多一則系統說明),再放草稿:使用者看到的對話和輸入框同時更新。
+      // 重新載入失敗不影響倒回已生效的事實——仍然把草稿放進去,歷史稍後由 `session-history-reset` 推播補上。
+      await reloadHistory(set, sessionId).catch((err: unknown) => {
+        console.error("[session] 倒回後重新載入歷史失敗(等推播補上):", err);
+      });
+      set((state) => ({
+        sessions: state.sessions.map((s) => (s.id === session.id ? session : s)),
+        pendingDraftBySession: { ...state.pendingDraftBySession, [sessionId]: draftFromMessage(message) },
+      }));
+      return true;
+    } catch (err) {
+      appendActionFailure(set, sessionId, "session.rewindFailed", err);
+      return false;
+    }
+  },
+
+  forkFromMessage: async (sessionId, messageId, titleSuffix) => {
+    try {
+      const raw = await client.call("session.fork", { sessionId, messageId, titleSuffix });
+      const { session, message } = SessionForkResultSchema.parse(raw);
+      const historyRaw = await client.call("session.history", { sessionId: session.id });
+      const { messages } = SessionHistoryResultSchema.parse(historyRaw);
+      set((state) => ({
+        sessions: state.sessions.some((s) => s.id === session.id) ? state.sessions : [...state.sessions, session],
+        currentSessionId: session.id,
+        itemsBySession: { ...state.itemsBySession, [session.id]: messageRecordsToItems(messages) },
+        pendingDraftBySession: { ...state.pendingDraftBySession, [session.id]: draftFromMessage(message) },
+      }));
+      void get().fetchCapabilities(session.adapterType);
+      return true;
+    } catch (err) {
+      appendActionFailure(set, sessionId, "session.forkFailed", err);
+      return false;
+    }
+  },
+
+  takePendingDraft: (sessionId) => {
+    const draft = get().pendingDraftBySession[sessionId];
+    if (!draft) return undefined;
+    set((state) => {
+      const { [sessionId]: _taken, ...rest } = state.pendingDraftBySession;
+      return { pendingDraftBySession: rest };
+    });
+    return draft;
   },
 
   selectSession: async (sessionId) => {
@@ -1013,6 +1099,9 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     // payload 兩處都依這個值決定要不要附加 attachments 欄位,避免兩處各自判斷
     // 而漂移(呼應本檔案既有的「單一資料流」慣例)。
     const validAttachments = attachments && attachments.length > 0 ? attachments : undefined;
+    // 2026-10-16:本地 id 同時當 core 寫進 DB 的 `messages.id`(`session.sendPrompt` 的 `messageId`)——過去兩邊的 id 對不上,
+    // 剛送出的訊息(樂觀回顯)要「倒回到這裡」/「在這裡分支」時,core 找不到那一筆。
+    const messageId = crypto.randomUUID();
     set((state) => ({
       itemsBySession: {
         ...state.itemsBySession,
@@ -1020,7 +1109,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
           ...(state.itemsBySession[sessionId] ?? []),
           {
             kind: "user",
-            id: crypto.randomUUID(),
+            id: messageId,
             content: text,
             createdAt: Date.now(),
             ...(validAttachments ? { attachments: validAttachments } : {}),
@@ -1040,6 +1129,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
           // 再組一次。
           ...(validAttachments ? { attachments: validAttachments } : {}),
         },
+        messageId,
       });
     } catch (err) {
       appendSendFailure(set, sessionId, err);
@@ -1200,6 +1290,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       delete costSummaryBySession[sessionId];
       const slashCommandsBySession = { ...state.slashCommandsBySession };
       delete slashCommandsBySession[sessionId];
+      const pendingDraftBySession = { ...state.pendingDraftBySession };
+      delete pendingDraftBySession[sessionId];
       clearTerminalBuffer(sessionId);
       return {
         sessions,
@@ -1207,6 +1299,7 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         sessionUsage,
         costSummaryBySession,
         slashCommandsBySession,
+        pendingDraftBySession,
         // 這筆 session 若還有待決的權限請求/待答問題,一併移除 —— session 都
         // 沒了,那些彈窗再也不可能被正確回覆。
         pendingPermissions: state.pendingPermissions.filter((p) => p.sessionId !== sessionId),
@@ -1507,6 +1600,54 @@ function handleSessionMessage(
       },
     };
   });
+}
+
+/**
+ * 2026-10-16:重新載入某個 session 的整段歷史(倒回之後、收到 `session-history-reset` 推播時)。和 `selectSession()` 的差別是
+ * 不動 `currentSessionId`。
+ */
+async function reloadHistory(
+  set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
+  sessionId: string,
+): Promise<void> {
+  const raw = await client.call("session.history", { sessionId });
+  const { messages } = SessionHistoryResultSchema.parse(raw);
+  set((state) => ({
+    itemsBySession: { ...state.itemsBySession, [sessionId]: messageRecordsToItems(messages) },
+  }));
+}
+
+/** `session.rewind` / `session.fork` 回傳的那則訊息 → 輸入框的待填草稿(附件只留圖片/文件,同 `messageRecordsToItems()`)。 */
+function draftFromMessage(message: SessionMessageDraft): PendingDraft {
+  const attachments = (message.attachments ?? []).filter(
+    (a): a is PendingAttachment => a.type === "image" || a.type === "document",
+  );
+  return { text: message.content, attachments };
+}
+
+/**
+ * 2026-10-16:倒回/分支失敗時在對話裡插入一則本地的錯誤提示(系統訊息,不落地,做法同 `appendSendFailure()`)。
+ * `event` = `session.rewindFailed` / `session.forkFailed`,由 `resolveSystemEventText()` 在渲染時翻譯(label + `errors:<code>` 的原因)。
+ */
+function appendActionFailure(
+  set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
+  sessionId: string,
+  event: "session.rewindFailed" | "session.forkFailed",
+  err: unknown,
+): void {
+  const message = err instanceof Error ? err.message : String(err);
+  const params: Record<string, unknown> =
+    err instanceof DeskmonyError ? { code: err.code, errorParams: err.params ?? {}, message } : { message };
+  console.error(`[session] ${event} 失敗:`, err);
+  set((state) => ({
+    itemsBySession: {
+      ...state.itemsBySession,
+      [sessionId]: capItems([
+        ...(state.itemsBySession[sessionId] ?? []),
+        { kind: "system", id: crypto.randomUUID(), content: JSON.stringify({ event, params }), createdAt: Date.now() },
+      ]),
+    },
+  }));
 }
 
 /**
