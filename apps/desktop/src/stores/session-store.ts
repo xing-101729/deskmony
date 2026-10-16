@@ -1059,6 +1059,11 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       const { session, message } = SessionForkResultSchema.parse(raw);
       const historyRaw = await client.call("session.history", { sessionId: session.id });
       const { messages } = SessionHistoryResultSchema.parse(historyRaw);
+      // 不呼叫 `selectSession()`:它做的事只有「設 currentSessionId + 載入歷史」,這裡在同一次 `set()` 裡一起做完——
+      // 切過去的第一個畫面就有歷史與草稿,不會先閃一下空白對話(和 `createSession()` 直接設 currentSessionId 同理)。
+      // model/思考程度選項是 `Session.options`(隨 session 物件與 `session-updated` 推播更新)、待決權限/提問/用量都是以
+      // sessionId 為鍵的 store 全域狀態,新 session 剛建立、本來就沒有;slash command 清單與輸入框焦點由 ChatView 依
+      // currentSessionId 變化的 effect 處理。
       set((state) => ({
         sessions: state.sessions.some((s) => s.id === session.id) ? state.sessions : [...state.sessions, session],
         currentSessionId: session.id,

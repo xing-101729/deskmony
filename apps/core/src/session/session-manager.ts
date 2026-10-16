@@ -450,6 +450,13 @@ export class SessionManager extends EventEmitter {
    * `clearPerSessionState()`),避免無限增長。
    */
   private readonly pendingIdleInjection = new Map<string, PendingNetworkMessage[]>();
+  /**
+   * 2026-10-16:倒回(`rewindSession()`)當下**沒有 runtime** 的 session(core 重啟後的 closed/interrupted、被回收的 error,或倒回後
+   * 重新啟動 agent 失敗)——下一則人類訊息會走自動復活(`respawnRuntime()`),那時對話紀錄開頭的說明要講「使用者倒回了」,
+   * 不是預設的「app 重新開啟」。純記憶體:core 重啟後就退回預設說明,而那時 app 確實重新開啟過,說法仍然正確,所以不需要為此
+   * 新增 DB 欄位。成功復活(紀錄已組好)或 session 被刪除時移除。
+   */
+  private readonly rewoundWhileStopped = new Set<string>();
   /** `shutdownAll()` 開始後為 true:這之後不再替任何 session 重新啟動 agent(否則會在 core 要退出時多出一個沒人收的子行程)。 */
   private shuttingDown = false;
   /** 訊息鏈預算(第三條斷路器),見 `message-chain-budget.ts`。 */
@@ -966,6 +973,21 @@ export class SessionManager extends EventEmitter {
   }
 
   private async sendPromptInner(sessionId: string, prompt: PromptInput, delivery: PromptDelivery): Promise<void> {
+    // 2026-10-16:呼叫端指定的 `messageId` 已經是某則訊息的 id(任何 session)→ 在做任何有副作用的事(啟動 agent、寫 DB、送 prompt)
+    // **之前**就明確拒絕,而不是讓之後的 INSERT 噴 SQLite 的 PRIMARY KEY 錯誤。不做成冪等(「同一個 id 再送一次就當作已送達」):
+    // 第一次嘗試可能在寫進 DB 之後、交給 agent 之前就失敗了,冪等會把那次失敗吞掉,使用者以為送出了、agent 其實沒收到。
+    // 真正的併發重複(兩個同 id 的請求同時通過這個檢查)由同一 session 的鎖與 DB 主鍵擋下——INSERT 在 `adapter.sendPrompt()` 之前,
+    // 寫入失敗就不會把 prompt 交給 agent。
+    if (delivery.messageId) {
+      const taken = await this.db.select({ id: messagesTable.id }).from(messagesTable).where(eq(messagesTable.id, delivery.messageId)).all();
+      if (taken.length > 0) {
+        throw new DeskmonyError(
+          "session.messageIdConflict",
+          { sessionId, messageId: delivery.messageId },
+          `訊息 id ${delivery.messageId} 已經存在,這則訊息沒有送出`,
+        );
+      }
+    }
     const existing = this.runtime.get(sessionId);
     // 2026-10-15(session 自動復活):沒有活的 runtime(app 重開後的 closed/interrupted、閒置回收後的 error、agent 行程自己結束後的
     // error——事件迴圈結束時 runtime 已被拿掉,見 `detachEndedRuntime()`……)時,**人類輸入**
@@ -1889,6 +1911,8 @@ export class SessionManager extends EventEmitter {
     opts: { statusAfter: "idle" | "busy"; intro?: TranscriptIntro },
   ): Promise<{ runtime: RuntimeState; outcome: ReviveOutcome }> {
     const sessionId = session.id;
+    // 倒回時沒有 runtime 的 session:這次復活是使用者倒回造成的(見 `rewoundWhileStopped`),紀錄說明用 `rewind`。
+    const intro: TranscriptIntro = opts.intro ?? (this.rewoundWhileStopped.has(sessionId) ? "rewind" : "revive");
     if (this.shuttingDown) {
       throw new DeskmonyError(ErrorCodes.SESSION_NOT_RUNNING, { sessionId }, `core 正在關閉,無法重新啟動 session: ${sessionId}`);
     }
@@ -1941,7 +1965,8 @@ export class SessionManager extends EventEmitter {
         }
       }
 
-      outcome = await this.planReviveOutcome(runtime, resumed, opts.intro ?? "revive");
+      outcome = await this.planReviveOutcome(runtime, resumed, intro);
+      this.rewoundWhileStopped.delete(sessionId);
       await this.setStatus(sessionId, opts.statusAfter);
     } catch (err) {
       this.runtime.delete(sessionId);
@@ -2077,6 +2102,9 @@ export class SessionManager extends EventEmitter {
           tx.update(sessionsTable).set({ backendSessionId: null, updatedAt: Date.now() }).where(eq(sessionsTable.id, sessionId)).run();
         });
         notice = { event: "session.rewoundDeferred" };
+        // 先假設之後沒有 runtime(沒有活的 agent,或下面重新啟動失敗):下一則訊息的自動復活要用 `rewind` 的說明。
+        // 重新啟動成功時 `respawnRuntime()` 會把這個標記清掉。
+        this.rewoundWhileStopped.add(sessionId);
         if (live) {
           const rewound = (await this.getSession(sessionId)) ?? session;
           try {
@@ -2820,6 +2848,7 @@ export class SessionManager extends EventEmitter {
    */
   private clearPerSessionState(sessionId: string): void {
     this.sendPromptLocks.delete(sessionId);
+    this.rewoundWhileStopped.delete(sessionId);
     this.pendingIdleInjection.delete(sessionId);
     this.chainBudget.prune(this.referencedChainIds());
   }

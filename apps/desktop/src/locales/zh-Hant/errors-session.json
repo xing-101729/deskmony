@@ -14,7 +14,8 @@
     "cannotForwardToSelf": "不能把訊息轉傳給來源 session 自己"
   },
   "session": {
-    "reviveFailed": "無法重新啟動 session {{sessionId}} 的 agent:{{detail}}"
+    "reviveFailed": "無法重新啟動 session {{sessionId}} 的 agent:{{detail}}",
+    "messageIdConflict": "這則訊息的 id 已經存在,沒有送出(可能是重複送出)"
   },
   "sessionHistory": {
     "unsupported": "終端程式({{adapterType}})沒有可以倒回或分支的對話",

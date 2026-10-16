@@ -14,7 +14,8 @@
     "cannotForwardToSelf": "転送元のセッション自身にメッセージを転送することはできません"
   },
   "session": {
-    "reviveFailed": "セッション {{sessionId}} の agent を再起動できませんでした:{{detail}}"
+    "reviveFailed": "セッション {{sessionId}} の agent を再起動できませんでした:{{detail}}",
+    "messageIdConflict": "このメッセージの ID はすでに存在するため送信しませんでした(重複送信の可能性があります)"
   },
   "sessionHistory": {
     "unsupported": "ターミナルプログラム({{adapterType}})には巻き戻し・分岐できる会話がありません",
