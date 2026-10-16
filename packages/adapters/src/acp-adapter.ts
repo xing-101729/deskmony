@@ -427,6 +427,9 @@ export class AcpAdapter implements AgentAdapter {
           message: "ACP session 更新迴圈中斷",
           detail: err instanceof Error ? err.message : String(err),
         });
+        // 2026-10-15:迴圈中斷之後這個 session 再也不會有事件——關掉佇列讓 core 知道它已經不能用了(core 會收掉它,下一則人類
+        // 訊息重新啟動 agent,見 SessionManager.detachEndedRuntime())。不關的話 core 的事件迴圈永遠等下去,session 看起來還活著。
+        outputQueue.close();
       });
 
       return handle;
@@ -533,7 +536,9 @@ export class AcpAdapter implements AgentAdapter {
     await waitForChildExit(internal.child, 3_000);
     // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
     unregisterChild(internal.child.pid);
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——agent 自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {

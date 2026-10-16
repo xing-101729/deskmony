@@ -547,6 +547,9 @@ export class OpenCodeAdapter implements AgentAdapter {
         message: "OpenCode /event 串流中斷",
         detail: err instanceof Error ? err.message : String(err),
       });
+      // 2026-10-15:事件只走這條 SSE——它斷了,這個 session 就再也收不到回合的進展。關掉佇列讓 core 知道它已經不能用了(core
+      // 會收掉它、殺掉 server,下一則人類訊息重新啟動並沿用同一個 opencode session,見 SessionManager.detachEndedRuntime())。
+      outputQueue.close();
     });
 
     // 這輪(slash command)新增:上面的 GET /command 查詢成功時才推播——見該
@@ -762,7 +765,9 @@ export class OpenCodeAdapter implements AgentAdapter {
     await waitForChildExit(internal.child, 3_000);
     // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
     unregisterChild(internal.child.pid);
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——server 自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {

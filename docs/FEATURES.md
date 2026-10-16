@@ -307,6 +307,9 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   OpenCode(HTTP)的 model / variant 隨每則訊息送出,Claude 的 `--model` / `--effort` 照舊。`Session.options` 只存記憶體,
   復活前(closed 的 session)是空的,復活後才回來。
   agent 用 `send_to_session` 傳給已關閉的 session 則**不會**喚醒它,維持明確報錯。
+- **app 沒關、但 agent 行程自己結束了**(崩潰、被工作管理員殺掉、OpenCode server 掛掉)也一樣:session 轉成
+  `error`,對話裡留一則說明「agent 已停止執行,送出下一則訊息時會自動重新啟動」;送出訊息就用和上面相同的流程
+  重新啟動並接回(連按兩次也只啟動一次)。在這之前,別的 session 用 `send_to_session` 傳給它同樣會明確報錯、不會喚醒它。
 - (2026-10-02 移除:原本的「重跑」與髒 worktree 強制前置流程是任務 worktree
   專用,見 [`DECISIONS.md` §H](./DECISIONS.md)。)
 
@@ -401,8 +404,7 @@ session、agent、model 等技術詞)依詞彙表刻意保留原文,不強行本
   主動傳(`canUseTools: false`)。(OpenCode(HTTP)原本也在這裡,2026-10-03 起掛上了
   同一個 bridge,與 OpenCode(ACP)的差別只剩對接方式。)
 - **排給忙碌 session 的訊息只存在記憶體**,core 重啟會遺失;訊息鏈計數也一樣。
-- **自動復活只處理「沒有 runtime」的 session**:core 沒重啟、但 agent 行程自己死掉的 session
-  (runtime 還在、狀態 `error`)不會被復活;終端(PTY)session 在 xterm 裡直接敲鍵不會觸發復活,
+- **自動復活的觸發點只有輸入框送出的訊息**:終端(PTY)session 在 xterm 裡直接敲鍵不會觸發復活,
   要用下方輸入框送出一行。ACP `session/load` 重播期間送來的 `available_commands_update` 會連同
   歷史一起被丟掉(slash command 選單要等 agent 下一次推送)。
 - **偵測清單是固定的**(Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、
