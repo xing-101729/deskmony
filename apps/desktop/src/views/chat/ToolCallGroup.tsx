@@ -71,7 +71,10 @@ export const ToolCallGroup = memo(
           />
           <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${dotClass}`} />
           <span className="flex-shrink-0 text-fg-soft">{t("chat:tool.group.usedTools", { count: summary.total })}</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-fg-faint" title={allNames}>
+          {/* `w-0` 不能省:`truncate` 是 nowrap,min-content 寬度就是整串工具名;沒有明確寬度的話,窄視窗下它會把
+              外層 `<main>`(沒有 min-w-0 的 flex item)撐得比視窗寬,整個對話區橫向溢出。實際寬度由 flex-1 決定,
+              `w-0` 只是讓它不參與 min-content 的計算。 */}
+          <span className="w-0 min-w-0 flex-1 truncate font-mono text-fg-faint" title={allNames}>
             {summary.status === "running" && summary.runningName !== undefined
               ? t("chat:tool.group.runningNow", { name: summary.runningName })
               : shownNames}
