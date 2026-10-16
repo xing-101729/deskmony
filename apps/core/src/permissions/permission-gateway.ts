@@ -51,8 +51,9 @@ export interface ResolvedPendingPermission {
  * (理論上不該發生)」——同一份 codebase 裡一邊有實測證據、一邊假設它不成立。
  *
  * 刻意用與 notifier 相同的 `::` 分隔格式,讓兩處一眼看得出是同一個概念。
- * sessionId/requestId 都不含 `::`(前者是 randomUUID,後者是 adapter 的
- * 數字或 UUID 編號),不會有分隔歧義。
+ * sessionId/requestId 都不含 `::`(前者是 randomUUID,後者 2026-10-15 起是
+ * core 組的 `<8 碼 hex 前綴>:<adapter 的數字 / UUID / per_… 編號>`,見
+ * session-manager.ts 的 `clientRequestId()`),不會有分隔歧義。
  */
 function pendingKey(sessionId: string, requestId: string): string {
   return `${sessionId}::${requestId}`;

@@ -67,6 +67,11 @@ export type ToolResultEvent = z.infer<typeof ToolResultEventSchema>;
 /** 權限請求(由 adapter 的 canUseTool callback 轉發而來) */
 export const PermissionRequestEventSchema = z.object({
   type: z.literal("permission-request"),
+  /**
+   * adapter 送出時是它自己的編號(只在同一個 agent 行程內唯一,ACP 每個行程從 0 數起);2026-10-15 起 core 廣播給 client 前
+   * 換成 `<runtime 前綴>:<adapter 編號>`,agent 重新啟動後的新請求不會跟舊彈窗同號。client 一律當成不透明字串原樣送回。
+   * 見 apps/core/src/session/session-manager.ts 的 `clientRequestId()`。`user-dialog-request` 同。
+   */
   requestId: z.string(),
   toolName: z.string(),
   input: z.unknown().optional(),
@@ -115,6 +120,7 @@ export type PermissionRequestEvent = z.infer<typeof PermissionRequestEventSchema
  */
 export const UserDialogRequestEventSchema = z.object({
   type: z.literal("user-dialog-request"),
+  /** core 廣播前同樣換成帶 runtime 前綴的編號,見 `PermissionRequestEventSchema.requestId`。 */
   requestId: z.string(),
   toolUseID: z.string(),
   questions: z.unknown(),
