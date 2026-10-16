@@ -578,7 +578,8 @@ export class SessionManager extends EventEmitter {
       .where(eq(messagesTable.sessionId, sessionId))
       // 2026-10-16:排序鍵明確寫成 (created_at, rowid),和「倒回/分支」找出「M 之前/M 及之後」用的鍵(`messageAtOrAfter()`)
       // 是同一個。過去靠 JS 穩定排序保留 DB 回傳的順序(實際上就是 rowid 順序),結果相同,但那是巧合而不是保證——
-      // 兩邊的鍵一旦不同,畫面上看到的「M 之後」和被刪掉的「M 之後」就會對不上。      .orderBy(messagesTable.createdAt, sql`rowid`)
+      // 兩邊的鍵一旦不同,畫面上看到的「M 之後」和被刪掉的「M 之後」就會對不上。
+      .orderBy(messagesTable.createdAt, sql`rowid`)
       .all();
     return rows
       .map((row) => ({
