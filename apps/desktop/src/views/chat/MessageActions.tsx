@@ -84,8 +84,9 @@ function BarButton({
  * (見 `ChatBubble`),整列是跨在氣泡下緣的絕對定位浮動鈕,hover 前後整串訊息的位置完全不變。
  * 使用者訊息的氣泡靠右,動作列錨在**右**下角(`right-2`),往左展開;靠左的訊息錨在左下角,往右展開——這樣很短的氣泡
  * (例如「OK」)比動作列窄時,動作列凸出去的一邊是空白處,不會被捲動容器的邊界切掉。按鈕要 `whitespace-nowrap`:絕對定位元素
- * 的寬度上限是「氣泡寬度 − 錨點距離」,不加的話短氣泡上的標籤會被擠成好幾行。`-bottom-1` 刻意只伸出氣泡外 4px——剛好是相鄰
- * 訊息間 `my-1` 疊出的間距,不蓋到下一則;伸進氣泡內的部分落在 `py-2.5` 的底部留白裡。隱藏時 `pointer-events-none`,
+ * 的寬度上限是「氣泡寬度 − 錨點距離」,不加的話短氣泡上的標籤會被擠成好幾行。`-bottom-2` 讓動作列伸出氣泡外 8px:其中 4px 是相鄰
+ * 訊息間 `my-1` 疊出的間距,另外 4px 蓋在下一則訊息頂端的內距上(那裡沒有字);換來的是伸進自己氣泡的部分剛好落在 `py-2.5` 的
+ * 底部留白裡,不會蓋到單行氣泡最後一行字的下半(原本 `-bottom-1` 只伸出 4px,動作列比留白高,會蓋到字)。隱藏時 `pointer-events-none`,
  * 免得看不見的按鈕擋住氣泡下緣的選字。鍵盤聚焦用 `has-[:focus-visible]` 而不是 `focus-within`:滑鼠點擊後(對話框關閉、
  * 焦點回到按鈕)不會讓它一直停在顯示狀態。具名群組 `group/msg`:不和氣泡內容(程式碼區塊等)可能自己用的 `group` 互相觸發。
  *
@@ -164,7 +165,7 @@ export function MessageActions({ item }: { item: MessageItem }): JSX.Element | n
 
   return (
     <>
-      <div className={`absolute -bottom-1 ${sideClass} z-10 flex items-center gap-1 transition ${visibleClass}`}>
+      <div className={`absolute -bottom-2 ${sideClass} z-10 flex items-center gap-1 transition ${visibleClass}`}>
         <span
           title={formatMessageTimeFull(item.createdAt, locale)}
           className="inline-flex cursor-default select-none items-center rounded-md border border-line-subtle bg-surface-2 px-1.5 py-0.5 text-2xs tabular-nums text-fg-faint shadow-sm"
