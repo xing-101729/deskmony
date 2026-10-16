@@ -946,6 +946,9 @@ async function main() {
         ["session.create", { providerId: FAKE_ACP, workingDir: wsA }],
         ["session.delete", { sessionId: B }],
         ["session.forwardMessage", { sourceSessionId: A, targetSessionId: B, text: "x" }],
+        // 2026-10-16:訊息倒回 / 分支只給人類 UI 用——不在 bridge token 的方法白名單裡,agent 倒回不了任何 session(包含自己)
+        ["session.rewind", { sessionId: A, messageId: "00000000-0000-4000-8000-000000000000" }],
+        ["session.fork", { sessionId: A, messageId: "00000000-0000-4000-8000-000000000000" }],
         ["policy.listRules", {}],
         ["config.getEffective", {}],
       ]) {
@@ -959,7 +962,7 @@ async function main() {
       bridgeRaw.close();
       const setMode = forbidden.find((f) => f.method === "session.setPermissionMode");
       record(
-        "P3.7-8 ACP bridge token 只能呼叫那五個方法(agent.listForAgent/session.listForAgent/readForAgent/createFromAgent/sendFromAgent 全部成功);拿 token 呼叫 session.setPermissionMode 被拒(errorCode=gateway.scopedTokenForbidden),其他一般方法(sendPrompt/list/history/create/delete/forwardMessage/policy/config)一律被拒",
+        "P3.7-8 ACP bridge token 只能呼叫那五個方法(agent.listForAgent/session.listForAgent/readForAgent/createFromAgent/sendFromAgent 全部成功);拿 token 呼叫 session.setPermissionMode 被拒(errorCode=gateway.scopedTokenForbidden),其他一般方法(sendPrompt/list/history/create/delete/forwardMessage/rewind/fork/policy/config)一律被拒",
         allowed.every((a) => a.ok) &&
           setMode?.rejected === true &&
           setMode.code === "gateway.scopedTokenForbidden" &&
