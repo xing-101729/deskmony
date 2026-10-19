@@ -19,7 +19,15 @@
     "statusFailed": "Failed",
     "statusDone": "Done",
     "inputLabel": "Input",
-    "outputLabel": "Output"
+    "outputLabel": "Output",
+    "group": {
+      "usedTools_one": "Used {{count}} tool",
+      "usedTools_other": "Used {{count}} tools",
+      "runningNow": "Running {{name}}",
+      "failedCount_one": "{{count}} failed",
+      "failedCount_other": "{{count}} failed",
+      "nameSeparator": ", "
+    }
   },
   "code": {
     "copyAriaLabel": "Copy code",
