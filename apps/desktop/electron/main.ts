@@ -167,7 +167,8 @@ function resolveSystemNode(): string | undefined {
   try {
     const finder = process.platform === "win32" ? "where" : "which";
     const target = process.platform === "win32" ? "node.exe" : "node";
-    const result = spawnSync(finder, [target], { encoding: "utf8" });
+    // 2026-10-16:`windowsHide`——Electron 主程序是 GUI subsystem(沒有主控台),從它啟動 `where` 這類主控台程式不帶這個旗標會開出主控台視窗。
+    const result = spawnSync(finder, [target], { encoding: "utf8", windowsHide: true });
     if (result.status !== 0 || !result.stdout) return undefined;
     const candidate = result.stdout
       .split(/\r?\n/)
@@ -252,7 +253,10 @@ function startCore(): void {
   }
 
   const startedAt = Date.now();
-  coreProcess = spawn(command, [entry], { env, stdio: "inherit" });
+  // 2026-10-16:`windowsHide: true`。打包版的 command 是 Deskmony.exe(GUI,不受影響),但 dev 模式用的是系統 node.exe(主控台程式):
+  // 從沒有主控台的 Electron 主程序啟動它,系統會替它開一個新的主控台視窗。`stdio: "inherit"` 時 libuv 不會加 CREATE_NO_WINDOW,
+  // 只會把 STARTUPINFO 設成 SW_HIDE(實測足以讓新主控台不顯示);stdout/stderr 的 handle 仍照常繼承,從終端機啟動時 core 的 log 照樣印在那裡。
+  coreProcess = spawn(command, [entry], { env, stdio: "inherit", windowsHide: true });
 
   coreProcess.on("exit", (code) => {
     console.log(`[electron] core process exited with code ${code}`);

@@ -35,6 +35,12 @@ import { createRequire } from "node:module";
  * `.../node_modules/@agentclientprotocol/codex-acp/dist/index.js`),是因為
  * `main` 欄位理論上可能隨套件版本改變檔名/位置——交給 Node 內建的模組解析
  * 機制(含 pnpm 的 node_modules 結構),不自己維護一份可能過時的假設。
+ *
+ * 2026-10-16:這個套件與它間接依賴的 `@openai/codex` 都**鎖精確版本**(adapters 的 dependency 寫 `1.13.1`、根目錄
+ * `pnpm.overrides` 寫 `@openai/codex: 0.156.1`),並用 pnpm patch(patches/)給三處 spawn 補 `windowsHide: true`——
+ * 打包版的 Deskmony.exe 沒有主控台,少了這個旗標 codex 每開一個新對話都會跳出一個主控台視窗。`pnpm deploy --legacy`
+ * 不讀 lockfile,版本範圍(`^`)會讓安裝檔打進與開發環境不同的版本、patch 也不會套用;`scripts/bundle-core.mjs` 的
+ * `verifyCodexBundle()` 會在打包時檢查版本與旗標。升級任一個套件要同步改精確版本並用 `pnpm patch` 重做 patch。
  */
 export function resolveCodexAcpBridge(): { command: string; args: string[] } | undefined {
   try {
