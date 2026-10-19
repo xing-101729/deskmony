@@ -5,7 +5,10 @@
     "switchAriaLabel": "Switch model"
   },
   "effort": {
-    "switchAriaLabel": "Switch thinking effort"
+    "switchAriaLabel": "Switch thinking effort",
+    "unsupportedOption": "Thinking effort: not supported",
+    "unsupportedTitle": "The current model ({{model}}) has no selectable thinking effort. Switch to a model that supports it to choose one.",
+    "unsupportedTitleNoModel": "The current model has no selectable thinking effort. Switch to a model that supports it to choose one."
   },
   "control": {
     "notSpecifiedOption": "(Not specified, uses the CLI default)",

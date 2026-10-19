@@ -5,7 +5,10 @@
     "switchAriaLabel": "Cambiar model"
   },
   "effort": {
-    "switchAriaLabel": "Cambiar nivel de razonamiento"
+    "switchAriaLabel": "Cambiar nivel de razonamiento",
+    "unsupportedOption": "Nivel de razonamiento: no compatible",
+    "unsupportedTitle": "El model actual ({{model}}) no ofrece niveles de razonamiento seleccionables. Cambie a un model compatible para poder elegir uno.",
+    "unsupportedTitleNoModel": "El model actual no ofrece niveles de razonamiento seleccionables. Cambie a un model compatible para poder elegir uno."
   },
   "control": {
     "notSpecifiedOption": "(No especificado, usa el valor predeterminado del CLI)",

@@ -6,7 +6,8 @@
  * 查詢(見 packages/shared/src/session-options.ts),這支用 fake 後端驗證整條路徑,不需要任何真實模型:
  *
  *   A. 純函式:ACP `configOptions` → `SessionOptions`(依 category 認、攤平分組、忽略無關選項與 boolean)、
- *      `providerEffortChoices()`、`opencode models --verbose` 的解析。
+ *      `providerEffortChoices()`、(2026-10-16)沒有選項時控制項顯示什麼的判斷 `providerEffortSelectionState()` /
+ *      `effortUnavailableInSession()`、`opencode models --verbose` 的解析。
  *   B. ACP(fake-acp-agent.mjs `--config-options`):建立後回報選項並寫回 session 的 model/effort;對話中換 model
  *      (思考程度跟著換清單)、換思考程度;值真的送到 agent(agent 回報自己的設定);不合法 / 不提供的值回明確錯誤
  *      且 agent 沒收到;agent 主動送 `config_option_update`;記住 provider 上次的選擇、下次建立自動套用(做不到就略過);
@@ -301,6 +302,66 @@ async function main() {
     );
   } catch (err) {
     record("A2 providerEffortChoices", false, String(err));
+  }
+
+  // 2026-10-16:思考程度控制項「沒有選項時顯示什麼」的判斷(桌面端建立選單與對話標題列共用,見 resolve-providers.ts)。
+  // 使用者回報「opencode 沒辦法選思考程度」:預設 model big-pickle 沒有 variants,控制項整個消失,不知道換 model 才能選。
+  try {
+    const { providerEffortSelectionState, effortUnavailableInSession } = await import(distUrl("packages", "shared", "dist", "index.js"));
+    const claude = { supportsEffortSelection: true, supportsModelSelection: true, efforts: ["low", "max"], models: [{ id: "opus", label: "opus" }] };
+    const oc = {
+      supportsEffortSelection: true,
+      supportsModelSelection: true,
+      models: [
+        { id: "a/none", label: "none", efforts: [] },
+        { id: "a/y", label: "y", efforts: ["low", "high"] },
+        { id: "a/unknown", label: "unknown" },
+      ],
+    };
+    const ocNoDetection = { supportsEffortSelection: true, supportsModelSelection: true, models: [] };
+    const codexLike = { supportsEffortSelection: true, supportsModelSelection: true, models: [{ id: "gpt", label: "gpt" }] };
+    const pty = { supportsEffortSelection: false, supportsModelSelection: false, models: [] };
+    const state = (p, m) => providerEffortSelectionState(p, m).kind;
+    const got = {
+      claudeDefault: state(claude, undefined),
+      claudeModel: state(claude, "opus"),
+      ocDefault: state(oc, undefined),
+      ocWithVariants: providerEffortSelectionState(oc, "a/y"),
+      ocNone: state(oc, "a/none"),
+      ocUnknown: state(oc, "a/unknown"),
+      ocNoDetection: state(ocNoDetection, undefined),
+      codexLike: state(codexLike, undefined),
+      pty: state(pty, undefined),
+    };
+    record(
+      "A2b providerEffortSelectionState():Claude 固定清單照舊、OpenCode 沒選 model → pickModelFirst、選了沒有 variants 的 → modelHasNone、有 → choices;" +
+        "model 沒有思考程度資訊 / 沒有偵測到 model 清單 / codex 這類沒有 per-model 資訊 / 不支援 → none(不顯示)",
+      got.claudeDefault === "choices" && got.claudeModel === "choices" && got.ocDefault === "pickModelFirst" &&
+        got.ocWithVariants.kind === "choices" && sameList(got.ocWithVariants.choices, ["low", "high"]) && got.ocNone === "modelHasNone" &&
+        got.ocUnknown === "none" && got.ocNoDetection === "none" && got.codexLike === "none" && got.pty === "none",
+      JSON.stringify(got),
+    );
+
+    const ocSupports = { supportsEffortSelection: true };
+    const withEffort = { model: { current: "a/y", choices: [{ value: "a/y", label: "y" }] }, effort: { current: "low", choices: [{ value: "low", label: "low" }] } };
+    const noEffort = { model: { current: "opencode/big-pickle", choices: [{ value: "opencode/big-pickle", label: "big-pickle" }] } };
+    const gotSession = {
+      withEffort: effortUnavailableInSession(ocSupports, withEffort),
+      noEffort: effortUnavailableInSession(ocSupports, noEffort),
+      emptyOptions: effortUnavailableInSession(ocSupports, {}),
+      emptyChoices: effortUnavailableInSession(ocSupports, { effort: { choices: [] } }),
+      notReported: effortUnavailableInSession(ocSupports, undefined),
+      providerNoSupport: effortUnavailableInSession({ supportsEffortSelection: false }, noEffort),
+      providerGone: effortUnavailableInSession(undefined, noEffort),
+    };
+    record(
+      "A2c effortUnavailableInSession():agent 回報過選項但沒有思考程度(含 {}、空清單)→ true;有選項 / 還沒回報(ACP 剛啟動、PTY、已結束)/ provider 不支援 / provider 不在目錄 → false",
+      gotSession.noEffort && gotSession.emptyOptions && gotSession.emptyChoices && !gotSession.withEffort && !gotSession.notReported &&
+        !gotSession.providerNoSupport && !gotSession.providerGone,
+      JSON.stringify(gotSession),
+    );
+  } catch (err) {
+    record("A2b/A2c 思考程度控制項的顯示判斷", false, String(err));
   }
 
   try {

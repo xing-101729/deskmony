@@ -5,7 +5,10 @@
     "switchAriaLabel": "切換 model"
   },
   "effort": {
-    "switchAriaLabel": "切換思考程度"
+    "switchAriaLabel": "切換思考程度",
+    "unsupportedOption": "思考程度:不支援",
+    "unsupportedTitle": "目前的 model({{model}})沒有可選的思考程度,換成支援的 model 後才能選",
+    "unsupportedTitleNoModel": "目前的 model 沒有可選的思考程度,換成支援的 model 後才能選"
   },
   "control": {
     "notSpecifiedOption": "(未指定,使用 CLI 預設)",

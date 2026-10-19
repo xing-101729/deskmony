@@ -8,6 +8,8 @@
   "effortAriaLabel": "選擇思考程度",
   "effortLabel": "思考程度",
   "defaultEffortOption": "(預設思考程度)",
+  "effortPickModelFirst": "先選 model 才能選思考程度",
+  "effortModelUnsupported": "這個 model 不支援思考程度",
   "optionsAfterStartHint": "這個 agent 要等對話開起來才會告訴 Deskmony 有哪些 model 與思考程度——建立後在對話標題列選擇;會記住你上次的選擇,下次自動套用。",
   "workingDirLabel": "工作資料夾",
   "workingDirPlaceholder": "預設:{{dir}}",
