@@ -6,18 +6,12 @@ import { Badge } from "../../ui/Badge.js";
 import { Button } from "../../ui/Button.js";
 import { Input } from "../../ui/Field.js";
 import { Icon } from "../../ui/icons.js";
+import { isQuestionToolName } from "../../lib/question-tools.js";
 import { ToolCallBubble } from "../ChatView.js";
 
-/**
- * 會被渲染成問答表單的提問工具:claude-agent-sdk 的 `AskUserQuestion`、
- * opencode 的 `question`(2026-09-17 補上——在那之前只認前者,opencode 的提問
- * 只會顯示成一個永遠「執行中」的通用工具氣泡,使用者看不到任何選項)。
- */
-const QUESTION_TOOL_NAMES = new Set(["AskUserQuestion", "question"]);
-
-export function isQuestionToolName(toolName: string): boolean {
-  return QUESTION_TOOL_NAMES.has(toolName);
-}
+// 2026-10-16:提問工具名單搬到 lib/question-tools.ts(讓分組純函式與它的測試能共用,不必牽出 React),
+// 這裡 re-export 以維持既有的 import 路徑。
+export { isQuestionToolName };
 
 /** 對應 SDK 的 `AskUserQuestionInput.questions[]`(見 async-scribbling-llama.md
  *  Phase 7)。跟 TodoListView.tsx/DiffHunkView.tsx 一樣不 import SDK 型別

@@ -5,7 +5,10 @@
     "switchAriaLabel": "model を切り替え"
   },
   "effort": {
-    "switchAriaLabel": "思考の深さを切り替え"
+    "switchAriaLabel": "思考の深さを切り替え",
+    "unsupportedOption": "思考レベル:非対応",
+    "unsupportedTitle": "現在の model({{model}})には選択できる思考レベルがありません。対応している model に切り替えると選択できます。",
+    "unsupportedTitleNoModel": "現在の model には選択できる思考レベルがありません。対応している model に切り替えると選択できます。"
   },
   "control": {
     "notSpecifiedOption": "(未指定、CLI のデフォルトを使用)",
@@ -16,7 +19,13 @@
     "statusFailed": "失敗",
     "statusDone": "完了",
     "inputLabel": "入力",
-    "outputLabel": "出力"
+    "outputLabel": "出力",
+    "group": {
+      "usedTools_other": "{{count}} 個のツールを使用",
+      "runningNow": "{{name}} を実行中",
+      "failedCount_other": "{{count}} 件失敗",
+      "nameSeparator": "、"
+    }
   },
   "code": {
     "copyAriaLabel": "コードをコピー",

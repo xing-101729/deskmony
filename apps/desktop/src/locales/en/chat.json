@@ -5,7 +5,10 @@
     "switchAriaLabel": "Switch model"
   },
   "effort": {
-    "switchAriaLabel": "Switch thinking effort"
+    "switchAriaLabel": "Switch thinking effort",
+    "unsupportedOption": "Thinking effort: not supported",
+    "unsupportedTitle": "The current model ({{model}}) has no selectable thinking effort. Switch to a model that supports it to choose one.",
+    "unsupportedTitleNoModel": "The current model has no selectable thinking effort. Switch to a model that supports it to choose one."
   },
   "control": {
     "notSpecifiedOption": "(Not specified, uses the CLI default)",
@@ -16,7 +19,15 @@
     "statusFailed": "Failed",
     "statusDone": "Done",
     "inputLabel": "Input",
-    "outputLabel": "Output"
+    "outputLabel": "Output",
+    "group": {
+      "usedTools_one": "Used {{count}} tool",
+      "usedTools_other": "Used {{count}} tools",
+      "runningNow": "Running {{name}}",
+      "failedCount_one": "{{count}} failed",
+      "failedCount_other": "{{count}} failed",
+      "nameSeparator": ", "
+    }
   },
   "code": {
     "copyAriaLabel": "Copy code",

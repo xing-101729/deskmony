@@ -5,7 +5,10 @@
     "switchAriaLabel": "Cambiar model"
   },
   "effort": {
-    "switchAriaLabel": "Cambiar nivel de razonamiento"
+    "switchAriaLabel": "Cambiar nivel de razonamiento",
+    "unsupportedOption": "Nivel de razonamiento: no compatible",
+    "unsupportedTitle": "El model actual ({{model}}) no ofrece niveles de razonamiento seleccionables. Cambie a un model compatible para poder elegir uno.",
+    "unsupportedTitleNoModel": "El model actual no ofrece niveles de razonamiento seleccionables. Cambie a un model compatible para poder elegir uno."
   },
   "control": {
     "notSpecifiedOption": "(No especificado, usa el valor predeterminado del CLI)",
@@ -16,7 +19,17 @@
     "statusFailed": "Fallido",
     "statusDone": "Completado",
     "inputLabel": "Entrada",
-    "outputLabel": "Salida"
+    "outputLabel": "Salida",
+    "group": {
+      "usedTools_one": "Usó {{count}} herramienta",
+      "usedTools_many": "Usó {{count}} herramientas",
+      "usedTools_other": "Usó {{count}} herramientas",
+      "runningNow": "Ejecutando {{name}}",
+      "failedCount_one": "{{count}} fallida",
+      "failedCount_many": "{{count}} fallidas",
+      "failedCount_other": "{{count}} fallidas",
+      "nameSeparator": ", "
+    }
   },
   "code": {
     "copyAriaLabel": "Copiar código",
