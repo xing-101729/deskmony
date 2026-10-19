@@ -549,23 +549,29 @@ export type ServerPush = z.infer<typeof ServerPushSchema>;
  * docs/LAYER-4-detail-design/policy-engine_detail.md §0)——UI 仍然需要知道
  * 「這筆請求已經被解決」,只是來源不是使用者手動點擊,也不是逾時,而是政策
  * 引擎自動判定。
+ *
+ * `source: "agent-stopped"`(2026-10-15 新增):發出請求的 agent 在等回覆期間就不在了——行程自己結束、session 被刪除或
+ * 閒置回收、core 關閉。core 清掉它的待決請求(含逾時計時器),以 deny 通知 client 關閉彈窗;這個決定沒有、也不可能送回
+ * 那個 agent。agent 停止的原因另有系統說明(`session.agentStopped` 或 session 的 lastError),UI 不需要再補一則。
  */
 export const PermissionResolvedPushSchema = z.object({
   sessionId: z.string(),
   requestId: z.string(),
   decision: z.enum(["allow", "deny"]),
-  source: z.enum(["user", "timeout", "policy"]),
+  source: z.enum(["user", "timeout", "policy", "agent-stopped"]),
 });
 export type PermissionResolvedPush = z.infer<typeof PermissionResolvedPushSchema>;
 
 /**
  * async-scribbling-llama.md Phase 7:`user-dialog-resolved` channel 的
  * payload——結構刻意比 `PermissionResolvedPushSchema` 簡單,**沒有 `source`
- * 欄位**:`permission-request` 有 user/timeout/policy 三種解決來源,但
+ * 欄位**:`permission-request` 有 user/timeout/policy/agent-stopped 四種解決來源,但
  * `user-dialog-request` 完全不經過 `PermissionGateway` 的逾時機制、也不經過
  * `PolicyEngine`(見 apps/core/src/session/session-manager.ts 的
  * `consumeEvents()` 內 `"user-dialog-request"` case 註解),唯一的來源就是
  * 某個 client 呼叫了 `dialog.resolve`,不需要區分。
+ * 2026-10-15:發問的 agent 在等答案期間就不在了(同 `PermissionResolvedPushSchema` 的 `"agent-stopped"`)時,core 也會以
+ * `result: { behavior: "cancelled" }` 推播,讓 client 收掉那份已經沒人等的表單。
  */
 export const UserDialogResolvedPushSchema = z.object({
   sessionId: z.string(),

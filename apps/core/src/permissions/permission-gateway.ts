@@ -23,6 +23,8 @@ const DEFAULT_TIMEOUT_MS = 5 * 60_000; // 5 分鐘
 
 interface PendingPermission {
   sessionId: string;
+  /** 2026-10-15:`releaseSession()` 要回傳被清掉的 requestId(key 是組合鍵,不從裡面拆)。 */
+  requestId: string;
   /** S7(auto-mode-and-yolo)L4 §4 新增:這筆請求當初是否為 escalate-strong
    *  (hard-deny 命中降級的強確認)——`resolve()` 回傳時一併帶出,供
    *  `SessionManager.resolvePermission()` 做「escalate-strong 不得帶
@@ -82,7 +84,7 @@ export class PermissionGateway {
     this.clearTimer(key);
 
     if (timeoutMs === null) {
-      this.pending.set(key, { sessionId, strong });
+      this.pending.set(key, { sessionId, requestId, strong });
       return;
     }
 
@@ -93,7 +95,7 @@ export class PermissionGateway {
     // Node 環境下避免計時器阻擋進程結束。
     timer.unref?.();
 
-    this.pending.set(key, { sessionId, strong, timer });
+    this.pending.set(key, { sessionId, requestId, strong, timer });
   }
 
   /**
@@ -107,6 +109,23 @@ export class PermissionGateway {
     this.clearTimer(key);
     this.pending.delete(key);
     return { sessionId: entry.sessionId, strong: entry.strong };
+  }
+
+  /**
+   * 2026-10-15:發出請求的 agent 已經不在了(行程自己結束、session 被刪除或回收、core 關閉)——它的待決請求再也沒有人能
+   * 回覆給它。清掉這個 session 的全部待決請求(連同逾時計時器,逾時回呼不會再觸發),回傳被清掉的 requestId,讓呼叫端通知
+   * 所有 client 關閉對應的彈窗。呼叫端要在舊 runtime 已經拿掉、新 runtime 還沒登記任何請求時呼叫(見 SessionManager 的
+   * `releasePendingRequests()`),以 session 為單位清才不會清到重新啟動後的新 agent 的請求。
+   */
+  releaseSession(sessionId: string): string[] {
+    const released: string[] = [];
+    for (const [key, entry] of this.pending) {
+      if (entry.sessionId !== sessionId) continue;
+      if (entry.timer) clearTimeout(entry.timer);
+      this.pending.delete(key);
+      released.push(entry.requestId);
+    }
+    return released;
   }
 
   private clearTimer(key: string): void {
