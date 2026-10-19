@@ -28,7 +28,7 @@ import { TodoListView, parseTodoWriteInput } from "./chat/TodoListView.js";
 import { DiffHunkView, parseDiffResult } from "./chat/DiffHunkView.js";
 import { ToolImage, parseImageBlock } from "./chat/ToolImage.js";
 import { AskUserQuestionWidget, PendingUserDialogsDock, isQuestionToolName } from "./chat/AskUserQuestionWidget.js";
-import { ForwardMessageDialog } from "./chat/ForwardMessageDialog.js";
+import { MessageActions } from "./chat/MessageActions.js";
 import { ToolCallGroup } from "./chat/ToolCallGroup.js";
 import { groupChatItems, type ToolItem } from "../lib/chat-groups.js";
 import { SessionTitleHeading } from "./SessionTitle.js";
@@ -414,51 +414,6 @@ function OriginTag({ origin }: { origin: MessageOrigin }): JSX.Element {
 }
 
 /**
- * 每則 assistant 訊息的動作列(串流完才出現):「轉傳到…」→ `ForwardMessageDialog`。滑過整則訊息才顯示
- * (`group-hover`),鍵盤聚焦(`focus-visible`)時也會顯示。
- *
- * **疊加式、不佔版面**:這個元件要渲染在氣泡外層的 `relative` 容器裡(見 `ChatBubble`),動作鈕是跨在氣泡
- * 左下角邊緣的絕對定位浮動鈕。過去它是氣泡下方的一個獨立 `div`(隱藏時 `opacity-0`),不論有沒有 hover
- * 都佔一行高度,所以 assistant 訊息和下一則訊息之間永遠多了約 20px 的空隙(user 接 assistant 只有 4px,
- * assistant 接 user 卻是 24px)。現在它不參與排版,hover 前後整串訊息的位置完全不變。
- * 錨在**左**下角(`left-2`)而不是右下角:assistant 氣泡靠左,很短的氣泡(例如「OK」)比按鈕還窄,錨在右邊
- * 的話按鈕會往左凸出氣泡、被捲動容器的左邊界切掉;錨在左邊則是往右凸出到空白處。按鈕要 `whitespace-nowrap`:
- * 絕對定位元素的寬度上限是「氣泡寬度 − left」,不加的話短氣泡上的標籤會被擠成好幾行。
- * `-bottom-1` 刻意只伸出氣泡外 4px——剛好是相鄰訊息間 `my-1` 疊出的間距,不蓋到下一則;伸進氣泡內的部分
- * 落在 `py-2.5` 的底部留白裡。隱藏時 `pointer-events-none`,免得看不見的按鈕擋住氣泡左下角的選字。
- * 鍵盤聚焦用 `has-[:focus-visible]` 而不是 `focus-within`:滑鼠點擊後(對話框關閉、焦點回到按鈕)不會讓它
- * 一直停在顯示狀態。
- */
-function AssistantActions({ item }: { item: Extract<ChatItem, { kind: "assistant" }> }): JSX.Element | null {
-  const { t } = useTranslation(["chat"]);
-  const [forwarding, setForwarding] = useState(false);
-  const sourceSession = useSessionStore((s) => s.sessions.find((x) => x.id === s.currentSessionId));
-  if (!sourceSession) return null;
-  return (
-    <>
-      <div className="pointer-events-none absolute -bottom-1 left-2 z-10 flex opacity-0 transition has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
-        <button
-          type="button"
-          onClick={() => setForwarding(true)}
-          title={t("chat:forward.buttonTitle")}
-          className="focus-ring inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-line-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-fg-muted shadow-sm transition hover:bg-surface hover:text-fg"
-        >
-          <Icon name="forward" size={11} />
-          {t("chat:forward.button")}
-        </button>
-      </div>
-      {forwarding && (
-        <ForwardMessageDialog
-          source={sourceSession}
-          item={{ content: item.content }}
-          onClose={() => setForwarding(false)}
-        />
-      )}
-    </>
-  );
-}
-
-/**
  * 2026-09-04(稽核修補):包了 `memo`。
  *
  * `items.map()` 每次 render 都會重建整份元素陣列,而 `ChatItem` 物件本身在
@@ -519,12 +474,16 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
 
   // 2026-10-02(P3):別的 session 送來的(或使用者轉傳來的)訊息——靠左、不是 accent 色(那不是使用者在這個
   // session 打的字),頂端帶「來自 <title>」標籤;內文是原始 message 本體(信封樣板文字只給 agent 看)。
+  // 2026-10-16:外面多包一層 `relative group/msg`,給 hover 動作列(時間戳 + 複製)定位——不是使用者自己說的話,沒有倒回/分支。
   if (item.kind === "user" && item.origin) {
     return (
       <div className="my-1 flex justify-start">
-        <div className="max-w-[75%] whitespace-pre-wrap rounded-lg border border-line-subtle bg-surface-2 px-3.5 py-2.5 text-sm leading-relaxed text-fg">
-          <OriginTag origin={item.origin} />
-          {item.content}
+        <div className="group/msg relative max-w-[75%]">
+          <div className="whitespace-pre-wrap rounded-lg border border-line-subtle bg-surface-2 px-3.5 py-2.5 text-sm leading-relaxed text-fg">
+            <OriginTag origin={item.origin} />
+            {item.content}
+          </div>
+          <MessageActions item={item} />
         </div>
       </div>
     );
@@ -532,12 +491,12 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
 
   const isUser = item.kind === "user";
   return (
-    <div className="group my-1">
+    <div className="my-1">
       <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
-        {/* 外層 `relative` 容器是 `AssistantActions` 浮動鈕的定位基準。浮動鈕刻意放在氣泡 div 的**外面**
-            (而不是氣泡內容的最後一個子元素):`MarkdownMessage` 的段落靠 `last:mb-0` 去掉最後一段的下邊距,
-            氣泡裡多一個兄弟節點會讓它失效、氣泡平白變高。 */}
-        <div className="relative max-w-[75%]">
+        {/* 外層 `relative group/msg` 容器是 `MessageActions` 浮動動作列的定位基準與 hover 範圍(只有滑過氣泡本身才顯示,
+            不是整列的空白處)。動作列刻意放在氣泡 div 的**外面**(而不是氣泡內容的最後一個子元素):`MarkdownMessage`
+            的段落靠 `last:mb-0` 去掉最後一段的下邊距,氣泡裡多一個兄弟節點會讓它失效、氣泡平白變高。 */}
+        <div className="group/msg relative max-w-[75%]">
           <div
             className={`rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
               isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
@@ -572,7 +531,8 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
               <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-fg-muted align-middle" />
             )}
           </div>
-          {item.kind === "assistant" && !item.streaming && item.content.trim() !== "" && <AssistantActions item={item} />}
+          {/* 串流中的 assistant 訊息不顯示動作列(內容還在長、也還沒有定稿的時間);空內容的 assistant 訊息沒有東西可複製/轉傳。 */}
+          {(item.kind === "user" || (!item.streaming && item.content.trim() !== "")) && <MessageActions item={item} />}
         </div>
       </div>
     </div>
@@ -789,6 +749,9 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const items = useSessionStore((s) => (s.currentSessionId ? (s.itemsBySession[s.currentSessionId] ?? EMPTY_ITEMS) : EMPTY_ITEMS));
   const sendPrompt = useSessionStore((s) => s.sendPrompt);
   const interrupt = useSessionStore((s) => s.interrupt);
+  // 2026-10-16:倒回/分支後待填進輸入框的草稿(被倒回的那則訊息的原文與附件),見下方取走草稿的 effect。
+  const pendingDraft = useSessionStore((s) => (s.currentSessionId ? s.pendingDraftBySession[s.currentSessionId] : undefined));
+  const takePendingDraft = useSessionStore((s) => s.takePendingDraft);
   const slashCommandsBySession = useSessionStore((s) => s.slashCommandsBySession);
   const fetchSlashCommands = useSessionStore((s) => s.fetchSlashCommands);
 
@@ -900,6 +863,20 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   useEffect(() => {
     setPendingAttachments([]);
   }, [currentSessionId]);
+
+  // 2026-10-16:倒回/分支之後,把被倒回的那則使用者訊息的原文(與附件)放進這個 session 的輸入框,讓使用者改完重送。
+  // 刻意宣告在上面「切換 session 時清掉待送附件」的 effect **之後**:分支會同時切換 session 與放草稿,同一次 commit 裡
+  // 兩個 effect 依宣告順序執行,先清掉上一條的附件、再填入草稿,附件才不會被清掉。取走(而不是讀取)草稿,同一份只填一次。
+  // 會取代輸入框目前的內容——使用者按下倒回/分支時要的就是「把那則訊息放回來改」。
+  useEffect(() => {
+    if (!currentSessionId || !pendingDraft) return;
+    const draftToApply = takePendingDraft(currentSessionId);
+    if (!draftToApply) return;
+    setDraft(draftToApply.text);
+    setPendingAttachments(draftToApply.attachments.map((attachment) => ({ ...attachment, id: crypto.randomUUID() })));
+    setAttachmentError(null);
+    textareaRef.current?.focus();
+  }, [currentSessionId, pendingDraft, takePendingDraft]);
 
   const addComposerAttachments = (files: File[]): void => {
     if (files.length === 0) return;

@@ -100,6 +100,9 @@ const SUITES = [
   // Claude resume、PTY 全新程序;接不回時退回對話紀錄),復原視圖的「繼續」走同一個流程。十幾個 core 開關,約 1~2 分鐘;
   // 放在 e2e-crash-recovery 之後:它疊在崩潰對帳(interrupted/closed 的分類)之上。
   "e2e-session-revive",
+  // 2026-10-16:訊息 hover 動作列的倒回 / 分支(session.rewind / session.fork)——疊在 session 自動復活的對話紀錄機制之上,
+  // 所以放在 e2e-session-revive 之後。一個 core 開關三次(活著 / 重啟後沒有 runtime / 崩潰後 interrupted),一次只開一個 core。
+  "e2e-session-rewind",
   "e2e-auto-mode-yolo",
   // 2026-09-09(cli_hld.md §9):驅動編譯後的 `apps/cli/dist/bin.js` 子程序,
   // 疊在其餘每一支都假設能正常運作的 gateway/adapters/policy-engine 之上

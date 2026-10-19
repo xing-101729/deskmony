@@ -17,6 +17,19 @@
     "agentStopped": "El agent dejó de ejecutarse (su proceso terminó o se perdió su conexión con Deskmony). Al enviar tu próximo mensaje se reiniciará automáticamente.",
     "sendFailed": {
       "label": "[No enviado]"
+    },
+    "rewoundFromTranscript": "Se rebobinó hasta justo antes del mensaje seleccionado: ese mensaje y todo lo posterior se eliminaron. El agent tiene ahora una conversación nueva y Deskmony adjunta la transcripción conservada ({{count}} mensajes, solo texto, sin los resultados de las herramientas de entonces) al siguiente mensaje que reciba para que la lea: continúa a partir del registro, no recuerda realmente. Los archivos que el agent ya modificó no se restauran.",
+    "rewoundFromTranscriptTruncated": "Se rebobinó hasta justo antes del mensaje seleccionado: ese mensaje y todo lo posterior se eliminaron. El agent tiene ahora una conversación nueva y Deskmony adjunta la transcripción conservada (los {{count}} mensajes más recientes, solo texto, sin los resultados de las herramientas de entonces; los más antiguos se omitieron por ser demasiado larga) al siguiente mensaje que reciba para que la lea: continúa a partir del registro, no recuerda realmente. Los archivos que el agent ya modificó no se restauran.",
+    "rewoundFresh": "Se rebobinó hasta el inicio de la conversación: el mensaje seleccionado y todo lo posterior se eliminaron. El agent tiene ahora una conversación nueva, sin nada de lo anterior. Los archivos que el agent ya modificó no se restauran.",
+    "rewoundDeferred": "Se rebobinó hasta justo antes del mensaje seleccionado: ese mensaje y todo lo posterior se eliminaron. El agent no se está ejecutando ahora; la próxima vez que envíes un mensaje se reiniciará con una conversación nueva y la transcripción conservada (solo texto, sin los resultados de las herramientas de entonces) se adjuntará a ese mensaje para que la lea (no recuerda realmente). Los archivos que el agent ya modificó no se restauran.",
+    "forkedFromTranscript": "Esta conversación se bifurcó de «{{title}}»: se copiaron los mensajes anteriores al punto de bifurcación. El agent se inició desde cero y Deskmony adjunta esa transcripción ({{count}} mensajes, solo texto, sin los resultados de las herramientas de entonces) al primer mensaje que reciba para que la lea: continúa a partir del registro, no recuerda realmente. Los archivos no se restauraron; lo que el agent modificó antes queda como está.",
+    "forkedFromTranscriptTruncated": "Esta conversación se bifurcó de «{{title}}»: se copiaron los mensajes anteriores al punto de bifurcación. El agent se inició desde cero y Deskmony adjunta esa transcripción (los {{count}} mensajes más recientes, solo texto, sin los resultados de las herramientas de entonces; los más antiguos se omitieron por ser demasiado larga) al primer mensaje que reciba para que la lea: continúa a partir del registro, no recuerda realmente. Los archivos no se restauraron; lo que el agent modificó antes queda como está.",
+    "forkedFresh": "Esta conversación se bifurcó desde el mismo inicio de «{{title}}», así que no hay nada anterior. El agent se inició desde cero. Los archivos no se restauraron; lo que el agent modificó antes queda como está.",
+    "rewindFailed": {
+      "label": "[Error al rebobinar]"
+    },
+    "forkFailed": {
+      "label": "[Error al bifurcar]"
     }
   }
 }

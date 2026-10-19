@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema, SessionTitleMethodSchema } from "./session.js";
-import { PromptInputSchema } from "./prompt.js";
+import { PromptAttachmentSchema, PromptInputSchema } from "./prompt.js";
 import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema, SlashCommandInfoSchema } from "./events.js";
 import { AgentSoftwareSchema, SessionPermissionModeSchema } from "./agent-launch.js";
 import { EffortValueSchema } from "./session-options.js";
@@ -92,7 +92,18 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
   z.object({
     ...baseRequest,
     method: z.literal("session.sendPrompt"),
-    params: z.object({ sessionId: z.string(), prompt: PromptInputSchema }),
+    params: z.object({
+      sessionId: z.string(),
+      prompt: PromptInputSchema,
+      /**
+       * 2026-10-16(訊息 hover 動作列:倒回/分支):呼叫端自己產生的 UUID,core 用它當這則使用者訊息在 `messages` 表的 id。
+       * 桌面端樂觀回顯時就先有一個本地 id,過去它跟 DB 的 id 對不上——剛送出的訊息要「倒回到這裡」就找不到 DB 那一筆。
+       * 讓兩邊從一開始就是同一個 id,不必等回應再換 id(送出到回應之間 session 本來就是忙碌的,但回應失敗時訊息
+       * 可能已經落地,換 id 的做法會漏掉這種情況)。省略時 core 自己產生(CLI/TUI 等其他 client 照舊)。
+       * 只決定列 id,不影響訊息鏈、來源或任何權限判斷;撞到已存在的 id 會讓這次送出失敗(主鍵衝突)。
+       */
+      messageId: z.string().uuid().optional(),
+    }),
   }),
   z.object({
     ...baseRequest,
@@ -198,6 +209,43 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     ...baseRequest,
     method: z.literal("session.autoTitle"),
     params: z.object({ sessionId: z.string() }),
+  }),
+  /**
+   * 2026-10-16(訊息 hover 動作列):**倒回到使用者訊息 M**——這個 session 的對話回到 M **送出之前**:M 以及之後的所有訊息
+   * (user/assistant/tool/system)從 DB 移除,agent 的後端對話換成**全新**的(不能接回舊的,舊的含 M 之後的內容),
+   * M 之前的對話改成文字紀錄附在下一則 prompt 前面(沿用 session 自動復活的對話紀錄機制,見
+   * apps/core/src/session/session-transcript.ts)。M 之前沒有任何對話 = 全新對話、不附紀錄。model / 思考程度保留。
+   * **只倒對話,不碰檔案**——agent 已經改過的檔案不會還原。
+   *
+   * 只有閒置時才能呼叫(busy/waiting → `sessionHistory.busy`);終端程式(pty)沒有對話可言 → `sessionHistory.unsupported`;
+   * `messageId` 不屬於這個 session、不是人類在這個 session 輸入的 user 訊息 → `sessionHistory.messageNotFound` /
+   * `sessionHistory.messageNotRewindable`。沒有 runtime 的 session(core 重啟後的 closed/interrupted)也可以:只改 DB,
+   * 下次送出訊息時才會重新啟動 agent 並附上紀錄。
+   *
+   * **只給人類 UI 用**:scoped MCP bridge token 的方法白名單(`computeAllowedMethods()`)只有 session 網路那五個,
+   * 這個方法不在其中——agent 無法倒回任何 session(包含自己)。回應 = 更新後的 session + M 的文字與附件(放回輸入框)。
+   * 其他開著同一 session 的 client 會收到 `session-history-reset` 推播並重新載入歷史。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.rewind"),
+    params: z.object({ sessionId: z.string().min(1), messageId: z.string().min(1) }),
+  }),
+  /**
+   * 2026-10-16:**在使用者訊息 M 分支**——建一個新 session(同 provider、model、思考程度、工作資料夾),把原 session 中 M
+   * **之前**的訊息(所有角色,保留順序與 createdAt/origin/attachments)複製過去,新 session 的 agent 是全新的後端對話,
+   * 第一則 prompt 附上那段對話的文字紀錄。**原 session 完全不動。** 標題 = 原標題加上 `titleSuffix`(省略時 core 用預設
+   * 「(分支)」;桌面端傳目前語言的字串),標題來源沿用原 session 的(使用者改過的名字不會被降級成可自動覆蓋)。
+   * 前置條件與錯誤同 `session.rewind`(來源 session 必須閒置、不是終端程式)。回應 = 新 session + M 的文字與附件。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("session.fork"),
+    params: z.object({
+      sessionId: z.string().min(1),
+      messageId: z.string().min(1),
+      titleSuffix: z.string().max(40).optional(),
+    }),
   }),
   z.object({
     ...baseRequest,
@@ -533,6 +581,13 @@ export const ServerPushSchema = z.object({
      * 不用自己重新呼叫 `policy.listRules` 才發現。
      */
     "policy-updated",
+    /**
+     * 2026-10-16(訊息 hover 動作列:倒回):某個 session 的歷史被**整段改寫**(`session.rewind` 把一部分訊息刪掉)——
+     * payload 是 `SessionHistoryResetPushSchema`。收到的 client 若有顯示/快取那個 session,要丟掉手上的訊息重新
+     * `session.history`(其他 push 只會「追加」,沒有一條能表達「這些訊息不存在了」)。在倒回完成、系統說明已寫進 DB
+     * **之後**才推,所以重新載入拿到的就是最終狀態。
+     */
+    "session-history-reset",
   ]),
   payload: z.unknown(),
 });
@@ -800,3 +855,23 @@ export const SessionMessagePushSchema = z.object({
   message: MessageRecordSchema,
 });
 export type SessionMessagePush = z.infer<typeof SessionMessagePushSchema>;
+
+// ---- 2026-10-16:訊息 hover 動作列(倒回/分支)-----------------------------------
+/** `session-history-reset` push 的 payload,見 `ServerPushSchema.channel` 的說明。 */
+export const SessionHistoryResetPushSchema = z.object({ sessionId: z.string() });
+export type SessionHistoryResetPush = z.infer<typeof SessionHistoryResetPushSchema>;
+
+/**
+ * 被倒回/分支的那則使用者訊息的原文與附件——UI 放回輸入框讓使用者修改後重送。以 DB 裡存的為準(UI 畫面上的版本可能
+ * 被 `SESSION_ITEMS_MAX` 截斷過歷史,或附件還沒載入)。
+ */
+export const SessionMessageDraftSchema = z.object({
+  content: z.string(),
+  attachments: z.array(PromptAttachmentSchema).optional(),
+});
+export type SessionMessageDraft = z.infer<typeof SessionMessageDraftSchema>;
+
+/** `session.rewind` 的回應:倒回後的 session(狀態/model/思考程度)+ M 的原文。 */
+export const SessionRewindResultSchema = z.object({ session: SessionSchema, message: SessionMessageDraftSchema });
+/** `session.fork` 的回應:**新** session + M 的原文(要放進新 session 的輸入框)。 */
+export const SessionForkResultSchema = z.object({ session: SessionSchema, message: SessionMessageDraftSchema });

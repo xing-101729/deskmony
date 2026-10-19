@@ -48,6 +48,7 @@ export type IconName =
   | "terminal"
   | "trash"
   | "type"
+  | "undo"
   | "user"
   | "users"
   | "x"
@@ -250,6 +251,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M4 7V4h16v3" />
       <path d="M9 20h6" />
       <path d="M12 4v16" />
+    </>
+  ),
+  // 2026-10-16:訊息 hover 動作列的「倒回」——向左彎的回復箭頭。
+  undo: (
+    <>
+      <path d="M9 14 4 9l5-5" />
+      <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
     </>
   ),
   user: (
