@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { resolveCodexAcpBridge } from "@deskmony/adapters";
+import { buildAgentChildEnv, resolveCodexAcpBridge } from "@deskmony/adapters";
 import { type AgentDetectionEntry, type AgentSoftware, type DetectedModel } from "@deskmony/shared";
 
 /**
@@ -67,7 +67,9 @@ const CLAUDE_MODELS_API_TIMEOUT_MS = 5_000;
  *  退回空陣列、UI 上完全不會出現 model 選單,而且沒有任何錯誤訊息可看
  *  (fail-soft 設計吞掉了逾時)。獨立開一個較長的逾時,只套用在
  *  `runModelsCommand()`,不影響 `--version` 探測的既有 3000ms 節奏。 */
-const MODELS_PROBE_TIMEOUT_MS = 10_000;
+// 2026-10-06:10 秒 → 20 秒。在負載高的機器上實測 `opencode models` 7.4–9.9 秒(加不加 `--verbose` 差不多),
+// 貼著 10 秒的邊緣,逾時就整份 model 清單(連同思考程度)都沒了。偵測是背景執行,不影響 core 啟動。
+const MODELS_PROBE_TIMEOUT_MS = 20_000;
 
 /** Windows 上 `where` 可能列出同名但不可直接執行的候選(例如 npm 同時安裝了
  *  一個無副檔名的 unix shell script 版本),依這個優先順序挑一個「Node 在
@@ -140,7 +142,8 @@ function runVersionCommand(resolvedPath: string, versionArgs: string[]): Promise
     // 只有 .cmd/.bat 這類 shell shim 需要 shell:true(見 class 頂端註解第2點)。
     const needsShell = process.platform === "win32" && (ext === ".cmd" || ext === ".bat");
     const file = needsShell ? quoteForShell(resolvedPath) : resolvedPath;
-    execFile(file, versionArgs, { timeout: PROBE_TIMEOUT_MS, shell: needsShell }, (error, stdout, stderr) => {
+    // 2026-10-05(安全):探測的是使用者機器上的 agent 執行檔——同樣不把 core 的主認證 token 等內部憑證交給它(見 adapters 的 agent-env.ts)。
+    execFile(file, versionArgs, { timeout: PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv() }, (error, stdout, stderr) => {
       if (error) {
         resolve(undefined);
         return;
@@ -175,7 +178,7 @@ function runModelsCommand(resolvedPath: string, args: string[]): Promise<Detecte
     const ext = path.extname(resolvedPath).toLowerCase();
     const needsShell = process.platform === "win32" && (ext === ".cmd" || ext === ".bat");
     const file = needsShell ? quoteForShell(resolvedPath) : resolvedPath;
-    execFile(file, args, { timeout: MODELS_PROBE_TIMEOUT_MS, shell: needsShell }, (error, stdout) => {
+    execFile(file, args, { timeout: MODELS_PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv() }, (error, stdout) => {
       if (error) {
         resolve([]);
         return;
@@ -193,22 +196,45 @@ function runModelsCommand(resolvedPath: string, args: string[]): Promise<Detecte
  * 底線、冒號、連字號——涵蓋常見的 provider/model id 命名慣例),過濾掉標題、
  * 空白行、警告訊息等其他雜訊行;不臆測、不嘗試修正解析不出的行,單純略過。
  * 以 id 去重,保留第一次出現的順序。
+ *
+ * 2026-10-06:偵測改跑 `opencode models --verbose`,拿每個 model 的思考程度(variants)。1.18.7 實測格式:
+ * 每個 model 先一行 `providerID/modelID`,接著一個縮排 2 格、從 `{` 到第 0 欄 `}` 的 JSON 物件(含 `variants`,
+ * key 是 variant 名稱,沒有 variants 時是 `{}`)。這裡兩種格式都吃:id 行後面緊接 `{` 才當成 JSON 區塊解析,
+ * 解析失敗只是這個 model 沒有 `efforts`(= 不知道),不影響 id 清單。
  */
-function parseModelsOutput(raw: string): DetectedModel[] {
-  const lines = raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+export function parseModelsOutput(raw: string): DetectedModel[] {
+  const lines = raw.split(/\r?\n/);
   const modelLinePattern = /^[\w.-]+\/[\w.:-]+$/;
   const seen = new Set<string>();
   const models: DetectedModel[] = [];
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
     if (!modelLinePattern.test(line)) continue;
+    let efforts: string[] | undefined;
+    if (lines[i + 1]?.trim() === "{") {
+      const end = lines.findIndex((l, j) => j > i && l.trimEnd() === "}");
+      if (end !== -1) {
+        efforts = parseVariantNames(lines.slice(i + 1, end + 1).join("\n"));
+        i = end;
+      }
+    }
     if (seen.has(line)) continue;
     seen.add(line);
-    models.push({ id: line, label: line });
+    models.push({ id: line, label: line, ...(efforts ? { efforts } : {}) });
   }
   return models;
+}
+
+function parseVariantNames(json: string): string[] | undefined {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const variants = (parsed as { variants?: unknown }).variants;
+    if (variants === undefined) return [];
+    return typeof variants === "object" && variants !== null && !Array.isArray(variants) ? Object.keys(variants) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -230,7 +256,7 @@ interface AllowlistEntry {
   displayName: string;
   /** 寫死的命令名稱(不含路徑,由 PATH 解析)——絕不可來自外部輸入。 */
   command: string;
-  /** 對應 Deskmony 的 AgentSoftware 分類(見 packages/shared/src/agent-profile.ts)。 */
+  /** 對應 Deskmony 的 AgentSoftware 分類(見 packages/shared/src/agent-launch.ts)。 */
   software: AgentSoftware;
   modelsNote: string;
   /**
@@ -285,8 +311,9 @@ const AGENT_ALLOWLIST: AllowlistEntry[] = [
     modelsNote: "模型由 opencode 自行管理,此處不臆測。",
     // `opencode models` 是純文字輸出的非互動子命令(見上方 AllowlistEntry.
     // modelsCommandArgs 註解),不需要啟動 `opencode serve`、不需要等 port
-    // 就緒,是這輪選用的偵測機制。
-    modelsCommandArgs: ["models"],
+    // 就緒,是這輪選用的偵測機制。2026-10-06 加 `--verbose`:多帶每個 model 的
+    // variants(思考程度),見 `parseModelsOutput()`。
+    modelsCommandArgs: ["models", "--verbose"],
   },
   {
     key: "aider-cli",
@@ -359,7 +386,7 @@ async function detectClaudeModelsFromApi(apiKey: string): Promise<DetectedModel[
  * 的舊清單,比完全不顯示更危險)——只有 `ANTHROPIC_API_KEY` 存在且
  * `detectClaudeModelsFromApi()` 真的查得到資料時,`models` 才非空;其餘情況
  * (沒有金鑰、查詢失敗/逾時)一律回空陣列 + `modelsNote` 如實說明原因,UI 端
- * 因為 `models.length > 0` 才顯示選單的既有條件(見 ProfileCreateDialog.tsx)
+ * 因為 `models.length > 0` 才顯示選單的既有條件(見 SessionList.tsx 的 agent/model 選單)
  * 會自然隱藏 model 選單,不會顯示任何過時資訊。刻意**不**在只有 `claude
  * login`(無 API 金鑰、僅本機 CLI 登入)的情況下嘗試呼叫 Models API——沒有
  * 金鑰可傳,呼叫只會確定失敗。

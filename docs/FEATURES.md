@@ -5,7 +5,9 @@
 > 功能都已落地並有對應的 e2e 測試,不包含規劃中或設計中的東西——那些見
 > [`ARCHITECTURE.md` §15「已知缺口」](./ARCHITECTURE.md#15-已知缺口誠實列出)。
 >
-> 內容截至 **2026-08-25**。與 [`DECISIONS.md`](./DECISIONS.md)(為什麼這樣設計)、
+> 內容截至 **2026-10-03**。2026-10-02 起移除 team / 任務 / 看板 / agent profile,改成
+> 「偵測 agent 直接建 session + 全 session 互傳訊息」(見
+> [`DECISIONS.md` §H](./DECISIONS.md))。與 [`DECISIONS.md`](./DECISIONS.md)(為什麼這樣設計)、
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md)(程式碼目前長什麼樣)互補,三份文件
 > 衝突時以 `DECISIONS.md` 為準。
 
@@ -13,61 +15,168 @@
 
 ## 一句話
 
-Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊天視窗)在
-**無人值守**的情況下跑數小時而不失控——靠的是三個彼此獨立、遠端也動不了的
-安全斷路器,不是靠「相信 agent 不會亂來」。
+Deskmony 是一個桌面控制室,讓 AI coding agent(不是單一聊天視窗)在
+**無人值守**的情況下跑數小時而不失控——靠的是彼此獨立、遠端也動不了的
+安全斷路器(權限、訊息、成本),不是靠「相信 agent 不會亂來」。
 
 ---
 
-## 1. 多 Agent 團隊協作
+## 1. Session 網路(偵測 agent 直接建 session + 全 session 互傳訊息)
 
-- **角色制團隊**:每個 team member 綁一個 Agent Profile(角色、後端、model、
-  effort、系統提示詞、環境變數),`lifecycle` 分 `persistent`(長命,例如熟悉
-  codebase 的 Reviewer)與 `ephemeral`(隨任務生滅的執行 worker)。
-- **刪除團隊**:「團隊管理」可刪除整個 team——會**連帶**中止所有成員正在跑的
-  session、刪除全部任務(含各自的 git worktree)與群聊紀錄。確認對話框逐條列出
-  代價、預設焦點在取消鈕;worktree 內有未提交變更不會中止刪除,而是刪完後明確
-  列出是哪些任務,讓人知道失去了什麼(e2e 步驟 35 守住「不留孤兒 session /
-  殘留 worktree」)。
-- **agent 互傳訊息**:內建 `team-bus` MCP server,agent 能呼叫
-  `send_message`、`broadcast`、`report_status`、`request_review`、
-  `list_teammates`。人類在「團隊群聊」視圖看即時對話,隨時能插話。
-  這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸(後者涵蓋 Codex、Gemini,
-  以及走 `opencode acp` 的 OpenCode);`pty` 直通沒有工具通道,該類成員收得到
-  訊息但回覆傳不回群聊——注入時會如實告知,不會叫它呼叫不存在的工具。
-  權威清單見 `packages/shared/src/team-bus.ts` 的 `SOFTWARE_WITH_TEAM_BUS`。
-- **不為了回覆而回覆**:注入的訊息會標明「這是專門發給你的」還是「發給全隊的
-  廣播」,並明講不回應也是正常選項(廣播另外提醒通常不需要每個人都回)。
-  team-bus 工具的說明也點出「每則訊息消耗任務的訊息額度、廣播一次消耗 N 則、
-  回報進度請用不佔額度的 `report_status`」。沒有這些訊號時,一則廣播給五個成員
-  就等於邀請五則回覆——正是訊息斷路器要防的迴圈。
-- **投遞策略**:目標 idle → 立即注入;busy → 排隊,回合結束後批次注入;
-  `priority=interrupt` 且對方允許被中斷 → 先確實中斷才注入;沒有活躍 session
-  的長命(persistent)成員 → **自動幫它開一條 session 再投遞**(「長命」的定義
-  就是在線可達;同一成員有雙重檢查鎖,不會被兩則同時到的訊息開出兩條);短命
-  (ephemeral)成員或自動上線失敗 → 落 Mailbox(DB 持久化,不是純記憶體),
-  session 建立後補投,群聊介面會提示「對方目前不在線」。
-- **注入的訊息會告訴 agent 怎麼回**:agent 不會知道「直接用文字回答」只留在自己
-  的 session,所以注入內容後面會點名該呼叫的工具——人類插話提示用 `broadcast`
-  (人類沒有對應的 team member 可以指名),隊友訊息提示 `send_message(to: …)`。
-- **Session 子 agent**:任一 session 可透過 `subagent` MCP server 呼叫
-  `spawn_subagent`/`send_to_subagent`,把工作委派給子 session 並收集結果
-  (完成後自動把結果當 prompt 注回父 session)。**刻意不自動放行**——會多跑
-  一輪的操作一律走權限升級,不因為是「開子 agent」就特例。
-- 目前只有 `claude-agent-sdk` 與經 ACP 的 agent(Codex、Gemini CLI,透過
-  scoped MCP-bridge token)能**主動**呼叫傳訊/開子 agent 工具;OpenCode、PTY
-  尚未掛載——但**接收端跨後端都通**,注入 prompt 對任何 session 都有效。
+> ⚠️ **2026-10-02 整套換掉(見 [`DECISIONS.md` §H](./DECISIONS.md))**:角色制團隊
+> (team / team member / lifecycle)、`team-bus` 傳訊、團隊群聊、投遞策略與
+> Mailbox、任務看板、agent profile,以及 S12 的子 agent 工具
+> (`spawn_subagent` / `send_to_subagent` / `list_subagents` / `list_profiles`)與
+> 「子完成 → 結果自動注入父 session」——全部已經拿掉,由下面這套取代。
+> 對應測試:`scripts/e2e-agent-catalog.mjs`、`scripts/e2e-session-network.mjs`。
+
+### 1.1 偵測 agent,直接建 session
+
+- **從這台電腦偵測**:core 啟動時在背景偵測有哪些 agent 可用(Claude Agent SDK、
+  Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider;固定清單,偵測**不阻塞
+  啟動**),桌面側欄、設定與 CLI 的 `doctor` 都能「重新偵測」。
+- **沒有 profile**:開 session = 從偵測到的 agent 挑一個(`providerId`)+ 選填
+  model / effort(思考程度,見 §1.6)+ 工作資料夾。桌面側欄有這四個選單加上「新對話」鈕(上次選的
+  組合記在 `localStorage`,`Ctrl/⌘+N` 沿用);CLI 用 `--agent <providerId>`
+  (預設 `claude-agent-sdk`)+ `--model` / `--effort`。偵測不到任何 agent 時,UI
+  會說明並提供「重新偵測」。
+- **API key 等設定走 provider 層級的環境變數**(設定介面,對外一律遮罩);每個
+  session 一律從 `always-ask` 開始,Auto / YOLO 仍是逐 session 切換。
+- **session 自帶 provider 與啟動指令**,續接 / 接手不依賴任何 profile;該 agent 已
+  偵測不到時,退回 session 存下來的 command。舊 session 在 core 啟動時依它們原本
+  的 profile 回填;`agent_profiles` 表留在舊資料庫裡,只讀不改。
+- 手動輸入 command 的 `custom-pty` 已移除:session 只能從偵測到的 agent 開出來,
+  gateway 上沒有任何能新增 command 的入口。
+
+### 1.2 每個 session 的五個工具
+
+能掛工具的 session(`claude-agent-sdk` in-process;ACP agent——Codex、Gemini CLI、
+走 `opencode acp` 的 OpenCode——與走 HTTP 的 OpenCode,後兩者經 scoped MCP-bridge
+token)會從 MCP server `deskmony` 拿到五個工具(Claude 裡的完整名稱是 `mcp__deskmony__<name>`):
+
+| 工具 | 做什麼 | 權限 |
+|---|---|---|
+| `list_agents` | 目前可用的 agent:id / label / software / models / 預設 model / `canUseTools` | 自動放行 |
+| `list_sessions` | **所有** session(不限父子、不限工作資料夾):id / 標題 / agent / model / 狀態 / 工作資料夾 / 父 session / 是不是你自己 / `canUseTools`。不含對話內容 | 自動放行 |
+| `read_session` | 任一 session 最近 N 則訊息(預設 20、上限 100);只含 user / assistant,每則內容超過 4,000 字元會截斷並標註;附件只標示有無 | 自動放行 |
+| `create_session` | 用指定 agent(可選 model、標題、工作資料夾,預設沿用呼叫者的)開新 session 並送出第一則訊息 | 走權限流程 |
+| `send_to_session` | 對任一其他 session(不能是自己)送訊息 | 走權限流程 |
+
+- **create_session / send_to_session 刻意不進自動放行清單**——它們會讓某個
+  session 多跑一輪,照一般工具呼叫的權限階梯走:always-ask 下升級給人;開了
+  Auto / YOLO 的 session 則和其他「未分類」操作一樣會被自動放行,這時由下面的
+  訊息鏈預算兜底。
+- **所有 session 互相可見**,沒有父子限制。`create_session` 開出來的 session 掛在
+  建立者底下顯示,只為巢狀顯示與溯源,其餘與任何 session 平等。
+- **不做任何自動回送**:訊息以信封送達(標明誰送的、哪個 agent,並說明這則訊息
+  不會自動得到回覆),**要不要回、回給誰由收到的 agent 自己決定**(用
+  `send_to_session`,不一定回給寄件者)。送出訊息的 agent 也不會被通知對方是否
+  讀了——想知道結果,等對方傳訊息過來,或用 `read_session` 去看。
+- **身分不可冒名**:呼叫者是誰由 adapter(in-process)或 bridge token(ACP)決定,
+  從來不是工具參數。信封只在訊息送到 agent 的那一刻才組裝,資料庫存的是原始
+  訊息本體加來源標記(`origin`)。
+- **投遞**:對方 idle 就立刻送;busy / waiting 則排進**記憶體佇列**,等它這一輪
+  結束才送(PTY 沒有完成事件,靜止轉回 idle 時才送)。對方已關閉、出錯、不存在
+  或沒在執行,都是明確錯誤,不假裝成功;core 重啟時排隊中的訊息會遺失。
+- **誰能主動傳**:`claude-agent-sdk`、所有走 ACP 的 agent,以及走 HTTP 的 OpenCode
+  (2026-10-03 起:同一個 bridge 子行程,寫進 OpenCode 的 `mcp.deskmony` 設定
+  掛載;`create_session` / `send_to_session` 在 always-ask 下照一般工具呼叫跳權限
+  確認,三個查詢工具預先放行)。PTY 類(Claude Code CLI、Aider)能**接收**但不能
+  主動傳;`list_agents` / `list_sessions` 的 `canUseTools: false` 讓寄件者知道對方
+  回不了話。
+
+### 1.3 訊息鏈預算(第二條斷路器)
+
+agent 之間的傳遞受每條訊息鏈的預算限制,詳見下方 3.2。
+
+### 1.4 桌面端
+
+- 收到的跨 session 訊息顯示「來自 <session>」(或「轉傳自 <session>」)標籤,可點擊
+  跳到那個 session;內文只顯示訊息本體,不顯示信封樣板。
+- 每則 assistant 訊息有「轉傳到…」:選任一其他 session、附上選填附註,對方收到的
+  信封標明「使用者從 session X 轉來」。轉傳是人類操作,開新的訊息鏈,不計預算、
+  不會被熔斷擋下。
+- session 底下仍可手動開新 session(巢狀顯示),走的是一般的建立流程。
+
+### 1.5 Session 標題:手動改名與 AI 自動命名(2026-10-06)
+
+- **手動改名**:側欄雙擊標題,或「⋯」選單/右鍵選單的「重新命名」;對話(或終端)標題列點一下標題。都是
+  就地編輯:Enter 儲存、Esc 取消、點別處也算儲存。gateway 是 `session.rename({sessionId, title})`:換行/控制字元
+  換成空白、去頭尾空白後必須是 1–100 個字(以 Unicode code point 計),否則回 `session.titleEmpty` /
+  `session.titleTooLong`;成功後推播 `session-updated`。session 已關閉/中斷也能改(純 DB 欄位)。
+- **標題來源** `titleSource`:`default`(還是預設的「新對話」——桌面端依介面語言顯示)、`auto`(自動命名的結果)、
+  `user`(使用者改過,或建立時就明確給了標題)。**`user` 之後 AI 絕不自動覆蓋。** `session.create` 明確帶了
+  (非空白)標題——例如在某個 session 底下開新 session 時填了標題——或由 agent 用 `create_session` 開的 session,
+  一律是 `user`;桌面端側欄的「新對話」與 CLI 都不帶標題(桌面端過去會帶「對話 N」這種佔位標題,已拿掉),
+  所以會自動命名。既有資料庫在啟動時冪等補上 `title_source` 欄位:標題是「新對話」的回填成 `default`,其他一律
+  `user`。
+- **AI 自動命名**:第一則**人類**輸入送出後(標題還是 `default` 時),在背景用**這個 session 自己的 agent** 另開一個
+  **臨時對話**產生標題(依使用者語言、約 30 字內),完成就丟棄——**主對話不會多一輪**,上下文、歷史一個字都不會多。
+  側欄「⋯」選單與標題列的 ✦ 按鈕是「AI 重新命名」(gateway `session.autoTitle`),可以對既有 session 手動觸發
+  (即使標題是自己取的);產生期間使用者又手動改名,以使用者的為準(compare-and-set,結果作廢)。
+- **各 agent 的命名方式**(2026-10-06 本機實測):
+
+  | Agent | 臨時對話怎麼開 | 工具/權限 |
+  |---|---|---|
+  | Claude Code(內嵌 SDK) | 另跑一次性的 SDK `query()`:同一個 model、同一份 sanitized 環境;純字串系統提示取代 Claude Code 預設提示、`settingSources: []`、`persistSession: false`(不寫 `~/.claude/projects/`)、`maxTurns: 1`、`effort: "low"` | `tools: []` + `mcpServers: {}` + `strictMcpConfig`,`canUseTool` 一律 deny;出現 `tool_use` 就中止 |
+  | OpenCode(HTTP) | 同一個 `opencode serve` 上 `POST /session`(不帶 `parentID`)→ `prompt_async` → 從同一條 SSE 收集該 session 的回覆 → `DELETE /session/{id}` | 該 session 的 `permission.asked`/`question.asked` 一律當場 reject,出現 tool part 就 `/abort` 並中止。(OpenCode 免費方案在 prompt 帶 `tools` 停用或指定內建 `title` agent 時都回 403,所以只能靠拒絕權限) |
+  | OpenCode(ACP)、Codex、Gemini | 同一條 ACP 連線 `session/new`(不掛 Deskmony 的 MCP 工具)→ prompt → 收集文字 → 有宣告就 `session/close`、`session/delete` | 該 session 的 `session/request_permission` 一律拒絕,出現 `tool_call` 就 `session/cancel` 並中止 |
+  | PTY(Claude Code CLI、Aider) | 沒有「另開一個對話」的方法 | —— 直接退回截取首句 |
+
+- **一律退回「截取首句」**:agent 不支援、session 不在執行中、每日成本斷路器已觸發、臨時對話逾時(60 秒)、拒答或出錯、
+  回了空白——都改用第一則訊息的第一個非空白行(去掉 markdown,截到 30 字)。錯誤只記 log,**絕不影響主 session**。
+- 命名用的回合不經過主 session 的事件迴圈:不計入回合硬上限與訊息鏈預算、不寫進對話歷史。拿得到用量的後端
+  (Claude SDK 的 result、OpenCode assistant 訊息的 cost/tokens、ACP 的 `usage_update.cost`)會把**這次臨時對話自己的**
+  用量直接加進該 session 與當日的成本 rollup(每日 kill-switch 一樣算得到);桌面端對話標題列即時顯示的用量徽章只反映
+  主對話。
+- 2026-10-06 本機以真實 agent 實測過臨時對話這條路:Claude Code(內嵌 SDK,預設 model)、OpenCode(HTTP 與 ACP,
+  `opencode/big-pickle`)、Codex(codex-acp 1.4.0)都由 agent 產生標題,主對話歷史只有一問一答;Gemini 本機沒有安裝,
+  沒有實測(走同一個 ACP adapter)。
+- **已知限制**:`opencode acp`(1.18.7)宣告支援 `session/close` 但沒有 `session/delete`——臨時 session 會留在 opencode
+  自己的 session 清單裡(Deskmony 這邊已關閉、丟棄,不影響任何對話)。臨時對話與主對話同時進行,慢的免費模型
+  命名可能要二、三十秒。
+
+### 1.6 每個 agent 都能選 model 與思考程度(2026-10-06)
+
+> 過去只有 Claude 能選 model 與思考程度,其他 agent 一律「由 agent 自行管理」。
+> 對應測試:`scripts/e2e-agent-options.mjs`、`scripts/e2e-agent-catalog.mjs`(A3/A3b)。
+
+- **向 agent 本身查詢,不寫死**:agent 回報「這個 session 能選哪些 model / 思考程度、
+  目前是哪個」(`session-options` 事件,掛在 `Session.options`),UI 只顯示真的提供的。
+  思考程度的值由各 agent 定義(Claude 是 low…max,codex/opencode 有 none/minimal……)。
+
+  | Agent | model | 思考程度 | 什麼時候能選 |
+  |---|---|---|---|
+  | Claude(內嵌 SDK) | provider 目錄清單 | 固定 5 級 | 建立時、對話中 |
+  | Claude Code CLI | 別名清單(`--model`) | 固定 5 級(`--effort`) | 只有建立時 |
+  | Codex / Gemini / OpenCode ACP | agent 在 `session/new` 回報的 `configOptions`(category `model`) | 同上(category `thought_level`) | 建立後在對話標題列;`session/set_config_option` |
+  | OpenCode(HTTP) | `opencode models` 清單 | 目前 model 的 variants(`opencode models --verbose` / `/config/providers`),隨每則訊息的 `variant` 送出 | 建立時、對話中 |
+  | Aider | — | — | — |
+
+- **記住上次的選擇**:要等 session 開起來才知道選項的 agent(ACP),建立選單會說明「建立後在
+  對話標題列選」,並把使用者上次對這個 agent 的選擇記下來(core 設定 `providerLastSelection`),
+  下次建立時自動套用;agent 這次不提供那個值就略過,建立不會失敗。agent 自己改的設定不算。
+- **不支援就明確報錯**:agent 不提供的 model / 思考程度(`agent.modelNotOffered`、
+  `agent.effortNotOffered`、`agent.invalidModel`、`agent.invalidEffort`)一律回明確錯誤;建立時
+  明確指定卻做不到,建立失敗、不留 session。換 model 後新 model 沒有的思考程度會被清掉。
+- `list_agents` 的摘要帶上可選的思考程度(`efforts`、`models[].efforts`)與 `optionsAfterStart`;
+  `create_session` 可帶 `effort`。
+- **真實 Codex 實測**(2026-10-15,codex-acp 1.4.0,本機 ChatGPT 登入):建立後 `Session.options` 有 codex 回報的
+  model 清單(`gpt-5.6-terra`、`gpt-5.6-luna`)與思考程度(`low…max`,`terra` 另有 `ultra`——換 model 後清單跟著變);
+  對話中換 model/思考程度後回合照常回覆、建立時指定的值有套用、不在清單的值回 `agent.invalidModel`/`agent.invalidEffort`;
+  自動命名(§1.5)的臨時對話不會動到主 session 的選項。桌面端建立選單對 Codex 只顯示說明、對話標題列顯示兩個選擇器。
 
 ## 2. 多後端 Adapter,一套介面
 
 | Provider | 對接方式 | 能力層級 |
 |---|---|---|
-| Claude Code(內嵌 SDK) | Claude Agent SDK,程式內嵌 | 最深——hooks、子 agent、細粒度權限事件、對話中即時切換 model/effort |
+| Claude Code(內嵌 SDK) | Claude Agent SDK,程式內嵌 | 最深——hooks、in-process session 工具、細粒度權限事件、對話中即時切換 model/effort |
 | Claude Code CLI | PTY 原始直通 | 相容層,無權限事件 |
-| Codex | ACP(經 `@agentclientprotocol/codex-acp` 橋接套件) | 結構化事件 |
-| Gemini CLI | ACP | 結構化事件 |
-| OpenCode | HTTP + SSE(原生 server) | 結構化事件,可遠端 |
-| Aider / 任意互動式 CLI | PTY | 相容層,無權限事件 |
+| Codex | ACP(經 `@agentclientprotocol/codex-acp` 橋接套件) | 結構化事件;可換 model 與思考程度 |
+| Gemini CLI | ACP | 結構化事件;agent 有提供時可換 model 與思考程度 |
+| OpenCode(HTTP) | HTTP + SSE(原生 server) | 結構化事件,可遠端;能用 session 工具、主動傳訊息;可換 model 與思考程度(variant) |
+| OpenCode(ACP) | `opencode acp`,ACP | 結構化事件;能用 session 工具、主動傳訊息(subagent 工具停用);可換 model 與思考程度 |
+| Aider | PTY | 相容層,無權限事件 |
 
 - **能力探測誠實分級**:每個 adapter 回報 streaming / 工具事件 / 權限請求 /
   diff / interrupt / 終端機這些布林能力,外加 usage 回報、context 回報、
@@ -87,8 +196,30 @@ Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊�
 - **Default-deny 政策引擎**:每次工具呼叫都走同一套固定優先序判斷,判斷不
   出來一律升級給人,絕不自動放行。
 - **四類硬性禁止(hard-deny),config 永遠關不掉**:worktree 外寫入/刪除、讀
-  秘密路徑(`~/.ssh`、`~/.aws`、`.env*`、`id_rsa*`、`credentials`)、危險
+  秘密路徑(`~/.ssh`、`~/.aws`、桌面殼自己的本機資料夾、`.env*`、`id_rsa*`、`credentials`)、危險
   git(force-push、砍遠端分支、`branch -D`)、對非白名單主機的網路連線。
+- **OpenCode 也走同一套引擎**(2026-10-03):OpenCode 預設放行所有工具,只有它自己
+  設定裡標成 `ask` 的才會詢問,所以過去 OpenCode session 的 bash/edit/webfetch/
+  MCP 呼叫大多**不經過**政策引擎(hard-deny 形同虛設)。現在 Deskmony 啟動
+  OpenCode(`opencode` 與 `opencode-acp` 兩個 provider)時,用環境變數
+  `OPENCODE_CONFIG_CONTENT` 注入「所有工具都 ask」的設定,與使用者既有的值深度
+  合併(Deskmony 的權限規則優先)。**使用者可見的改變**:`always-ask` 下的
+  OpenCode session 原本靜默執行的操作,現在會跳出權限確認;auto/YOLO 照常
+  放行。`opencode-acp` 的 `task`(subagent)工具會被停用——`opencode acp` 不會
+  轉發 subagent 子 session 的權限請求,subagent 會永遠卡住;`opencode`(HTTP)
+  則會轉發,不受影響。
+  同時,OpenCode 在 loopback 開的本機 HTTP 伺服器(`opencode serve` 與實測也會開
+  的 `opencode acp`)預設**沒有認證**——本機任何程序都能替它核准權限請求、讀到設定
+  裡的 scoped bridge token。現在每次啟動都以環境變數給一組隨機密碼(basic auth,
+  使用者自己設的同名變數被覆蓋),Deskmony 對它的每個請求都帶認證。擋的是 agent
+  **以外**的本機程序;至於 agent 自己的 bash 工具,2026-10-05 起由 Deskmony 自帶的
+  OpenCode 外掛把那個密碼(以及注入的設定內容)從它的環境移除。
+- **agent 的環境裡沒有 Deskmony 自己的憑證**(2026-10-05):桌面殼一律把主認證 token 設進
+  core 的環境,過去 agent 的 bash 讀得到它——連上 gateway 就能自己核准權限、切 YOLO。
+  現在每個 agent(Claude、所有 ACP、OpenCode、PTY)的子行程環境都會濾掉主 token、MCP
+  bridge 的憑證與繼承來的 OpenCode 伺服器密碼(使用者在 provider 環境變數裡填的也一樣);
+  session 網路工具照常可用(bridge 的憑證是另外明確交給它的)。擋不住的是同一個作業系統
+  使用者的程序讀其他程序的記憶體、或解密本機檔案——那屬於沙箱的範疇。
 - **每 session 的 Auto / YOLO 開關**:Auto 只把「未分類中間地帶」變自動放行;
   YOLO 額外跳過 config 裡的 deny 規則。**兩者都絕不跳過 hard-deny**。YOLO
   30 分鐘後自動失效。
@@ -101,54 +232,57 @@ Deskmony 是一個桌面控制室,讓**一隊** AI coding agent(不是單一聊�
   處於 YOLO,啟用當下會強制跳出風險說明對話框(要求輸入確認字串)+ 桌面
   通知 + 稽核記錄。這是**唯一**能繞過 hard-deny 的路徑,而且是逐 session、
   需要人明確二次確認才能開,不是任何規則比對能自動觸發的。
+- **規則可以限定到某個 agent**(2026-10-02):允許清單 / 拒絕規則可帶
+  `providerId`(只對那個 agent 的 session 生效)。舊 profile 時代遺留、限定
+  profile id 或角色的規則已經對不到任何 session,一律往安全側收:這類 `allow`
+  規則不再匹配(該次呼叫改成升級給人),這類 `deny` 規則改成套用到所有 session
+  (避免被限定範圍的 deny 靜默失效、在 Auto 模式下變成自動放行);core 啟動時逐條
+  記錄,設定的「權限」分頁也會標示這些規則。
 - **遠端能力**(2026-08-25 更新):遠端連線現在能觀察、送 prompt、逐一核可/
   拒絕權限升級、**切換 session 的 Auto/YOLO 模式、編輯允許清單、開啟真.
-  無限制層**——與本機同權。遠端仍然**不能**:建立/刪除 agent profile、改
-  daemon 綁定介面、改預算上限。這是連線本身(是否為 loopback)由 Core 判定,
+  無限制層**——與本機同權。遠端仍然**不能**:編輯 provider 設定(其環境變數可能
+  帶 API key,並會併進每個 agent 子程序)、改一般設定檔、改 daemon 綁定介面、
+  改預算上限。這是連線本身(是否為 loopback)由 Core 判定,
   絕不採信 client 自稱;即使是繞過 UI 直接送 raw request,伺服器端一樣會擋。
 
-### 3.2 訊息斷路器
+### 3.2 訊息斷路器(2026-10-02 以「訊息鏈」重建)
 
-- 每個 context 自帶訊息數上限,燒完就對該 context 的
-  `send_message`/`broadcast`/`request_review` 一律拒收熔斷。
-- context id 由 Core 依當下綁定的任務推導,agent 不可自己指定——避免被管制
-  的一方能透過換 id 重置額度。
-- **手上沒有進行中任務時**(2026-08-28 修正):不再一律拒收,改落
-  `member:<memberId>` 這個同樣由 Core 推導、agent 一樣指定不了的專屬桶——每位
-  成員各自一桶、彼此隔離,而且照樣吃同一條訊息數上限。原本的「無任務即拒收」
-  連帶擋掉了沒有任務在身的成員回覆人類或隊友,那不是斷路器要防的失控形態。
-- 只斷橫向閒聊,不斷縱向進度回報:`report_status`/`list_teammates` 不受影響。
+agent 能互傳訊息之後,要防的是迴圈(A 回 B、B 回 A 永不停)與不斷扇出新 session。
+原本的每 context 訊息數預算隨 `MessageBus` 移除,見
+[`DECISIONS.md` §H](./DECISIONS.md)(A5 改寫);現在改以**訊息鏈**為單位:
+
+- **人類輸入的 prompt(或 UI 轉傳)開一條新鏈**;agent 在處理某則訊息的那一輪裡
+  經 `create_session` / `send_to_session` 送出的訊息,沿用觸發它那一輪的鏈。
+- 每條鏈的上限是 `messageBudget.maxMessagesPerContext`(預設 50;鍵名沿用舊設計
+  以免破壞既有設定檔,現在的意義是「每條鏈」)。達到 `warnAtPercent` 發一次軟警告
+  (稽核 + 通知,不 halt)。
+- **超過上限的第一則訊息就熔斷**:該則被拒,工具結果明講「這條鏈已熔斷、需要
+  使用者介入」,並寫稽核紀錄 + 桌面通知(每條鏈只通知一次,熔斷通知必送、不節流);
+  已熔斷的鏈上 `create_session` 不會 spawn 新 session。
+- **只擋 agent 對 agent 的傳遞**:人類照常能對任何 session 輸入,輸入即開新鏈;
+  UI 轉傳是人類操作,不計數、不會被擋。
+- 計數只存記憶體(core 重啟歸零);`messageBudget` 不在遠端可改的設定子集,**遠端
+  關不掉**。
 
 ### 3.3 成本斷路器
 
 | 元件 | 依據 | 觸發條件 | halt 範圍 |
 |---|---|---|---|
 | TurnLimiter | 工具呼叫次數 + 時間,**不需要 usage 資料** | 單回合 30 分鐘或 200 次工具呼叫 | 立即中斷該回合 |
-| CostGovernor(任務預算) | usage 事件 | 任務累計花費超標 | 擋後續 prompt,不打斷已完成的回合 |
-| CostGovernor(每日 kill-switch) | usage 事件 | 當日團隊總花費超標 | 全部 session 中斷 |
+| CostGovernor(每日 kill-switch) | usage 事件 | 當日總花費超標 | 全部 session 中斷 |
 | WaitingWatchdog T1 | 掛起時長 | 超過 6 小時 | 只通知,不 halt |
-| WaitingWatchdog T2 | 掛起時長 | 超過 72 小時 | 回收子行程資源;任務保持 blocked,worktree 保留 |
+| WaitingWatchdog T2 | 掛起時長 | 超過 72 小時 | 回收子行程資源;對話紀錄保留 |
 
 TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經 ACP)完全不
 回報 usage,依賴 usage 的預算對這類後端完全不生效,回合硬上限是唯一還有效
 的保護。
 
-## 4. 任務協作與 Git Worktree 隔離
+## 4. 任務協作與 Git Worktree 隔離 — 已於 2026-10-02 移除
 
-- **任務看板**:backlog → assigned → in_progress → review → merging → done,
-  外加可從任何非終態進入的 blocked。
-- **每個任務一份獨立 git worktree**,指派時自動建立;`ephemeral` 成員被指派
-  時會自動 spawn 對應的 session。
-- **三道人類把關**,agent 沒有任何工具能讓任務自己變成 done:
-  1. 機器驗收閘——任務可帶測試/build/typecheck 等驗收指令,沒過就進不了 review。
-  2. 人類 review 閘——沒有驗收條件、或連續驗收失敗達上限時,任務卡在
-     `in-progress` 等人核可。
-  3. 人類合併——`task.merge` 是全系統唯一真正執行 `git merge` 的入口,只能
-     從任務看板按鈕觸發。
-- **合併衝突不留半殘狀態**:失敗就自動 `git merge --abort` 還原,任務維持
-  `merging`,不嘗試自動 stash 這種可能犧牲使用者資料的花招。
-- **worktree 不會在任務完成時自動清掉**——留給人事後檢視改了什麼;只有明確
-  刪除任務才會真的移除 worktree。
+任務看板、任務級 git worktree 隔離、機器驗收閘、人類 review 閘、人類批准合併、
+合併衝突自動 abort、ephemeral 成員自動 spawn——**整套已移除**,見
+[`DECISIONS.md` §H](./DECISIONS.md)。使用者資料庫裡既有的 `tasks` / `workspaces`
+等表沒有被刪除,只是不再有程式碼讀寫。
 
 ## 5. 崩潰復原
 
@@ -156,14 +290,28 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   復原的本質是「對帳 + 人工分流」,不是重放事件流。
 - Core 每次啟動,在接受任何連線之前先做對帳:上次沒乾淨關閉的 session 一律
   標記 `interrupted`。
-- 復原視圖提供四種動作,**全部要人主動點,沒有任何背景自動觸發**:
-  - **繼續**(保有記憶重啟,僅限真正支援磁碟持久化 session 的後端)
+- 復原視圖提供三種動作,**全部要人主動點,沒有任何背景自動觸發**:
+  - **繼續**(重啟 agent 並接回原本的對話:Claude SDK 的 `resume`、ACP 的 `session/resume`
+    或 `session/load`、OpenCode 沿用同一個 session;PTY 沒有後端 session 可接,不提供)
   - **接手**(讀摘要重啟,一律可用)
-  - **重跑**(要求 worktree 必須先乾淨,髒的話明確拒絕,絕不默默在髒
-    worktree 上重跑)
-  - **放棄**(session 標記關閉,worktree 與任務原封不動保留)
-- 髒 worktree 有強制前置流程:留著(建 WIP 分支 commit)或丟棄(需要二次
-  確認,絕不默默清空)。
+  - **放棄**(session 標記關閉,對話紀錄原封不動保留)
+- **對 `closed` / `interrupted` 的 session 直接送訊息會自動復活**(2026-10-15):關閉 app 再開,
+  對話還在畫面上,在聊天框送出訊息就會透明地重新啟動 agent 並送達,不必先走復原視圖。接回的方式
+  依後端而定;**接不回(agent 不支援、或它那邊的歷史已經不在)不會讓這次送出失敗**,改成把 Deskmony
+  存的先前對話(user/assistant 文字,上限約 12000 字元、從最舊的開始截)附在第一則訊息前面讓 agent
+  讀——對話裡會留一則系統說明講清楚「它是讀紀錄接續,不是真的記得」。DB 存的使用者訊息仍是原文。
+  PTY 一律是全新的程序(說明「不保留記憶」),不把紀錄灌進終端。重新啟動失敗時 UI 會在對話裡顯示
+  錯誤,session 狀態還原、不卡在忙碌。權限模式重啟後一律從 `always-ask` 開始。
+  復活後 model / 思考程度維持重啟前的選擇:ACP agent 重啟後常回到預設,Deskmony 在接回(或開新對話)之後、
+  第一則訊息之前把 session 記住的值重新套用(`session/set_config_option`;agent 這次不提供那個值就略過,不讓復活失敗),
+  OpenCode(HTTP)的 model / variant 隨每則訊息送出,Claude 的 `--model` / `--effort` 照舊。`Session.options` 只存記憶體,
+  復活前(closed 的 session)是空的,復活後才回來。
+  agent 用 `send_to_session` 傳給已關閉的 session 則**不會**喚醒它,維持明確報錯。
+- **app 沒關、但 agent 行程自己結束了**(崩潰、被工作管理員殺掉、OpenCode server 掛掉)也一樣:session 轉成
+  `error`,對話裡留一則說明「agent 已停止執行,送出下一則訊息時會自動重新啟動」;送出訊息就用和上面相同的流程
+  重新啟動並接回(連按兩次也只啟動一次)。在這之前,別的 session 用 `send_to_session` 傳給它同樣會明確報錯、不會喚醒它。
+- (2026-10-02 移除:原本的「重跑」與髒 worktree 強制前置流程是任務 worktree
+  專用,見 [`DECISIONS.md` §H](./DECISIONS.md)。)
 
 ## 6. 遠端存取
 
@@ -177,8 +325,8 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
   `DESKMONY_AUTH_TOKEN` 環境變數,或(桌面殼專屬)Settings 的「遠端存取」
   區塊用 Electron `safeStorage` 加密保存在本機的值,兩者都不落入設定檔。
 - 遠端能力邊界見上方「3.1 權限斷路器」——這是 2026-08-25 這輪唯一被有意識
-  放寬的部分,其餘(訊息、成本兩條斷路器,以及 profile 管理/綁定介面/預算
-  上限)遠端一律仍然動不了。
+  放寬的部分,其餘(成本與訊息斷路器,以及 provider 設定/一般設定檔/綁定介面/
+  預算上限)遠端一律仍然動不了。
 
 ## 7. 桌面 IDE 體驗
 
@@ -192,18 +340,22 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
 - **Slash command**:輸入 `/` 叫出後端原生支援的指令清單(claude-agent-sdk、
   ACP、OpenCode 三種來源都支援,清單即時更新)。
 - **Command Palette**(`Ctrl+K`):快速搜尋與執行指令。
-- 對話中可即時切換 model 與 effort(思考程度)——依後端能力優雅降級,不支援
-  的後端會得到明確錯誤而不是靜默失敗。
+- **Session 標題**:就地改名、第一則訊息後由 session 自己的 agent 在臨時對話裡自動命名、「AI 重新命名」(見 1.5)。
+- 對話中可即時切換 model 與 effort(思考程度)——選項由 agent 本身回報(見 §1.6),
+  不支援的後端會得到明確錯誤而不是靜默失敗。
 
 ## 8. 設定系統
 
 - **分層設定合併**:預設值 → `<DESKMONY_HOME>/config.json` → 環境變數,
   UI 上每個欄位都標示目前生效值的來源,來源是環境變數的欄位會鎖成唯讀。
-- **Provider 目錄管理**:偵測本機已裝的 agent 軟體與版本、啟用/停用個別
-  provider、排序、勾選要開放的 model、設定環境變數(對外一律遮罩顯示)。
+- **Provider 目錄管理**:偵測本機已裝的 agent 軟體與版本(可「重新偵測」)、
+  啟用/停用個別 provider、排序、勾選要開放的 model、設定環境變數(對外一律遮罩
+  顯示)。這份目錄就是「能用哪些 agent 開 session」的唯一來源(見 §1.1);環境變數
+  是 provider 層級的,API key 放在這裡,不再有每個 profile 各自的 env。
 - **「權限」分頁**(2026-08-25 新增):瀏覽目前生效的允許清單、逐條新增
-  (工具 + 條件 + 效果 + 可選 scope)、逐條刪除——本機與遠端皆可用,即時透過
-  推播同步給其他已連線的 client。
+  (工具 + 條件 + 效果 + 可選的 agent 範圍〔`providerId`〕)、逐條刪除——本機與遠端
+  皆可用,即時透過推播同步給其他已連線的 client。帶舊 profile / 角色範圍的既有
+  規則會被標示出來(allow 已停用、deny 已套用全部)。
 - **通知設定**:唯讀顯示目前的桌面通知/webhook 設定(webhook URL 視同憑證,
   一律遮罩,不提供任何寫入路徑,只能手動編輯設定檔)。
 - **「遠端存取」token 管理**(桌面殼專屬,2026-09 新增):顯示目前 token
@@ -225,12 +377,18 @@ TurnLimiter 是最後一道防線——實測某些後端(例如 Claude Code 經
 
 四語言完整支援(English、繁體中文、日本語、Español),涵蓋介面文字、錯誤
 訊息、通知內容。產品專有詞(YOLO、AUTO、UNRESTRICTED 等徽章文字、
-worktree、session、profile 等技術詞)依詞彙表刻意保留原文,不強行本土化。
+session、agent、model 等技術詞)依詞彙表刻意保留原文,不強行本土化。
 
 ## 11. 稽核與資料持久化
 
-- SQLite(better-sqlite3 + Drizzle ORM),11 張表,冪等遷移(`CREATE TABLE
-  IF NOT EXISTS` + 逐欄位 `ensure` 函式,不需要版本化 migration 系統)。
+- SQLite(better-sqlite3 + Drizzle ORM),5 張表(sessions / messages / settings /
+  enforcement_audit / usage_rollup;2026-10-02 起 team / 任務相關五張表與
+  `agent_profiles` 的程式碼定義已移除,但既有資料庫裡的表與資料原封不動留著——
+  `agent_profiles` 只在啟動回填舊 session 時被讀取),冪等遷移
+  (`CREATE TABLE IF NOT EXISTS` + 逐欄位 `ensure` 函式,不需要版本化 migration 系統)。
+- session 自帶 provider 與啟動指令(`provider_id` / `launch_command` /
+  `launch_args`,不存 env);`messages.origin` 記錄跨 session 訊息的來源;
+  `sessions.title_source` 記錄標題來源(見 1.5)。
 - `enforcement_audit` 是系統裡唯一 append-only 的表:只記權限決策(含自動
   放行)、三斷路器熔斷、啟動對帳、真.無限制切換、允許清單變更——供事後
   稽核與除錯,**不是** event sourcing,不記 agent 輸出,不能拿來重建狀態。
@@ -240,11 +398,18 @@ worktree、session、profile 等技術詞)依詞彙表刻意保留原文,不強�
 ## 尚未做的事(誠實列出)
 
 - **PTY 沒有執行沙箱**——這類後端因此結構上無法自主運作,一律唯讀。
-- **沒有 LLM lead/orchestrator**——任務拆解目前是純人工,`TaskService` 是
-  確定性狀態機。
 - **沒有 mid-turn 成本熔斷**——目前唯一會回報 usage 的後端都是在回合結束時
   才發送一次。
-- **OpenCode、PTY 尚未掛載傳訊/子 agent 的 MCP 工具**(接收端不受影響)。
+- **PTY 沒有掛載 session 網路的 MCP 工具**——這類 session 能**接收**訊息,但不能
+  主動傳(`canUseTools: false`)。(OpenCode(HTTP)原本也在這裡,2026-10-03 起掛上了
+  同一個 bridge,與 OpenCode(ACP)的差別只剩對接方式。)
+- **排給忙碌 session 的訊息只存在記憶體**,core 重啟會遺失;訊息鏈計數也一樣。
+- **自動復活的觸發點只有輸入框送出的訊息**:終端(PTY)session 在 xterm 裡直接敲鍵不會觸發復活,
+  要用下方輸入框送出一行。ACP `session/load` 重播期間送來的 `available_commands_update` 會連同
+  歷史一起被丟掉(slash command 選單要等 agent 下一次推送)。
+- **偵測清單是固定的**(Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、
+  Codex、Aider)。手動輸入 command 的入口已移除;支援其他 ACP-native CLI(如
+  qwen-code、goose 等)要在目錄裡加一項,而且需要先在實機上驗證啟動旗標。
 - **Provider 環境變數本機明文儲存**——對外一律遮罩,但本機 SQLite 檔案本身
   不加密(與多數同類工具的既有取捨一致)。
 - **只有 Windows 打包**——core 與 adapter 本身是純 Node/TypeScript,其餘平台

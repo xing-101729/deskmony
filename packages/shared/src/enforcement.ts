@@ -60,6 +60,10 @@ export type EscalationEnforcementEvent = z.infer<typeof EscalationEnforcementEve
 /**
  * 訊息/成本熔斷單方面叫停(S2/S3b 專用)。S1 階段只定型 schema、不產生這種
  * 事件——`source` 之後可能還會擴充,這裡先覆蓋 HLD §5 列出的兩種已知來源。
+ *
+ * 2026-10-02(P3:session 網路):`source: "message"` 現在是「**每條訊息鏈**的訊息數預算」超標
+ * (`reason: "message-chain-budget"`,targetIds = 鏈上相關的 session:送出方與目標),見
+ * apps/core/src/session/session-manager.ts 的鏈預算。熔斷只擋 agent 對 agent 的傳遞,不 interrupt 任何回合。
  */
 export const TripEnforcementEventSchema = z
   .object({
@@ -90,56 +94,24 @@ export type TripEnforcementEvent = z.infer<typeof TripEnforcementEventSchema>;
  * `reason: "budget-warning"`(HLD §3「中間地帶軟警告」):達 `warnAtPercent`
  * 時發通知、**不 halt**,與 T1 同一種「純提醒」語意,故共用這個 kind——差別
  * 只在提醒的具體原因,見 `EnforcementNotificationPushSchema.reminderReason`。
+ * 2026-10-02(P3):`reason: "message-chain-warning"`(`source: "message"`)是同一種軟警告,對象是訊息鏈的訊息數。
  */
 export const ReminderEnforcementEventSchema = z
   .object({
     kind: z.literal("reminder"),
-    source: z.literal("cost"),
-    reason: z.enum(["waiting-ttl", "budget-warning"]),
+    /** 2026-10-02(P3):新增 `"message"`——訊息鏈的訊息數達 `warnAtPercent`(軟警告,不 halt)。 */
+    source: z.enum(["cost", "message"]),
+    reason: z.enum(["waiting-ttl", "budget-warning", "message-chain-warning"]),
     targetIds: z.array(z.string()),
     ts: z.number(),
   })
   .strict();
 export type ReminderEnforcementEvent = z.infer<typeof ReminderEnforcementEventSchema>;
 
-/**
- * S5(dispose-gate)新增:任務的「完成判定」升級給人類核可(見
- * docs/LAYER-4-detail-design/dispose-gate-and-lead_detail.md §1.2/§3)。
- *
- * **為何不能沿用既有的 `escalation`**:`EscalationEnforcementEventSchema` 的形狀
- * 綁死在「一次工具權限請求」的語意上(`requestId`/`toolName`/`strong` 都是
- * PermissionGateway 那條路徑才有的概念)——這裡的升級對象是「一個任務」,不是
- * 一次工具呼叫,沒有 requestId/toolName 可填,硬塞會產生一堆假欄位。理由與
- * `ReminderEnforcementEventSchema` 頂端註解完全相同:形狀不合硬塞,不如獨立
- * 開一個 kind。
- *
- * 兩種觸發原因(`reason`):
- *   - `"no-acceptance"`:任務沒有機器驗收條件,完成判定只能由人類判(HLD §2.2)。
- *   - `"acceptance-failure-streak"`:同一任務連續驗收失敗達上限(L4 §3),
- *     停止自動重跑、改為需要人類介入。
- *
- * `RealNotifier.deliver()`(apps/core/src/enforcement/notifier.ts)收到這個
- * kind 時,直接送出(不進批次佇列——理由見該檔案內的說明),對外仍然沿用
- * `EnforcementNotificationPushSchema` 既有的 "escalation" kind(不擴充對外
- * payload 形狀),只是用 `taskTitle` 取代 session 顯示名。
- */
-export const TaskReviewEnforcementEventSchema = z
-  .object({
-    kind: z.literal("task-review"),
-    taskId: z.string(),
-    teamId: z.string(),
-    taskTitle: z.string(),
-    reason: z.enum(["no-acceptance", "acceptance-failure-streak"]),
-    ts: z.number(),
-  })
-  .strict();
-export type TaskReviewEnforcementEvent = z.infer<typeof TaskReviewEnforcementEventSchema>;
-
 export const EnforcementEventSchema = z.discriminatedUnion("kind", [
   DecisionEnforcementEventSchema,
   EscalationEnforcementEventSchema,
   TripEnforcementEventSchema,
   ReminderEnforcementEventSchema,
-  TaskReviewEnforcementEventSchema,
 ]);
 export type EnforcementEvent = z.infer<typeof EnforcementEventSchema>;

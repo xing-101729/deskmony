@@ -1,18 +1,31 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { Readable, Writable } from "node:stream";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
 import { structuredPatch } from "diff";
-import type { AgentEvent, AgentProfile, McpBridgeTokenGrant, McpBridgeTokenPort, PromptInput, SlashCommandInfo, SubagentPort } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, TeamSpawnContext, Workspace } from "./types.js";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
+import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
+import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
+import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
+import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
+import { buildAgentChildEnv } from "./agent-env.js";
+import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded, type OpencodeShellEnvPluginLaunch } from "./opencode-shell-env.js";
+import { acpOptionChoices, acpSessionOptions, findAcpConfigOption, invalidOptionError, optionNotOfferedError, type AgentOptionKind } from "./agent-options.js";
 
 /**
  * AcpAdapter — 對接 [Agent Client Protocol](https://agentclientprotocol.com)
@@ -30,7 +43,9 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
  *    prompt 結束的 `stop` 訊息)。
  *  - `session/update` 的 `agent_message_chunk` → `message-delta`;
  *    `tool_call` → `tool-call`;`tool_call_update`(status 為 completed/
- *    failed 時)→ `tool-result`。ACP 明確帶 `messageId`(不像 Claude SDK
+ *    failed 時)→ `tool-result`;`tool_call_update` 帶來新的非空 `rawInput`
+ *    (OpenCode 在 `tool_call` 只給 `{}`,真參數隨後才到)時,先對同一個
+ *    toolCallId 補送一次 `tool-call`(見 handleSessionUpdate())。ACP 明確帶 `messageId`(不像 Claude SDK
  *    需要自行從 `message_start`/`message_stop` 推斷邊界),但仍比照
  *    ClaudeAgentSdkAdapter 的作法,在 messageId 切換或該輪 `stop` 時補送
  *    一次 `done:true` 的空 delta,確保串流分組規則一致。
@@ -45,16 +60,34 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
  *    (找不到就回 cancelled)」收場,不讓 agent 的 `requestPermission` 呼叫
  *    永久卡住。
  *
+ * 接回既有對話(2026-10-15,session 自動復活;`spawn()` 帶 `ResumeOptions.backendSessionId` 時,見 `startAcpSession()`):
+ *  - `initialize` 回應的 `agentCapabilities.sessionCapabilities.resume` 有宣告 → `session/resume`(協議保證**不**重播歷史);
+ *    否則宣告了 `loadSession` → `session/load`(協議規定 agent 會用 `session/update` **重播整段歷史**,然後才回應);
+ *    都沒有、或呼叫失敗/逾時(例如 agent 那邊的歷史已經被清掉)→ 退回 `session/new`,`AgentHandle.resumed` 標 `false`,
+ *    由呼叫端用 Deskmony 存的對話紀錄補脈絡。接回失敗**不會**讓 `spawn()` 失敗。
+ *  - 重播絕不能當成新事件送出(否則 DB/UI 出現重複訊息):`ActiveSession` 是 `session/update` 的唯一出口,而我們在 resume/load
+ *    **回應回來、確認重播的通知都處理完之後**才把它掛上去(見 `attachResumedSession()`),在那之前的通知沒有人接,直接丟棄。
+ *  - resume/load 帶的 `mcpServers` 與 `session/new` 完全一樣(session 網路 bridge,新核發的 scoped token);子行程的環境變數過濾、
+ *    opencode 家族的「所有工具 ask」設定都在 spawn 子行程那一步套用,三種建立 session 的方式共用同一個子行程,沒有差別。
+ *
  * 已知限制 / TODO(M2 Round A 範圍):
  *  - 只處理 `ContentBlock.type === "text"`,image/audio/resource(_link)
  *    尚未轉發。
  *  - `session/update` 的 `plan`/`plan_update`/`current_mode_update`/
- *    `config_option_update`/`session_info_update`/`agent_thought_chunk`/
+ *    `session_info_update`/`agent_thought_chunk`/
  *    `user_message_chunk` 尚未有對應的 AgentEvent 型別(見
  *    packages/shared/src/events.ts),先略過不轉發。`usage_update` 已在 S3a
  *    (usage-metering)接上(見下方 `handleSessionUpdate()`),
- *    `available_commands_update` 已在這輪(slash command)接上,這裡的清單
+ *    `available_commands_update` 已在這輪(slash command)接上,
+ *    `config_option_update` 已在 2026-10-06(model/思考程度)接上,這裡的清單
  *    同步移除,避免文件與程式碼漂移。
+ *  - **model / 思考程度(2026-10-06)**:向 agent 查,不寫死。`session/new` 回應的 `configOptions`(與之後的
+ *    `config_option_update`)裡 `category: "model"` / `"thought_level"` 的選項轉成 `session-options` 事件;
+ *    `setModel()`/`setEffort()` 走 `session/set_config_option`。建立時指定的值在 `session/new` 之後立刻套用
+ *    (見 `applyLaunchOptions()`)。agent 沒宣告的項目就是不支援(UI 不顯示、呼叫回明確錯誤)。實測:
+ *    opencode 1.18.7 回 `model` + `mode`,目前 model 有 variants 時另有 `effort`;codex-acp 1.4.0 回 `model` +
+ *    `reasoning_effort`(讀它的原始碼確認,2026-10-15 以真實 Codex 實測:model 有 `gpt-5.6-terra`/`gpt-5.6-luna`,思考程度
+ *    隨 model 變——terra 有 low…max 與 ultra、luna 只到 max)。Gemini 本機未安裝,沒有實測。
  *  - `diff` 能力(Codex ACP 橋接切換 Phase 3 起回報為 true):
  *    `resolveDiffStructuredResult()` 用兩條路徑合成
  *    `ToolResultEvent.structuredResult`(消費端是既有機制,見
@@ -76,19 +109,20 @@ import { killProcessTree, waitForChildExit } from "./child-process.js";
 export class AcpAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
 
-  // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`subagentPort` 完全比照
-  // `ClaudeAgentSdkAdapter` 既有的 `setSubagentPort()` 模式——apps/core 的
+  // Phase 2(ACP 掛載 session 網路 MCP 工具):`sessionNetworkPort` 完全比照
+  // `ClaudeAgentSdkAdapter` 既有的 `setSessionNetworkPort()` 模式——apps/core 的
   // SessionManager 在啟動時用 setter 事後注入(adapter 建構當下 core 的
   // SessionManager 還沒好,打破建構循環,見 claude-sdk-adapter.ts 同名欄位的
-  // 註解)。`tokenMinter` 是這輪新增的第二個事後注入依賴——見
+  // 註解)。ACP 這邊 port 本身只當「要不要掛載」的開關(真正的工作由 bridge 子行程經 gateway 打回 core)。
+  // `tokenMinter` 是第二個事後注入依賴——見
   // packages/shared/src/mcp-bridge-auth.ts 的 `McpBridgeTokenPort` 完整背景
   // 說明,實例由 apps/core 的 WsGateway 提供。兩者都是 **可選**:`spawn()`
-  // 只在 `team`(呼叫端傳入)或 `subagentPort`(已注入)至少一者存在、且
-  // `tokenMinter` 也已注入時,才會核發 token、掛載 mcp-bridge-server.ts——
-  // 三者缺一,行為與這輪之前完全相同(不核發 token、不多一個子行程)。
-  private subagentPort?: SubagentPort;
-  setSubagentPort(port: SubagentPort): void {
-    this.subagentPort = port;
+  // 只在 `sessionNetworkPort` 已注入、且 `tokenMinter` 也已注入時,才會核發 token、
+  // 掛載 mcp-bridge-server.ts——兩者缺一,行為與這輪之前完全相同(不核發 token、
+  // 不多一個子行程)。
+  private sessionNetworkPort?: SessionNetworkPort;
+  setSessionNetworkPort(port: SessionNetworkPort): void {
+    this.sessionNetworkPort = port;
   }
   private tokenMinter?: McpBridgeTokenPort;
   setTokenMinter(minter: McpBridgeTokenPort): void {
@@ -146,43 +180,92 @@ export class AcpAdapter implements AgentAdapter {
       // `available_commands_update`(已查證 `@agentclientprotocol/sdk@1.2.1`
       // 型別上這是一個 optional 的 session/update 變體,agent 不一定會送)。
       slashCommands: "unknown",
+      // 2026-10-06:要等 `session/new` 回報 `configOptions` 才知道 agent 宣告了哪些(見 agent-options.ts)。
+      modelSwitching: "unknown",
+      effortSwitching: "unknown",
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace, team?: TeamSpawnContext): Promise<AgentHandle> {
-    const acpConfig = profile.acpConfig;
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
+    const acpConfig = launch.acpConfig;
+    const agentLabel = launch.providerId ?? "acp";
     if (!acpConfig) {
       throw new DeskmonyError(
         ErrorCodes.ADAPTER_MISSING_CONFIG,
-        { profileId: profile.id, software: "acp", configField: "command" },
-        `AgentProfile "${profile.id}" 的 software="acp" 缺少 acpConfig(command)`,
+        { providerId: agentLabel, software: "acp", configField: "command" },
+        `agent "${agentLabel}" 的 software="acp" 缺少 acpConfig(command)`,
       );
     }
 
-    // Phase 2(ACP 掛載 team-bus/subagent MCP 工具):`AgentHandle.id` 提前在
+    // Phase 2(ACP 掛載 session 網路 MCP 工具):`AgentHandle.id` 提前在
     // 這裡生成(這輪之前是等 ACP handshake 成功後才在下面產生)——scoped
     // token 需要綁定「這一個 session」,但核發時機必須在
     // `buildSession().withMcpServer()` 之前(掛進 `session/new` 請求的
     // `mcpServers` 欄位),比 handshake 完成、正式建立 `AgentHandle` 都早,
     // 所以提前生成這個 id,下面 `const handle: AgentHandle = { id: handleId,
     // ... }` 沿用同一個值。
-    const handleId = randomUUID();
+    // 2026-10-15:復活既有 session 時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`)——scoped token 與 session
+    // 網路工具的呼叫者身分都綁這個 id,必須等於 SessionManager 登記這條 session 的 id。
+    const handleId = resume?.sessionId ?? randomUUID();
 
     const { command, args, useShell } = resolveWindowsSpawnCommand(acpConfig.command, acpConfig.args ?? []);
-    // 這輪新增:`profile.env`(provider 層級預設 + profile 自己的覆寫,已由
-    // SessionManager.createSession() 合併好,見該檔案內的說明)疊在
-    // process.env 之上,`acpConfig.env`(既有欄位,呼叫端在 profile 建立時
-    // 針對這個 adapter 特別設定的值)最優先——維持這個既有欄位一直以來的
-    // "最終覆寫" 語意不變,只是多了 profile.env 這一個中間層。
-    const child = spawn(command, args, {
-      cwd: workspace.path,
-      env: { ...process.env, ...profile.env, ...acpConfig.env },
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: useShell,
-    });
+
+    // Phase 2:this.sessionNetworkPort(已注入)存在時,核發 scoped token 並算出
+    // 要掛載的 mcp-bridge-server.ts 設定——ACP 只有一個統一的 bridge
+    // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是
+    // in-process 的 MCP server。沒有 sessionNetworkPort 時直接回傳 undefined,
+    // 不核發任何 token、不掛任何 MCP server。
+    // 2026-10-03:**提前到 spawn 子程序之前**——opencode 家族要在子程序的環境變數裡預先放行三個查詢工具,
+    // 必須先知道 bridge 有沒有掛上。核發之後任何一步失敗都要撤銷(見下方 spawn 例外與 catch)。
+    const bridgeLaunch = mintMcpBridgeLaunch(
+      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
+      handleId,
+      "acp-adapter",
+    );
+
+    // `launch.env`(provider 層級 env,由 SessionManager.prepareSpawnSpec() 從
+    // settings 讀出併好)疊在 process.env 之上,`acpConfig.env`(既有欄位)最優先
+    // ——維持這個既有欄位一直以來的「最終覆寫」語意不變。
+    // 2026-10-05(安全):最後一律濾掉 Deskmony 內部憑證(主認證 token、MCP bridge 的 scoped token……)——
+    // 否則 agent 的 bash 讀得到 `DESKMONY_AUTH_TOKEN`,連上 gateway 就能自己核准權限/切 YOLO,等於自己拆掉安全罩。
+    // bridge 需要的值是下面 `session/new` 的 `mcpServers[].env` 明確交給 bridge 的,不靠繼承。見 agent-env.ts。
+    const childEnv: NodeJS.ProcessEnv = buildAgentChildEnv(launch.env, acpConfig.env);
+    let shellEnvPlugin: OpencodeShellEnvPluginLaunch | undefined;
+    if (launch.family === "opencode") {
+      // 2026-10-05(安全):opencode 不會把伺服器密碼與這份設定從它啟動的 bash 工具環境濾掉,agent 讀得到就能自我核准權限——
+      // 掛 Deskmony 自帶的外掛在 `shell.env` hook 把它們移除。外掛找不到時降級(警告、session 照常啟動)。見 opencode-shell-env-plugin.ts。
+      shellEnvPlugin = prepareOpencodeShellEnvPlugin("acp-adapter", handleId);
+      // opencode 預設所有工具權限都是 allow、不經過 Deskmony 的政策引擎——一律改成全部 ask(default-deny)。
+      // 完整理由、設定寫法與實測依據見 opencode-config.ts。掛了 bridge 時三個唯讀查詢工具預先放行。
+      childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
+        shellEnvPlugin: shellEnvPlugin?.entry,
+        sessionNetwork: bridgeLaunch ? {} : undefined,
+        // opencode acp 不會轉發 subagent 子 session 的權限請求 → 子 session 卡死,只能不讓它用 subagent(見該選項註解)。
+        denySubagents: true,
+      });
+      // 2026-10-03(安全):**`opencode acp` 也會在 loopback 開 HTTP 伺服器**(實測 1.18.7:聽 `127.0.0.1:4096`——opencode 的
+      // 預設 port,被占用才改隨機;預設無認證,不帶標頭 `GET /config` 回 200)——本機其他程序可以替它核准權限請求、讀設定裡的 token。ACP 這條路
+      // Deskmony 不需要打它的 HTTP API(全走 stdio),所以只要設一組隨機密碼讓別人進不去,回傳的標頭值用不到、直接丟棄。
+      // 實測帶了密碼 `opencode acp` 照常運作(initialize/session/new/session/prompt 都正常)。理由與覆蓋規則見 opencode-server-auth.ts。
+      applyOpencodeServerAuth(childEnv);
+    }
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(command, args, {
+        cwd: workspace.path,
+        env: childEnv,
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: useShell,
+        windowsHide: true,
+      });
+    } catch (err) {
+      // spawn 本身同步丟例外(例如 Windows 上 `.cmd` 沒走 shell 的 EINVAL):token 已核發,不能留成孤兒。
+      if (bridgeLaunch) this.tokenMinter?.revokeForSession(handleId);
+      throw err;
+    }
     // 2026-09-04(稽核修補):登記 pid,讓 core 若非正常終止,下次啟動時能回收
-    // 這個孤兒。見 packages/adapters/src/child-registry.ts。
-    registerChild(child.pid, `acp:${command}`);
+    // 這個孤兒。見 packages/adapters/src/child-registry.ts。2026-10-12:非同步登記,不 await。
+    void registerChild(child.pid, `acp:${command}`, () => child.exitCode !== null || child.signalCode !== null);
 
     // child 啟動失敗(command 找不到等)會觸發 "error" 而不是 reject 某個
     // promise;把它轉成一個會 reject 的 promise,跟 initialize/newSession
@@ -203,7 +286,7 @@ export class AcpAdapter implements AgentAdapter {
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      console.error(`[acp-adapter] ${profile.name} stderr: ${chunk.toString().trimEnd()}`);
+      console.error(`[acp-adapter] ${agentLabel} stderr: ${chunk.toString().trimEnd()}`);
     });
 
     const outputQueue = new AsyncQueue<AgentEvent>({
@@ -217,6 +300,9 @@ export class AcpAdapter implements AgentAdapter {
         ),
     });
     const pendingPermissions = new Map<string, PendingPermission>();
+    // 2026-10-06(AI 自動命名):命名用臨時 session 的 id(見 `generateTitle()`)。權限請求的 handler 在 internal 建好之前
+    // 就得註冊,所以這個 Set 先在這裡建、再放進 internal。
+    const titleSessionIds = new Set<string>();
 
     const stream = acp.ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -226,6 +312,13 @@ export class AcpAdapter implements AgentAdapter {
     const clientApp = acp
       .client({ name: "deskmony" })
       .onRequest(acp.methods.client.session.requestPermission, (ctx) => {
+        // 2026-10-06:命名用臨時 session 的權限請求**一律當場拒絕**——不進政策引擎、不進 UI、不轉給主 session
+        // (臨時對話不得取得任何工具或權限,見 types.ts 的 `AgentAdapter.generateTitle()`)。`generateTitle()` 看到
+        // tool_call 也會自己中止這次命名。
+        if (titleSessionIds.has(ctx.params.sessionId)) {
+          console.warn(`[acp-adapter] ${agentLabel} 的命名用臨時對話要求工具權限(${ctx.params.toolCall.title ?? "?"}),已拒絕`);
+          return Promise.resolve(buildPermissionResponse(ctx.params.options, "deny"));
+        }
         return new Promise<acp.RequestPermissionResponse>((resolve) => {
           const requestId = String(ctx.requestId);
           pendingPermissions.set(requestId, { resolve, options: ctx.params.options });
@@ -241,20 +334,18 @@ export class AcpAdapter implements AgentAdapter {
 
     const connection = clientApp.connect(stream);
 
-    // Phase 2:team(呼叫端傳入)或 this.subagentPort(已注入)任一存在時,
-    // 核發 scoped token 並算出要掛載的 mcp-bridge-server.ts 設定——比照
-    // ClaudeAgentSdkAdapter.spawn() 既有的「team 跟 subagent 各自獨立判斷、
-    // 兩者皆有時同時掛上」累加模式,唯一差異是 ACP 只有一個統一的 bridge
-    // 子行程(見 mcp-bridge-server.ts 檔頭註解),不像 claude-agent-sdk 是兩個
-    // 各自獨立的 in-process MCP server,所以這裡是「核發一個範圍涵蓋兩者聯集
-    // 的 token、掛一個 server」而不是「核發兩個 token、掛兩個 server」。
-    // 兩者皆無時 `buildMcpBridgeServer()` 直接回傳 undefined,不核發任何
-    // token、不掛任何 MCP server——這輪之前唯一在跑的 ACP 情境(沒有 team 的
-    // Gemini 個人單機使用)行為與這輪之前完全相同。
-    const bridgeMcpServer = this.buildMcpBridgeServer(handleId, team);
+    // MCP server 名稱與 in-process 版一致(`deskmony`),agent 看到的工具全名才會是 `mcp__deskmony__<name>`。
+    const bridgeMcpServer: acp.McpServer | undefined = bridgeLaunch
+      ? {
+          name: "deskmony",
+          command: bridgeLaunch.command,
+          args: bridgeLaunch.args,
+          env: Object.entries(bridgeLaunch.env).map(([name, value]) => ({ name, value })),
+        }
+      : undefined;
 
     try {
-      await Promise.race([
+      const initialized = await Promise.race([
         connection.agent.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
           clientCapabilities: {
@@ -265,11 +356,24 @@ export class AcpAdapter implements AgentAdapter {
         spawnFailure,
       ]);
 
-      let sessionBuilder = connection.agent.buildSession(workspace.path);
-      if (bridgeMcpServer) {
-        sessionBuilder = sessionBuilder.withMcpServer(bridgeMcpServer);
-      }
-      const session = await Promise.race([sessionBuilder.start(), spawnFailure]);
+      const { session, resumed } = await Promise.race([
+        startAcpSession({
+          cx: connection.agent,
+          capabilities: initialized.agentCapabilities ?? undefined,
+          cwd: workspace.path,
+          bridgeMcpServer,
+          backendSessionId: resume?.backendSessionId,
+          agentLabel,
+        }),
+        spawnFailure,
+      ]);
+
+      // 2026-10-06:model / 思考程度。agent 回報的選項在 `session/new` 回應的 `configOptions`;建立時指定的值
+      // (明確值做不到就讓建立失敗,記住的上次選擇做不到就略過)在這裡、第一則訊息之前套用。
+      const configOptions = await Promise.race([
+        this.applyLaunchOptions(connection, session.sessionId, session.newSessionResponse.configOptions ?? [], launch, agentLabel),
+        spawnFailure,
+      ]);
 
       // 2026-09-17:handshake 與 session/new 都成功 = 真正的 agent 行程一定已經在
       // 回應了。`child.pid` 可能只是外殼 —— `.cmd` shim 的 cmd.exe、`.ps1` 的
@@ -279,7 +383,7 @@ export class AcpAdapter implements AgentAdapter {
       // (查詢要 1 秒多)。見 child-registry.ts 的 registerChildDescendants()。
       void registerChildDescendants(child.pid);
 
-      const handle: AgentHandle = { id: handleId, profile, workspace };
+      const handle: AgentHandle = { id: handleId, launch, workspace, ...(resume?.backendSessionId ? { resumed } : {}) };
       const internal: InternalSession = {
         handle,
         child,
@@ -288,9 +392,25 @@ export class AcpAdapter implements AgentAdapter {
         outputQueue,
         pendingPermissions,
         toolTitles: new Map(),
+        toolInputs: new Map(),
         currentMessageId: null,
+        sessionCapabilities: initialized.agentCapabilities?.sessionCapabilities ?? undefined,
+        titleSessionIds,
+        titleAborts: new Set(),
+        configOptions,
+        agentLabel,
       };
       this.sessions.set(handle.id, internal);
+      this.pushSessionOptions(internal);
+
+      // 2026-10-05:`session/new` 成功 = opencode 對這個資料夾的 instance(含外掛初始化)已建立——看載入標記檔:外掛沒載入只警告、
+      // 不影響 session。背景執行,不拖慢 session 建立;必須在 session 登記**之後**(`isCancelled` 靠 `this.sessions` 判斷 session
+      // 是不是已經被 dispose 掉)。
+      if (shellEnvPlugin) {
+        void watchOpencodeShellEnvPluginLoaded(shellEnvPlugin, "acp-adapter", handleId, {
+          isCancelled: () => !this.sessions.has(handleId),
+        });
+      }
 
       child.on("exit", (code, signal) => {
         if (!this.sessions.has(handle.id)) return; // dispose() 已經處理過
@@ -307,6 +427,9 @@ export class AcpAdapter implements AgentAdapter {
           message: "ACP session 更新迴圈中斷",
           detail: err instanceof Error ? err.message : String(err),
         });
+        // 2026-10-15:迴圈中斷之後這個 session 再也不會有事件——關掉佇列讓 core 知道它已經不能用了(core 會收掉它,下一則人類
+        // 訊息重新啟動 agent,見 SessionManager.detachEndedRuntime())。不關的話 core 的事件迴圈永遠等下去,session 看起來還活著。
+        outputQueue.close();
       });
 
       return handle;
@@ -317,6 +440,7 @@ export class AcpAdapter implements AgentAdapter {
       if (bridgeMcpServer) {
         this.tokenMinter?.revokeForSession(handleId);
       }
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
       try {
         connection.close();
       } catch {
@@ -325,57 +449,6 @@ export class AcpAdapter implements AgentAdapter {
       this.killChild(child);
       throw err;
     }
-  }
-
-  /**
-   * Phase 2:算出這個 session 要不要掛載 mcp-bridge-server.ts,以及要掛的話
-   * 需要的完整 `McpServerStdio` 設定(含核發好的 scoped token)。回傳
-   * `undefined` 代表不掛載(`team`/`subagentPort` 皆無,或缺少
-   * `tokenMinter`/找不到已編譯的 bridge server 進入點這兩種**優雅降級**的
-   * 情況——後兩者理論上不該發生,但寧可略過掛載、印警告,也不要讓整個
-   * session 建立失敗:team-bus/subagent 工具是加分項,不是這個 session 能不
-   * 能建立的前提)。
-   */
-  private buildMcpBridgeServer(sessionId: string, team: TeamSpawnContext | undefined): acp.McpServer | undefined {
-    if (!team && !this.subagentPort) return undefined;
-    if (!this.tokenMinter) {
-      console.warn(
-        `[acp-adapter] session ${sessionId}: team/subagentPort 存在但尚未注入 tokenMinter,略過掛載 team-bus/subagent MCP 工具`,
-      );
-      return undefined;
-    }
-    const entryPath = resolveMcpBridgeServerEntry();
-    if (!entryPath || !existsSync(entryPath)) {
-      console.warn(
-        `[acp-adapter] session ${sessionId}: 找不到 mcp-bridge-server.js(${entryPath ?? "無法解析路徑"}),` +
-          "略過掛載 team-bus/subagent MCP 工具——請確認 packages/adapters 已執行過 pnpm build。",
-      );
-      return undefined;
-    }
-
-    const grant: McpBridgeTokenGrant = this.tokenMinter.mint({
-      sessionId,
-      team: team ? { teamId: team.teamId, memberId: team.memberId } : undefined,
-      subagent: Boolean(this.subagentPort),
-    });
-
-    // 見 mcp-bridge-server.ts 檔頭「環境變數」段落——一律透過 env(不是 CLI
-    // args)傳遞,避免 token 出現在行程列表裡(尤其是 Windows 的
-    // tasklist/工作管理員預設就會顯示完整命令列,見這輪的核心安全設計)。
-    const env: acp.EnvVariable[] = [
-      { name: "DESKMONY_MCP_BRIDGE_TOKEN", value: grant.token },
-      { name: "DESKMONY_MCP_BRIDGE_GATEWAY_URL", value: grant.gatewayUrl },
-      { name: "DESKMONY_MCP_BRIDGE_SESSION_ID", value: sessionId },
-    ];
-    if (team) {
-      env.push({ name: "DESKMONY_MCP_BRIDGE_TEAM_ID", value: team.teamId });
-      env.push({ name: "DESKMONY_MCP_BRIDGE_MEMBER_ID", value: team.memberId });
-    }
-    if (this.subagentPort) {
-      env.push({ name: "DESKMONY_MCP_BRIDGE_SUBAGENT_ENABLED", value: "1" });
-    }
-
-    return { name: "deskmony-mcp-bridge", command: process.execPath, args: [entryPath], env };
   }
 
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void {
@@ -391,6 +464,15 @@ export class AcpAdapter implements AgentAdapter {
 
   events(handle: AgentHandle): AsyncIterable<AgentEvent> {
     return this.mustGet(handle).outputQueue;
+  }
+
+  /**
+   * ACP 的 `sessionId`(2026-10-15,session 自動復活)——agent 端(codex-acp、opencode、gemini 等)把對話存在自己的磁碟上,
+   * 下次 `spawn()` 帶這個值就能用 `session/resume` / `session/load` 接回。`session/new` 回應之後立刻就有值(不像 Claude SDK
+   * 要等第一則訊息),所以沒有「還沒捕捉到」的空窗。
+   */
+  getBackendSessionId(handle: AgentHandle): string | undefined {
+    return this.sessions.get(handle.id)?.session.sessionId;
   }
 
   /**
@@ -417,7 +499,7 @@ export class AcpAdapter implements AgentAdapter {
     const internal = this.sessions.get(handle.id);
     if (!internal) return;
     // Phase 2:這個 session 若曾核發過 scoped MCP bridge token(見 spawn() 的
-    // `buildMcpBridgeServer()`),session 結束時必須讓它立即失效——不能變成
+    // `mintMcpBridgeLaunch()`),session 結束時必須讓它立即失效——不能變成
     // 孤兒憑證一直有效到 24 小時 TTL 才過期。`revokeMcpBridgeTokensForSession()`
     // 對「這個 session 根本沒核發過 token」是安全的 no-op(見
     // apps/core/src/gateway/ws-gateway.ts 的實作),不需要先判斷有沒有核發過。
@@ -428,6 +510,8 @@ export class AcpAdapter implements AgentAdapter {
       pending.resolve(buildPermissionResponse(pending.options, "deny"));
     }
     internal.pendingPermissions.clear();
+    // 進行中的命名臨時對話一併中止(連線馬上要關了)。
+    for (const controller of internal.titleAborts) controller.abort();
     internal.lastCost = undefined;
     internal.outputQueue.close();
     try {
@@ -443,17 +527,18 @@ export class AcpAdapter implements AgentAdapter {
     this.killChild(internal.child);
     // S8 迴歸修正:`killChild()` 只是「送出終止指令」,不保證子程序已經真的死掉。
     // 在 Windows 上,行程要再過數十毫秒才會釋放它對 cwd(= 任務 worktree)的
-    // 佔用 —— 若 dispose() 在此之前就 resolve,呼叫端(TaskService.deleteTask →
-    // WorkspaceManager.removeWorkspace)會立刻 `git worktree remove`,撞上
-    // `Permission denied` / `EBUSY: resource busy or locked`。
-    // S8 讓 assignTask() 自動 spawn session 之後,worktree 首次會被子程序佔住,
-    // 這個既有的時序漏洞才被 e2e-gateway 步驟 15e 暴露出來。
+    // 佔用 —— 若 dispose() 在此之前就 resolve,呼叫端(原任務刪除流程,
+    // 2026-10-02 已移除,見 docs/DECISIONS.md §H)會立刻 `git worktree remove`,撞上
+    // `Permission denied` / `EBUSY: resource busy or locked`。這個時序漏洞當時是
+    // 由 e2e-gateway 步驟 15e 暴露出來的,修正本身(等子程序真正退出)仍然有效。
     // 這裡等子程序真正 exit(上限 3 秒;逾時就放棄等待,讓呼叫端既有的重試機制
     // 接手,絕不因為等不到而卡住 dispose)。
     await waitForChildExit(internal.child, 3_000);
     // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
     unregisterChild(internal.child.pid);
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——agent 自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {
@@ -465,34 +550,175 @@ export class AcpAdapter implements AgentAdapter {
   }
 
   /**
-   * M5 Round C:ACP 協議的 `session/new`/`session/prompt` 沒有 model 參數,
-   * model 完全由被 spawn 出來的外部 agent/CLI 自行決定與管理,呼叫端(我們)
-   * 沒有介面可以介入——明確拋出錯誤,不可靜默忽略成功(見
-   * packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
+   * 2026-10-06:向 agent 查——agent 在 `configOptions` 宣告了 `category: "model"` 的選項才支援,值必須在它給的
+   * 清單裡,用 `session/set_config_option` 切換(對話上下文不受影響)。沒宣告就丟明確錯誤,不可靜默忽略成功
+   * (見 packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
    */
-  async setModel(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "acp", operation: "setModel" },
-      'software="acp" 不支援變更 model(model 由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
-    );
+  async setModel(handle: AgentHandle, model: string): Promise<void> {
+    await this.setConfigValue(this.mustGet(handle), "model", model);
+  }
+
+  /** 比照上面的 `setModel()`:`category: "thought_level"` 的選項。 */
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
+    await this.setConfigValue(this.mustGet(handle), "effort", effort);
+  }
+
+  private async setConfigValue(internal: InternalSession, kind: AgentOptionKind, value: string): Promise<void> {
+    const option = findAcpConfigOption(internal.configOptions, kind);
+    if (!option) throw optionNotOfferedError(kind, internal.agentLabel);
+    const allowed = acpOptionChoices(option).map((c) => c.value);
+    if (!allowed.includes(value)) throw invalidOptionError(kind, internal.agentLabel, value, allowed);
+    const response = await internal.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+      sessionId: internal.session.sessionId,
+      configId: option.id,
+      value,
+    });
+    // 回應是**完整**的一份 configOptions(換 model 之後可選的思考程度可能跟著變,見 opencode 的實作)。
+    internal.configOptions = response.configOptions;
+    this.pushSessionOptions(internal);
   }
 
   /**
-   * 比照上面的 `setModel()`:ACP 協議的 `session/new`/`session/prompt` 沒有
-   * effort/reasoning 參數,思考程度完全由被 spawn 出來的外部 agent/CLI 自行
-   * 決定與管理,呼叫端(我們)沒有介面可以介入——明確拋出錯誤,不可靜默
-   * 忽略成功(見 packages/adapters/src/types.ts 的 `AgentAdapter.setEffort()`
-   * 介面註解)。
+   * `session/new` 之後、第一則訊息之前套用建立時指定的 model / 思考程度(先 model:可選的思考程度可能隨 model 變)。
+   *   - 明確值(`launch.model`/`launch.effort`):agent 沒宣告或值不在清單裡 → 丟明確錯誤,session 建立失敗
+   *     (spawn 的 catch 會收掉子程序與 token)——不能悄悄用別的 model 跑使用者指定的任務。
+   *   - 軟性偏好(`launch.preferredModel`/`preferredEffort`,這個 provider 上次的選擇或續接時 session 記得的值):
+   *     做不到就略過,只記 log。
+   * 回傳套用後的完整 configOptions。
    */
-  async setEffort(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "acp", operation: "setEffort" },
-      'software="acp" 不支援變更思考程度(思考程度由外部 agent/CLI 自行管理,ACP 協議未提供對應機制)',
-    );
+  private async applyLaunchOptions(
+    connection: acp.ClientConnection,
+    sessionId: string,
+    initial: acp.SessionConfigOption[],
+    launch: AgentLaunchSpec,
+    agentLabel: string,
+  ): Promise<acp.SessionConfigOption[]> {
+    let configOptions = initial;
+    const wanted: Array<{ kind: AgentOptionKind; explicit?: string; preferred?: string }> = [
+      { kind: "model", explicit: launch.model, preferred: launch.preferredModel },
+      { kind: "effort", explicit: launch.effort, preferred: launch.preferredEffort },
+    ];
+    for (const { kind, explicit, preferred } of wanted) {
+      const value = explicit ?? preferred;
+      if (!value) continue;
+      const option = findAcpConfigOption(configOptions, kind);
+      const allowed = option ? acpOptionChoices(option).map((c) => c.value) : [];
+      if (!option || !allowed.includes(value)) {
+        if (explicit) throw option ? invalidOptionError(kind, agentLabel, value, allowed) : optionNotOfferedError(kind, agentLabel);
+        console.warn(`[acp-adapter] ${agentLabel}:記住的${kind === "model" ? " model" : "思考程度"}「${value}」這次不在 agent 提供的選項裡,略過。`);
+        continue;
+      }
+      if (option.currentValue === value) continue;
+      const response = await connection.agent.request(acp.methods.agent.session.setConfigOption, { sessionId, configId: option.id, value });
+      configOptions = response.configOptions;
+    }
+    return configOptions;
+  }
+
+  private pushSessionOptions(internal: InternalSession): void {
+    internal.outputQueue.push({ type: "session-options", options: acpSessionOptions(internal.configOptions) });
+  }
+
+  /**
+   * 2026-10-06(AI 自動命名):在**同一條 ACP 連線**上用 `session/new` 另開一個臨時 session 產生標題,收集它的文字回覆後
+   * 取消/關閉它——主 session 的上下文完全不受影響。介面紀律見 types.ts 的 `AgentAdapter.generateTitle()`。
+   *
+   * 為什麼可行(2026-10-06 實測 opencode 1.18.7 的 `opencode acp`,不是讀文件猜的):同一條連線開第二個 session 正常;
+   * ACP SDK 依 `sessionId` 把 `session/update` 分流給各自的 `ActiveSession`(讀 `@agentclientprotocol/sdk@1.2.1` 的
+   * `SessionUpdateRouter` 確認),所以臨時 session 的事件**結構上**不會進主 session 的 `consume()` 迴圈;它的
+   * `session/request_permission` 帶的是臨時 session 的 id,spawn() 註冊的 handler 依 `titleSessionIds` 一律當場拒絕。
+   *
+   * 臨時 session 的設定:`session/new` **不掛** Deskmony 的 session 網路 MCP server(主 session 才有)。agent 自己的內建
+   * 工具還在(ACP 沒有「開一個沒有工具的 session」的標準方法),所以靠兩道防線:權限請求一律拒絕,以及**一看到
+   * `tool_call`/`tool_call_update` 就中止**這次命名(丟錯 → core 退回截取首句)——後者也涵蓋「agent 自己判斷不需要權限
+   * 就直接執行」的唯讀工具(例如 codex 沙箱內的指令),不讓它們跑完。
+   *
+   * 收尾(不論成功、失敗或逾時):還沒收到 stop 就送 `session/cancel`;停止事件分流;agent 有宣告
+   * `sessionCapabilities.close` 就送 `session/close`、有宣告 `delete` 就再送 `session/delete`(背景執行,不拖慢回傳)。
+   * 實測 `opencode acp` 宣告 close、**沒有** delete——臨時 session 會留在 opencode 自己的 session 清單裡(Deskmony 這邊
+   * 已丟棄,不影響任何對話),見 docs/FEATURES.md。
+   *
+   * 用量:`usage_update` 的 `cost` 是這個臨時 session 自己的累計(= 這次命名的總花費),有給就回傳給 core 計入。
+   */
+  async generateTitle(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult> {
+    const internal = this.mustGet(handle);
+    const controller = new AbortController();
+    const forwardAbort = (): void => controller.abort();
+    if (request.signal.aborted) controller.abort();
+    request.signal.addEventListener("abort", forwardAbort, { once: true });
+    internal.titleAborts.add(controller);
+    const signal = controller.signal;
+    try {
+      const starting = internal.connection.agent.buildSession(handle.workspace.path).start();
+      let temp: acp.ActiveSession;
+      try {
+        temp = await raceAbort(starting, signal);
+      } catch (err) {
+        // 中止時 `session/new` 可能還在路上:晚到的臨時 session 一樣要收掉,不然它的事件分流會一直掛著。
+        void starting.then((late) => this.discardTitleSession(internal, late, false), () => undefined);
+        throw err;
+      }
+      internal.titleSessionIds.add(temp.sessionId);
+      let stopped = false;
+      try {
+        // prompt 的失敗也會經 `nextUpdate()` 丟出來(SDK 會 reject 這個 session 的更新佇列),這裡只吞掉
+        // 「沒人接」的 unhandled rejection。
+        temp.prompt(request.prompt).catch(() => undefined);
+        let text = "";
+        let cost: { amount: number; currency: string } | undefined;
+        for (;;) {
+          const message = await raceAbort(temp.nextUpdate(), signal);
+          if (message.kind === "stop") {
+            stopped = true;
+            if (message.stopReason !== "end_turn") throw titleAgentFailedError("acp", `stopReason=${message.stopReason}`);
+            break;
+          }
+          const update = message.update;
+          if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+            throw titleToolUseError("acp");
+          }
+          if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+            text += update.content.text;
+          } else if (update.sessionUpdate === "usage_update" && update.cost) {
+            cost = { amount: update.cost.amount, currency: update.cost.currency };
+          }
+        }
+        return { text, ...(cost ? { usage: { costAmount: cost.amount, costCurrency: cost.currency } } : {}) };
+      } finally {
+        this.discardTitleSession(internal, temp, stopped);
+      }
+    } catch (err) {
+      if (signal.aborted) throw titleAbortedError();
+      throw err;
+    } finally {
+      request.signal.removeEventListener("abort", forwardAbort);
+      internal.titleAborts.delete(controller);
+    }
+  }
+
+  /**
+   * 收掉一個命名用的臨時 session(見 `generateTitle()`)。id **留在** `titleSessionIds`:收尾之後才晚到的權限請求
+   * 也一樣要拒絕(Set 只放 id 字串,一個 session 一輩子頂多累積幾個,不需要清)。
+   */
+  private discardTitleSession(internal: InternalSession, temp: acp.ActiveSession, stopped: boolean): void {
+    const sessionId = temp.sessionId;
+    internal.titleSessionIds.add(sessionId);
+    temp.dispose();
+    const caps = internal.sessionCapabilities;
+    void (async () => {
+      if (!stopped) {
+        await internal.connection.agent.notify(acp.methods.agent.session.cancel, { sessionId });
+      }
+      if (caps?.close) {
+        await internal.connection.agent.request(acp.methods.agent.session.close, { sessionId });
+      }
+      if (caps?.delete) {
+        await internal.connection.agent.request(acp.methods.agent.session.delete, { sessionId });
+      }
+    })().catch((err: unknown) => {
+      // 連線已關閉(主 session 被 dispose)或 agent 不認這些方法:只記 log,不影響任何東西。
+      console.warn(`[acp-adapter] 收掉命名用臨時 session ${sessionId} 失敗(忽略): ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   private mustGet(handle: AgentHandle): InternalSession {
@@ -562,6 +788,9 @@ export class AcpAdapter implements AgentAdapter {
         break;
       case "tool_call": {
         internal.toolTitles.set(update.toolCallId, update.title);
+        // 記下這次送出的 input,`tool_call_update` 補送參數時才分得出「帶來新資訊」
+        // 還是「只是把同一份再報一次」(見下方 "tool_call_update" case 的註解)。
+        internal.toolInputs.set(update.toolCallId, serializeToolInput(update.rawInput));
         internal.outputQueue.push({
           type: "tool-call",
           toolCallId: update.toolCallId,
@@ -572,7 +801,7 @@ export class AcpAdapter implements AgentAdapter {
         // 的查證註解——只有「kind === "edit" 且有 locations」時才值得預先讀檔。
         // `pendingFileSnapshots` 是 InternalSession 上的**選填**欄位(故意不放進
         // spawn() 建立 internal 物件時的初始化清單,這輪不動 spawn() 的簽章或
-        // 內容,避免跟同時進行的 team-bus/subagent MCP 掛載那個 Phase 衝突),
+        // 內容,避免跟同時進行的 subagent MCP 掛載那個 Phase 衝突),
         // 這裡用 `??=` 在第一次真的需要時才 lazily 建立。
         const snapshotPath = resolveEditSnapshotPath(update.kind, update.locations, internal.handle.workspace.path);
         if (snapshotPath) {
@@ -588,7 +817,45 @@ export class AcpAdapter implements AgentAdapter {
         break;
       }
       case "tool_call_update": {
-        if (update.status === "completed" || update.status === "failed") {
+        const terminal = update.status === "completed" || update.status === "failed";
+        // 補送工具參數。OpenCode(1.18.7 實測)的 `tool_call`(`pending`)帶的
+        // `rawInput` 是空物件 `{}` 佔位,真正的參數要到後續的 `tool_call_update`
+        // (`in_progress`,完成時的 `completed` 也會再帶一次)才有。過去只在
+        // `tool_call` 送一次 `tool-call`、`tool_call_update` 完全不讀 `rawInput`,
+        // 所以工具確實收到參數(例如 `send_to_session` 的訊息真的送達),歷史與 UI
+        // 卻都記成 `"input":{}`。
+        //
+        // 修法是同一個 toolCallId 再送一次 `tool-call`(補資訊,語意見
+        // `ToolCallEventSchema` 註解):core 依 toolCallId 就地更新那筆 call 且不
+        // 重複計入回合硬上限,桌面端以 toolCallId upsert。條件刻意用「input 有內容
+        // 且與上次送出的不同」而不看 status——`in_progress` 的 update 帶參數也要送,
+        // 而 codex 之類每次 update 都把同一份 `rawInput` 原樣再報的 agent 不會因此
+        // 每則 update 多一個事件。必須排在同一個呼叫的 `tool-result` 之前
+        // (core 在收到 result 後就把 toolCallId 視為已結束,之後再來一個 `tool-call`
+        // 會被當成新的呼叫重複計數),所以終態之後 `toolInputs` 記成 `null`、不再補送。
+        const lastInput = internal.toolInputs.get(update.toolCallId);
+        if (lastInput !== null && isInformativeToolInput(update.rawInput)) {
+          const serialized = serializeToolInput(update.rawInput);
+          if (serialized !== lastInput) {
+            // update 帶了新 title 就更新記下的 title(tool-result 的 toolName 也會跟著用它),
+            // 否則沿用 `tool_call` 時記下的。
+            const toolName = update.title || internal.toolTitles.get(update.toolCallId) || "";
+            if (toolName) internal.toolTitles.set(update.toolCallId, toolName);
+            internal.toolInputs.set(update.toolCallId, serialized);
+            internal.outputQueue.push({
+              type: "tool-call",
+              toolCallId: update.toolCallId,
+              toolName,
+              input: update.rawInput,
+            });
+          }
+        }
+        if (terminal) {
+          // 終態:同一個 toolCallId 之後不會再有合法的 update(見
+          // `resolveDiffStructuredResult()` 註解)。改記成 `null` 而不是刪除——
+          // 刪掉的話,萬一後端終態之後又送一則帶 `rawInput` 的 update,會被當成「從沒
+          // 送過」而補送,在 core 變成一次多餘的新呼叫。順手把可能很大的參數字串釋放掉。
+          internal.toolInputs.set(update.toolCallId, null);
           const structuredResult = await this.resolveDiffStructuredResult(internal, update);
           internal.outputQueue.push({
             type: "tool-result",
@@ -629,6 +896,11 @@ export class AcpAdapter implements AgentAdapter {
        */
       case "available_commands_update":
         internal.outputQueue.push({ type: "available-commands", commands: mapAvailableCommands(update.availableCommands) });
+        break;
+      /** 2026-10-06:agent 主動更新選項(完整一份,REPLACE 語意),見 `setConfigValue()`/agent-options.ts。 */
+      case "config_option_update":
+        internal.configOptions = update.configOptions;
+        this.pushSessionOptions(internal);
         break;
       default:
         // user_message_chunk / agent_thought_chunk / plan* / 其餘擴充型別:
@@ -738,10 +1010,22 @@ interface InternalSession {
   child: ChildProcessWithoutNullStreams;
   connection: acp.ClientConnection;
   session: acp.ActiveSession;
+  /** `initialize` 回應裡 agent 宣告的 session 能力(命名用臨時 session 收尾時看它支不支援 close/delete)。 */
+  sessionCapabilities?: acp.SessionCapabilities;
+  /** 命名用臨時 session 的 id——它們的權限請求一律拒絕,見 spawn() 的 handler 與 `generateTitle()`。 */
+  titleSessionIds: Set<string>;
+  /** 進行中的命名臨時對話,`dispose()` 時一併中止。 */
+  titleAborts: Set<AbortController>;
   outputQueue: AsyncQueue<AgentEvent>;
   pendingPermissions: Map<string, PendingPermission>;
   /** toolCallId -> 建立時的 title,tool_call_update 有時不會重複帶 title。 */
   toolTitles: Map<string, string>;
+  /**
+   * toolCallId -> 最近一次送出 `tool-call` 事件時的 input(JSON 字串),
+   * `tool_call_update` 靠它判斷要不要補送參數(見 handleSessionUpdate() 的註解)。
+   * 呼叫進入終態(completed/failed)後記成 `null`:不再補送。
+   */
+  toolInputs: Map<string, string | null>;
   currentMessageId: string | null;
   /**
    * S3a(usage-metering)L4 §2:最近一次從 `usage_update` 拿到的累計花費
@@ -760,11 +1044,18 @@ interface InternalSession {
    *
    * **選填、預設不存在**(而不是比照 `toolTitles` 在 `spawn()` 建構
    * `InternalSession` 時就初始化成空 Map)——這輪明確不動 `spawn()` 的簽章或
-   * 內容(避免跟同時進行的「ACP 掛載 team-bus/subagent MCP」那個 Phase 的
+   * 內容(避免跟同時進行的「ACP 掛載 subagent MCP」那個 Phase 的
    * 改動衝突),改成在 `handleSessionUpdate()` 第一次真的需要寫入時用
    * `??=` lazily 建立,行為上與「一開始就是空 Map」完全等價。
    */
   pendingFileSnapshots?: Map<string, { path: string; before: string }>;
+  /**
+   * 2026-10-06:agent 最近一次回報的完整 `configOptions`(`session/new` 回應、`session/set_config_option` 回應、
+   * `config_option_update` 通知三個來源,一律整份覆蓋)。model / 思考程度選擇的唯一依據,見 agent-options.ts。
+   */
+  configOptions: acp.SessionConfigOption[];
+  /** 錯誤訊息裡的 agent 名稱(providerId)。 */
+  agentLabel: string;
 }
 
 /**
@@ -796,6 +1087,24 @@ interface DiffStructuredResult {
  * `ToolResultEvent.structuredResult` 的既有形狀只能表達單一檔案的 diff,取
  * 第一個命中的 `type:"diff"` 區塊即可,不嘗試合併多個。
  */
+/**
+ * `rawInput` 是否帶有實際內容:`undefined`/`null`/空物件/空陣列/空字串都是「還不知道
+ * 參數」的佔位(OpenCode 的 `tool_call` 就是送 `{}`),不值得補送一次 `tool-call`。
+ * 一個真的不帶參數的工具,input 停在第一次送的 `{}` 即可,不受影響。
+ */
+function isInformativeToolInput(input: unknown): boolean {
+  if (input === undefined || input === null) return false;
+  if (typeof input === "string") return input.length > 0;
+  if (Array.isArray(input)) return input.length > 0;
+  if (typeof input === "object") return Object.keys(input).length > 0;
+  return true;
+}
+
+/** 供「這次的 input 和上次送出的一樣嗎」比對用;`rawInput` 來自 JSON-RPC,必定可序列化。 */
+function serializeToolInput(input: unknown): string {
+  return JSON.stringify(input) ?? "undefined";
+}
+
 function findDiffBlock(content: acp.ToolCallContent[] | null | undefined): acp.Diff | undefined {
   return content?.find((c): c is acp.Diff & { type: "diff" } => c.type === "diff");
 }
@@ -940,23 +1249,105 @@ function mapAvailableCommands(commands: acp.AvailableCommand[]): SlashCommandInf
   }));
 }
 
+/** `session/resume` / `session/load` 的等待上限;超過就當作接回失敗,退回 `session/new`(不讓一次送出卡住)。 */
+const RESUME_REQUEST_TIMEOUT_MS = 60_000;
+
+interface StartAcpSessionArgs {
+  cx: acp.ClientContext;
+  /** `initialize` 回應裡 agent 宣告的能力(決定走 resume / load / 都不支援)。 */
+  capabilities: acp.AgentCapabilities | undefined;
+  cwd: string;
+  bridgeMcpServer: acp.McpServer | undefined;
+  /** 有值 = 嘗試接回這個 ACP session;省略 = 直接 `session/new`。 */
+  backendSessionId: string | undefined;
+  agentLabel: string;
+}
+
 /**
- * Phase 2:算出 `packages/adapters/src/mcp-bridge-server.ts` 編譯後的路徑。
+ * 建立這條連線的主 session:有 `backendSessionId` 先嘗試接回既有的 ACP session,不行就 `session/new`。
  *
- * **不用** `require.resolve()`(對照 `codex-acp-locator.ts` 的
- * `resolveCodexAcpBridge()`)——那是給*外部* npm 套件用的解法(套件的
- * `main`/`bin` 欄位理論上可能隨版本改變檔名/位置,交給 Node 的模組解析機制
- * 比自己組字串路徑可靠)。`mcp-bridge-server.ts` 是**這個套件自己的檔案**,
- * `tsc`(見 `packages/adapters/tsconfig.json` 的 `outDir: "dist"`)把
- * `src/` 底下每個檔案原樣編譯成 `dist/` 底下同名的 `.js`,所以
- * `mcp-bridge-server.js` 永遠跟這個檔案編譯後的 `acp-adapter.js` 在**同一個
- * 目錄**——用 `import.meta.url`(這個模組自己的路徑)算出所在目錄,取同目錄
- * 下的檔名即可,不需要、也不應該假設它是一個可以被 `require.resolve()`
- * 查到的獨立套件。
+ * 選擇順序(2026-10-15):`sessionCapabilities.resume` → `session/resume`(不重播歷史,最乾淨);沒有再看 `loadSession` →
+ * `session/load`(會重播歷史,由 `attachResumedSession()` 擋掉);兩者都沒宣告,或呼叫失敗/逾時 → `session/new`。
+ * 任何接回失敗都只留一筆警告,**不丟錯**(呼叫端的這次送出不能因此失敗),`resumed` 據實回報。
+ * 連線本身已經斷了的話,後面的 `session/new` 也會失敗,那個錯誤會照常往外丟。
  */
-function resolveMcpBridgeServerEntry(): string {
-  const thisFile = fileURLToPath(import.meta.url);
-  return path.join(path.dirname(thisFile), "mcp-bridge-server.js");
+async function startAcpSession(args: StartAcpSessionArgs): Promise<{ session: acp.ActiveSession; resumed: boolean }> {
+  const { cx, capabilities, cwd, bridgeMcpServer, backendSessionId, agentLabel } = args;
+  if (backendSessionId) {
+    const method: "resume" | "load" | undefined = capabilities?.sessionCapabilities?.resume
+      ? "resume"
+      : capabilities?.loadSession
+        ? "load"
+        : undefined;
+    if (method) {
+      try {
+        const session = await attachResumedSession(cx, method, backendSessionId, cwd, bridgeMcpServer ? [bridgeMcpServer] : []);
+        console.log(`[acp-adapter] ${agentLabel} 已用 session/${method} 接回既有對話 ${backendSessionId}`);
+        return { session, resumed: true };
+      } catch (err) {
+        console.warn(
+          `[acp-adapter] ${agentLabel} 的 session/${method}(${backendSessionId}) 失敗,改開全新的 session(由呼叫端補對話紀錄): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    } else {
+      console.warn(`[acp-adapter] ${agentLabel} 沒有宣告 session/resume 或 loadSession,無法接回既有對話,改開全新的 session`);
+    }
+  }
+  let builder = cx.buildSession(cwd);
+  if (bridgeMcpServer) builder = builder.withMcpServer(bridgeMcpServer);
+  return { session: await builder.start(), resumed: false };
+}
+
+/**
+ * `session/resume` / `session/load` 成功後,取得一個接回該 session 的 `ActiveSession`(`consume()`/`sendPrompt()` 都靠它)。
+ *
+ * ## 為什麼自己 attach、為什麼要等一個 macrotask
+ *
+ * ACP SDK(1.2.1、1.3.0 都一樣)只有 `buildSession().start()`(= `session/new`)會替回應建立 `ActiveSession`,沒有公開 API 能對
+ * 既有的 session id 做同一件事;而 `ClientContext.attachSession()` 正是 `start()` 在回應回來時呼叫的內部方法,TypeScript 標成
+ * private、執行期可呼叫。這裡用型別轉換呼叫它,找不到就丟錯(→ 呼叫端退回 `session/new`,不會壞)。e2e-session-revive 用真的 SDK 跑,
+ * SDK 升級改掉這個方法時會立刻紅燈。
+ *
+ * **重播的擋法**:SDK 把 `session/update` 分流給「已 attach 的 ActiveSession」,沒有 attach 的 session id 的通知直接沒人接。
+ * `session/load` 的重播通知全部在回應**之前**送達;但 SDK 處理通知是非同步的(每個通知要經過好幾個 handler 的 `await`),
+ * 回應的 promise 卻是同步 resolve 的——理論上回應回來時,最後幾筆重播通知可能還在 microtask 佇列裡排隊、尚未分流。所以回應回來之後
+ * 先等一個 macrotask(`setImmediate`),讓所有已經收到的通知處理完(它們沒有人接,被丟棄),**才** attach。之後才抵達的通知(下一輪
+ * 對話的新事件)一定來自後面的 I/O,不會被誤丟。`session/resume` 協議上不重播,同樣的流程無害。
+ *
+ * 誠實記錄:這一步是防禦性的。實測(假 agent 在回應前重播 132 個 update、真實 codex-acp / `opencode acp` 的 `session/load`)把它拿掉
+ * 也沒有漏——SDK 目前的實際分流時序已經讓「回應 resolve」晚於先前通知的分流。真正擋住重播的是「回應回來之後才 attach」;
+ * 先 attach 再發請求(最直覺的寫法)則會把整段歷史當成新事件送出(e2e-session-revive 的 L2 會抓到)。
+ */
+async function attachResumedSession(
+  cx: acp.ClientContext,
+  method: "resume" | "load",
+  backendSessionId: string,
+  cwd: string,
+  mcpServers: acp.McpServer[],
+): Promise<acp.ActiveSession> {
+  const attach = (cx as unknown as { attachSession?: (response: acp.NewSessionResponse) => acp.ActiveSession }).attachSession;
+  if (typeof attach !== "function") {
+    throw new Error("ACP SDK 沒有 ClientContext.attachSession(),無法接回既有 session(SDK 版本不相容)");
+  }
+
+  const request = { sessionId: backendSessionId, cwd, mcpServers };
+  const pending: Promise<acp.ResumeSessionResponse | acp.LoadSessionResponse> =
+    method === "resume" ? cx.request(acp.methods.agent.session.resume, request) : cx.request(acp.methods.agent.session.load, request);
+  pending.catch(() => undefined); // 逾時後才失敗的請求不能變成 unhandled rejection
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`session/${method} 等待逾時(${RESUME_REQUEST_TIMEOUT_MS}ms)`)), RESUME_REQUEST_TIMEOUT_MS);
+  });
+  let response: acp.ResumeSessionResponse | acp.LoadSessionResponse;
+  try {
+    response = await Promise.race([pending, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return attach.call(cx, { ...response, sessionId: backendSessionId });
 }
 
 /**
@@ -1029,7 +1420,7 @@ function resolveWindowsSpawnCommand(
  * command/args 使用(Node 在 shell 模式不會自動處理這件事,見上方函式註解)。
  * 只處理「含空白字元或雙引號時才加引號」與「內部雙引號用兩個雙引號跳脫」
  * 這兩條 `cmd.exe` 的基本規則,不是完整的 `cmd.exe` metacharacter 跳脫
- * (例如 `&`/`|`/`^` 等),ACP profile 的 command/args 屬於使用者自行設定的
+ * (例如 `&`/`|`/`^` 等),ACP agent 的 command/args 屬於使用者自行設定的
  * 受信任本機設定,不是任意外部輸入。
  */
 function quoteWindowsShellArg(value: string): string {

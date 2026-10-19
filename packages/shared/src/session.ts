@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { AgentSoftwareSchema, EffortLevelSchema, SessionPermissionModeSchema } from "./agent-profile.js";
+import { AgentSoftwareSchema, SessionPermissionModeSchema } from "./agent-launch.js";
+import { EffortValueSchema, SessionOptionsSchema } from "./session-options.js";
 import { PromptAttachmentSchema } from "./prompt.js";
 
 /**
@@ -11,15 +12,39 @@ import { PromptAttachmentSchema } from "./prompt.js";
  *   - `closed`:優雅關閉時主動標記(見 apps/core/src/session/
  *     session-manager.ts 的 `shutdownAll()`)——啟動對帳據此判斷「這不是崩潰」。
  *   - `interrupted`:啟動對帳(`reconcileOnStartup()`)發現的孤兒——子程序已隨
- *     core 消失,等人在復原視圖分流(繼續/接手/重跑/放棄)。
+ *     core 消失,等人在復原視圖分流(繼續/接手/放棄)。
  */
 export const SessionStatusSchema = z.enum(["idle", "busy", "waiting", "error", "closed", "interrupted"]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 
+/**
+ * 2026-10-06:標題從哪來(三態的完整語意見 session-title.ts 檔頭)。`user` 之後 AI 絕不自動覆蓋。
+ */
+export const SessionTitleSourceSchema = z.enum(["default", "auto", "user"]);
+export type SessionTitleSource = z.infer<typeof SessionTitleSourceSchema>;
+
+/** `session.autoTitle` 實際用的命名方式:`agent` = session 自己的 agent 在臨時對話裡產生;`fallback` = 截取第一則訊息的第一行。 */
+export const SessionTitleMethodSchema = z.enum(["agent", "fallback"]);
+export type SessionTitleMethod = z.infer<typeof SessionTitleMethodSchema>;
+
 export const SessionSchema = z.object({
   id: z.string(),
   title: z.string().default("新對話"),
-  agentProfileId: z.string(),
+  /**
+   * 2026-10-06:標題來源(見 `SessionTitleSourceSchema`)。舊資料由 packages/db/src/client.ts 的啟動遷移回填:
+   * 標題是「新對話」→ `default`,其他 → `user`(不知道當年是誰取的,一律當成使用者取的、不自動覆蓋)。
+   */
+  titleSource: SessionTitleSourceSchema.default("default"),
+  /**
+   * 2026-10-02(P2:移除 profile):這個 session 是用哪個 provider 目錄項目
+   * (`ProviderCatalogEntry.id`,例如 "claude-agent-sdk"、"codex"、"opencode")建立的。
+   * 取代過去的 `agentProfileId`。舊 session 由 `packages/db/src/client.ts` 的啟動遷移回填:
+   * 能對應到 profile 的用 profile 的 providerId,否則是 `"claude-agent-sdk"`
+   * (software 為 claude-agent-sdk)、`"legacy-<software>"`,或找不到 profile 時的
+   * `"legacy-unknown"`——這些 `legacy-*` 值不在 provider 目錄裡,UI 顯示時直接當成
+   * 標籤文字、續接時退回 session 自己存的 `launch_command`/`launch_args`。
+   */
+  providerId: z.string(),
   adapterType: AgentSoftwareSchema,
   status: SessionStatusSchema,
   workingDir: z.string(),
@@ -27,29 +52,35 @@ export const SessionSchema = z.object({
   updatedAt: z.number(),
   lastError: z.string().optional(),
   /**
-   * session 級別的 model 覆寫(M5 Round C:對話中切換 model)。建立時預設取自
-   * `AgentProfile.model`(見 `SessionManager.createSession()`);之後可透過
+   * session 級別的 model(M5 Round C:對話中切換 model)。建立時取自
+   * `CreateSessionInput.model`(沒給時用 provider 明確標記 `isDefault` 的 model,
+   * 都沒有就維持 undefined,見 `AgentCatalog.buildLaunchSpec()`);之後可透過
    * `session.setModel` gateway 方法變更,`adapterType === "claude-agent-sdk"`
    * 與 `"opencode"` 的 session 支援(見 packages/adapters/src/types.ts 的
    * `AgentAdapter.setModel()` 介面註解——兩者實作方式不同:前者呼叫 SDK
    * 官方的 `Query.setModel()`,後者是 adapter 內部的 session 覆寫,下一則
-   * 訊息才真正生效)。acp/pty session 呼叫這個方法會得到明確錯誤。舊 session
-   * (建立於這個欄位存在之前)這個欄位可能是 `undefined` —— UI 應 fallback
-   * 顯示 profile 的 model,或標示「(由 agent 管理)」。
+   * 訊息才真正生效)。acp/pty session 呼叫這個方法會得到明確錯誤。這個欄位
+   * 可能是 `undefined`(建立時沒指定 model、由 agent 自己決定)—— UI 應標示
+   * 「(由 agent 管理)」。
    */
   model: z.string().optional(),
   /**
-   * session 級別的 effort(思考程度)覆寫,比照上面的 `model` 欄位。建立時預設
-   * 取自 `AgentProfile.effort`(見 `SessionManager.createSession()`);之後可
-   * 透過 `session.setEffort` gateway 方法變更,只有 `adapterType ===
-   * "claude-agent-sdk"` 的 session 支援(見 packages/adapters/src/types.ts 的
-   * `AgentAdapter.setEffort()` 介面註解——呼叫 SDK 的
-   * `Query.applyFlagSettings({ effortLevel })`)。其餘 adapter(含 opencode)
-   * 呼叫這個方法會得到明確錯誤。舊 session(建立於這個欄位存在之前)這個欄位
-   * 可能是 `undefined` —— UI 應 fallback 顯示 profile 的 effort,或視為
-   * 「(未指定,使用 CLI 預設)」。
+   * session 級別的 effort(思考程度),比照上面的 `model` 欄位。建立時取自
+   * `CreateSessionInput.effort`(見 `SessionManager.createSession()`);之後可
+   * 透過 `session.setEffort` gateway 方法變更。2026-10-06 起值由各 agent 定義(不再只是 Claude 的
+   * 5 級,見 session-options.ts):claude-agent-sdk 呼叫 SDK 的 `Query.applyFlagSettings({ effortLevel })`;
+   * ACP agent 有宣告 `thought_level` 選項時走 `session/set_config_option`;OpenCode(HTTP)是目前 model
+   * 的 variant。agent 回報的目前值也會寫回這裡(見 SessionManager 的 `session-options` 處理)。
+   * 這個欄位可能是 `undefined` —— UI 應視為「(未指定,使用 agent 預設)」。
    */
-  effort: EffortLevelSchema.optional(),
+  effort: EffortValueSchema.optional(),
+  /**
+   * 2026-10-06:agent 回報「這個 session 現在能選哪些 model / 思考程度」(見 session-options.ts)。
+   * **純 ephemeral**——同 `permissionMode` 的待遇,只存 `SessionManager` 記憶體(最近一次 `session-options`
+   * 事件),每次回傳 Session 物件前即時補上;session 沒在跑(或 agent 還沒回報)時是 undefined。
+   * UI 依此決定顯示哪些選擇器(claude-agent-sdk 不送這個事件,沿用 provider 目錄的 model 清單與固定 5 級)。
+   */
+  options: SessionOptionsSchema.optional(),
   /**
    * S7(auto-mode-and-yolo):這個 session 目前的權限模式(auto/YOLO)——**純
    * ephemeral**,只存在 `SessionManager` 記憶體(見 apps/core/src/session/
@@ -98,95 +129,79 @@ export const SessionSchema = z.object({
    */
   backendSessionId: z.string().optional(),
   /**
-   * S12(session-subagent):這個 session 的 parent session id——只有
-   * 子 session(subagent)有值,根 session 為 undefined。
+   * 這個 session 是從哪個 session 底下開出來的(`create_session` 工具,或使用者在畫面上
+   * 從某個 session 底下開新 session)——**只用於 UI 巢狀顯示與溯源**,不代表任何權限或
+   * 回報關係(2026-10-02 P3:所有 session 互相可見、互相可傳訊息,不限父子)。根 session 為 undefined。
    */
   parentSessionId: z.string().optional(),
 });
 export type Session = z.infer<typeof SessionSchema>;
 
 /**
- * 這輪新增:建立 session 時,除了套用 agentProfile,也能就這一次建立臨時
- * 覆寫要用的 agent software/model——不落地成新的 AgentProfile 記錄(profile
- * 本身還是 permissionLevel/systemPrompt/env/workingDir 的權威來源),純粹是
- * 「這次 spawn 用這個 software/model 而不是 profile 原本設定的那個」。
- *
- * 語意刻意設計成「部分覆寫、以 software 是否提供分流」(見
- * apps/core/src/session/session-manager.ts 的 `applyAgentOverride()`):
- *   - 只給 `model`(省略 `software`):software/command/args 全部沿用
- *     profile 原本的設定,只換 model——對應 UI「不換 agent,只想換個更省成本
- *     的 model」這個最常見的情境。
- *   - 給了 `software`:整批取代該 software 對應的 config(acpConfig/
- *     ptyConfig/opencodeConfig 三選一,其餘設回 undefined,不與 profile 原本
- *     的舊 config 混用)——`command`/`args` 由前端從 `resolveProviders()`
- *     解析出的已知(已偵測到、免手動輸入)provider 帶入,見
- *     apps/desktop/src/lib/agent-override.ts 的 `buildAgentOverride()`。
+ * 2026-10-02(P2:移除 profile):session 直接以「偵測到的 agent(providerId)+
+ * model」建立,不再有 `agentProfileId`/`agentOverride`(`AgentOverrideSchema` 已整個
+ * 移除)。啟動資訊(command/args)由 core 的 `AgentCatalog.buildLaunchSpec()` 依
+ * `providerId` 組出——**gateway 不接受任何 command/args 參數**,否則等於遠端可執行
+ * 任意程式。
  */
-export const AgentOverrideSchema = z.object({
-  software: AgentSoftwareSchema.optional(),
-  /** 對應 ProviderCatalogEntry.id,純中繼資訊(顯示/env 查找用),不影響 spawn。 */
-  providerId: z.string().optional(),
-  /** 只在提供 `software` 時有意義(claude-agent-sdk 不需要 command)。 */
-  command: z.string().optional(),
-  args: z.array(z.string()).optional(),
-  model: z.string().optional(),
-  effort: EffortLevelSchema.optional(),
-});
-export type AgentOverride = z.infer<typeof AgentOverrideSchema>;
-
 export const CreateSessionInputSchema = z.object({
-  title: z.string().optional(),
-  agentProfileId: z.string(),
-  workingDir: z.string(),
+  /** `BUILTIN_PROVIDERS` 的 id(例如 "claude-agent-sdk"、"codex"、"opencode")。 */
+  providerId: z.string().min(1),
+  /** 省略時用該 provider 明確標記 `isDefault` 的 model;都沒有就由 agent 自己決定。 */
+  model: z.string().optional(),
   /**
-   * M3 Round A:若這個 session 屬於某個 team 的成員,傳入該 TeamMember.id ——
-   * `SessionManager.createSession()` 會依此向 TeamManager 查出 team/member
-   * 資訊,建立 session 時把 team context 傳給 adapter.spawn()(目前只有
-   * `ClaudeAgentSdkAdapter` 會據此掛載 team-bus MCP 工具,見
-   * packages/adapters/src/team-bus-mcp.ts),並讓 MessageBus 能把這個
-   * session 登記為該成員的投遞目標。
+   * 思考程度,值由各 agent 定義(見 session-options.ts)。provider 不支援選思考程度時忽略;建立時就知道選項的
+   * agent(Claude、OpenCode HTTP)會在建立前驗證,ACP agent 要等 `session/new` 回報選項後由 adapter 驗證。
    */
-  teamMemberId: z.string().optional(),
+  effort: EffortValueSchema.optional(),
+  workingDir: z.string(),
+  /** 明確給了(非空白)標題 → `titleSource: "user"`,不會自動命名;省略 → 預設標題,第一則人類輸入後自動命名。 */
+  title: z.string().optional(),
   /**
-   * S12(session-subagent):建立子 session 時帶入 parent session id。
+   * 掛在哪個 session 底下顯示(UI 巢狀 + 溯源,見 `Session.parentSessionId`)。使用者從畫面
+   * 「在這個 session 底下開新 session」時帶入;agent 用 `create_session` 建立時由 core 以呼叫者
+   * 身分帶入(不是工具參數)。(2026-10-02:原本還有 `teamMemberId`——team 已移除,見 DECISIONS §H。)
    */
   parentSessionId: z.string().optional(),
-  /** 見 `AgentOverrideSchema` 註解。 */
-  agentOverride: AgentOverrideSchema.optional(),
 });
 export type CreateSessionInput = z.infer<typeof CreateSessionInputSchema>;
 
 /**
- * S12(session-subagent):spawn child session 的輸入參數。
- * parentSessionId 與 agentProfileId 為必填,其餘選填;child 的 adapter
- * 取自 agentProfile 的 software。
- */
-export const SpawnChildSessionInputSchema = z.object({
-  parentSessionId: z.string(),
-  agentProfileId: z.string(),
-  /** 省略時沿用父 session 的 workingDir。 */
-  workingDir: z.string().optional(),
-  title: z.string().optional(),
-  /** 建立子 session 後立即送出的第一段 prompt（子 agent 的任務）。 */
-  prompt: z.string().min(1),
-  /** 見 `AgentOverrideSchema` 註解。 */
-  agentOverride: AgentOverrideSchema.optional(),
-});
-export type SpawnChildSessionInput = z.infer<typeof SpawnChildSessionInputSchema>;
-
-/**
- * 訊息角色與持久化訊息紀錄(對應 ERD MESSAGE,M1 簡化為單一 session 內的
- * user/assistant/system 對話紀錄,不含跨 agent 傳訊 - 那是 M3 MessageBus 的範疇)。
+ * 訊息角色與持久化訊息紀錄(對應 ERD MESSAGE,單一 session 內的
+ * user/assistant/system/tool 對話紀錄)。
  */
 export const MessageRoleSchema = z.enum(["user", "assistant", "system", "tool"]);
 export type MessageRole = z.infer<typeof MessageRoleSchema>;
+
+/**
+ * 2026-10-02(P3:session 網路,見 docs/LAYER-4-detail-design/simplify-agents-sessions_detail.md §P3.2):
+ * 一則 user 訊息的**來源標記**——這則訊息不是人類在這個 session 的輸入框打的,而是別的 session 送來的。
+ *   - `session`:別的 session 的 agent 用 `send_to_session` / `create_session` 送來的。
+ *   - `forward`:使用者在畫面上把別的 session 的某則 assistant 訊息「轉傳到…」過來的。
+ * `sessionId`/`title` 是**送出方**(快照:title 是送出當下的標題,送出方之後改名或被刪除不影響顯示);
+ * `chainId` 是這則訊息所屬的訊息鏈(只用於鏈預算斷路器與除錯,見 SessionManager)。
+ *
+ * ⚠️ **只有 core 能設這個欄位**:`session.sendPrompt` 的 schema 不收 `origin`/`chainId`,gateway 的任何 client
+ * 都不能偽造「這是別的 session 送來的」(否則人類輸入可以假冒成 agent 訊息、也能指定鏈 id 繞過鏈預算)。
+ */
+export const MessageOriginSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("session"), sessionId: z.string(), title: z.string(), chainId: z.string() }),
+  z.object({ kind: z.literal("forward"), sessionId: z.string(), title: z.string(), chainId: z.string() }),
+]);
+export type MessageOrigin = z.infer<typeof MessageOriginSchema>;
 
 export const MessageRecordSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
   role: MessageRoleSchema,
+  /**
+   * 對 `role === "user"` 且有 `origin` 的訊息,這裡存的是**原始 message 本體**(送出方寫的內容),
+   * 不含給 agent 看的信封樣板文字——信封只在送進 adapter 那一刻才組裝(見 SessionManager)。
+   */
   content: z.string(),
   createdAt: z.number(),
+  /** 見 `MessageOriginSchema`。人類在這個 session 輸入的訊息、assistant/system/tool 訊息沒有這個欄位。 */
+  origin: MessageOriginSchema.optional(),
   /**
    * async-scribbling-llama.md Phase 6:使用者傳送訊息時夾帶的圖片(只有
    * `role === "user"` 的紀錄可能有值)。持久化在獨立的 `messages.attachments`

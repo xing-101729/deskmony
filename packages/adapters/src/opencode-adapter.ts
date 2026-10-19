@@ -2,12 +2,27 @@ import { randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import path from "node:path";
-import type { AgentEvent, AgentProfile, DialogAnswer, PromptInput, SlashCommandInfo } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, McpBridgeTokenPort, PromptInput, SessionNetworkPort, SlashCommandInfo } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
+import { raceAbort, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, registerChildDescendants, unregisterChild } from "./child-registry.js";
 import { waitForChildExit } from "./child-process.js";
+import { mintMcpBridgeLaunch } from "./mcp-bridge-launch.js";
+import { buildOpencodeConfigContent, OPENCODE_CONFIG_CONTENT_ENV } from "./opencode-config.js";
+import { applyOpencodeServerAuth } from "./opencode-server-auth.js";
+import { buildAgentChildEnv } from "./agent-env.js";
+import { discardOpencodeShellEnvPluginMarker, prepareOpencodeShellEnvPlugin, watchOpencodeShellEnvPluginLoaded } from "./opencode-shell-env.js";
+import { invalidOptionError, optionNotOfferedError } from "./agent-options.js";
 
 /**
  * OpenCodeAdapter — 對接 opencode 的 headless server API(ARCHITECTURE.md
@@ -18,12 +33,13 @@ import { waitForChildExit } from "./child-process.js";
  * 與本機起一個真實 `opencode serve` process 觀察到的行為為準,不臆測**)----
  *
  *  - `opencode`(本機驗證版本 1.18.4)有一個原生子命令 `opencode serve`
- *    (`--port`/`--hostname`,預設 `--port 0` 隨機取一個 port、
+ *    (`--port`/`--hostname`,預設 `--port 0`——**不是純隨機**:2026-10-03 用 1.18.7 實測,它先試 opencode 的預設 port
+ *    4096,被占用才改隨機,所以第一個伺服器的位址是可預測的(見下方「認證」段落)、
  *    `--hostname 127.0.0.1`),啟動後會在 **stdout** 印出一行
  *    `opencode server listening on http://<host>:<port>`——這裡 spawn 子
  *    程序時固定帶 `serve --port 0 --hostname 127.0.0.1`(除非
- *    `profile.opencodeConfig.args` 有指定,見 `packages/shared/src/
- *    agent-profile.ts` 的 `OpencodeAgentConfigSchema` 註解:那是給
+ *    `launch.opencodeConfig.args` 有指定,見 `packages/shared/src/
+ *    agent-launch.ts` 的 `OpencodeAgentConfigSchema` 註解:那是給
  *    `scripts/fake-opencode-server.mjs` 用的逃生閥,一般情況下不需要填),
  *    再解析這行 stdout 取得實際綁定的 base URL。
  *  - 伺服器提供 `GET /doc` 的 OpenAPI 3.1 文件與 `GET /global/health`
@@ -36,14 +52,24 @@ import { waitForChildExit } from "./child-process.js";
  *    實測驗證),因此這裡 spawn 子程序時把 `cwd` 設成 `workspace.path`
  *    (與 AcpAdapter/GenericPtyAdapter 的既有慣例一致),不需要額外在
  *    `POST /session` 帶查詢參數。
- *  - 送出訊息:`POST /session/{id}/message`,body
- *    `{parts:[{type:"text", text}]}`——這支 API 會**阻塞直到該輪真正完成**
- *    才回應(本機實測:回應內容是完整的最終 assistant 訊息 + parts),但
- *    同一時間 `GET /event` 這條 SSE 連線會即時推播該輪的中間過程事件
- *    (見下方事件轉換說明)。這裡的策略是:`sendPrompt()` 不等待這個 POST
- *    resolve(它本身回傳 void,呼叫端也不需要等),真正的串流顯示與回合
- *    邊界完全交給已經常駐訂閱的 SSE 連線處理;POST 失敗時才轉成 `error`
- *    AgentEvent。
+ *  - 送出訊息:**優先用 `POST /session/{id}/prompt_async`**(2026-10-05 起),body
+ *    `{parts:[{type:"text", text}], model?}`——**立即回應 `204 No Content`**(1.18.7 實測約 70ms),該輪在背景執行、
+ *    事件走 SSE `/event`。舊的 `POST /session/{id}/message`(同樣的 body)會**阻塞直到該輪真正完成**才回應
+ *    (本機實測:回應內容是完整的最終 assistant 訊息 + parts),而 Node 內建 `fetch`(undici)的 `headersTimeout`
+ *    預設 300 秒——一輪超過約 5 分鐘(寫程式、跑測試很常見),這個懸著的 POST 就以 `fetch failed`
+ *    (`cause.code === "UND_ERR_HEADERS_TIMEOUT"`)失敗,舊版因此在回合還在正常進行時送出**假的** `error` 事件
+ *    (實測:330 秒的 bash 工具,錯誤在約 304 秒冒出、回合約 342 秒才 completed)。`sendPrompt()` 不等待 POST resolve
+ *    (它本身回傳 void,呼叫端也不需要等),真正的串流顯示與回合邊界完全交給已經常駐訂閱的 SSE 連線處理——所以換成
+ *    立即回應的端點對事件處理零影響。細節、兩個要補的洞(舊版 opencode 的 404 退路、失敗只走 SSE `session.error`)見
+ *    `submitPrompt()`:
+ *      - `prompt_async` 回 404(舊版 opencode 沒有這個路由)→ 退回 `/message`;退路上 undici 的等待逾時
+ *        (`isUndiciWaitTimeout()`)不算錯誤、不送 `error`(回合狀態以 SSE 為準),其他錯誤照舊送 `error`。
+ *      - `prompt_async` 對「回合根本跑不起來」(例如 model 不存在)也回 204,錯誤只出現在 SSE `session.error`
+ *        (實測:`session.status busy` → `session.error {name:"UnknownError", data:{message:"Model not found: …"}}` →
+ *        `session.status idle`;舊的 `/message` 則回 HTTP 500「Unexpected server error」)——`handleEvent()` 因此處理
+ *        `session.error`(一輪只回報一個 `error`)。
+ *      - 斜線指令的 `POST /session/{id}/command` 同樣阻塞到整輪結束(實測:自訂指令跑 20 秒的 bash,POST 約 26.6 秒才回),
+ *        而且 OpenAPI 文件裡**沒有**非阻塞版本(沒有 `command_async`),所以只能維持原端點、把 undici 等待逾時當成正常。
  *  - 事件串流:`GET /event`(全域,不分 session)是一個 SSE 端點,每個
  *    frame 是 `data: {"id":"evt_...","type":"...","properties":{...}}`。
  *    本機用一個不觸發任何工具呼叫的簡單 prompt、以及一個觸發 `bash` 工具的
@@ -106,6 +132,18 @@ import { waitForChildExit } from "./child-process.js";
  *    `{reply:"once"|"always"|"reject"}`——`resolvePermission()` 的
  *    `allow`/`deny` 分別對應 `"once"`/`"reject"`(`"always"` 是「記住這個
  *    決定」的進階選項,目前 UI 沒有對應的操作,不使用)。
+ *  - **認證(2026-10-03,安全;理由與實測見 `opencode-server-auth.ts` 檔頭)**:`opencode serve` 預設**沒有任何認證**,
+ *    本機任何程序掃到 loopback port 就能 `POST /permission/{id}/reply` 替它核准權限(繞過政策引擎)、`GET /config` 讀到
+ *    `mcp.deskmony.environment` 裡的 scoped bridge token、對 session 送 prompt。所以 `spawn()` 每次都產生一組新的隨機密碼,
+ *    以 `OPENCODE_SERVER_PASSWORD`(+ 明確的 `OPENCODE_SERVER_USERNAME`)**環境變數**交給子行程(不放 command args;
+ *    覆蓋使用者設的同名變數),opencode 的 basic auth 就會對所有端點(含 SSE `/event`、`/global/health`)要求
+ *    `Authorization: Basic ...`——實測無標頭或密碼錯一律 401。這個 adapter 打 opencode 的每一個請求都帶這個標頭:
+ *    `waitForHealthy()`(`/global/health`)、`postJson()`(`/session`、`/session/{id}/prompt_async|message|command|abort`、
+ *    `/permission/{id}/reply`、`/question/{id}/reply|reject`,含 `dispose()` 的清理呼叫)、`getJson()`(`/command`)、
+ *    `consumeEvents()`(`GET /event` SSE)——全都經過 `authHeaders()`,`authorization` 是這些函式的必填參數(漏帶 = 編譯錯誤)。
+ *    密碼只留在記憶體(`InternalSession.authorization`),不寫 log、不寫 DB、不進任何 AgentEvent。`spawn()` 在就緒後另外
+ *    不帶標頭探測一次,伺服器仍回 2xx(= 這個 opencode 版本不認那個環境變數)就 `console.warn`,不拒絕啟動
+ *    (見 `warnIfServerUnsecured()`)。`opencode acp` 那條路同理(它也開 HTTP 伺服器),見 acp-adapter.ts。
  *  - 提問(2026-09-17 用本機 opencode 1.18.7 + `opencode/big-pickle` 真實跑過
  *    「回答 / 空答案 / reject / abort」四種情境確認,不是讀文件猜的):
  *      - 事件順序:tool part(`tool:"question"`,`status:"pending"`,input `{}`)
@@ -143,13 +181,19 @@ import { waitForChildExit } from "./child-process.js";
  *  - `interrupt`:true(見上方)。`terminal`:false(這不是 PTY 直通)。
  *
  * ---- 已知限制 / TODO ----
- *  - `setModel()`(對話中途換 model)已實作,但用的是「session 記憶體內的
- *    覆寫值,下一則訊息才套用」這個折衷方案——opencode 沒有「設定當前
- *    model」的獨立端點可呼叫,也沒有機會本機驗證 `/provider`/
- *    `/config/providers` 這兩個端點的實際形狀(見檔案開頭的對接策略,一貫
- *    要求「以實際觀察到的行為為準,不臆測」),所以不驗證這組
- *    providerID/modelID 是否真的存在。完整取捨說明見 `setModel()` 方法本身
- *    的註解。
+ *  - `setModel()`(對話中途換 model)用的是「session 記憶體內的覆寫值,下一則
+ *    訊息才套用」——opencode 沒有「設定當前 model」的獨立端點,model 是每則
+ *    訊息各自帶的欄位。完整取捨說明見 `setModel()` 方法本身的註解。
+ *  - **思考程度(2026-10-06)**:opencode 的「思考程度」是 model 的 **variants**。
+ *    1.18.7 實測:`GET /config/providers` 回 `{providers, default}`,每個 model 有
+ *    `variants`(物件,key 是 variant 名稱,例如 `none`/`low`/`medium`/`high`/`xhigh`,
+ *    Gemini 是 `minimal`/`low`/`high`;各 model 不同,部分 model 例如 `opencode/big-pickle`
+ *    是空的);`prompt_async`/`message` 的 body 有 `variant?: string`(讀 1.18.7
+ *    內附 SDK 的參數表與伺服器端 schema 確認)。spawn 時讀一次清單(失敗不影響
+ *    對話,只是不能選思考程度,也不驗證 model),選定的 variant 存在 session 裡、
+ *    隨每則訊息送出;可選的清單以 `session-options` 事件回報(只回報思考程度——
+ *    model 清單沿用 provider 目錄,同一個 `opencode models` 來源,而且會套用使用者的
+ *    provider 偏好)。
  *  - **每個 session 各自 spawn 一個獨立的 `opencode serve` 子程序**(與
  *    AcpAdapter/GenericPtyAdapter 每個 session 各自 spawn 一個子程序的既有
  *    模式一致,換取實作簡單、session 之間互不干擾),而非在這個 adapter
@@ -181,6 +225,21 @@ type OpencodeChildProcess = ChildProcessByStdio<null, Readable, Readable>;
 export class OpenCodeAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
 
+  // 2026-10-03:掛載 session 網路 MCP 工具(`list_agents`/`list_sessions`/`read_session`/`create_session`/
+  // `send_to_session`),讓 OpenCode(HTTP)session 也能主動傳訊息。**完全比照 `AcpAdapter`**(同一個 bridge 子行程
+  // `mcp-bridge-server.ts`、同樣的 scoped token 與環境變數,見 mcp-bridge-launch.ts),差別只在掛法:ACP 經
+  // `session/new` 的 `mcpServers`,這裡寫進 `OPENCODE_CONFIG_CONTENT` 的 `mcp.deskmony`(type "local")。
+  // 兩個依賴都由 apps/core 事後注入(adapter 建構時 SessionManager/WsGateway 還不存在,見 acp-adapter.ts 同名欄位的說明);
+  // **缺一就不掛載**(不核發 token、不多一個子行程),行為與這個欄位出現之前完全相同。
+  private sessionNetworkPort?: SessionNetworkPort;
+  setSessionNetworkPort(port: SessionNetworkPort): void {
+    this.sessionNetworkPort = port;
+  }
+  private tokenMinter?: McpBridgeTokenPort;
+  setTokenMinter(minter: McpBridgeTokenPort): void {
+    this.tokenMinter = minter;
+  }
+
   capabilities(): AdapterCapabilities {
     return {
       streaming: true,
@@ -202,16 +261,20 @@ export class OpenCodeAdapter implements AgentAdapter {
       // 宣告為 "unknown",實際結果依 `spawn()` 內那次 `GET /command` 是否成功
       // 收斂(見該處呼叫點註解)。
       slashCommands: "unknown",
+      // 2026-10-06:model 是每則訊息自帶的欄位,adapter 自己保證做得到;思考程度要看目前 model 有沒有 variants。
+      modelSwitching: "supported",
+      effortSwitching: "unknown",
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
-    const config = profile.opencodeConfig;
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
+    const config = launch.opencodeConfig;
+    const agentLabel = launch.providerId ?? "opencode";
     if (!config) {
       throw new DeskmonyError(
         ErrorCodes.ADAPTER_MISSING_CONFIG,
-        { profileId: profile.id, software: "opencode", configField: "command" },
-        `AgentProfile "${profile.id}" 的 software="opencode" 缺少 opencodeConfig(command)`,
+        { providerId: agentLabel, software: "opencode", configField: "command" },
+        `agent "${agentLabel}" 的 software="opencode" 缺少 opencodeConfig(command)`,
       );
     }
 
@@ -219,16 +282,63 @@ export class OpenCodeAdapter implements AgentAdapter {
     const rawArgs = config.args && config.args.length > 0 ? config.args : defaultServeArgs;
     const { command, args, useShell } = resolveWindowsSpawnCommand(config.command, rawArgs);
 
-    // 這輪新增:profile.env 疊在 process.env 之上,config.env(既有欄位)
+    // `AgentHandle.id` 提前在這裡生成(同 acp-adapter.ts 的做法):scoped token 要綁定「這一個 session」,而核發必須在
+    // spawn 子程序之前(token 要放進子程序的 OPENCODE_CONFIG_CONTENT)。session 網路工具的**呼叫者身分**由 token 綁定的
+    // 這個 id 決定,不是任何工具參數——所以它必須等於 SessionManager 登記的 session id(= handle.id)。
+    // 2026-10-15(session 自動復活):復活既有 session 時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`)。
+    const handleId = resume?.sessionId ?? randomUUID();
+    const bridgeLaunch = mintMcpBridgeLaunch(
+      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
+      handleId,
+      "opencode-adapter",
+    );
+    // 核發之後的任何一步失敗都要撤銷,不留孤兒 token(24 小時 TTL 只是保底)。
+    const revokeBridgeToken = (): void => {
+      if (bridgeLaunch) this.tokenMinter?.revokeForSession(handleId);
+    };
+
+    // launch.env(provider 層級 env)疊在 process.env 之上,config.env(既有欄位)
     // 最優先——同 acp-adapter.ts 的合併順序說明。
-    const child: OpencodeChildProcess = spawn(command, args, {
-      cwd: workspace.path,
-      env: { ...process.env, ...profile.env, ...config.env },
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: useShell,
+    // 2026-10-05(安全):最後一律濾掉 Deskmony 內部憑證(含繼承來的 OPENCODE_SERVER_PASSWORD——下面 applyOpencodeServerAuth()
+    // 會設這個 opencode 行程自己的新密碼,必須在這之後)。完整理由見 agent-env.ts。
+    const childEnv: NodeJS.ProcessEnv = buildAgentChildEnv(launch.env, config.env);
+    // 2026-10-03(安全):opencode 預設所有工具權限都是 allow,只有它自己設定裡標成 "ask" 的才會發
+    // `permission.asked`——不處理的話 bash/edit/webfetch/MCP 工具**完全不經過** Deskmony 的政策引擎
+    // (default-deny、hard-deny 四類、auto/YOLO 全部失效)。這裡一律注入「所有工具都 ask」的設定,
+    // 與使用者既有的 OPENCODE_CONFIG_CONTENT 深度合併(Deskmony 優先)。完整理由與實測見 opencode-config.ts。
+    // 這個 adapter 就是 opencode(software="opencode"),不需要看 launch.family。
+    // 掛了 bridge 時:session 網路 MCP server(名稱 `deskmony`,工具全名 `deskmony_<name>`)寫進同一份設定,
+    // 三個唯讀查詢工具預先放行。token 只放 `environment`,**不放 command**(命令列在行程列表看得到)。
+    // 2026-10-05(安全):opencode 不會把伺服器密碼與這份設定(含 bridge 的 scoped token)從它啟動的 bash 工具環境濾掉,
+    // agent 讀得到就能自我核准權限——掛 Deskmony 自帶的外掛在 `shell.env` hook 把它們移除。外掛找不到時降級(警告、session 照常啟動)。
+    // 實測依據、機制與限制見 opencode-shell-env-plugin.ts。
+    const shellEnvPlugin = prepareOpencodeShellEnvPlugin("opencode-adapter", handleId);
+    childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
+      shellEnvPlugin: shellEnvPlugin?.entry,
+      sessionNetwork: bridgeLaunch
+        ? { localMcpServer: { command: [bridgeLaunch.command, ...bridgeLaunch.args], environment: bridgeLaunch.env } }
+        : undefined,
     });
-    // 2026-09-04(稽核修補):見 child-registry.ts。
-    registerChild(child.pid, `opencode:${command}`);
+    // 2026-10-03(安全):**這個 opencode 伺服器要有認證**。`opencode serve` 預設完全不鎖,本機任何程序掃到 loopback port 就能
+    // 替它核准權限請求(繞過政策引擎)、`GET /config` 讀到上面的 scoped bridge token。這裡每次 spawn 產生一組新的隨機密碼,
+    // 以環境變數(不是 command args)交給子行程——**在所有使用者 env 合併完之後才設,所以覆蓋**使用者自己設的同名變數。
+    // 回傳值是之後每個請求要帶的 `Authorization: Basic ...`,只留在記憶體(InternalSession.authorization)。完整理由見 opencode-server-auth.ts。
+    const authorization = applyOpencodeServerAuth(childEnv);
+    let child: OpencodeChildProcess;
+    try {
+      child = spawn(command, args, {
+        cwd: workspace.path,
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: useShell,
+      });
+    } catch (err) {
+      // spawn 本身同步丟例外(例如 Windows 上 `.cmd` 沒走 shell 的 EINVAL):token 已核發,不能留成孤兒。
+      revokeBridgeToken();
+      throw err;
+    }
+    // 2026-09-04(稽核修補):見 child-registry.ts。2026-10-12:非同步登記,不 await。
+    void registerChild(child.pid, `opencode:${command}`, () => child.exitCode !== null || child.signalCode !== null);
 
     const spawnFailure = new Promise<never>((_, reject) => {
       child.once("error", (err) => {
@@ -246,7 +356,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
-      console.error(`[opencode-adapter] ${profile.name} stderr: ${chunk.toString().trimEnd()}`);
+      console.error(`[opencode-adapter] ${agentLabel} stderr: ${chunk.toString().trimEnd()}`);
     });
 
     let baseUrl: string;
@@ -262,7 +372,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         ),
       ]);
       await Promise.race([
-        waitForHealthy(baseUrl),
+        waitForHealthy(baseUrl, authorization),
         spawnFailure,
         rejectAfter(
           HEALTH_POLL_TIMEOUT_MS,
@@ -271,8 +381,13 @@ export class OpenCodeAdapter implements AgentAdapter {
           "等待 OpenCode server /global/health 就緒逾時",
         ),
       ]);
+      // 認證有沒有真的生效:不帶標頭打一次,仍回 2xx 就是這個 opencode 版本不認 OPENCODE_SERVER_PASSWORD(或改了名稱)。
+      // 只警告、不拒絕啟動——見 warnIfServerUnsecured() 的取捨說明。
+      await warnIfServerUnsecured(baseUrl, agentLabel);
     } catch (err) {
       this.killChild(child);
+      revokeBridgeToken();
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
       throw err;
     }
 
@@ -285,12 +400,40 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 建立;查不到只是少一層保護。見 child-registry.ts 的 registerChildDescendants()。
     void registerChildDescendants(child.pid);
 
-    let opencodeSessionId: string;
+    // 2026-10-15(session 自動復活):opencode 把 session 存在磁碟(它自己的資料目錄),新的 `opencode serve` 行程用同一個 session id
+    // 就能接著聊。先 `GET /session/{id}` 確認它還在(被使用者在 opencode 裡刪掉、資料目錄換了都會 404),在就沿用;不在、查詢失敗
+    // 一律退回 `POST /session` 開新的並把 `handle.resumed` 標 false(由呼叫端用 Deskmony 的對話紀錄補脈絡)——接回失敗不能讓 spawn 失敗。
+    let opencodeSessionId: string | undefined;
+    let resumed = false;
+    if (resume?.backendSessionId) {
+      try {
+        const existing = await getJson<{ id?: string } | undefined>(
+          `${baseUrl}/session/${encodeURIComponent(resume.backendSessionId)}`,
+          authorization,
+        );
+        if (existing?.id === resume.backendSessionId) {
+          opencodeSessionId = existing.id;
+          resumed = true;
+          console.log(`[opencode-adapter] ${agentLabel} 沿用既有的 opencode session ${opencodeSessionId}`);
+        } else {
+          console.warn(`[opencode-adapter] ${agentLabel} 的 GET /session/${resume.backendSessionId} 回應對不上,改開新的 opencode session`);
+        }
+      } catch (err) {
+        console.warn(
+          `[opencode-adapter] ${agentLabel} 找不到既有的 opencode session ${resume.backendSessionId},改開新的(由呼叫端補對話紀錄): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
     try {
-      const created = await postJson<{ id: string }>(`${baseUrl}/session`, {});
-      opencodeSessionId = created.id;
+      if (opencodeSessionId === undefined) {
+        const created = await postJson<{ id: string }>(`${baseUrl}/session`, {}, authorization);
+        opencodeSessionId = created.id;
+      }
     } catch (err) {
       this.killChild(child);
+      revokeBridgeToken();
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
       throw new DeskmonyError(
         "opencode.sessionCreateFailed",
         { detail: err instanceof Error ? err.message : String(err) },
@@ -313,13 +456,27 @@ export class OpenCodeAdapter implements AgentAdapter {
     let availableCommands = new Map<string, OpencodeCommand>();
     let availableCommandsFetched = false;
     try {
-      const commands = await getJson<OpencodeCommand[]>(`${baseUrl}/command`);
+      const commands = await getJson<OpencodeCommand[]>(`${baseUrl}/command`, authorization);
       availableCommands = new Map(commands.map((c) => [c.name, c]));
       availableCommandsFetched = true;
     } catch (err) {
       console.error(
-        `[opencode-adapter] ${profile.name} GET /command 失敗(不影響對話,只影響 "/" 指令與選單): ${err instanceof Error ? err.message : String(err)}`,
+        `[opencode-adapter] ${agentLabel} GET /command 失敗(不影響對話,只影響 "/" 指令與選單): ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+
+    // 2026-10-06:各 model 的思考程度(variants)與 opencode 設定的預設 model(見檔案頂端「思考程度」段落)。
+    // 查不到不影響對話:只是不能選思考程度、也不驗證 model(退回這個功能之前的行為)。建立時指定的值在這裡驗證——
+    // 指定了做不到的 model/思考程度要讓建立失敗,不能悄悄用別的設定跑。
+    const modelCatalog = await fetchOpencodeModelCatalog(baseUrl, authorization, agentLabel);
+    let initialVariant: string | undefined;
+    try {
+      initialVariant = resolveLaunchVariant(launch, modelCatalog, agentLabel);
+    } catch (err) {
+      this.killChild(child);
+      revokeBridgeToken();
+      discardOpencodeShellEnvPluginMarker(shellEnvPlugin);
+      throw err;
     }
 
     const outputQueue = new AsyncQueue<AgentEvent>({
@@ -332,14 +489,16 @@ export class OpenCodeAdapter implements AgentAdapter {
             "否則 completed 事件永遠進不來,session 會卡在 busy。",
         ),
     });
-    const handle: AgentHandle = { id: randomUUID(), profile, workspace };
+    const handle: AgentHandle = { id: handleId, launch, workspace, ...(resume?.backendSessionId ? { resumed } : {}) };
     const sseController = new AbortController();
 
     const internal: InternalSession = {
       handle,
       child,
       baseUrl,
+      authorization,
       opencodeSessionId,
+      childSessionIds: new Set(),
       outputQueue,
       partMeta: new Map(),
       toolMeta: new Map(),
@@ -349,11 +508,28 @@ export class OpenCodeAdapter implements AgentAdapter {
       messageRoles: new Map(),
       busy: false,
       turnErrored: false,
+      turnErrorReported: false,
+      promptAsyncUnsupported: false,
       idleWaiters: [],
       sseController,
       availableCommands,
+      titleSessionIds: new Set(),
+      titleCollectors: new Map(),
+      titleAborts: new Set(),
+      modelCatalog,
+      variant: initialVariant,
+      agentLabel,
     };
     this.sessions.set(handle.id, internal);
+
+    // 2026-10-05:opencode 對這個資料夾的 instance(含外掛初始化)在上面的 `POST /session`、`GET /command` 就已建立——這時看載入標記檔:
+    // 外掛沒載入(舊版 opencode 不認 `shell.env`、載入失敗……)只警告、不影響 session。背景執行,不拖慢 session 建立;
+    // 必須在 session 登記**之後**(`isCancelled` 靠 `this.sessions` 判斷 session 是不是已經被 dispose 掉)。
+    if (shellEnvPlugin) {
+      void watchOpencodeShellEnvPluginLoaded(shellEnvPlugin, "opencode-adapter", handleId, {
+        isCancelled: () => !this.sessions.has(handleId),
+      });
+    }
 
     child.on("exit", (code, signal) => {
       if (!this.sessions.has(handle.id)) return; // dispose() 已經處理過
@@ -371,6 +547,9 @@ export class OpenCodeAdapter implements AgentAdapter {
         message: "OpenCode /event 串流中斷",
         detail: err instanceof Error ? err.message : String(err),
       });
+      // 2026-10-15:事件只走這條 SSE——它斷了,這個 session 就再也收不到回合的進展。關掉佇列讓 core 知道它已經不能用了(core
+      // 會收掉它、殺掉 server,下一則人類訊息重新啟動並沿用同一個 opencode session,見 SessionManager.detachEndedRuntime())。
+      outputQueue.close();
     });
 
     // 這輪(slash command)新增:上面的 GET /command 查詢成功時才推播——見該
@@ -381,6 +560,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (availableCommandsFetched) {
       outputQueue.push({ type: "available-commands", commands: mapOpencodeCommands(availableCommands) });
     }
+    this.pushSessionOptions(internal);
 
     return handle;
   }
@@ -389,6 +569,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     const internal = this.mustGet(handle);
     internal.busy = true;
     internal.turnErrored = false;
+    internal.turnErrorReported = false;
 
     // 這輪(slash command)新增:偵測開頭 "/已知指令名稱"——**完整比對整個
     // 第一個 token,不是 prefix**(例如已知指令 "review" 不可誤配到使用者
@@ -409,10 +590,17 @@ export class OpenCodeAdapter implements AgentAdapter {
       // 物件形狀不同,這輪沒有機會實測這支端點真正接受的字串格式(對接策略
       // 一貫要求「以實際觀察到的行為為準,不臆測」)——setModel() 覆寫對
       // 指令呼叫暫不生效,是刻意縮小的範圍,不是遺漏。
-      void postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/command`, {
-        command: commandName,
-        arguments: commandMatch?.[2] ?? "",
-      }).catch((err: unknown) => {
+      //
+      // 2026-10-05:`/command` 與 `/message` 一樣**阻塞到整輪結束才回應**(真實 opencode 1.18.7 實測:自訂指令請 bash
+      // 跑 20 秒,POST 在約 26.6 秒才回、SSE 的 tool part 在 29.7 秒才 completed——回應晚於工具完成),而且 OpenAPI 文件裡
+      // **沒有**對應的非阻塞端點(只有 `prompt_async`,沒有 `command_async`)。所以這條路沒辦法像一般 prompt 那樣改走
+      // 非阻塞端點,只能把「undici 等回應等太久」(見 `isUndiciWaitTimeout()`)當成正常:回合狀態以 SSE 為準,不是這個 POST。
+      void postJson(
+        `${internal.baseUrl}/session/${internal.opencodeSessionId}/command`,
+        { command: commandName, arguments: commandMatch?.[2] ?? "" },
+        internal.authorization,
+      ).catch((err: unknown) => {
+        if (isUndiciWaitTimeout(err)) return;
         internal.outputQueue.push({
           type: "error",
           message: "OpenCode session/command 送出失敗",
@@ -423,28 +611,89 @@ export class OpenCodeAdapter implements AgentAdapter {
     }
 
     // model 解析優先序:`internal.modelOverride`(透過 setModel() 對話中途
-    // 設定,見該方法)> `handle.profile.model`(profile 建立時挑選的
-    // "providerID/modelID" 組合字串,見 ProfileCreateDialog.tsx 的送出邏輯)。
+    // 設定,見該方法)> `handle.launch.model`(建立 session 時挑選的
+    // "providerID/modelID" 組合字串,來自 `opencode models` 偵測清單)。
     // 兩者都用同一個 parseModelString() 從第一個 "/" 拆成 opencode 要求的
-    // {providerID, modelID} 兩個欄位,隨 POST /session/{id}/message 一起送
-    // 出——setModel() 本身只是把覆寫記在記憶體裡,並不會呼叫任何 opencode
-    // API(沒有對應的端點),真正「生效」永遠是靠這裡讀到覆寫值的下一次
-    // sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
-    const modelField = internal.modelOverride ?? parseModelString(handle.profile.model);
-    void postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/message`, {
+    // {providerID, modelID} 兩個欄位,隨 prompt 請求(`prompt_async`,舊版 opencode 退回
+    // `/message`,兩者 body 相同,見 `submitPrompt()`)一起送出——setModel() 本身只是把覆寫
+    // 記在記憶體裡,並不會呼叫任何 opencode API(沒有對應的端點),真正「生效」永遠是靠這裡
+    // 讀到覆寫值的下一次 sendPrompt()。都沒有時完全不帶 model 欄位,交給 opencode 自己的預設。
+    const modelField = internal.modelOverride ?? parseModelString(handle.launch.model);
+    // 2026-10-06:思考程度 = 這則訊息要用的 variant(見 `setEffort()`);沒選就不帶,用 model 自己的預設。
+    void this.submitPrompt(internal, {
       parts: [{ type: "text", text: prompt.text }],
       ...(modelField ? { model: modelField } : {}),
-    }).catch((err: unknown) => {
+      ...(internal.variant ? { variant: internal.variant } : {}),
+    });
+  }
+
+  /**
+   * 送出一輪的 prompt。**永遠不會 reject**(失敗一律轉成 `error` AgentEvent 或有理由地吞掉),呼叫端用 `void` 丟著不管。
+   *
+   * ## 為什麼優先用 `POST /session/{id}/prompt_async`,不是 `/message`(2026-10-05)
+   *
+   * `/message` 會**阻塞到整輪結束才回應**(檔頭「送出訊息」段落)。Node 內建 `fetch`(undici)預設 `headersTimeout` 與
+   * `bodyTimeout` 都是 300 秒,所以一輪工作超過約 5 分鐘(寫程式、跑測試這類任務很常見),這個還沒回應的 POST 就會以
+   * `fetch failed`(`cause.code === "UND_ERR_HEADERS_TIMEOUT"`)失敗——舊版 adapter 因此送出一個**假的** `error` 事件
+   * (「送出失敗: fetch failed」),但 opencode 其實還在跑、SSE 也照常送事件,使用者看到的是「出錯了」,回合卻接著正常完成。
+   * 真實 opencode 1.18.7 實測:一個要跑 330 秒的 bash 工具,錯誤在約 304 秒出現、回合在約 342 秒才 completed。
+   *
+   * `prompt_async`(OpenAPI `session.prompt_async`,1.18.7 實測)的請求 body 與 `/message` 完全相同(`parts`、`model`……),
+   * 但**立即回應 `204 No Content`**(實測約 70ms),之後該輪照常在背景執行、事件照常走 SSE `/event`——而這個 adapter
+   * 本來就是「不等 POST 回應,回合邊界完全交給 SSE」(檔頭),所以換端點對事件處理零影響,只是不再有一條長時間懸著的
+   * HTTP 請求去撞逾時。
+   *
+   * ## 兩個要補的洞
+   *
+   *  1. **舊版 opencode 沒有 `prompt_async`**(路由不存在 → 404):退回 `/message`,並記在 `promptAsyncUnsupported`
+   *     (這個 session 之後不再試)。退路上 undici 的等待逾時(`isUndiciWaitTimeout()`)**不是錯誤**——POST 等太久不代表
+   *     送出失敗,回合狀態以 SSE 為準;其他錯誤(連線被拒、4xx/5xx……)照舊送 `error`。
+   *  2. **失敗的回報管道變了**:`/message` 在「模型不存在」這類回合根本跑不起來的情況會直接回 HTTP 500(也就是舊版靠這個
+   *     POST 失敗才看得到錯誤),`prompt_async` 則一律 204,錯誤**只**透過 SSE `session.error` 出現(實測:壞 model →
+   *     `session.status busy` → `session.error` → `session.status idle`)。所以 `handleEvent()` 必須處理 `session.error`
+   *     (見 `reportTurnError()`),否則這種失敗會變成「靜默地 completed」。
+   */
+  private async submitPrompt(internal: InternalSession, body: unknown): Promise<void> {
+    const sessionUrl = `${internal.baseUrl}/session/${internal.opencodeSessionId}`;
+    if (!internal.promptAsyncUnsupported) {
+      try {
+        await postJson(`${sessionUrl}/prompt_async`, body, internal.authorization);
+        return;
+      } catch (err) {
+        if (!isHttpNotFound(err)) {
+          internal.outputQueue.push({
+            type: "error",
+            message: "OpenCode session/prompt_async 送出失敗",
+            detail: err instanceof Error ? err.message : String(err),
+          });
+          return;
+        }
+        internal.promptAsyncUnsupported = true;
+        // 落到下面的 /message 退路。
+      }
+    }
+    try {
+      await postJson(`${sessionUrl}/message`, body, internal.authorization);
+    } catch (err) {
+      if (isUndiciWaitTimeout(err)) return; // POST 等太久 ≠ 送出失敗,見上面的說明。
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode session/message 送出失敗",
         detail: err instanceof Error ? err.message : String(err),
       });
-    });
+    }
   }
 
   events(handle: AgentHandle): AsyncIterable<AgentEvent> {
     return this.mustGet(handle).outputQueue;
+  }
+
+  /**
+   * opencode 自己的 session id(2026-10-15,session 自動復活)——opencode 把 session 存在磁碟,`spawn()` 帶這個值就沿用同一個
+   * session(見 `spawn()` 的 `GET /session/{id}` 確認)。`POST /session` 回應之後立刻就有值。
+   */
+  getBackendSessionId(handle: AgentHandle): string | undefined {
+    return this.sessions.get(handle.id)?.opencodeSessionId;
   }
 
   /**
@@ -457,7 +706,7 @@ export class OpenCodeAdapter implements AgentAdapter {
   async interrupt(handle: AgentHandle): Promise<void> {
     const internal = this.mustGet(handle);
     try {
-      await postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/abort`, {});
+      await postJson(`${internal.baseUrl}/session/${internal.opencodeSessionId}/abort`, {}, internal.authorization);
     } catch {
       // 伺服器可能已經結束或本來就沒有進行中的回合,忽略。
     }
@@ -467,12 +716,15 @@ export class OpenCodeAdapter implements AgentAdapter {
   async dispose(handle: AgentHandle): Promise<void> {
     const internal = this.sessions.get(handle.id);
     if (!internal) return;
+    // 這個 session 若曾核發過 scoped MCP bridge token(見 spawn()),結束時必須讓它立即失效——不能變成孤兒憑證
+    // 一直有效到 24 小時 TTL 才過期。對「沒核發過」是安全的 no-op(見 ws-gateway.ts 的 revokeMcpBridgeTokensForSession)。
+    this.tokenMinter?.revokeForSession(handle.id);
     // 懸置的權限請求(opencode 端 `permission.asked` 呼叫)若放著不管會讓
     // opencode 卡住等回覆——一律以「拒絕」收場後再清空(比照
     // AcpAdapter.dispose() 的既有做法)。
     for (const requestId of internal.pendingPermissions.keys()) {
       try {
-        await postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply: "reject" });
+        await postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply: "reject" }, internal.authorization);
       } catch {
         // 伺服器即將被關閉,忽略。
       }
@@ -482,12 +734,14 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 而不是空答案——session 都要關了,沒有「讓模型繼續下一步」的必要。
     for (const requestId of internal.pendingQuestions.keys()) {
       try {
-        await postJson(`${internal.baseUrl}/question/${requestId}/reject`, {});
+        await postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}, internal.authorization);
       } catch {
         // 伺服器即將被關閉,忽略。
       }
     }
     internal.pendingQuestions.clear();
+    // 進行中的命名臨時對話一併中止(伺服器馬上要被關掉)。
+    for (const controller of internal.titleAborts) controller.abort();
     internal.sseController.abort();
     internal.outputQueue.close();
     this.killChild(internal.child);
@@ -500,8 +754,8 @@ export class OpenCodeAdapter implements AgentAdapter {
      *
      * 為什麼要等:「送出終止指令」不等於「子程序已經死掉」。在 Windows 上
      * 行程要再過一小段時間才釋放它對 cwd(= 任務 worktree)的佔用,而呼叫端
-     * (`TaskService.deleteTask` → `WorkspaceManager.removeWorkspace`)緊接著就會
-     * `git worktree remove`,撞上 `EBUSY`/`Permission denied`。`WorkspaceManager`
+     * (原任務刪除流程(2026-10-02 已移除,見 docs/DECISIONS.md §H))緊接著就會
+     * `git worktree remove`,撞上 `EBUSY`/`Permission denied`。呼叫端當時
      * 有約 1.8 秒的重試窗口可以補救,但那比這裡主動等的 3 秒短 —— 在子程序退出
      * 較慢的機器上,opencode/pty 因此比另外兩個 adapter 更容易真的觸發
      * `workspace.cleanupFailed`。
@@ -511,7 +765,9 @@ export class OpenCodeAdapter implements AgentAdapter {
     await waitForChildExit(internal.child, 3_000);
     // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
     unregisterChild(internal.child.pid);
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——server 自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {
@@ -519,7 +775,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (!internal.pendingPermissions.has(requestId)) return;
     internal.pendingPermissions.delete(requestId);
     const reply = decision === "allow" ? "once" : "reject";
-    void postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply }).catch((err: unknown) => {
+    void postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply }, internal.authorization).catch((err: unknown) => {
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode permission/reply 送出失敗",
@@ -543,7 +799,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     const answers = pending.questions.map((q) =>
       result.behavior === "completed" ? toOpencodeAnswer(q, result.result.answers[q.question]) : [],
     );
-    void postJson(`${internal.baseUrl}/question/${requestId}/reply`, { answers }).catch((err: unknown) => {
+    void postJson(`${internal.baseUrl}/question/${requestId}/reply`, { answers }, internal.authorization).catch((err: unknown) => {
       internal.outputQueue.push({
         type: "error",
         message: "OpenCode question/reply 送出失敗",
@@ -562,15 +818,10 @@ export class OpenCodeAdapter implements AgentAdapter {
    * sendPrompt() 會用到,不需要、也沒有 API 可以呼叫去讓它「立即」生效),
    * 符合 `AgentAdapter.setModel()` 介面註解「不可靜默忽略成功」的要求。
    *
-   * 唯一會拋錯的情況是 `model` 本身不是合法的 "providerID/modelID" 形狀,
-   * 無法解析(與 `parseModelString()` 判斷 `profile.model` 是否合法的規則
-   * 完全一致)。刻意不做的部分:呼叫 `/config/providers`(或 `/provider`)
-   * 驗證這組 providerID/modelID 是否真的存在——本檔案的對接策略一貫要求
-   * 「以實際觀察到的 opencode 行為為準,不臆測」,這輪沒有機會對這兩個端點
-   * 做本機驗證。若使用者傳入語法正確但實際不存在的 model,opencode 會在
-   * 下一次 `POST /session/{id}/message` 時自行判定失敗,經由既有的
-   * `message.updated` 錯誤事件轉發路徑浮現(見 `handleEvent()`)——與
-   * 「`profile.model` 打錯字」的既有行為完全一致,不需要另外處理。
+   * 會拋錯的情況:`model` 不是合法的 "providerID/modelID" 形狀(與 `parseModelString()` 判斷 `launch.model`
+   * 是否合法的規則完全一致);2026-10-06 起,spawn 時查得到 `/config/providers` 的話,不在清單裡的 model 也直接
+   * 回明確錯誤(查不到清單時維持舊行為:不存在的 model 在下一則訊息經 `session.error` 浮現,見 `handleEvent()`)。
+   * 換 model 時,目前選的思考程度(variant)若新 model 沒有,就清掉(回到 model 自己的預設),並重送選項。
    */
   async setModel(handle: AgentHandle, model: string): Promise<void> {
     const internal = this.mustGet(handle);
@@ -583,25 +834,243 @@ export class OpenCodeAdapter implements AgentAdapter {
           `"anthropic/claude-sonnet-4-20250514"),收到的值 "${model}" 無法解析`,
       );
     }
+    const catalog = internal.modelCatalog;
+    if (catalog && !catalog.variants.has(model)) {
+      throw invalidOptionError("model", internal.agentLabel, model, [...catalog.variants.keys()]);
+    }
     internal.modelOverride = parsed;
+    if (internal.variant && !(catalog?.variants.get(model) ?? []).includes(internal.variant)) {
+      internal.variant = undefined;
+    }
+    this.pushSessionOptions(internal);
   }
 
   /**
-   * 思考程度(reasoning effort)——與上面的 `setModel()`**不同**,這裡**不**
-   * 採用「存進 session 覆寫、下一則訊息才生效」的 workaround:沒有查證到
-   * opencode API(`POST /session/{id}/message` 或其他端點)有任何
-   * reasoning-effort 相關欄位或機制可用(見本檔案頂端對接策略「以實際觀察到
-   * 的行為為準,不臆測」的一貫要求),不可臆測一個不存在的能力。明確拋出
-   * 錯誤,不可靜默忽略成功(見 packages/adapters/src/types.ts 的
-   * `AgentAdapter.setEffort()` 介面註解)。
+   * 2026-10-06:思考程度 = 目前 model 的 variant(見檔案頂端「思考程度」段落)。比照 `setModel()` 存進 session、
+   * 下一則訊息的 `variant` 欄位才真正送出。目前 model 不知道(沒指定、opencode 設定也沒寫)、沒有 variants、
+   * 或 spawn 時查不到清單 → 明確錯誤(不可靜默忽略成功,見 types.ts 的 `AgentAdapter.setEffort()` 介面註解)。
    */
-  async setEffort(handle: AgentHandle): Promise<void> {
-    this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)
-    throw new DeskmonyError(
-      ErrorCodes.ADAPTER_UNSUPPORTED_OPERATION,
-      { software: "opencode", operation: "setEffort" },
-      'software="opencode" 不支援變更思考程度(未查得到 opencode 有對應的 reasoning-effort 機制)',
-    );
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
+    const internal = this.mustGet(handle);
+    const variants = this.currentVariants(internal);
+    if (variants.length === 0) throw optionNotOfferedError("effort", internal.agentLabel);
+    if (!variants.includes(effort)) throw invalidOptionError("effort", internal.agentLabel, effort, variants);
+    internal.variant = effort;
+    this.pushSessionOptions(internal);
+  }
+
+  /** 目前 model 的 variants(不知道目前 model 或查不到清單 = 空陣列)。 */
+  private currentVariants(internal: InternalSession): string[] {
+    const catalog = internal.modelCatalog;
+    if (!catalog) return [];
+    const override = internal.modelOverride;
+    const model = override ? `${override.providerID}/${override.modelID}` : (internal.handle.launch.model ?? catalog.defaultModel);
+    return model ? (catalog.variants.get(model) ?? []) : [];
+  }
+
+  /** 送 `session-options`(只有思考程度,model 清單沿用 provider 目錄——見檔案頂端「思考程度」段落)。查不到清單就不送。 */
+  private pushSessionOptions(internal: InternalSession): void {
+    if (!internal.modelCatalog) return;
+    const variants = this.currentVariants(internal);
+    internal.outputQueue.push({
+      type: "session-options",
+      options:
+        variants.length > 0
+          ? { effort: { current: internal.variant, choices: variants.map((v) => ({ value: v, label: v })) } }
+          : {},
+    });
+  }
+
+  /**
+   * 2026-10-06(AI 自動命名):在**同一個** opencode 伺服器上 `POST /session` 開一個臨時 session → `prompt_async` 送命名指示
+   * → 從**同一條** SSE `/event` 收集它的回覆 → `DELETE /session/{id}` 丟掉。主 session 的上下文完全不受影響。介面紀律見
+   * types.ts 的 `AgentAdapter.generateTitle()`。
+   *
+   * 事件隔離(2026-10-06 用 opencode 1.18.7 實測確認,不是讀文件猜的):臨時 session 的所有事件(`session.*`、
+   * `message.updated`、`message.part.updated/delta`、`permission.asked`……)都帶頂層 `properties.sessionID`;臨時 session
+   * 建立時**不帶** `parentID`,所以它不會被當成主 session 的 subagent 子 session(那些的權限請求會轉給主 session)。
+   * `handleEvent()` 一開頭就把 `titleSessionIds` 裡的事件整個轉給 `handleTitleEvent()`,不會走到主 session 的任何分支。
+   *
+   * 工具:opencode 沒有能可靠停用工具的做法——實測 prompt body 帶 `tools: {"*": false}` 或指定內建的 `title` agent,
+   * OpenCode 免費方案(`opencode/big-pickle`)都直接回 403「free tier can only be used from within OpenCode」。所以工具定義
+   * 留著,靠兩道防線:Deskmony 注入的設定讓每個工具都是 ask,臨時 session 的 `permission.asked` 一律當場 reject(提問一律
+   * reject),而且**一看到 tool part 就中止**這次命名(`/abort` + 丟錯 → core 退回截取首句)。實測拒絕後 tool part 變
+   * error、回合結束,工具沒有執行。
+   *
+   * 用量:臨時 session 最後一則 assistant 訊息的 `cost`/`tokens`(這次命名自己的總量)回傳給 core 計入。
+   */
+  async generateTitle(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult> {
+    const internal = this.mustGet(handle);
+    const controller = new AbortController();
+    const forwardAbort = (): void => controller.abort();
+    if (request.signal.aborted) controller.abort();
+    request.signal.addEventListener("abort", forwardAbort, { once: true });
+    internal.titleAborts.add(controller);
+    const signal = controller.signal;
+    let tempSessionId: string | undefined;
+    let finished = false;
+    try {
+      const created = await raceAbort(
+        postJson<{ id: string }>(`${internal.baseUrl}/session`, { title: "Deskmony title (temporary)" }, internal.authorization),
+        signal,
+      );
+      tempSessionId = created.id;
+      // 先登記再送 prompt:之後這個 session 的每個事件都進 handleTitleEvent()。
+      internal.titleSessionIds.add(tempSessionId);
+      const done = new Promise<TitleCollectorResult>((resolve, reject) => {
+        internal.titleCollectors.set(created.id, {
+          parts: new Map(),
+          roles: new Map(),
+          busySeen: false,
+          resolve,
+          reject,
+        });
+      });
+      done.catch(() => undefined); // 中止時沒人等它,避免 unhandled rejection。
+      const modelField = internal.modelOverride ?? parseModelString(handle.launch.model);
+      const body = { parts: [{ type: "text", text: request.prompt }], ...(modelField ? { model: modelField } : {}) };
+      const sessionUrl = `${internal.baseUrl}/session/${tempSessionId}`;
+      if (internal.promptAsyncUnsupported) {
+        // 舊版 opencode(沒有 prompt_async,見 submitPrompt()):`/message` 會阻塞到回合結束,不等它,結果一樣從 SSE 收。
+        void postJson(`${sessionUrl}/message`, body, internal.authorization).catch(() => undefined);
+      } else {
+        try {
+          await raceAbort(postJson(`${sessionUrl}/prompt_async`, body, internal.authorization), signal);
+        } catch (err) {
+          if (!isHttpNotFound(err)) throw err;
+          void postJson(`${sessionUrl}/message`, body, internal.authorization).catch(() => undefined);
+        }
+      }
+      const result = await raceAbort(done, signal);
+      finished = true;
+      return { text: result.text, ...(result.usage ? { usage: result.usage } : {}) };
+    } catch (err) {
+      if (signal.aborted) throw titleAbortedError();
+      throw err;
+    } finally {
+      request.signal.removeEventListener("abort", forwardAbort);
+      internal.titleAborts.delete(controller);
+      if (tempSessionId) {
+        internal.titleCollectors.delete(tempSessionId);
+        // id 留在 titleSessionIds:收尾之後才晚到的事件(包括權限請求)照樣被攔下、不會漏進主 session。
+        void this.discardTitleSession(internal, tempSessionId, finished);
+      }
+    }
+  }
+
+  /** 收掉命名用的臨時 session:回合還沒結束就先 `/abort`,然後 `DELETE`(不留在 opencode 的 session 清單裡)。失敗只記 log。 */
+  private async discardTitleSession(internal: InternalSession, sessionId: string, finished: boolean): Promise<void> {
+    try {
+      if (!finished) {
+        await postJson(`${internal.baseUrl}/session/${sessionId}/abort`, {}, internal.authorization).catch(() => undefined);
+      }
+      await deleteJson(`${internal.baseUrl}/session/${sessionId}`, internal.authorization);
+    } catch (err) {
+      console.warn(`[opencode-adapter] 刪除命名用臨時 session ${sessionId} 失敗(忽略): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 命名用臨時 session 的事件(見 `generateTitle()`)——**只**在這裡處理,絕不轉進主 session 的 outputQueue。
+   * 收集 assistant 的文字 part;權限請求/提問一律拒絕;出現 tool part 就中止;busy 之後回到 idle 就算結束。
+   */
+  private handleTitleEvent(internal: InternalSession, sessionId: string, evt: OpencodeEvent): void {
+    const properties = evt.properties as Record<string, unknown> | undefined;
+    // 權限與提問:就算這次命名已經收尾(collector 不在了)也照樣拒絕,不讓 opencode 卡著等。
+    if (evt.type === "permission.asked") {
+      const requestId = properties?.id as string | undefined;
+      if (requestId) {
+        console.warn(`[opencode-adapter] 命名用臨時對話要求工具權限(${String(properties?.permission ?? "?")}),已拒絕`);
+        void postJson(`${internal.baseUrl}/permission/${requestId}/reply`, { reply: "reject" }, internal.authorization).catch(() => undefined);
+      }
+      this.failTitleCollector(internal, sessionId, titleToolUseError("opencode"));
+      return;
+    }
+    if (evt.type === "question.asked") {
+      const requestId = properties?.id as string | undefined;
+      if (requestId) void postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}, internal.authorization).catch(() => undefined);
+      this.failTitleCollector(internal, sessionId, titleToolUseError("opencode"));
+      return;
+    }
+    const collector = internal.titleCollectors.get(sessionId);
+    if (!collector) return;
+    switch (evt.type) {
+      case "session.status": {
+        const status = properties?.status as { type?: string } | undefined;
+        if (status?.type === "busy") collector.busySeen = true;
+        else if (status?.type === "idle") this.finishTitleCollector(internal, sessionId);
+        break;
+      }
+      case "session.idle":
+        this.finishTitleCollector(internal, sessionId);
+        break;
+      case "session.error": {
+        const error = properties?.error as { name?: string; data?: { message?: string } } | undefined;
+        if (error && error.name !== "MessageAbortedError") collector.error = error.data?.message ?? error.name ?? "unknown";
+        break;
+      }
+      case "message.updated": {
+        const info = properties?.info as
+          | { id?: string; role?: string; cost?: number; tokens?: { input?: number; output?: number }; modelID?: string; providerID?: string; error?: { name?: string; data?: { message?: string } } }
+          | undefined;
+        if (info?.id && info.role) collector.roles.set(info.id, info.role);
+        if (info?.role === "assistant") {
+          if (info.error && info.error.name !== "MessageAbortedError") collector.error = info.error.data?.message ?? info.error.name ?? "unknown";
+          if (typeof info.cost === "number" || info.tokens) {
+            collector.usage = {
+              ...(typeof info.cost === "number" ? { costAmount: info.cost, costCurrency: "USD" } : {}),
+              ...(typeof info.tokens?.input === "number" ? { inputTokens: info.tokens.input } : {}),
+              ...(typeof info.tokens?.output === "number" ? { outputTokens: info.tokens.output } : {}),
+              ...(info.providerID && info.modelID ? { model: `${info.providerID}/${info.modelID}` } : {}),
+            };
+          }
+        }
+        break;
+      }
+      case "message.part.updated": {
+        const part = properties?.part as OpencodePart | undefined;
+        if (!part) break;
+        if (part.type === "tool") {
+          this.failTitleCollector(internal, sessionId, titleToolUseError("opencode"));
+        } else if (part.type === "text") {
+          collector.parts.set(part.id, { messageID: part.messageID, text: part.text ?? "" });
+        }
+        break;
+      }
+      case "message.part.delta": {
+        const partId = properties?.partID as string | undefined;
+        const delta = properties?.delta as string | undefined;
+        const entry = partId ? collector.parts.get(partId) : undefined;
+        // 只補已知的 text part;完整文字以 part.updated 的快照為準(它最後一定會帶全文)。
+        if (properties?.field === "text" && entry && delta && !entry.text.endsWith(delta)) entry.text += delta;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  /** 臨時 session 回到 idle:組出 assistant 的文字(排除使用者自己那則命名指示的 part)交給 `generateTitle()`。 */
+  private finishTitleCollector(internal: InternalSession, sessionId: string): void {
+    const collector = internal.titleCollectors.get(sessionId);
+    if (!collector || !collector.busySeen) return;
+    internal.titleCollectors.delete(sessionId);
+    if (collector.error) {
+      collector.reject(titleAgentFailedError("opencode", collector.error));
+      return;
+    }
+    const text = [...collector.parts.values()]
+      .filter((part) => !part.messageID || collector.roles.get(part.messageID) !== "user")
+      .map((part) => part.text)
+      .join("");
+    collector.resolve({ text, usage: collector.usage });
+  }
+
+  private failTitleCollector(internal: InternalSession, sessionId: string, err: Error): void {
+    const collector = internal.titleCollectors.get(sessionId);
+    if (!collector) return;
+    internal.titleCollectors.delete(sessionId);
+    collector.reject(err);
   }
 
   private mustGet(handle: AgentHandle): InternalSession {
@@ -632,7 +1101,18 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   /** 持續讀取 `GET /event` 這條 SSE 連線,轉譯成 AgentEvent 並 push 進 outputQueue。 */
   private async consumeEvents(internal: InternalSession): Promise<void> {
-    const res = await fetch(`${internal.baseUrl}/event`, { signal: internal.sseController.signal });
+    const res = await fetch(`${internal.baseUrl}/event`, {
+      headers: authHeaders(internal.authorization),
+      signal: internal.sseController.signal,
+    });
+    if (!res.ok) {
+      // 認證被拒(401)或其他錯誤:不能把一個錯誤回應當成 SSE 串流讀(會靜靜地讀到 EOF、session 卡在永遠收不到事件)。
+      throw new DeskmonyError(
+        "opencode.requestFailed",
+        { url: `${internal.baseUrl}/event`, status: res.status },
+        `GET ${internal.baseUrl}/event 失敗(status=${res.status})`,
+      );
+    }
     if (!res.body) {
       throw new DeskmonyError(
         "opencode.eventStreamMissingBody",
@@ -665,8 +1145,34 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   private handleEvent(internal: InternalSession, evt: OpencodeEvent): void {
     const properties = evt.properties as Record<string, unknown> | undefined;
+
+    // 2026-10-06:命名用臨時 session 的事件**整個**交給 handleTitleEvent(),一個都不會走到下面主 session 的分支
+    // (見 generateTitle() 的「事件隔離」說明)。
+    const eventSessionId = properties?.sessionID;
+    if (typeof eventSessionId === "string" && internal.titleSessionIds.has(eventSessionId)) {
+      this.handleTitleEvent(internal, eventSessionId, evt);
+      return;
+    }
+
+    // 2026-10-03:追蹤這個 session 底下的 **subagent 子 session**(`task` 工具會建立
+    // `parentID` 指向呼叫者的子 session,實測 `session.created` 一定先於子 session 的任何事件)。
+    // 為什麼要管:所有工具現在都是 ask,subagent 裡的 bash/edit 一樣會發 `permission.asked`,但 `sessionID` 是
+    // **子 session 的**——下面的 sessionID 過濾若直接丟掉,opencode 會永遠等一個沒人回的權限,subagent 就卡死
+    // (改成全 ask 之前這些操作靜默放行,不會碰到這個問題)。
+    if (evt.type === "session.created" || evt.type === "session.updated") {
+      const info = properties?.info as { id?: string; parentID?: string } | undefined;
+      if (info?.id && info.parentID && (info.parentID === internal.opencodeSessionId || internal.childSessionIds.has(info.parentID))) {
+        internal.childSessionIds.add(info.id);
+      }
+    }
+
     const sessionID = properties?.sessionID;
-    if (sessionID !== undefined && sessionID !== internal.opencodeSessionId) return;
+    if (sessionID !== undefined && sessionID !== internal.opencodeSessionId) {
+      // 子 session 只轉發**權限請求**——它們的文字/工具事件不該混進這個 session 的對話串。
+      const isChildPermission =
+        evt.type === "permission.asked" && typeof sessionID === "string" && internal.childSessionIds.has(sessionID);
+      if (!isChildPermission) return;
+    }
 
     switch (evt.type) {
       case "session.status": {
@@ -699,12 +1205,18 @@ export class OpenCodeAdapter implements AgentAdapter {
           !internal.erroredMessageIds.has(info.id)
         ) {
           internal.erroredMessageIds.add(info.id);
-          internal.turnErrored = true;
-          internal.outputQueue.push({
-            type: "error",
-            message: `OpenCode 回合失敗: ${info.error.name ?? "未知錯誤"}`,
-            detail: info.error.data?.message,
-          });
+          this.reportTurnError(internal, info.error);
+        }
+        break;
+      }
+      case "session.error": {
+        // 2026-10-05:`prompt_async`(見 `submitPrompt()`)一律回 204,回合根本跑不起來的失敗(實測:壞 model →
+        // `Model not found: …`)**只**透過這個事件回報,不處理的話會變成靜默的 completed。global SSE 的這個事件
+        // 可能沒有 sessionID(與別的 session 無關的錯誤),上面的過濾放行了 undefined——這裡明確要求就是本 session。
+        // `MessageAbortedError` 是 `interrupt()` 的預期結果(同 message.updated),不報。
+        const error = properties?.error as { name?: string; data?: { message?: string } } | undefined;
+        if (sessionID === internal.opencodeSessionId && error && error.name !== "MessageAbortedError") {
+          this.reportTurnError(internal, error);
         }
         break;
       }
@@ -728,11 +1240,20 @@ export class OpenCodeAdapter implements AgentAdapter {
         const tool = properties?.tool as { callID?: string } | undefined;
         const toolMeta = tool?.callID ? internal.toolMeta.get(tool.callID) : undefined;
         const patterns = properties?.patterns as string[] | undefined;
+        // 2026-10-03:**帶上工具參數**。PolicyEngine 的 hard-deny(worktree 外寫入、讀秘密路徑、危險 git、
+        // 非白名單外連)與 allowlist 規則全靠 `input` 判斷——沒有 input 它們只能「猜不到 → 不命中」,
+        // auto/YOLO 模式下 `git push --force` 就會被當成未分類操作自動放行。優先用工具 part 的完整 input
+        // (`running` 帶的,bash 是 {command}、edit/read 是 {filePath,...}、webfetch 是 {url,...});
+        // 還沒收到(running 排在 permission.asked 之後)或是 subagent 子 session 的工具(它們的 part 不轉發)時,
+        // 退而用 `permission.asked` 自己的 metadata(實測 bash 是 {command}、edit 是 {filepath, diff})。
+        const metadata = properties?.metadata as Record<string, unknown> | undefined;
+        const input = toolMeta?.input ?? (metadata && Object.keys(metadata).length > 0 ? metadata : undefined);
         internal.pendingPermissions.set(requestId, { toolCallId: tool?.callID });
         internal.outputQueue.push({
           type: "permission-request",
           requestId,
           toolName: toolMeta?.toolName ?? (properties?.permission as string | undefined) ?? "unknown",
+          input,
           description: patterns && patterns.length > 0 ? `patterns: ${patterns.join(", ")}` : undefined,
         });
         break;
@@ -746,7 +1267,7 @@ export class OpenCodeAdapter implements AgentAdapter {
           // 形狀變了,寧可 reject 讓這一輪結束(對話串會看到工具失敗),也不要
           // 發一個 UI 畫不出來的請求、讓回合無聲無息地卡住。
           console.error(`[opencode-adapter] question.asked 的 questions 形狀無法辨識,已 reject: ${JSON.stringify(properties?.questions)}`);
-          void postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}).catch(() => {});
+          void postJson(`${internal.baseUrl}/question/${requestId}/reject`, {}, internal.authorization).catch(() => {});
           break;
         }
         const tool = properties?.tool as { callID?: string } | undefined;
@@ -850,7 +1371,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       const inputKnown = part.state.status === "running" || part.state.status === "completed";
       let meta = internal.toolMeta.get(part.callID);
       if (!meta) {
-        meta = { toolName: part.tool, inputEmitted: inputKnown, emittedResult: false };
+        meta = { toolName: part.tool, inputEmitted: inputKnown, emittedResult: false, input: inputKnown ? part.state.input : undefined };
         internal.toolMeta.set(part.callID, meta);
         internal.outputQueue.push({
           type: "tool-call",
@@ -864,6 +1385,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         // (讀原始碼的推論,例如無效呼叫被修補成別的工具;實測的 bash 沒有改名)。
         // 沒改名時這行是 no-op;有改名時 permission.asked 查到的名稱才會跟著對。
         meta.toolName = part.tool;
+        meta.input = part.state.input;
         internal.outputQueue.push({
           type: "tool-call",
           toolCallId: part.callID,
@@ -945,6 +1467,23 @@ export class OpenCodeAdapter implements AgentAdapter {
     meta.text += delta;
   }
 
+  /**
+   * 把 SSE 帶來的回合失敗(`message.updated` 的 assistant error、`session.error`)轉成**一個** `error` 事件。
+   * 同一個失敗 opencode 常常兩邊都報(訊息帶 error + `session.error`,甚至 `session.error` 報兩次、訊息文字不同),
+   * 所以一輪(從 `sendPrompt()` 到下一次 `sendPrompt()`)只回報第一個。標記 `turnErrored`:`markIdleIfBusy()` 就不再補
+   * `completed`(失敗的回合不是完成)。
+   */
+  private reportTurnError(internal: InternalSession, error: { name?: string; data?: { message?: string } }): void {
+    if (internal.turnErrorReported) return;
+    internal.turnErrorReported = true;
+    internal.turnErrored = true;
+    internal.outputQueue.push({
+      type: "error",
+      message: `OpenCode 回合失敗: ${error.name ?? "未知錯誤"}`,
+      detail: error.data?.message,
+    });
+  }
+
   /** 忙碌→閒置的轉換點(見 class 頂端註解):flush 尚未收到 done 的 text part,轉成 completed/略過(若這輪已經送過 error)。 */
   private markIdleIfBusy(internal: InternalSession): void {
     if (!internal.busy) return; // 已經處理過這次轉換(session.status 與 session.idle 常常成對送達)
@@ -970,6 +1509,8 @@ interface ToolMeta {
   /** 已經送過帶完整 input 的 tool-call(見 handlePartUpdated() 的兩段式說明)。 */
   inputEmitted: boolean;
   emittedResult: boolean;
+  /** 已知的完整 input(`running`/`completed` 帶的);`permission.asked` 轉成 permission-request 時要一起帶上。 */
+  input?: unknown;
 }
 
 interface PartMeta {
@@ -986,6 +1527,24 @@ interface PartMeta {
 
 interface PendingPermission {
   toolCallId?: string;
+}
+
+/** 命名用臨時 session 的收集結果(見 `OpenCodeAdapter.generateTitle()`)。 */
+interface TitleCollectorResult {
+  text: string;
+  usage?: TitleGenerationResult["usage"];
+}
+
+/** 一次命名的進行中狀態:臨時 session 的 text part 與訊息角色,回到 idle 時組出文字。 */
+interface TitleCollector {
+  parts: Map<string, { messageID?: string; text: string }>;
+  roles: Map<string, string>;
+  /** 看過 busy 之後的 idle 才算這一輪結束(建立 session 時的事件不算)。 */
+  busySeen: boolean;
+  error?: string;
+  usage?: TitleGenerationResult["usage"];
+  resolve: (result: TitleCollectorResult) => void;
+  reject: (err: Error) => void;
 }
 
 /**
@@ -1011,7 +1570,14 @@ interface InternalSession {
   handle: AgentHandle;
   child: OpencodeChildProcess;
   baseUrl: string;
+  /**
+   * 呼叫這個 session 的 opencode 伺服器要帶的 `Authorization` 標頭值(`Basic ...`),見 opencode-server-auth.ts。
+   * **秘密**:只留在記憶體,不寫 log、不進 DB、不進任何 AgentEvent;所有請求都必須經過下面的 postJson/getJson/authHeaders。
+   */
+  authorization: string;
   opencodeSessionId: string;
+  /** `task` 工具(subagent)建立的子 session id(含孫 session),見 handleEvent() 開頭的說明。 */
+  childSessionIds: Set<string>;
   outputQueue: AsyncQueue<AgentEvent>;
   partMeta: Map<string, PartMeta>;
   toolMeta: Map<string, ToolMeta>;
@@ -1025,9 +1591,17 @@ interface InternalSession {
   busy: boolean;
   /** 這一輪是否已經送出過 error(避免 markIdleIfBusy() 額外再送一次 completed)。 */
   turnErrored: boolean;
+  /**
+   * 這一輪是否已經回報過 SSE 來源的失敗(`message.updated` 帶 error、`session.error`),見 `reportTurnError()`——
+   * 一輪最多回報一次。與 `turnErrored` 的差別:`markIdleIfBusy()` 會把 `turnErrored` 清掉,這個只在下一次 `sendPrompt()`
+   * 才清(實測壞 model 時,第二個、訊息更長的 `session.error` 會在 idle **之後**才到,不能再報第二次)。
+   */
+  turnErrorReported: boolean;
+  /** 這個 opencode server 沒有 `prompt_async`(那個端點回過 404),之後的 prompt 直接走 `/message`,見 `submitPrompt()`。 */
+  promptAsyncUnsupported: boolean;
   idleWaiters: Array<() => void>;
   sseController: AbortController;
-  /** setModel() 設定的覆寫值,優先於 handle.profile.model——見 setModel()/sendPrompt() 方法註解。 */
+  /** setModel() 設定的覆寫值,優先於 handle.launch.model——見 setModel()/sendPrompt() 方法註解。 */
   modelOverride?: { providerID: string; modelID: string };
   /**
    * 這輪(slash command)新增:spawn() 時 `GET /command` 查到的指令清單,key
@@ -1036,6 +1610,27 @@ interface InternalSession {
    * 失敗分支的註解),不影響一般 /message 路徑。
    */
   availableCommands: Map<string, OpencodeCommand>;
+  /** 命名用臨時 session 的 id(含已收尾的)——它們的事件一律交給 handleTitleEvent(),見 generateTitle()。 */
+  titleSessionIds: Set<string>;
+  /** 進行中的命名:臨時 session id -> 收集狀態。 */
+  titleCollectors: Map<string, TitleCollector>;
+  /** 進行中的命名臨時對話,`dispose()` 時一併中止。 */
+  titleAborts: Set<AbortController>;
+  /** 2026-10-06:spawn 時查到的各 model variants 與預設 model;查不到是 undefined(見 `fetchOpencodeModelCatalog()`)。 */
+  modelCatalog?: OpencodeModelCatalog;
+  /** 2026-10-06:目前選的思考程度(variant),隨每則訊息送出;undefined = 用 model 自己的預設。 */
+  variant?: string;
+  /** 錯誤訊息裡的 agent 名稱(providerId)。 */
+  agentLabel: string;
+}
+
+/**
+ * 2026-10-06:`GET /config/providers` 整理出來的「每個 model(`providerID/modelID`)有哪些 variants」,
+ * 加上 `GET /config` 的 `model`(使用者 opencode 設定的預設 model,沒設就是 undefined)。
+ */
+interface OpencodeModelCatalog {
+  variants: Map<string, string[]>;
+  defaultModel?: string;
 }
 
 /**
@@ -1088,7 +1683,7 @@ function waitForIdle(internal: InternalSession, timeoutMs: number): Promise<void
 /**
  * 把一個扁平字串拆成 opencode `POST /session/{id}/message` body 要求的
  * `{providerID, modelID}` 兩個欄位。兩種呼叫來源共用這個函式：
- *   - `AgentProfile.model`(建立 profile 時，`ProfileCreateDialog` 從
+ *   - `AgentLaunchSpec.model`(建立 session 時，SessionList 從
  *     `opencode models` 偵測結果挑出的 "providerID/modelID" 組合，見
  *     provider-catalog.ts/resolve-providers.ts 的模型偵測流程)。
  *   - `setModel()` 收到的、對話中途要換的 model 字串(來源同上——UI 選單的
@@ -1201,12 +1796,23 @@ function waitForListeningLine(child: OpencodeChildProcess): Promise<string> {
   });
 }
 
+/**
+ * 對 opencode 伺服器發的**每一個**請求都要帶的標頭(2026-10-03:伺服器有 basic auth,見 opencode-server-auth.ts)。
+ * 這個檔案裡所有打 opencode 伺服器的 `fetch` 只有五處——waitForHealthy()、postJson()、getJson()、deleteJson()、SSE 的 consumeEvents()——
+ * 全都經過這個函式;`authorization` 在這幾個函式都是**必填參數**,漏帶會是編譯錯誤。
+ * (warnIfServerUnsecured() 刻意不帶:它就是要驗證「不帶標頭會被擋」。)
+ */
+function authHeaders(authorization: string, extra?: Record<string, string>): Record<string, string> {
+  return { ...extra, authorization };
+}
+
 /** 輪詢 `/global/health` 直到回應 200(或逾時,由呼叫端的 Promise.race 把關)。 */
-async function waitForHealthy(baseUrl: string): Promise<void> {
+async function waitForHealthy(baseUrl: string, authorization: string): Promise<void> {
   for (;;) {
     try {
-      const res = await fetch(`${baseUrl}/global/health`);
+      const res = await fetch(`${baseUrl}/global/health`, { headers: authHeaders(authorization) });
       if (res.ok) return;
+      // 401 = 密碼對不上(例如這個 opencode 版本改了認證方式),重試也不會好,但讓呼叫端的逾時去收尾(錯誤訊息一致)。
     } catch {
       // 尚未接受連線,稍後重試。
     }
@@ -1214,10 +1820,32 @@ async function waitForHealthy(baseUrl: string): Promise<void> {
   }
 }
 
-async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
+/**
+ * 不帶認證打一次 `/global/health`,確認 `OPENCODE_SERVER_PASSWORD` 真的有生效(實測 1.18.7:帶了密碼之後無標頭 → 401)。
+ * 仍回 2xx 代表這個 opencode 版本不認那個環境變數(或將來改了名稱),伺服器是**沒鎖**的——`console.warn` 讓它在 log 裡看得見。
+ *
+ * 為什麼只警告、不拒絕啟動:拒絕等於舊版 opencode 的使用者整個 OpenCode 功能壞掉,而 Deskmony 又沒辦法替 opencode 補上認證;
+ * 但靜默放過是更糟的選項——這道鎖原本就是為了擋「本機其他程序繞過權限引擎」,失效時至少要有跡可循。連線錯誤一律忽略
+ * (這只是事後的健全性檢查,不能讓它的任何失敗影響 session 建立)。
+ */
+async function warnIfServerUnsecured(baseUrl: string, agentLabel: string): Promise<void> {
+  try {
+    const res = await fetch(`${baseUrl}/global/health`);
+    if (res.ok) {
+      console.warn(
+        `[opencode-adapter] 警告:${agentLabel} 的 OpenCode server 沒有要求認證(不帶認證的請求得到 ${res.status})——這個 opencode 版本` +
+          "可能不支援 OPENCODE_SERVER_PASSWORD。本機其他程序可以直接呼叫它:替它核准權限請求(繞過政策引擎)、讀取設定裡的 session 網路 token。請升級 opencode。",
+      );
+    }
+  } catch {
+    // 只是健全性檢查,忽略。
+  }
+}
+
+async function postJson<T = unknown>(url: string, body: unknown, authorization: string): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: authHeaders(authorization, { "content-type": "application/json" }),
     body: JSON.stringify(body),
   });
   const text = await res.text();
@@ -1231,9 +1859,48 @@ async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
   return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
 }
 
+/** 2026-10-06:`DELETE`(命名用臨時 session 收尾用),錯誤處理比照 postJson()。 */
+async function deleteJson(url: string, authorization: string): Promise<void> {
+  const res = await fetch(url, { method: "DELETE", headers: authHeaders(authorization) });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new DeskmonyError(
+      "opencode.requestFailed",
+      { url, status: res.status, detail: text.slice(0, 500) },
+      `DELETE ${url} 失敗(status=${res.status}): ${text.slice(0, 500)}`,
+    );
+  }
+}
+
+/** postJson()/getJson() 丟出的「伺服器回了 404」(例如舊版 opencode 沒有 `prompt_async` 路由)。 */
+function isHttpNotFound(err: unknown): boolean {
+  return err instanceof DeskmonyError && err.code === "opencode.requestFailed" && err.params?.status === 404;
+}
+
+/** undici(Node 內建 `fetch`)因為「等回應等太久」而放棄的錯誤碼:`headersTimeout` 與 `bodyTimeout` 預設都是 300 秒。 */
+const UNDICI_WAIT_TIMEOUT_CODES: ReadonlySet<string> = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+
+/**
+ * 這個 `fetch` 失敗是不是 undici 的「等太久」逾時(`headersTimeout`/`bodyTimeout`,預設 300 秒)。`fetch` 把底層錯誤包成
+ * `TypeError("fetch failed")`,真正的錯誤碼在 `cause.code`(沿 `cause` 鏈往下找,最多五層,避免循環)。
+ *
+ * 只用在**本來就會阻塞到整輪結束**的請求(退路上的 `/message`、`/command`,見 `submitPrompt()`):那種請求等了 5 分鐘還沒
+ * 回應是正常的,不是送出失敗——回合狀態的唯一權威是 SSE。連線被拒(`ECONNREFUSED`)、重設(`ECONNRESET`)等其他錯誤不在此列,
+ * 仍然是真的失敗。
+ */
+export function isUndiciWaitTimeout(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && typeof current === "object" && current !== null; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && UNDICI_WAIT_TIMEOUT_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** 這輪(slash command)新增:比照上面 postJson() 的既有錯誤處理風格,補一個 GET 版本。 */
-async function getJson<T = unknown>(url: string): Promise<T> {
-  const res = await fetch(url);
+async function getJson<T = unknown>(url: string, authorization: string): Promise<T> {
+  const res = await fetch(url, { headers: authHeaders(authorization) });
   const text = await res.text();
   if (!res.ok) {
     throw new DeskmonyError(
@@ -1243,6 +1910,60 @@ async function getJson<T = unknown>(url: string): Promise<T> {
     );
   }
   return text.length > 0 ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/** `GET /config/providers` 用得到的部分(opencode 1.18.7 實測形狀,見檔案頂端「思考程度」段落)。 */
+interface OpencodeConfigProviders {
+  providers?: Array<{ id: string; models?: Record<string, { variants?: Record<string, unknown> }> }>;
+}
+
+/**
+ * 2026-10-06:查這個 opencode server 的 model 清單與各 model 的 variants。**永遠不丟例外**——查不到(舊版、e2e 替身沒有
+ * 這支端點……)回 undefined,呼叫端退回「不能選思考程度、不驗證 model」。預設 model 讀 `GET /config` 的 `model`
+ * (同一份設定裡有 Deskmony 自己注入的 `OPENCODE_CONFIG_CONTENT`,只在這個行程的記憶體裡讀,不外流)。
+ */
+async function fetchOpencodeModelCatalog(baseUrl: string, authorization: string, agentLabel: string): Promise<OpencodeModelCatalog | undefined> {
+  let providers: OpencodeConfigProviders;
+  try {
+    providers = await getJson<OpencodeConfigProviders>(`${baseUrl}/config/providers`, authorization);
+  } catch (err) {
+    console.error(
+      `[opencode-adapter] ${agentLabel} GET /config/providers 失敗(不影響對話,只是不能選思考程度): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
+  const variants = new Map<string, string[]>();
+  for (const provider of providers?.providers ?? []) {
+    for (const [modelId, model] of Object.entries(provider.models ?? {})) {
+      variants.set(`${provider.id}/${modelId}`, Object.keys(model?.variants ?? {}));
+    }
+  }
+  if (variants.size === 0) return undefined;
+  let defaultModel: string | undefined;
+  try {
+    const config = await getJson<{ model?: unknown }>(`${baseUrl}/config`, authorization);
+    if (typeof config?.model === "string" && config.model) defaultModel = config.model;
+  } catch {
+    // 沒有預設 model 只代表「沒指定 model 時不知道能選哪些思考程度」。
+  }
+  return { variants, defaultModel };
+}
+
+/**
+ * 2026-10-06:驗證建立時指定的 model / 思考程度,回傳要用的 variant。查不到清單時不驗證(舊行為),原樣採用指定的值。
+ * 指定了做不到的值 → 丟明確錯誤(呼叫端收掉子程序後往外丟,session 建立失敗)。
+ */
+function resolveLaunchVariant(launch: AgentLaunchSpec, catalog: OpencodeModelCatalog | undefined, agentLabel: string): string | undefined {
+  if (!catalog) return launch.effort;
+  if (launch.model && parseModelString(launch.model) && !catalog.variants.has(launch.model)) {
+    throw invalidOptionError("model", agentLabel, launch.model, [...catalog.variants.keys()]);
+  }
+  if (!launch.effort) return undefined;
+  const model = launch.model ?? catalog.defaultModel;
+  const variants = model ? (catalog.variants.get(model) ?? []) : [];
+  if (variants.length === 0) throw optionNotOfferedError("effort", agentLabel);
+  if (!variants.includes(launch.effort)) throw invalidOptionError("effort", agentLabel, launch.effort, variants);
+  return launch.effort;
 }
 
 /**

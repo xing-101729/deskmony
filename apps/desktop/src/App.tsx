@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import type { AgentOverride } from "@deskmony/shared";
-import { client, useSessionStore } from "./stores/session-store.js";
-import { useTeamStore } from "./stores/team-store.js";
+import { client, providerLabelOf, selectAvailableProviders, useSessionStore } from "./stores/session-store.js";
 import { useRecoveryStore } from "./stores/recovery-store.js";
 import { SessionList } from "./views/SessionList.js";
 import { SessionView } from "./views/SessionView.js";
-import { TeamChatView } from "./views/TeamChatView.js";
-import { TaskBoardView } from "./views/TaskBoardView.js";
 import { PermissionModal } from "./views/PermissionModal.js";
 import { ConnectScreen } from "./views/ConnectScreen.js";
 import { SettingsDialog } from "./views/SettingsDialog.js";
@@ -23,8 +19,14 @@ import { useFontScale } from "./ui/font-scale.js";
 import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 import { ConfirmDialogHost } from "./ui/ConfirmDialog.js";
 import { shortenPath } from "./lib/workspaces.js";
-
-export type ViewMode = "session" | "team-chat" | "task-board";
+import { translateError } from "./lib/error-i18n.js";
+import { displaySessionTitle } from "./views/SessionTitle.js";
+import {
+  loadNewSessionSelection,
+  reconcileSelection,
+  saveNewSessionSelection,
+  type NewSessionSelection,
+} from "./lib/new-session-selection.js";
 
 /**
  * M5 Round B(任務2):Electron renderer 由 preload.ts 透過 `contextBridge`
@@ -40,12 +42,13 @@ const hasElectronBridge = typeof window !== "undefined" && Boolean(window.deskmo
  * ---------------------------------------------------------------------------
  *
  * 改版前:一條頂列同時擠了連線狀態、產品名、中斷提示、三個視圖切換鈕、設定、
- * 登出;側欄只有一條扁平的 session 清單。問題是「導覽」與「狀態」混在同一列,
+ * 登出;側欄只有一條扁平的 session 清單。(2026-10-02:三個視圖裡的團隊群聊與
+ * 任務看板已移除,見 docs/DECISIONS.md §H,只剩 session 視圖,視圖切換整個拿掉。)問題是「導覽」與「狀態」混在同一列,
  * 而永遠健康的東西(連線正常)卻永久佔著位置。
  *
  * 改版後(對齊 Linear / Cursor 的作法):
- *   - **導覽全部進側欄**(見 views/SessionList.tsx):視圖切換 → 工作區 →
- *     session,形成三層可掃視的階層;每個視圖自己的標頭負責「這個畫面的」標題
+ *   - **導覽全部進側欄**(見 views/SessionList.tsx):工作區 → session,
+ *     形成可掃視的階層;視圖自己的標頭負責「這個畫面的」標題
  *     與動作,不再與全域導覽競爭。
  *   - **頂部不再有常駐列**:改成「只有異常時才出現」的提示條(連線中斷、有
  *     中斷的 session 待分流)。健康狀態下整個垂直空間都留給內容——這是提高
@@ -53,18 +56,19 @@ const hasElectronBridge = typeof window !== "undefined" && Boolean(window.deskmo
  *   - **命令面板(⌘K)+ 全域快捷鍵**:所有導覽與常用動作都能不碰滑鼠完成。
  *
  * 行為完全不變:Electron 自動連線、瀏覽器先走 ConnectScreen、通知點擊聚焦
- * session、三個視圖與所有彈窗的觸發條件都與改版前一致。
+ * session、所有彈窗的觸發條件都與改版前一致。
  */
 export default function App(): JSX.Element {
   const { t } = useTranslation(["app", "common"]);
   const connect = useSessionStore((s) => s.connect);
   const status = useSessionStore((s) => s.status);
   const sessions = useSessionStore((s) => s.sessions);
-  const profiles = useSessionStore((s) => s.profiles);
+  const detectedAgents = useSessionStore((s) => s.detectedAgents);
+  const providerPrefs = useSessionStore((s) => s.providerPrefs);
+  const effectiveConfig = useSessionStore((s) => s.effectiveConfig);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const selectSession = useSessionStore((s) => s.selectSession);
   const createSession = useSessionStore((s) => s.createSession);
-  const initTeams = useTeamStore((s) => s.init);
   const initRecovery = useRecoveryStore((s) => s.init);
   const interruptedSessions = useRecoveryStore((s) => s.sessions);
   const themePreference = useTheme((s) => s.preference);
@@ -74,85 +78,101 @@ export default function App(): JSX.Element {
   const decreaseFontScale = useFontScale((s) => s.decrease);
   const resetFontScale = useFontScale((s) => s.reset);
 
-  const [viewMode, setViewMode] = useState<ViewMode>("session");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [browserReady, setBrowserReady] = useState(hasElectronBridge);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   /**
-   * 建立 session 用的 profile 選擇 —— 改版時從 SessionList 提升到這一層,因為
-   * 現在有**兩個**入口會用到它(側欄的「新對話」按鈕、命令面板的「新對話」
-   * 指令),兩者必須共用同一個「目前選了哪個 profile」,否則⌘N 建出來的 session
-   * 會與側欄下拉顯示的不一致。
+   * 2026-10-02(P2:移除 profile):建立 session 用的 agent/model/effort/資料夾選擇——取代原本的
+   * 「選哪個 profile」。改版時從 SessionList 提升到這一層,因為有**三個**入口會用到它(側欄的
+   * 「新對話」按鈕、`⌘N`、命令面板的「新對話」指令),必須共用同一份選擇,否則⌘N 建出來的 session
+   * 會與側欄下拉顯示的不一致。上次的選擇存 localStorage(見 lib/new-session-selection.ts),下次開 app 還原。
    */
-  const [selectedProfileId, setSelectedProfileId] = useState<string>("");
+  const [selection, setSelection] = useState<NewSessionSelection>(loadNewSessionSelection);
   const [creatingSession, setCreatingSession] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!hasElectronBridge) return; // 瀏覽器場景:等 ConnectScreen 驗證成功才連線
     connect();
-    initTeams();
     initRecovery();
-  }, [connect, initTeams, initRecovery]);
+  }, [connect, initRecovery]);
 
   /**
    * S11(Notification):使用者點擊桌面原生通知後,main process 透過
-   * `deskmony:notification-clicked` 把對應的 `sessionId` 轉發過來——切回
-   * 「Session 視圖」並聚焦到那個 session。純瀏覽器場景沒有
+   * `deskmony:notification-clicked` 把對應的 `sessionId` 轉發過來——聚焦到
+   * 那個 session。純瀏覽器場景沒有
    * `onNotificationClick`,這個 effect 直接 no-op。
    */
   useEffect(() => {
     const unsubscribe = window.deskmony?.onNotificationClick?.((sessionId) => {
-      setViewMode("session");
       void useSessionStore.getState().selectSession(sessionId);
     });
     return unsubscribe;
   }, []);
 
-  // profiles 是非同步載入的;第一次拿到清單、或目前選取的 profile 不再存在時,
-  // 自動選第一筆(邏輯與改版前 SessionList 內的同名 effect 相同)。
-  useEffect(() => {
-    if (profiles.length === 0) return;
-    if (!selectedProfileId || !profiles.some((p) => p.id === selectedProfileId)) {
-      setSelectedProfileId(profiles[0].id);
-    }
-  }, [profiles, selectedProfileId]);
-
-  const selectedProfile = profiles.find((p) => p.id === selectedProfileId);
-
-  /** agentOverride 選填——⌘N/命令面板呼叫時省略(維持既有「一鍵用目前 profile
-   *  建立」的快速路徑不變);SessionList 的「進階」揭露區展開並選了覆寫時,由
-   *  按鈕點擊那條路徑帶入,見該檔案 onCreateSession 的呼叫處。 */
-  const handleCreateSession = useCallback(
-    async (agentOverride?: AgentOverride): Promise<void> => {
-      const profile = selectedProfile ?? profiles[0];
-      if (!profile) return;
-      setCreatingSession(true);
-      try {
-        await createSession(profile.id, profile.workingDir, t("app:sessionDefaultTitle", { n: sessions.length + 1 }), undefined, agentOverride);
-        setViewMode("session");
-      } finally {
-        setCreatingSession(false);
-      }
-    },
-    [createSession, profiles, selectedProfile, sessions.length, t],
+  // 偵測結果是非同步載入的;把(可能過時的)選擇對齊到「現在真的可用」的 agent 清單——被停用/移除的 agent
+  // 會自動退回第一個可用的(邏輯等同改版前「profile 不再存在時自動選第一筆」)。
+  const availableProviders = useMemo(
+    () => selectAvailableProviders(detectedAgents, providerPrefs),
+    [detectedAgents, providerPrefs],
   );
+  const effectiveSelection = useMemo(
+    () => reconcileSelection(selection, availableProviders),
+    [selection, availableProviders],
+  );
+  const handleChangeSelection = useCallback((next: NewSessionSelection): void => {
+    setSelection(next);
+    saveNewSessionSelection(next);
+  }, []);
+
+  /** 新對話預設的工作資料夾:使用者在選單裡指定的 > core 的 `workspace.defaultWorkingDir` > 目前 session 的資料夾。 */
+  const defaultWorkingDir = effectiveConfig?.workspace.defaultWorkingDir.value ?? "";
+  const resolveWorkingDir = useCallback(
+    (): string =>
+      effectiveSelection.workingDir.trim() ||
+      defaultWorkingDir ||
+      sessions.find((x) => x.id === currentSessionId)?.workingDir ||
+      "",
+    [currentSessionId, defaultWorkingDir, effectiveSelection.workingDir, sessions],
+  );
+
+  const handleCreateSession = useCallback(async (): Promise<void> => {
+    const providerId = availableProviders.find((p) => p.id === effectiveSelection.providerId)?.id;
+    const workingDir = resolveWorkingDir();
+    if (!providerId || !workingDir) return;
+    setCreatingSession(true);
+    setCreateError(null);
+    try {
+      // 2026-10-06:不帶標題——core 用預設標題(titleSource "default"),第一則訊息送出後自動命名;
+      // 帶了標題就會被當成使用者取的名字,永遠不會自動命名。
+      await createSession({
+        providerId,
+        workingDir,
+        model: effectiveSelection.model || undefined,
+        effort: effectiveSelection.effort || undefined,
+      });
+    } catch (err) {
+      // agent 沒裝/被停用/啟動失敗等:顯示在側欄「新對話」按鈕下方,不要讓 promise 無聲地 reject。
+      setCreateError(translateError(err, t));
+    } finally {
+      setCreatingSession(false);
+    }
+  }, [availableProviders, createSession, effectiveSelection, resolveWorkingDir, t]);
 
   const handleConnected = (url: string, token: string): void => {
     client.configure(url, token);
     connect();
-    initTeams();
     initRecovery();
     setBrowserReady(true);
   };
 
   const handleLogout = (): void => {
     clearSavedConnection();
-    // 整頁重新整理回到最單純的初始狀態(WS 連線正確關閉、session/team/task
-    // 三個 store 的殘留資料一併清空),比逐一手動重置每個 store 簡單可靠。
+    // 整頁重新整理回到最單純的初始狀態(WS 連線正確關閉、各個 store 的殘留
+    // 資料一併清空),比逐一手動重置每個 store 簡單可靠。
     window.location.reload();
   };
 
@@ -163,7 +183,6 @@ export default function App(): JSX.Element {
       if (ordered.length === 0) return;
       const index = ordered.findIndex((s) => s.id === currentSessionId);
       const next = ordered[(index + delta + ordered.length) % ordered.length];
-      setViewMode("session");
       void selectSession(next.id);
     },
     [currentSessionId, selectSession, sessions],
@@ -174,9 +193,6 @@ export default function App(): JSX.Element {
       () => [
         { combo: "mod+k", handler: () => setPaletteOpen(true), allowInTerminal: true },
         { combo: "mod+shift+p", handler: () => setPaletteOpen(true), allowInTerminal: true },
-        { combo: "mod+1", handler: () => setViewMode("session") },
-        { combo: "mod+2", handler: () => setViewMode("team-chat") },
-        { combo: "mod+3", handler: () => setViewMode("task-board") },
         { combo: "mod+b", handler: () => setSidebarCollapsed((collapsed) => !collapsed) },
         { combo: "mod+n", handler: () => void handleCreateSession() },
         { combo: "mod+,", handler: () => setSettingsOpen(true) },
@@ -201,51 +217,18 @@ export default function App(): JSX.Element {
   const commands = useMemo<Command[]>(() => {
     const list: Command[] = [
       {
-        id: "view:session",
-        group: t("app:commands.groupGoto"),
-        title: t("app:commands.viewSession.title"),
-        icon: "message",
-        hint: `${MOD_LABEL}1`,
-        keywords: t("app:commands.viewSession.keywords"),
-        run: () => setViewMode("session"),
-      },
-      {
-        id: "view:team-chat",
-        group: t("app:commands.groupGoto"),
-        title: t("app:commands.viewTeamChat.title"),
-        icon: "users",
-        hint: `${MOD_LABEL}2`,
-        keywords: t("app:commands.viewTeamChat.keywords"),
-        run: () => setViewMode("team-chat"),
-      },
-      {
-        id: "view:task-board",
-        group: t("app:commands.groupGoto"),
-        title: t("app:commands.viewTaskBoard.title"),
-        icon: "board",
-        hint: `${MOD_LABEL}3`,
-        keywords: t("app:commands.viewTaskBoard.keywords"),
-        run: () => setViewMode("task-board"),
-      },
-      {
         id: "action:new-session",
         group: t("app:commands.groupActions"),
         title: t("app:commands.newSession.title"),
-        subtitle: selectedProfile
-          ? t("app:commands.newSession.subtitleWithProfile", { name: selectedProfile.name })
-          : t("app:commands.newSession.subtitleNoProfile"),
+        subtitle: availableProviders.some((p) => p.id === effectiveSelection.providerId)
+          ? t("app:commands.newSession.subtitleWithAgent", {
+              name: providerLabelOf(effectiveSelection.providerId, detectedAgents, providerPrefs),
+            })
+          : t("app:commands.newSession.subtitleNoAgent"),
         icon: "plus",
         hint: `${MOD_LABEL}N`,
         keywords: t("app:commands.newSession.keywords"),
         run: () => void handleCreateSession(),
-      },
-      {
-        id: "action:new-profile",
-        group: t("app:commands.groupActions"),
-        title: t("app:commands.newProfile.title"),
-        icon: "sparkle",
-        keywords: t("app:commands.newProfile.keywords"),
-        run: () => setProfileDialogOpen(true),
       },
       {
         id: "action:settings",
@@ -331,12 +314,11 @@ export default function App(): JSX.Element {
       list.push({
         id: `session:${session.id}`,
         group: t("app:commands.groupSessions"),
-        title: session.title,
+        title: displaySessionTitle(session, t),
         subtitle: shortenPath(session.workingDir ?? ""),
         status: sessionStatusMeta(session.status),
         keywords: `${session.adapterType} ${session.workingDir ?? ""}`,
         run: () => {
-          setViewMode("session");
           void selectSession(session.id);
         },
       });
@@ -351,7 +333,10 @@ export default function App(): JSX.Element {
     resetFontScale,
     resolvedTheme,
     selectSession,
-    selectedProfile,
+    availableProviders,
+    detectedAgents,
+    effectiveSelection.providerId,
+    providerPrefs,
     sessions,
     sidebarCollapsed,
     toggleTheme,
@@ -419,15 +404,14 @@ export default function App(): JSX.Element {
           onCloseMobile={() => setSidebarOpen(false)}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
-          viewMode={viewMode}
-          onChangeView={setViewMode}
           connectionStatus={status}
-          selectedProfileId={selectedProfileId}
-          onSelectProfile={setSelectedProfileId}
-          onCreateSession={(override) => void handleCreateSession(override)}
+          selection={selection}
+          onChangeSelection={handleChangeSelection}
+          defaultWorkingDir={defaultWorkingDir}
+          onCreateSession={() => void handleCreateSession()}
           creatingSession={creatingSession}
-          profileDialogOpen={profileDialogOpen}
-          onSetProfileDialogOpen={setProfileDialogOpen}
+          createError={createError}
+          onDismissCreateError={() => setCreateError(null)}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
           themePreference={themePreference}
@@ -442,21 +426,9 @@ export default function App(): JSX.Element {
           仍然可用。`resetKey` 綁 currentSessionId:切到別的 session 會自動清掉
           錯誤狀態,不會一路卡著同一張錯誤畫面。
         */}
-        {viewMode === "session" && (
-          <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
-            <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
-          </ErrorBoundary>
-        )}
-        {viewMode === "team-chat" && (
-          <ErrorBoundary label="團隊群聊">
-            <TeamChatView onOpenSidebar={() => setSidebarOpen(true)} />
-          </ErrorBoundary>
-        )}
-        {viewMode === "task-board" && (
-          <ErrorBoundary label="任務看板">
-            <TaskBoardView onOpenSidebar={() => setSidebarOpen(true)} />
-          </ErrorBoundary>
-        )}
+        <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
+          <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
+        </ErrorBoundary>
       </div>
 
       {/* 對話框各自也包一層:一個對話框壞掉不該把底下的主畫面一起帶走。 */}

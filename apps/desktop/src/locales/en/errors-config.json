@@ -1,0 +1,6 @@
+{
+  "config": {
+    "patchWriteFailed": "The config file ({{configPath}}) could not be parsed; refusing to write in order to avoid overwriting its existing content: {{detail}}",
+    "policyRuleWriteFailed": "The config file ({{configPath}}) could not be parsed; refusing to write the rule in order to avoid overwriting its existing content: {{detail}}"
+  }
+}

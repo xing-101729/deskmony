@@ -91,10 +91,8 @@ function field<T>(value: T, source: ConfigSource): { value: T; source: ConfigSou
  *     (`options.defaultStaticDir`,見上方 `LoadConfigOptions` 註解)——這裡用
  *     `undefined` 表示「維持這個算法」,實際字串在 index.ts 組裝最終
  *     `config.features.staticDir` 前才會補上。
- *   - `workspace.worktreesRoot` 沒有對應的舊行為預設值——這是全新欄位,
- *     `undefined` 代表「維持 WorkspaceManager 既有的動態算法」(見
- *     packages/shared/src/core-config.ts 的 `WorkspaceConfigSchema` 註解),
- *     是一個合法的「使用預設演算法」值,不是「還沒算出來」。
+ *   - (2026-10-02:原本還有 `workspace.worktreesRoot`——任務 worktree 根目錄,
+ *     只有已移除的 WorkspaceManager 讀——見 docs/DECISIONS.md §H。)
  */
 function computeDefaultCoreConfig(): CoreConfig {
   return {
@@ -107,7 +105,6 @@ function computeDefaultCoreConfig(): CoreConfig {
     },
     workspace: {
       defaultWorkingDir: os.homedir(),
-      worktreesRoot: undefined,
     },
     data: {
       dataDir: path.join(os.homedir(), ".deskmony"),
@@ -135,7 +132,6 @@ function computeDefaultCoreConfig(): CoreConfig {
     // S3b(CostGovernor):沒有設定檔時 = 只有回合硬上限生效(見
     // packages/shared/src/core-config.ts 的 `PURE_DEFAULT_CORE_CONFIG.budget` 註解)。
     budget: {
-      task: {},
       daily: {},
       turn: { maxDurationMs: 30 * 60_000, maxToolCalls: 200 },
       warnAtPercent: 80,
@@ -171,7 +167,7 @@ const KNOWN_CONFIG_KEYS: Record<string, true | Record<string, unknown>> = {
     permissionTimeoutMs: true,
     authRateLimit: { max: true, cooldownMs: true },
   },
-  workspace: { defaultWorkingDir: true, worktreesRoot: true },
+  workspace: { defaultWorkingDir: true },
   data: { dataDir: true },
   features: { staticDir: true },
   log: { level: true },
@@ -192,7 +188,6 @@ const KNOWN_CONFIG_KEYS: Record<string, true | Record<string, unknown>> = {
   },
   // S3b(CostGovernor):與 policy/notification 同等對待——白名單樹狀結構。
   budget: {
-    task: { maxCostUsd: true, maxTokens: true },
     daily: { maxCostUsd: true, maxTokens: true },
     turn: { maxDurationMs: true, maxToolCalls: true },
     warnAtPercent: true,
@@ -385,10 +380,6 @@ function applyEnvOverrides(
   const defaultWorkingDir = envWorkspace !== undefined ? envWorkspace : afterFile.workspace.defaultWorkingDir;
   const defaultWorkingDirSource: ConfigSource = envWorkspace !== undefined ? "env" : src("workspace.defaultWorkingDir");
 
-  // ---- workspace.worktreesRoot(沒有對應環境變數,只有 file/default 兩層)----
-  const worktreesRoot = afterFile.workspace.worktreesRoot;
-  const worktreesRootSource: ConfigSource = src("workspace.worktreesRoot");
-
   // ---- data.dataDir ----
   // 舊行為(db.ts):`process.env.DESKMONY_DATA_DIR ?? path.join(os.homedir(), ".deskmony")`,
   // 同樣是 `??` 語意,逐字複製。
@@ -435,10 +426,6 @@ function applyEnvOverrides(
   // ---- budget.*(S3b:CostGovernor,沒有對應環境變數,只有 file/default 兩層
   // ——理由與 policy/notification 相同:安全罩本身不透過環境變數覆寫,只能靠
   // 本機編輯設定檔,見 core-config.ts 的 `ConfigSetFilePatchSchema` 註解與 F4)。
-  const budgetTaskMaxCostUsd = afterFile.budget.task.maxCostUsd;
-  const budgetTaskMaxCostUsdSource: ConfigSource = src("budget.task.maxCostUsd");
-  const budgetTaskMaxTokens = afterFile.budget.task.maxTokens;
-  const budgetTaskMaxTokensSource: ConfigSource = src("budget.task.maxTokens");
   const budgetDailyMaxCostUsd = afterFile.budget.daily.maxCostUsd;
   const budgetDailyMaxCostUsdSource: ConfigSource = src("budget.daily.maxCostUsd");
   const budgetDailyMaxTokens = afterFile.budget.daily.maxTokens;
@@ -469,7 +456,7 @@ function applyEnvOverrides(
       permissionTimeoutMs,
       authRateLimit: { max: authRateLimitMax, cooldownMs: authRateLimitCooldownMs },
     },
-    workspace: { defaultWorkingDir, worktreesRoot },
+    workspace: { defaultWorkingDir },
     data: { dataDir },
     features: { staticDir },
     log: { level: logLevel },
@@ -485,7 +472,6 @@ function applyEnvOverrides(
       quietHours: notificationQuietHours,
     },
     budget: {
-      task: { maxCostUsd: budgetTaskMaxCostUsd, maxTokens: budgetTaskMaxTokens },
       daily: { maxCostUsd: budgetDailyMaxCostUsd, maxTokens: budgetDailyMaxTokens },
       turn: { maxDurationMs: budgetTurnMaxDurationMs, maxToolCalls: budgetTurnMaxToolCalls },
       warnAtPercent: budgetWarnAtPercent,
@@ -510,7 +496,6 @@ function applyEnvOverrides(
     },
     workspace: {
       defaultWorkingDir: field(defaultWorkingDir, defaultWorkingDirSource),
-      worktreesRoot: field(worktreesRoot, worktreesRootSource),
     },
     data: { dataDir: field(dataDir, dataDirSource) },
     features: { staticDir: field(staticDir, staticDirSource) },
@@ -530,10 +515,6 @@ function applyEnvOverrides(
       quietHours: field(notificationQuietHours, notificationQuietHoursSource),
     },
     budget: {
-      task: {
-        maxCostUsd: field(budgetTaskMaxCostUsd, budgetTaskMaxCostUsdSource),
-        maxTokens: field(budgetTaskMaxTokens, budgetTaskMaxTokensSource),
-      },
       daily: {
         maxCostUsd: field(budgetDailyMaxCostUsd, budgetDailyMaxCostUsdSource),
         maxTokens: field(budgetDailyMaxTokens, budgetDailyMaxTokensSource),
@@ -579,7 +560,6 @@ function mergeFileOverDefaults(
     },
     budget: {
       ...defaults.budget,
-      task: { ...defaults.budget.task },
       daily: { ...defaults.budget.daily },
       turn: { ...defaults.budget.turn },
       modelPricing: { ...defaults.budget.modelPricing },
@@ -611,10 +591,6 @@ function mergeFileOverDefaults(
     merged.workspace.defaultWorkingDir = file.workspace.defaultWorkingDir;
     fileSources["workspace.defaultWorkingDir"] = "file";
   }
-  if (file.workspace?.worktreesRoot !== undefined) {
-    merged.workspace.worktreesRoot = file.workspace.worktreesRoot;
-    fileSources["workspace.worktreesRoot"] = "file";
-  }
   if (file.data?.dataDir !== undefined) {
     merged.data.dataDir = file.data.dataDir;
     fileSources["data.dataDir"] = "file";
@@ -629,8 +605,7 @@ function mergeFileOverDefaults(
   }
   // S1(PolicyEngine):整批取代(不是逐條規則合併)——使用者在 config.json 寫
   // 的 `policy.rules`/`policy.allowedHosts` 就是最終清單,不會與 defaults 的
-  // 空陣列合併出奇怪的疊加結果(比照 `workspace.worktreesRoot` 這種「提供時
-  // 整批取代」的既有慣例)。
+  // 空陣列合併出奇怪的疊加結果(「提供時整批取代」)。
   if (file.policy?.rules !== undefined) {
     merged.policy.rules = file.policy.rules;
     fileSources["policy.rules"] = "file";
@@ -671,14 +646,6 @@ function mergeFileOverDefaults(
   // `modelPricing`,那是「整批取代」(使用者在 config.json 寫的定價表就是最終
   // 清單,不與 defaults 的空物件合併出奇怪的疊加結果,比照 `policy.rules` 的
   // 既有慣例)。
-  if (file.budget?.task?.maxCostUsd !== undefined) {
-    merged.budget.task.maxCostUsd = file.budget.task.maxCostUsd;
-    fileSources["budget.task.maxCostUsd"] = "file";
-  }
-  if (file.budget?.task?.maxTokens !== undefined) {
-    merged.budget.task.maxTokens = file.budget.task.maxTokens;
-    fileSources["budget.task.maxTokens"] = "file";
-  }
   if (file.budget?.daily?.maxCostUsd !== undefined) {
     merged.budget.daily.maxCostUsd = file.budget.daily.maxCostUsd;
     fileSources["budget.daily.maxCostUsd"] = "file";

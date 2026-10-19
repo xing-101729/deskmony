@@ -1,9 +1,10 @@
 import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentProfile, EffortLevel, Session, SlashCommandInfo } from "@deskmony/shared";
-import { PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
+import type { MessageOrigin, Session, SessionOptionChoice, SlashCommandInfo } from "@deskmony/shared";
+import { EffortLevelSchema, PromptImageMediaTypeSchema, type PromptImageMediaType } from "@deskmony/shared";
 import {
   useSessionStore,
+  providerLabelOf,
   selectProviderModels,
   selectUsageReporting,
   type ChatItem,
@@ -15,9 +16,8 @@ import { IconButton } from "../ui/Button.js";
 import { Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
-import { Meter } from "../ui/Feedback.js";
 import { shortenPath } from "../lib/workspaces.js";
-import { resolveSystemEventText } from "../lib/system-events.js";
+import { resolveSystemEventText, systemEventTone, type SystemEventTone } from "../lib/system-events.js";
 // 2026-09-04(稽核修補):ModelControl/EffortControl 的錯誤訊息原本繞過了
 // translateError(),在非中文介面會顯示未翻譯的原文——與 app 其餘幾乎所有
 // 錯誤處理不一致(那些在 error-i18n 重構時都改過了,這兩處被漏掉)。
@@ -27,6 +27,8 @@ import { TodoListView, parseTodoWriteInput } from "./chat/TodoListView.js";
 import { DiffHunkView, parseDiffResult } from "./chat/DiffHunkView.js";
 import { ToolImage, parseImageBlock } from "./chat/ToolImage.js";
 import { AskUserQuestionWidget, PendingUserDialogsDock, isQuestionToolName } from "./chat/AskUserQuestionWidget.js";
+import { ForwardMessageDialog } from "./chat/ForwardMessageDialog.js";
+import { SessionTitleHeading } from "./SessionTitle.js";
 
 /**
  * 2026-09-04(稽核修補):「沒有選中 session」時 `items` selector 的固定回傳值。
@@ -37,16 +39,23 @@ import { AskUserQuestionWidget, PendingUserDialogsDock, isQuestionToolName } fro
  */
 const EMPTY_ITEMS: readonly ChatItem[] = [];
 
+/** 系統訊息泡泡各色調的底色/文字色(色調怎麼決定見 `systemEventTone()`)。 */
+const SYSTEM_TONE_CLASS: Record<SystemEventTone, string> = {
+  info: "bg-info/10 text-info",
+  warn: "bg-warn/10 text-warn",
+  danger: "bg-danger/10 text-danger",
+};
+
 /**
- * 顯示目前 session 的 model,並(`software="claude-agent-sdk"` 或
- * `"opencode"`)提供切換用的下拉選單(功能3d)。兩者的 `AgentAdapter.
- * setModel()` 實作方式不同(前者呼叫 SDK 官方 API,後者是 adapter 內部的
- * session 覆寫,下一則訊息才生效),但對這裡是同一個 `session.setModel`
- * gateway 呼叫,不需要分流處理,見 packages/adapters/src/types.ts 的介面
- * 註解。acp/pty/codex 的 model 由外部 agent/CLI 自行管理,這裡只顯示唯讀
- * 資訊,不提供切換控制。
+ * 顯示目前 session 的 model,並提供切換用的下拉選單(功能3d)。選項來源:
+ *   - agent 自己回報了 model 選項(`session.options.model`,2026-10-06 起:ACP agent 的 `configOptions`,
+ *     見 packages/shared/src/session-options.ts)→ 用 agent 給的清單。
+ *   - `software="claude-agent-sdk"` 或 `"opencode"` → provider 目錄的清單(偵測結果 + 使用者偏好)。
+ * 兩者的 `AgentAdapter.setModel()` 實作方式不同,但對這裡是同一個 `session.setModel` gateway 呼叫,
+ * 不需要分流處理,見 packages/adapters/src/types.ts 的介面註解。其餘(pty、沒宣告 model 選項的 ACP agent、
+ * 沒在跑的 ACP session)只顯示唯讀資訊。
  */
-function ModelControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element {
+function ModelControl({ session }: { session: Session }): JSX.Element {
   const { t } = useTranslation(["chat"]);
   const setSessionModel = useSessionStore((s) => s.setSessionModel);
   const enabledModelIds = useSessionStore((s) => s.enabledModelIds);
@@ -55,17 +64,19 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 注意:`selectProviderModels()` 本身是通用邏輯(依 profile.providerId 查
-  // resolveProviders() 的結果),不是 Claude 專屬——opencode profile 只要是
-  // 透過 ProfileCreateDialog 目前的流程建立(帶 providerId="opencode"),這裡
-  // 就能拿到 `opencode models` 偵測到的清單,變數名稱維持通用命名。
+  // 注意:`selectProviderModels()` 本身是通用邏輯(依 session.providerId 查
+  // resolveProviders() 的結果),不是 Claude 專屬——opencode session 只要是
+  // 用 providerId="opencode" 建立,這裡就能拿到 `opencode models` 偵測到的清單,
+  // 變數名稱維持通用命名。
   const availableModels = useMemo(
-    () => selectProviderModels(profile, detectedAgents, providerPrefs, enabledModelIds),
-    [profile, detectedAgents, providerPrefs, enabledModelIds],
+    () => selectProviderModels(session, detectedAgents, providerPrefs, enabledModelIds),
+    [session, detectedAgents, providerPrefs, enabledModelIds],
   );
 
-  const supportsModelSwitch = session.adapterType === "claude-agent-sdk" || session.adapterType === "opencode";
-  const currentModel = session.model ?? profile?.model ?? "";
+  const agentModelOption = session.options?.model;
+  const supportsModelSwitch =
+    Boolean(agentModelOption) || session.adapterType === "claude-agent-sdk" || session.adapterType === "opencode";
+  const currentModel = session.model ?? agentModelOption?.current ?? "";
 
   const handleChange = async (model: string): Promise<void> => {
     if (!model || model === currentModel) return;
@@ -88,11 +99,11 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
     );
   }
 
-  const knownIds = new Set(availableModels.map((m) => m.id));
-  const options =
-    currentModel && !knownIds.has(currentModel)
-      ? [{ id: currentModel, label: currentModel }, ...availableModels]
-      : availableModels;
+  const listed = agentModelOption
+    ? agentModelOption.choices.map((c) => ({ id: c.value, label: c.label }))
+    : availableModels.map((m) => ({ id: m.id, label: m.label }));
+  const knownIds = new Set(listed.map((m) => m.id));
+  const options = currentModel && !knownIds.has(currentModel) ? [{ id: currentModel, label: currentModel }, ...listed] : listed;
 
   return (
     <div className="flex items-center gap-1.5">
@@ -120,24 +131,27 @@ function ModelControl({ session, profile }: { session: Session; profile: AgentPr
 }
 
 /**
- * 比照上面的 `ModelControl`,但更簡單:思考程度固定 5 個等級,不需要 provider
- * 偵測清單(見 packages/shared/src/agent-profile.ts 的 `EffortLevelSchema`
- * 註解)。只有 `claude-agent-sdk` 驗證支援這個能力——
- * `session.adapterType !== "claude-agent-sdk"` 時直接 `return null`,不像
- * `ModelControl` 對 acp/pty 顯示唯讀 badge:「思考程度」對那些 adapter 根本
- * 不是一個存在的概念,不需要顯示任何東西。
+ * 比照上面的 `ModelControl`:思考程度。選項來源(2026-10-06 起不只 Claude):
+ *   - agent 自己回報了思考程度選項(`session.options.effort`:ACP 的 `thought_level`、OpenCode 目前 model 的
+ *     variants)→ 用 agent 給的清單(隨 model 變動,agent 會重新回報)。
+ *   - `claude-agent-sdk` → Claude 的固定 5 級(`EffortLevelSchema`)。
+ * 其餘直接 `return null`,不像 `ModelControl` 顯示唯讀 badge——這個 session 不能選思考程度,不需要顯示任何東西。
  */
-function EffortControl({ session, profile }: { session: Session; profile: AgentProfile | undefined }): JSX.Element | null {
+function EffortControl({ session }: { session: Session }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
   const setSessionEffort = useSessionStore((s) => s.setSessionEffort);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (session.adapterType !== "claude-agent-sdk") return null;
+  const choices: SessionOptionChoice[] | undefined =
+    session.options?.effort?.choices ??
+    (session.adapterType === "claude-agent-sdk" ? EffortLevelSchema.options.map((v) => ({ value: v, label: v })) : undefined);
+  if (!choices || choices.length === 0) return null;
 
-  const currentEffort = session.effort ?? profile?.effort ?? "";
+  const currentEffort = session.effort ?? "";
+  const listed = currentEffort && !choices.some((c) => c.value === currentEffort) ? [{ value: currentEffort, label: currentEffort }, ...choices] : choices;
 
-  const handleChange = async (effort: EffortLevel | ""): Promise<void> => {
+  const handleChange = async (effort: string): Promise<void> => {
     if (!effort || effort === currentEffort) return;
     setSwitching(true);
     setError(null);
@@ -155,16 +169,16 @@ function EffortControl({ session, profile }: { session: Session; profile: AgentP
       <Select
         aria-label={t("chat:effort.switchAriaLabel")}
         value={currentEffort}
-        onChange={(e) => void handleChange(e.target.value as EffortLevel | "")}
+        onChange={(e) => void handleChange(e.target.value)}
         disabled={switching}
         className="!h-6 !text-2xs"
       >
         {!currentEffort && <option value="">{t("chat:control.notSpecifiedOption")}</option>}
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-        <option value="xhigh">xhigh</option>
-        <option value="max">max</option>
+        {listed.map((c) => (
+          <option key={c.value} value={c.value} title={c.description}>
+            {c.label}
+          </option>
+        ))}
       </Select>
       {error && (
         <span className="text-2xs text-danger" title={error}>
@@ -293,28 +307,14 @@ function UsageBadge({ session }: { session: Session }): JSX.Element | null {
   );
 }
 
-/** 依「$ 為主、token 兜底」規則(HLD §3.2)算出目前用了幾成。 */
-function budgetPercentForDisplay(
-  rollup: { costAmount: number; costCurrency?: string; inputTokens: number; outputTokens: number },
-  limits: { maxCostUsd?: number; maxTokens?: number },
-): number | undefined {
-  if (limits.maxCostUsd !== undefined && rollup.costCurrency !== undefined) {
-    return (rollup.costAmount / limits.maxCostUsd) * 100;
-  }
-  if (limits.maxTokens !== undefined) {
-    return ((rollup.inputTokens + rollup.outputTokens) / limits.maxTokens) * 100;
-  }
-  return undefined;
-}
-
 /**
- * S3b(CostGovernor)§7:標頭顯示累計與預算餘量。只有 `task`(綁定任務有設
- * 預算)與 `dailyTripped`(今日 kill-switch 已觸發)兩種情況會渲染。
+ * S3b(CostGovernor)§7:標頭顯示預算狀態。只有 `dailyTripped`(今日 kill-switch
+ * 已觸發)會渲染。(2026-10-02:原本還有 `task`——綁定任務的預算餘量與 trip,
+ * 任務預算已隨 task 移除,見 docs/DECISIONS.md §H。)
  */
 function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null {
   const { t } = useTranslation(["chat"]);
   const summary = useSessionStore((s) => s.costSummaryBySession[session.id]);
-  const effectiveConfig = useSessionStore((s) => s.effectiveConfig);
   const fetchCostSummary = useSessionStore((s) => s.fetchCostSummary);
 
   useEffect(() => {
@@ -322,42 +322,13 @@ function CostBudgetBadge({ session }: { session: Session }): JSX.Element | null 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
 
-  if (!summary || !effectiveConfig) return null;
-  const budget = effectiveConfig.budget;
-
-  const parts: Array<{ label: string; tripped: boolean; percent?: number }> = [];
-  if (summary.task) {
-    if (summary.task.tripped) {
-      parts.push({ label: t("chat:cost.taskTrippedLabel", { title: summary.task.title }), tripped: true });
-    } else {
-      const percent = budgetPercentForDisplay(summary.task.rollup, {
-        maxCostUsd: budget.task.maxCostUsd.value,
-        maxTokens: budget.task.maxTokens.value,
-      });
-      if (percent !== undefined) {
-        parts.push({ label: t("chat:cost.taskBudgetPercentLabel", { percent: Math.min(100, Math.round(percent)) }), tripped: false, percent });
-      }
-    }
-  }
-  if (summary.dailyTripped) {
-    parts.push({ label: t("chat:cost.dailyTrippedLabel"), tripped: true });
-  }
-
-  if (parts.length === 0) return null;
+  if (!summary?.dailyTripped) return null;
 
   return (
     <div className="flex items-center gap-1.5">
-      {parts.map((part) => (
-        <div key={part.label} className="flex items-center gap-1.5">
-          {part.percent !== undefined && <Meter percent={part.percent} className="w-10" />}
-          <Badge
-            tone={part.tripped ? "danger" : "neutral"}
-            title={part.tripped ? t("chat:cost.trippedTitle") : t("chat:cost.percentTitle")}
-          >
-            {part.label}
-          </Badge>
-        </div>
-      ))}
+      <Badge tone="danger" title={t("chat:cost.trippedTitle")}>
+        {t("chat:cost.dailyTrippedLabel")}
+      </Badge>
     </div>
   );
 }
@@ -369,6 +340,94 @@ function AttachmentFileChip({ name, className }: { name: string; className?: str
       <Icon name="file" size={12} className="flex-shrink-0" />
       <span className="truncate">{name}</span>
     </span>
+  );
+}
+
+/**
+ * 2026-10-02(P3:session 網路):有 `origin` 的訊息(別的 session 送來的,或使用者轉傳來的)頂端的來源標籤
+ * 「來自 <title>」——可點擊切到那個 session(那個 session 已被刪除時只顯示、不可點)。標籤文字用送出當下記下的
+ * title 快照(`origin.title`);若來源 session 還在,顯示它**目前**的標題。
+ */
+function OriginTag({ origin }: { origin: MessageOrigin }): JSX.Element {
+  const { t } = useTranslation(["chat"]);
+  const sourceSession = useSessionStore((s) => s.sessions.find((x) => x.id === origin.sessionId));
+  const selectSession = useSessionStore((s) => s.selectSession);
+  const title = sourceSession?.title ?? origin.title;
+  const forwarded = origin.kind === "forward";
+  const label = forwarded ? t("chat:origin.forwardedFrom", { title }) : t("chat:origin.fromSession", { title });
+  const className =
+    "mb-1.5 inline-flex max-w-full items-center gap-1 rounded bg-accent/10 px-1.5 py-0.5 text-2xs font-medium text-accent";
+  const icon = <Icon name={forwarded ? "forward" : "message"} size={11} className="flex-shrink-0" />;
+  if (!sourceSession) {
+    return (
+      <div>
+        <span
+          className={className}
+          title={forwarded ? t("chat:origin.forwardedFromGone") : t("chat:origin.fromSessionGone")}
+        >
+          {icon}
+          <span className="truncate">{label}</span>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => void selectSession(origin.sessionId)}
+        title={forwarded ? t("chat:origin.forwardedFromTitle") : t("chat:origin.fromSessionTitle")}
+        className={`focus-ring ${className} transition hover:bg-accent/20`}
+      >
+        {icon}
+        <span className="truncate">{label}</span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 每則 assistant 訊息的動作列(串流完才出現):「轉傳到…」→ `ForwardMessageDialog`。滑過整則訊息才顯示
+ * (`group-hover`),鍵盤聚焦(`focus-visible`)時也會顯示。
+ *
+ * **疊加式、不佔版面**:這個元件要渲染在氣泡外層的 `relative` 容器裡(見 `ChatBubble`),動作鈕是跨在氣泡
+ * 左下角邊緣的絕對定位浮動鈕。過去它是氣泡下方的一個獨立 `div`(隱藏時 `opacity-0`),不論有沒有 hover
+ * 都佔一行高度,所以 assistant 訊息和下一則訊息之間永遠多了約 20px 的空隙(user 接 assistant 只有 4px,
+ * assistant 接 user 卻是 24px)。現在它不參與排版,hover 前後整串訊息的位置完全不變。
+ * 錨在**左**下角(`left-2`)而不是右下角:assistant 氣泡靠左,很短的氣泡(例如「OK」)比按鈕還窄,錨在右邊
+ * 的話按鈕會往左凸出氣泡、被捲動容器的左邊界切掉;錨在左邊則是往右凸出到空白處。按鈕要 `whitespace-nowrap`:
+ * 絕對定位元素的寬度上限是「氣泡寬度 − left」,不加的話短氣泡上的標籤會被擠成好幾行。
+ * `-bottom-1` 刻意只伸出氣泡外 4px——剛好是相鄰訊息間 `my-1` 疊出的間距,不蓋到下一則;伸進氣泡內的部分
+ * 落在 `py-2.5` 的底部留白裡。隱藏時 `pointer-events-none`,免得看不見的按鈕擋住氣泡左下角的選字。
+ * 鍵盤聚焦用 `has-[:focus-visible]` 而不是 `focus-within`:滑鼠點擊後(對話框關閉、焦點回到按鈕)不會讓它
+ * 一直停在顯示狀態。
+ */
+function AssistantActions({ item }: { item: Extract<ChatItem, { kind: "assistant" }> }): JSX.Element | null {
+  const { t } = useTranslation(["chat"]);
+  const [forwarding, setForwarding] = useState(false);
+  const sourceSession = useSessionStore((s) => s.sessions.find((x) => x.id === s.currentSessionId));
+  if (!sourceSession) return null;
+  return (
+    <>
+      <div className="pointer-events-none absolute -bottom-1 left-2 z-10 flex opacity-0 transition has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
+        <button
+          type="button"
+          onClick={() => setForwarding(true)}
+          title={t("chat:forward.buttonTitle")}
+          className="focus-ring inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-line-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-fg-muted shadow-sm transition hover:bg-surface hover:text-fg"
+        >
+          <Icon name="forward" size={11} />
+          {t("chat:forward.button")}
+        </button>
+      </div>
+      {forwarding && (
+        <ForwardMessageDialog
+          source={sourceSession}
+          item={{ content: item.content }}
+          onClose={() => setForwarding(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -425,48 +484,69 @@ const ChatBubble = memo(function ChatBubble({ item }: { item: ChatItem }): JSX.E
     // systemEvents.json 翻譯早就寫好了,`resolveSystemEventText` 也一直被 import
     // 著,只是從來沒有被呼叫過(dead import)。
     return (
-      <div className="my-1.5 rounded-md bg-danger/10 px-2.5 py-1.5 text-xs leading-relaxed text-danger">
+      <div className={`my-1.5 rounded-md px-2.5 py-1.5 text-xs leading-relaxed ${SYSTEM_TONE_CLASS[systemEventTone(item.content)]}`}>
         {resolveSystemEventText(item.content, t)}
+      </div>
+    );
+  }
+
+  // 2026-10-02(P3):別的 session 送來的(或使用者轉傳來的)訊息——靠左、不是 accent 色(那不是使用者在這個
+  // session 打的字),頂端帶「來自 <title>」標籤;內文是原始 message 本體(信封樣板文字只給 agent 看)。
+  if (item.kind === "user" && item.origin) {
+    return (
+      <div className="my-1 flex justify-start">
+        <div className="max-w-[75%] whitespace-pre-wrap rounded-lg border border-line-subtle bg-surface-2 px-3.5 py-2.5 text-sm leading-relaxed text-fg">
+          <OriginTag origin={item.origin} />
+          {item.content}
+        </div>
       </div>
     );
   }
 
   const isUser = item.kind === "user";
   return (
-    <div className={`my-1 flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[75%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
-          isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
-        }`}
-      >
-        {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片/檔案——
-            樂觀回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後
-            的 history(messageRecordsToItems())兩條路徑都會填
-            item.attachments,這裡不需要區分來源。 */}
-        {item.kind === "user" && item.attachments && item.attachments.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-1.5">
-            {item.attachments.map((att, index) =>
-              att.type === "image" ? (
-                <img
-                  key={index}
-                  src={`data:${att.mediaType};base64,${att.data}`}
-                  alt={t("chat:composer.attachmentAltText")}
-                  className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
-                />
-              ) : (
-                <AttachmentFileChip
-                  key={index}
-                  name={att.name}
-                  className="rounded-md border border-accent-fg/20 bg-accent-fg/10 px-2 py-1 text-2xs"
-                />
-              ),
+    <div className="group my-1">
+      <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
+        {/* 外層 `relative` 容器是 `AssistantActions` 浮動鈕的定位基準。浮動鈕刻意放在氣泡 div 的**外面**
+            (而不是氣泡內容的最後一個子元素):`MarkdownMessage` 的段落靠 `last:mb-0` 去掉最後一段的下邊距,
+            氣泡裡多一個兄弟節點會讓它失效、氣泡平白變高。 */}
+        <div className="relative max-w-[75%]">
+          <div
+            className={`rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
+              isUser ? "whitespace-pre-wrap bg-accent text-accent-fg" : "bg-surface text-fg"
+            }`}
+          >
+            {/* async-scribbling-llama.md Phase 6:使用者傳送時夾帶的圖片/檔案——
+                樂觀回顯(session-store.ts 的 sendPrompt() action)與 DB reload 後
+                的 history(messageRecordsToItems())兩條路徑都會填
+                item.attachments,這裡不需要區分來源。 */}
+            {item.kind === "user" && item.attachments && item.attachments.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {item.attachments.map((att, index) =>
+                  att.type === "image" ? (
+                    <img
+                      key={index}
+                      src={`data:${att.mediaType};base64,${att.data}`}
+                      alt={t("chat:composer.attachmentAltText")}
+                      className="max-h-56 max-w-full rounded-md border border-accent-fg/20 object-contain"
+                    />
+                  ) : (
+                    <AttachmentFileChip
+                      key={index}
+                      name={att.name}
+                      className="rounded-md border border-accent-fg/20 bg-accent-fg/10 px-2 py-1 text-2xs"
+                    />
+                  ),
+                )}
+              </div>
+            )}
+            {isUser ? item.content : <MarkdownMessage content={item.content} />}
+            {item.kind === "assistant" && item.streaming && (
+              <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-fg-muted align-middle" />
             )}
           </div>
-        )}
-        {isUser ? item.content : <MarkdownMessage content={item.content} />}
-        {item.kind === "assistant" && item.streaming && (
-          <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-fg-muted align-middle" />
-        )}
+          {item.kind === "assistant" && !item.streaming && item.content.trim() !== "" && <AssistantActions item={item} />}
+        </div>
       </div>
     </div>
   );
@@ -656,7 +736,8 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   const { t } = useTranslation(["chat"]);
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const sessions = useSessionStore((s) => s.sessions);
-  const profiles = useSessionStore((s) => s.profiles);
+  const detectedAgentsForLabel = useSessionStore((s) => s.detectedAgents);
+  const providerPrefsForLabel = useSessionStore((s) => s.providerPrefs);
   /**
    * 2026-09-04(稽核修補):這裡原本是 `useSessionStore((s) => s.itemsBySession)`
    * ——訂閱**整個** map。而 store 對「任何一條 session 的任何一個事件」都會產生
@@ -849,7 +930,8 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   }
 
   const busy = session.status === "busy" || session.status === "waiting";
-  const profile = profiles.find((p) => p.id === session.agentProfileId);
+  // 2026-10-02(P2:移除 profile):顯示 agent 名稱改看 `session.providerId` → provider label。
+  const agentLabel = providerLabelOf(session.providerId, detectedAgentsForLabel, providerPrefsForLabel);
   /**
    * async-scribbling-llama.md Phase 6:目前只有 claude-agent-sdk 的
    * sendPrompt() 有明確路徑把圖片/文件內容送給模型(見 claude-sdk-adapter.ts)。
@@ -882,18 +964,19 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
     <main className="flex h-full flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-fg">{session.title}</h1>
-          <p className="truncate text-2xs text-fg-faint" title={session.workingDir}>
-            {shortenPath(session.workingDir)}
+        {/* 2026-10-06:標題是可點擊的改名入口,給它最小寬度——控制項多時讓右側那組換行,而不是把標題擠到剩一個字。 */}
+        <div className="min-w-[8rem] flex-1">
+          <SessionTitleHeading session={session} />
+          <p className="truncate text-2xs text-fg-faint" title={`${agentLabel} · ${session.workingDir}`}>
+            <span className="text-fg-subtle">{agentLabel}</span> · {shortenPath(session.workingDir)}
           </p>
         </div>
         <div className="flex flex-shrink-0 flex-wrap items-center gap-1.5">
           <UsageBadge session={session} />
           <CostBudgetBadge session={session} />
           <AutoModeControl session={session} />
-          <ModelControl session={session} profile={profile} />
-          <EffortControl session={session} profile={profile} />
+          <ModelControl session={session} />
+          <EffortControl session={session} />
           {busy && (
             <IconButton
               icon="pause"

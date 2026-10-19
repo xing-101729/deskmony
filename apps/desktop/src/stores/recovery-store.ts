@@ -1,20 +1,16 @@
 import { create } from "zustand";
 import {
-  type RecoveryGitStatusResult,
   type RecoverySessionInfo,
   RecoveryAbandonResultSchema,
-  RecoveryGitStatusResultSchema,
   RecoveryListResultSchema,
-  RecoveryResolveDirtyWorktreeResultSchema,
   RecoverySessionResultSchema,
 } from "@deskmony/shared";
 import { client } from "./session-store.js";
 
 /**
  * recovery-store(S6:崩潰復原):`recovery.*` 系列 gateway method 的狀態,獨立
- * 於 session-store/team-store/task-store 之外,比照那幾個 store 的既有慣例
- * ——共用同一條 WS 連線(`client`),各自獨立 subscribe `onPush`,不互相依賴
- * 對方的 store 狀態。
+ * 於 session-store 之外——共用同一條 WS 連線(`client`),獨立 subscribe
+ * `onPush`,不依賴 session-store 的狀態。
  *
  * §5.4「入口是常駐提示條,不是強制彈窗」:`sessions.length > 0` 是 App.tsx
  * 常駐提示條的唯一判斷依據——這個 store 不自己決定要不要彈窗,純粹提供資料,
@@ -29,10 +25,7 @@ interface RecoveryStoreState {
   refresh: () => Promise<void>;
   continueSession: (sessionId: string) => Promise<void>;
   takeover: (sessionId: string) => Promise<void>;
-  rerun: (sessionId: string) => Promise<void>;
   abandon: (sessionId: string) => Promise<void>;
-  gitStatus: (sessionId: string) => Promise<RecoveryGitStatusResult>;
-  resolveDirtyWorktree: (sessionId: string, action: "keep" | "discard", confirmDiscard?: boolean) => Promise<void>;
 }
 
 export const useRecoveryStore = create<RecoveryStoreState>((set, get) => ({
@@ -47,7 +40,7 @@ export const useRecoveryStore = create<RecoveryStoreState>((set, get) => ({
     // 的既有 ServerPushSchema——這輪刻意不新增,因為 `session-updated`/
     // `session-list-updated` 已經涵蓋所有會改變 `interrupted` 集合的動作:
     // `continueSession`/`abandon` 都會 emit "session-updated",
-    // `takeover`/`rerun` 建立新 session 會 emit "session-list-updated")。
+    // `takeover` 建立新 session 會 emit "session-list-updated")。
     // 收到任一個就重新拉一次完整清單。
     client.onPush((push) => {
       if (push.channel === "session-updated" || push.channel === "session-list-updated") {
@@ -86,26 +79,9 @@ export const useRecoveryStore = create<RecoveryStoreState>((set, get) => ({
     await get().refresh();
   },
 
-  rerun: async (sessionId) => {
-    const raw = await client.call("recovery.rerun", { sessionId });
-    RecoverySessionResultSchema.parse(raw);
-    await get().refresh();
-  },
-
   abandon: async (sessionId) => {
     const raw = await client.call("recovery.abandon", { sessionId });
     RecoveryAbandonResultSchema.parse(raw);
-    await get().refresh();
-  },
-
-  gitStatus: async (sessionId) => {
-    const raw = await client.call("recovery.gitStatus", { sessionId });
-    return RecoveryGitStatusResultSchema.parse(raw);
-  },
-
-  resolveDirtyWorktree: async (sessionId, action, confirmDiscard) => {
-    const raw = await client.call("recovery.resolveDirtyWorktree", { sessionId, action, confirmDiscard });
-    RecoveryResolveDirtyWorktreeResultSchema.parse(raw);
     await get().refresh();
   },
 }));

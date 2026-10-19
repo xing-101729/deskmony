@@ -8,10 +8,7 @@
   "adapter": {
     "unsupportedOperation": "{{software}} does not support this operation: {{operation}}",
     "unknownHandle": "No running session found for: {{handleId}}",
-    "missingConfig": "Profile \"{{profileId}}\" is missing configuration required by {{software}}: {{configField}}"
-  },
-  "task": {
-    "invalidTransition": "Task \"{{taskId}}\" cannot transition from {{from}} to {{to}}"
+    "missingConfig": "Agent \"{{providerId}}\" is missing configuration required by {{software}}: {{configField}}"
   },
   "auth": {
     "notYetAuthenticated": "Not yet authenticated: the first message must be an auth request with a valid token",
@@ -20,16 +17,11 @@
   },
   "gateway": {
     "localOnlyMethod": "This operation is only available on a local connection: {{method}}",
-    "localOnlyField": "This operation cannot supply “{{field}}” from a remote connection: {{method}}",
-    "invalidRequest": "Invalid request: {{detail}}"
+    "invalidRequest": "Invalid request: {{detail}}",
+    "bridgeTokenRequired": "{{method}} is only for MCP bridge tokens (the caller identity is determined by the token)"
   },
   "budget": {
-    "dailyLimitReached": "Daily budget limit reached",
-    "taskLimitReached": "Task \"{{taskTitle}}\" has reached its budget limit"
-  },
-  "recovery": {
-    "discardConfirmRequired": "Confirmation is required before discarding changes",
-    "worktreeLost": "Worktree not found: {{worktreePath}}"
+    "dailyLimitReached": "Daily budget limit reached"
   },
   "internal": {
     "unexpected": "An unexpected error occurred"

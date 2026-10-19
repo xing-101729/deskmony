@@ -14,8 +14,20 @@
  * 版本,讀取後確認欄位名稱與呼叫方式)。
  *
  * 啟動方式:透過 stdio 建立 ACP JSON-RPC 連線,不接受命令列參數 —— 由
- * AcpAdapter.spawn() 依 AgentProfile.acpConfig(command/args/env)啟動這支
- * 腳本本身(例如 command=process.execPath, args=[thisFilePath])。
+ * AcpAdapter.spawn() 依 AgentLaunchSpec.acpConfig(command/args/env)啟動這支
+ * 腳本本身(例如 command=process.execPath, args=[thisFilePath])。2026-10-02(P2:移除 profile)
+ * 起,e2e 經 core 的環境變數 `DESKMONY_E2E_EXTRA_PROVIDERS` 把這組 command/args 注入
+ * `AgentCatalog`(見 scripts/lib/e2e-providers.mjs),session 用 `providerId:"e2e-fake-acp"` 建立。
+ *
+ * 2026-10-06:以 `--config-options` 旗標啟動時(e2e 的 FAKE_ACP_OPTIONS provider,見 scripts/lib/e2e-providers.mjs),
+ * 模擬會回報 model / 思考程度的 ACP agent(opencode acp、codex-acp):`session/new` 回應帶 `configOptions`(一個
+ * 無關的 `mode`、`category: "model"` 的 model 選項(分組)、目前 model 有思考程度時再加 `category: "thought_level"`),
+ * 並處理 `session/set_config_option`(換 model 時思考程度重設成新 model 的第一個,沒有就整個選項消失——同 opencode 的行為)。
+ * option id 刻意用不常見的 `llm`/`think`:Deskmony 必須靠 category 認,不能靠 id。沒有這個旗標時完全不回報
+ * configOptions、也不處理 set_config_option(既有測試不受影響)。兩個只在這個模式有意義的 prompt:
+ *   - `ACP_REPORT_CONFIG`:回一句 `CONFIG:{"model","effort","setCalls"}`——agent 端實際的設定與收到過的
+ *     set_config_option 呼叫,讓 e2e 證明「切換真的送到 agent、之後的回合用的是新設定」。
+ *   - `ACP_CONFIG_UPDATE {"model"?,"effort"?}`:agent 自己改設定並送 `config_option_update` 通知(模擬 agent 主動變更)。
  *
  * 協定(僅供本腳本與 e2e-gateway.mjs 步驟 9 之間使用,非 ACP 標準的一部分):
  *   - 一般 prompt:固定回覆 FAKE_ACP_REPLY_CHUNKS 串接而成的文字,拆成多段
@@ -34,13 +46,13 @@
  *          (status: "completed"),再送一句完成訊息,以 end_turn 結束。
  *       4. 選了 "deny"(或 outcome 為 cancelled):不寫檔、不送
  *          `tool_call_update`,直接以 end_turn 結束這一輪。
- *   - 若 prompt 文字內含 DELAY_ECHO_MARKER 樣式(M3 Round A,e2e 步驟 12
- *     MessageBus 測試用,見 scripts/e2e-gateway.mjs):延遲指定毫秒數後,
+ *   - 若 prompt 文字內含 DELAY_ECHO_MARKER 樣式:延遲指定毫秒數後,
  *     把「完整收到的 prompt 文字」原封不動回顯(前綴 "ECHO:")。用來驗證
- *     MessageBus 注入的 prompt 確實送達目標 session(用 substring 搜尋,不是
- *     startsWith——MessageBus 會在原始內容外包一層「來自 @X(角色)的訊息:」
- *     的格式化文字,marker 仍會保留在包裹後的字串中間),以及用可控制的
- *     延遲時間製造「session 目前 busy」的測試窗口。
+ *     注入的 prompt 確實送達目標 session(用 substring 搜尋,不是
+ *     startsWith——注入時可能在原始內容外包一層格式化文字,marker 仍會保留在
+ *     包裹後的字串中間),以及用可控制的延遲時間製造「session 目前 busy」的
+ *     測試窗口。(原本的使用者是 2026-10-02 已移除的團隊訊息 e2e;P3 的 session
+ *     互傳訊息 e2e 預期會再用到。)
  *   - 若 prompt 文字以 USAGE_UPDATE_PREFIX("ACP_USAGE_UPDATE ")開頭,其後接
  *     一段 JSON `{"used": number, "size": number, "cost"?: {"amount": number,
  *     "currency": string}}`(S3a usage-metering,e2e 步驟 29 用,見
@@ -100,12 +112,23 @@
  *     client。這是**決定性**的(完全由這支腳本的程式碼決定要不要呼叫、呼叫
  *     哪個工具,不依賴任何真實模型的自由選擇),但走的是完整的真實管線:
  *     AcpAdapter 核發的 scoped token → 真的透過 WS 打回 gateway → 真的觸發
- *     TeamBusPort/SubagentPort 對應的方法——見
+ *     SessionManager 對應的方法(session 網路五個工具)——見
  *     packages/adapters/src/mcp-bridge-server.ts 的完整安全/協定說明。
  *     `mcpServers` 陣列為空(這個 session 沒有掛任何 MCP server,例如沒有
- *     team/subagentPort 的一般 ACP session)時,回覆一則固定的錯誤文字
+ *     subagentPort 的一般 ACP session)時,回覆一則固定的錯誤文字
  *     `"BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured"`,不嘗試 spawn
  *     任何東西。
+ *   - 若 prompt 文字**任何位置**含 BRIDGE_ON_PROMPT_PATTERN 標記
+ *     `[[E2E_BRIDGE_ON_PROMPT:<base64>]]`(2026-10-02,P3 session 網路 e2e 用,見
+ *     scripts/e2e-session-network.mjs):`<base64>` 是 `{"tool": string, "args": object}` 的 JSON 以 base64
+ *     編碼(base64 不含 `]`,所以標記可以巢狀塞進另一則訊息的內文而不會截斷)。這個 agent 收到含標記的
+ *     prompt 時,**自己**用 `CALL_BRIDGE_TOOL_PREFIX` 那條完全相同的真實管線(spawn mcp-bridge 子行程 → scoped
+ *     token → gateway)呼叫該工具,把結果回成 `BRIDGE_ON_PROMPT_RESULT:` + JSON。用來決定性地模擬「agent 收到訊息後
+ *     自己決定回覆(send_to_session)」——A↔B 互傳的訊息鏈就是靠這個巢狀標記一層一層推進的,不依賴任何真實模型。
+ *     標記是明確的、由測試腳本逐字組出來的,不是「看起來像指令的自然語言」,所以不會誤觸。
+ *   - 若 prompt 文字以 SAY_PREFIX("ACP_SAY ")開頭:原封不動把其後的文字當成這一輪的回覆(不加任何前綴、
+ *     **不**解讀裡面的標記)——e2e 用它造出「內文含 BRIDGE_ON_PROMPT 標記的 assistant 訊息」,再被「轉傳到…」
+ *     給另一個 session,驗證轉傳開的新鏈會被收到的 agent 沿用。
  *   - 若 prompt 文字等於 UPSERT_TOOL_CALLS_PREFIX("ACP_UPSERT_TOOL_CALLS",
  *     不接受任何參數)(CLI/TUI「同一個 toolCallId 只印一行」的 e2e 用,見
  *     scripts/e2e-cli.mjs 的案例 11 與 scripts/e2e-cli-tui.mjs 的案例 9f):
@@ -118,12 +141,12 @@
  *          個 adapter 之後「參數齊了再送一次」的那一次),最後一則
  *          `tool_call_update`(completed)。
  *          ⚠️ 送兩則 `tool_call`(而不是用 `tool_call_update` 更新)**不是**
- *          標準 ACP 的用法——`AcpAdapter.handleSessionUpdate()` 把
- *          `tool_call_update` 轉成 `tool-result`,不是第二個 `tool-call`
- *          事件,所以唯一能在 ACP 這一層產生「同一個 toolCallId 的兩個
- *          `tool-call` **AgentEvent**」的方法就是送兩則 `tool_call`。要驗的
- *          是 AgentEvent 層的 upsert(那是 claude-sdk/opencode 原生就會產生
- *          的形狀),這裡刻意用這個方式把它在假 ACP agent 上重現出來。
+ *          標準 ACP 的用法——標準做法(真實 OpenCode 就是這樣)是第二次改用
+ *          帶 `rawInput` 的 `tool_call_update`,`AcpAdapter.handleSessionUpdate()`
+ *          也會把它補送成第二個 `tool-call` 事件,那條路徑由下面的
+ *          OPENCODE_TOOL_CALLS_PREFIX 涵蓋。這裡保留送兩則 `tool_call` 的寫法,
+ *          是因為 CLI/TUI 的 e2e 要驗的是 AgentEvent 層的 upsert 規則,兩種 ACP
+ *          寫法在 AgentEvent 層長得一樣,維持原樣就不必改動既有斷言。
  *       2. `NoInputTool`:只送一則不帶 `rawInput` 的 `tool_call`,接著直接
  *          `tool_call_update`(completed)——**永遠等不到 input** 的工具
  *          (被中斷的工具,或 `tool_call` 本來就沒帶 `rawInput` 的真實 ACP
@@ -132,6 +155,18 @@
  *     兩個工具都是 `kind: "other"` 且不帶 `locations`,確保不會意外命中
  *     `resolveEditSnapshotPath()` 的檔案快照路徑(那是 diff 顯示路徑 B,與
  *     這個情境無關)。
+ *   - 若 prompt 文字以 OPENCODE_TOOL_CALLS_PREFIX("ACP_OPENCODE_TOOL_CALLS ")
+ *     開頭,其後接一段 JSON `{"count": number}`(2026-10-03,e2e-opencode-tool-input.mjs
+ *     的 E 組用):在同一輪裡送出 `count` 個**照真實 OpenCode(1.18.7)順序**的
+ *     工具呼叫——先 `tool_call`(`pending`,`rawInput: {}` 佔位),再
+ *     `tool_call_update`(`in_progress`,**第一次帶真正的參數**,同時帶一個和
+ *     `tool_call` 不同的 title),再一則 `in_progress` 把同一份參數原樣重報
+ *     (adapter 不能因此多送事件),最後 `tool_call_update`(`completed`,`rawInput`
+ *     再帶一次同一份)。每個工具的參數是 `opencodeToolInput(i)`、title 分別是
+ *     `OPENCODE_TOOL_PENDING_TITLE` / `opencodeToolRunningTitle(i)`,e2e 直接 import,
+ *     不在兩邊各寫一份字面值。用來決定性地驗證 AcpAdapter 會把 `tool_call_update`
+ *     帶來的參數補送成同一個 toolCallId 的第二個 `tool-call` 事件,而 core 不重複
+ *     計數(`count` 個工具只計 `count` 次)。
  *   - 若 prompt 文字等於 EMPTY_RESULT_TOOL_NAME_PREFIX
  *     ("ACP_EMPTY_RESULT_TOOL_NAME",不接受任何參數)(CLI/TUI「工具失敗那
  *     一行要有工具名稱」的 e2e 用,見 scripts/e2e-cli.mjs 的案例 12 與
@@ -159,18 +194,58 @@
  *     唯一能把那個 AgentEvent 形狀餵給**真正的 CLI 子程序**的方法就是讓這個
  *     假 agent 把 title 蓋成空字串——與上面 UPSERT_TOOL_CALLS 送兩則
  *     `tool_call` 是同一種取捨,理由見該段的 ⚠️。
+ *   - 2026-10-06(session 自動命名,scripts/e2e-session-title.mjs 用):prompt 是 core 組的**命名請求**
+ *     (`parseTitleRequestPrompt()` 認得,開頭是 `TITLE_REQUEST_HEADER`)時,這個 session 被標成「命名用臨時 session」,
+ *     依引用的使用者訊息裡的標記決定行為(標記與預期標題見 scripts/lib/fake-title-modes.mjs;這一條排在所有其他判斷
+ *     之前——引用的訊息本身可能含別的標記):
+ *       - 沒有標記:回 `fakeTitleReplyFor(訊息)`(含 core 要清掉的 markdown、前綴、引號與第二行)。
+ *       - `TITLE_MODE_TOOL`:先送 `tool_call`,再 `session/request_permission`;**被允許**才在工作目錄寫
+ *         `TITLE_TOOL_MARKER_FILE`(e2e 斷言它不存在)。結果記在這個 session 的 `permissionOutcomes`。
+ *       - `TITLE_MODE_HANG`:一直不回(直到 `session/cancel`),讓 core 的逾時退回截取首句。
+ *       - `TITLE_MODE_REFUSE`:以 `stopReason: "refusal"` 結束。
+ *     initialize 宣告 `sessionCapabilities.close`,`session/close` 會把 session 標成 closed。
+ *   - `REPORT_SESSIONS_PREFIX`(不接受參數):回 `SESSIONS:` + JSON——這個 agent 行程裡每個 session 的
+ *     `{sessionId, kind:"main"|"title", closed, cancelled, permissionOutcomes, prompts}`(只回這些統計,不回對話內容)。
+ *   - 2026-10-15(session 自動復活,scripts/e2e-session-revive.mjs 用):模擬「agent 把對話存在自己的磁碟上、重啟後能接回」。
+ *     `FAKE_ACP_STATE_DIR`(環境變數,由啟動 core 的 e2e 設;子行程繼承)有設時,每個 session 的狀態(cwd + 每一輪收到的 prompt)
+ *     存成 `<dir>/session-<id>.json`,每個 ACP 呼叫(initialize / session/new|resume|load)附加一行 JSON 到 `<dir>/calls.log`
+ *     ——e2e 靠它斷言「走了哪條路」「agent 行程啟動了幾次」。沒設時完全維持原本的行為(只在記憶體、不支援接回)。
+ *     命令列旗標決定宣告的能力:
+ *       - (無旗標)`loadSession: false`、沒有 `sessionCapabilities.resume`——**不支援接回**(退路:對話紀錄)。
+ *       - `--resume`:宣告 `sessionCapabilities.resume`,`session/resume` 接回(不重播)。
+ *       - `--load`:宣告 `loadSession: true`,`session/load` 接回,並在回應**之前**用 `session/update` 把每一輪歷史重播一次
+ *         (user_message_chunk + agent_message_chunk + tool_call + tool_call_update,文字都帶 `REPLAY_MARKER`)——重播
+ *         絕不能出現在 core 的事件串流/DB(e2e 逐項斷言)。
+ *       - `--forget`:搭配上面兩個旗標之一,宣告了能力但 agent 那邊的歷史已經不在(resume/load 一律回 resource not found)
+ *         ——退路:接回失敗改開 `session/new` + 對話紀錄。
+ *     `REVIVE_REPORT_MARKER` 結尾的 prompt(文字**結尾**是這個標記,所以夾在對話紀錄裡的舊標記不會誤觸)→ 回 `REVIVE_REPORT:` + JSON
+ *     `{agentSessionId, mode, priorPrompts, prompt}`:這個 session 在**這個 agent 自己的狀態**裡先前收過的所有 prompt、這一輪收到的完整
+ *     文字——e2e 用它區分「agent 真的記得」(priorPrompts 含重啟前的訊息)與「agent 只是讀了對話紀錄」(prompt 開頭有 Deskmony 附的紀錄)。
  */
 
 import * as acp from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
-import { writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { loadConfigPlugins, simulateShellEnv, presenceIn } from "./lib/fake-opencode-plugin-host.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+// 2026-10-06:命名請求的格式以 core 實際用的為準(單一來源),見檔頭。需要先 pnpm build。
+import { parseTitleRequestPrompt } from "../packages/shared/dist/session-title.js";
+import { TITLE_MODE_HANG, TITLE_MODE_REFUSE, TITLE_MODE_TOOL, TITLE_TOOL_MARKER_FILE, fakeTitleReplyFor } from "./lib/fake-title-modes.mjs";
 
 export const FAKE_ACP_REPLY_CHUNKS = ["Hello", " from", " fake ACP agent"];
+/** 2026-10-15(session 自動復活)e2e 用,見檔頭註解。 */
+export const REVIVE_REPORT_MARKER = "[[E2E_REVIVE_REPORT]]";
+/** `--load` 模式重播歷史時,每一段重播文字都帶這個標記——e2e 斷言它**絕不**出現在 core 的事件串流與 DB。 */
+export const REPLAY_MARKER = "REPLAYED-FROM-LOAD";
+/** `--load` 重播時每一輪額外補幾個填充片段(總 update 數 = 輪數 × (4 + 這個值)),e2e 用同一個常數算預期值。 */
+export const REPLAY_FILLER_PER_TURN = 40;
+/** 回報這個 agent 行程裡每個 session 的統計,見檔頭。 */
+export const REPORT_SESSIONS_PREFIX = "ACP_REPORT_SESSIONS";
 export const WRITE_FILE_PREFIX = "ACP_WRITE_FILE ";
 /** S3a(usage-metering)e2e 用,見檔頭註解。 */
 export const USAGE_UPDATE_PREFIX = "ACP_USAGE_UPDATE ";
@@ -195,6 +270,64 @@ export const CALL_BRIDGE_TOOL_PREFIX = "ACP_CALL_BRIDGE_TOOL ";
  * MCP 管線」兩個不同的斷言面向。
  */
 export const REPORT_MCP_SERVERS_PREFIX = "ACP_REPORT_MCP_SERVERS";
+/**
+ * 2026-10-03 e2e 用(不接受任何參數,純字面比對):回覆 `ENV:` + JSON(`{ OPENCODE_CONFIG_CONTENT: <這個子行程收到的原始
+ * 字串,沒有則 null> }`)。給 scripts/e2e-opencode-permissions.mjs 斷言 Deskmony 啟動 `opencode acp` 這一家(provider 目錄
+ * 的 `family: "opencode"`)時注入的「所有工具 ask」設定,以及其他 ACP agent **沒有**被注入(對照組)。
+ */
+export const REPORT_ENV_PREFIX = "ACP_REPORT_ENV";
+/**
+ * 2026-10-03(安全:認證):`ENV:` 回覆多一個 `serverAuth`——子行程收到的 `OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME`
+ * 的**描述**(沒收到密碼是 null;有收到是 `{username, passwordLength, passwordSha256}`)。刻意**不回顯密碼本身**:回覆會進
+ * `session.history`,而 e2e 要斷言密碼不會出現在對話裡;雜湊足夠讓測試判斷「每次 spawn 都不同」(256 bit 隨機值的雜湊不洩漏什麼)。
+ * `opencode acp` 實測會在 loopback 開 HTTP 伺服器(固定 4096、預設無認證),所以 Deskmony 對 opencode 家族的 ACP 子行程也要設密碼,
+ * 見 packages/adapters/src/opencode-server-auth.ts。
+ */
+function describeServerAuth() {
+  const password = process.env.OPENCODE_SERVER_PASSWORD;
+  if (password === undefined) return null;
+  return {
+    username: process.env.OPENCODE_SERVER_USERNAME ?? null,
+    passwordLength: password.length,
+    passwordSha256: createHash("sha256").update(password).digest("hex"),
+  };
+}
+/**
+ * 2026-10-05(安全:agent 子行程環境不得含 Deskmony 憑證)e2e 用:`ACP_REPORT_PRESENCE:<逗號分隔的變數名稱>` →
+ * 回覆 `PRESENCE:` + JSON(`{ <名稱>: boolean }`)——**只回報這個子行程的環境裡「有沒有」這個變數(不分大小寫比對,
+ * Windows 的環境變數不分大小寫),絕不回顯值**:回覆會進 `session.history`/log,而 e2e 要斷言 token 不會出現在那裡。
+ * 給 scripts/e2e-agent-env.mjs 斷言 `DESKMONY_AUTH_TOKEN`/`DESKMONY_MCP_BRIDGE_*` 沒有被繼承進 agent 的環境。
+ */
+export const REPORT_PRESENCE_PREFIX = "ACP_REPORT_PRESENCE:";
+/** 回報 `names` 各自在 `process.env` 裡是否存在(不分大小寫);給三支 fake 後端共用的語意(見 fake-opencode-server/fake-pty-echo)。 */
+function describePresence(namesCsv) {
+  const upperKeys = new Set(Object.keys(process.env).map((k) => k.toUpperCase()));
+  return Object.fromEntries(
+    namesCsv
+      .split(",")
+      .map((n) => n.trim())
+      .filter(Boolean)
+      .map((name) => [name, upperKeys.has(name.toUpperCase())]),
+  );
+}
+/**
+ * 2026-10-05(安全:opencode 外掛)e2e 用:`ACP_REPORT_SHELL_ENV:<逗號分隔的變數名稱>` → 回覆 `SHELLENV:` + JSON
+ * (`{ shell, process, pluginsLoaded, pluginErrors }`)。扮演 `opencode acp`(provider 目錄的 `family: "opencode"`):依
+ * `OPENCODE_CONFIG_CONTENT` 的 `plugin` 載入外掛並跑 `shell.env` hook,回報 agent 的 bash 工具環境與這個行程自己的環境裡「有沒有」
+ * 這些變數(只回有沒有,絕不回顯值)。語意同 fake-opencode-server.mjs 的 REPORT_SHELL_ENV_PREFIX,外掛宿主的模擬規則見
+ * scripts/lib/fake-opencode-plugin-host.mjs;`FAKE_OPENCODE_SKIP_PLUGINS=1` = 不載入任何外掛。
+ */
+export const REPORT_SHELL_ENV_PREFIX = "ACP_REPORT_SHELL_ENV:";
+/** 啟動時(main())載入的外掛宿主狀態。 */
+let pluginHost = { hooks: [], loaded: [], errors: [] };
+/** P3(session 網路)e2e 用,見檔頭註解:把其後的文字原樣當成這一輪的回覆。 */
+export const SAY_PREFIX = "ACP_SAY ";
+/** P3(session 網路)e2e 用,見檔頭註解:prompt 任何位置含這個標記就自己呼叫 bridge 工具。 */
+const BRIDGE_ON_PROMPT_PATTERN = /\[\[E2E_BRIDGE_ON_PROMPT:([A-Za-z0-9+/=]+)\]\]/;
+/** 建構出一段「收到這則 prompt 的 agent 要呼叫 bridge 工具 `tool`(帶 `args`)」的標記文字。 */
+export function bridgeOnPromptMarker(tool, args) {
+  return `[[E2E_BRIDGE_ON_PROMPT:${Buffer.from(JSON.stringify({ tool, args }), "utf8").toString("base64")}]]`;
+}
 /** CLI/TUI「同一個 toolCallId 只印一行」e2e 用(不接受參數),見檔頭註解。 */
 export const UPSERT_TOOL_CALLS_PREFIX = "ACP_UPSERT_TOOL_CALLS";
 /** 上面那一輪用到的固定字串——e2e 直接 import,不在兩邊各寫一份字面值。 */
@@ -202,6 +335,12 @@ export const UPSERT_TOOL_TITLE = "UpsertTool";
 export const NO_INPUT_TOOL_TITLE = "NoInputTool";
 export const UPSERT_TOOL_COMMAND = "echo upsert-input-arrived";
 export const UPSERT_DONE_TEXT = "upsert tool calls sent";
+/** e2e-opencode-tool-input.mjs E 組用:照真實 OpenCode 的 ACP 通知順序送工具呼叫,見檔頭註解。 */
+export const OPENCODE_TOOL_CALLS_PREFIX = "ACP_OPENCODE_TOOL_CALLS ";
+/** 上面那一輪用到的固定字串/參數——e2e 直接 import,不在兩邊各寫一份字面值。 */
+export const OPENCODE_TOOL_PENDING_TITLE = "opencode_tool";
+export const opencodeToolRunningTitle = (index) => `opencode_tool_running_${index}`;
+export const opencodeToolInput = (index) => ({ message: `opencode-style-input-${index}`, limit: index + 10 });
 /** CLI/TUI「工具失敗那一行要有工具名稱」e2e 用(不接受參數),見檔頭註解。 */
 export const EMPTY_RESULT_TOOL_NAME_PREFIX = "ACP_EMPTY_RESULT_TOOL_NAME";
 /** 上面那一輪用到的固定字串——e2e 直接 import,不在兩邊各寫一份字面值。 */
@@ -210,6 +349,52 @@ export const FAILING_NO_INPUT_TOOL_TITLE = "FailingNoInputTool";
 export const FAILING_TOOL_COMMAND = "echo will-fail";
 export const FAILING_TOOL_ERROR_TEXT = "boom";
 export const EMPTY_RESULT_DONE_TEXT = "failing tool calls sent";
+/** 2026-10-06:`--config-options` 模式(見檔頭)的 model 清單——每個 model 自己的思考程度(可能沒有)。 */
+export const FAKE_ACP_CONFIG_MODELS = [
+  { value: "fake/alpha", name: "Fake Alpha", efforts: [] },
+  { value: "fake/beta", name: "Fake Beta", efforts: ["low", "high"] },
+  { value: "fake/gamma", name: "Fake Gamma", efforts: ["minimal", "medium", "max"] },
+];
+export const FAKE_ACP_DEFAULT_MODEL = "fake/beta";
+export const FAKE_ACP_MODEL_CONFIG_ID = "llm";
+export const FAKE_ACP_EFFORT_CONFIG_ID = "think";
+export const REPORT_CONFIG_PREFIX = "ACP_REPORT_CONFIG";
+export const CONFIG_UPDATE_PREFIX = "ACP_CONFIG_UPDATE ";
+const CONFIG_OPTIONS_MODE = process.argv.includes("--config-options");
+
+function effortsOf(model) {
+  return FAKE_ACP_CONFIG_MODELS.find((m) => m.value === model)?.efforts ?? [];
+}
+
+/** 這個 session 目前的 configOptions(完整一份,`session/new`、`set_config_option`、`config_option_update` 共用)。 */
+function buildConfigOptions(state) {
+  const efforts = effortsOf(state.model);
+  return [
+    // 無關的選項:Deskmony 只取 model 與思考程度,這個要被忽略。
+    { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "build" }] },
+    {
+      id: FAKE_ACP_MODEL_CONFIG_ID,
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: state.model,
+      options: [{ group: "fake", name: "Fake", options: FAKE_ACP_CONFIG_MODELS.map((m) => ({ value: m.value, name: m.name })) }],
+    },
+    ...(efforts.length > 0
+      ? [
+          {
+            id: FAKE_ACP_EFFORT_CONFIG_ID,
+            name: "Thinking",
+            category: "thought_level",
+            type: "select",
+            currentValue: state.effort,
+            options: efforts.map((e) => ({ value: e, name: e.toUpperCase(), description: `effort ${e}` })),
+          },
+        ]
+      : []),
+  ];
+}
+
 /** 建構出一段「延遲 delayMs 毫秒後把整段 prompt 文字回顯」的標記文字。 */
 export function delayEchoMarker(delayMs) {
   return `[[E2E_DELAY_ECHO:${delayMs}]]`;
@@ -217,16 +402,99 @@ export function delayEchoMarker(delayMs) {
 const DELAY_ECHO_PATTERN = /\[\[E2E_DELAY_ECHO:(\d+)\]\]/;
 
 class FakeAcpAgent {
-  constructor() {
+  /**
+   * @param {{ resume?: boolean, load?: boolean, forget?: boolean, stateDir?: string }} [options] 見檔頭「2026-10-15」段落。
+   */
+  constructor(options = {}) {
     /** @type {Map<string, { abort: AbortController | null }>} */
     this.sessions = new Map();
+    this.options = options;
+  }
+
+  /** 附加一行 JSON 到 calls.log(沒設 stateDir 就不記)。 */
+  appendCall(record) {
+    if (!this.options.stateDir) return;
+    appendFileSync(path.join(this.options.stateDir, "calls.log"), `${JSON.stringify({ pid: process.pid, ...record })}\n`, "utf8");
+  }
+
+  statePath(sessionId) {
+    return path.join(this.options.stateDir, `session-${sessionId}.json`);
+  }
+
+  /** 把這個 session 的狀態(cwd + 每一輪收到的 prompt)存到磁碟——沒設 stateDir 時不存。 */
+  persistSession(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!this.options.stateDir || !session) return;
+    mkdirSync(this.options.stateDir, { recursive: true });
+    writeFileSync(this.statePath(sessionId), JSON.stringify({ sessionId, cwd: session.cwd, turns: session.turns }), "utf8");
+  }
+
+  /** resume/load 共用:從磁碟還原 session 狀態並登記進這個行程。找不到(或 `--forget`)就丟 resource not found。 */
+  restoreSession(params) {
+    const sessionId = params.sessionId;
+    if (this.options.forget || !this.options.stateDir || !existsSync(this.statePath(sessionId))) {
+      throw acp.RequestError.resourceNotFound(sessionId);
+    }
+    const saved = JSON.parse(readFileSync(this.statePath(sessionId), "utf8"));
+    this.sessions.set(sessionId, {
+      abort: null,
+      mcpServers: params?.mcpServers ?? [],
+      kind: "main",
+      closed: false,
+      cancelled: 0,
+      permissionOutcomes: [],
+      prompts: 0,
+      cwd: params.cwd ?? saved.cwd,
+      turns: saved.turns ?? [],
+      ...(CONFIG_OPTIONS_MODE ? { config: this.freshConfig() } : {}),
+    });
+    return saved;
   }
 
   async initialize() {
+    this.appendCall({ call: "initialize" });
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
-      agentCapabilities: { loadSession: false },
+      // 2026-10-06:宣告支援 session/close(命名用臨時 session 收尾時會用到,見 closeSession())。
+      // 2026-10-15:`--resume` 加宣告 sessionCapabilities.resume、`--load` 宣告 loadSession(見檔頭)。
+      agentCapabilities: {
+        loadSession: this.options.load === true,
+        sessionCapabilities: { close: {}, ...(this.options.resume ? { resume: {} } : {}) },
+      },
     };
+  }
+
+  /** `session/resume`:接回既有 session,**不**重播歷史。 */
+  async resumeSession(params) {
+    this.appendCall({ call: "session/resume", sessionId: params.sessionId, mcpServers: (params?.mcpServers ?? []).length });
+    this.restoreSession(params);
+    return CONFIG_OPTIONS_MODE ? { configOptions: buildConfigOptions(this.sessions.get(params.sessionId).config) } : {};
+  }
+
+  /** `session/load`:接回既有 session,並在回應**之前**用 session/update 把每一輪歷史重播一次(協議規定的行為)。 */
+  async loadSession(params, cx) {
+    this.appendCall({ call: "session/load", sessionId: params.sessionId, mcpServers: (params?.mcpServers ?? []).length });
+    const saved = this.restoreSession(params);
+    let replayedUpdates = 0;
+    const notify = (update) => {
+      replayedUpdates += 1;
+      return cx.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update });
+    };
+    for (const [index, turn] of saved.turns.entries()) {
+      const text = typeof turn.prompt === "string" ? turn.prompt.slice(0, 60) : "";
+      await notify({ sessionUpdate: "user_message_chunk", messageId: `replay-user-${index}`, content: { type: "text", text: `${REPLAY_MARKER} user ${index}: ${text}` } });
+      await notify({ sessionUpdate: "agent_message_chunk", messageId: `replay-agent-${index}`, content: { type: "text", text: `${REPLAY_MARKER} agent ${index}` } });
+      await notify({ sessionUpdate: "tool_call", toolCallId: `replay-tool-${index}`, title: `${REPLAY_MARKER} tool`, kind: "other", status: "pending", rawInput: { replay: index } });
+      await notify({ sessionUpdate: "tool_call_update", toolCallId: `replay-tool-${index}`, status: "completed", rawOutput: { replay: index } });
+      // 每一輪再補一批填充的文字片段:一大串 session/update 緊接著 session/load 的回應,是最容易在「回應已 resolve、通知還在排隊分流」
+      // 的競態裡漏出去的情境(真實 agent 重播長對話時就是這樣)。
+      for (let filler = 0; filler < REPLAY_FILLER_PER_TURN; filler++) {
+        await notify({ sessionUpdate: "agent_message_chunk", messageId: `replay-agent-${index}`, content: { type: "text", text: `${REPLAY_MARKER} filler ${index}.${filler}` } });
+      }
+    }
+    // e2e 用:證明重播真的發生過(重播的 update 總數),再回應 session/load。
+    this.appendCall({ call: "session/load.replayed", sessionId: params.sessionId, updates: replayedUpdates });
+    return CONFIG_OPTIONS_MODE ? { configOptions: buildConfigOptions(this.sessions.get(params.sessionId).config) } : {};
   }
 
   async newSession(params) {
@@ -235,10 +503,90 @@ class FakeAcpAgent {
     // 帶的 `mcpServers`(AcpAdapter.spawn() 透過 `SessionBuilder.
     // withMcpServer()` 掛上的設定,見檔頭註解)存起來,供
     // `handleCallBridgeTool()` 之後真的拿去 spawn 成子行程。沒有掛任何
-    // server 時(這個 session 沒有 team/subagentPort)是空陣列,不是
+    // server 時(這個 session 沒有 subagentPort)是空陣列,不是
     // undefined(見 NewSessionRequest.mcpServers 的型別——必填欄位)。
-    this.sessions.set(sessionId, { abort: null, mcpServers: params?.mcpServers ?? [] });
-    return { sessionId };
+    const session = {
+      abort: null,
+      mcpServers: params?.mcpServers ?? [],
+      // 2026-10-06(session 自動命名)e2e 用的統計,見 REPORT_SESSIONS_PREFIX。
+      kind: "main",
+      closed: false,
+      cancelled: 0,
+      permissionOutcomes: [],
+      prompts: 0,
+      // 2026-10-15:這個 agent 自己「記得」的對話(每一輪收到的 prompt),見檔頭。
+      cwd: params?.cwd,
+      turns: [],
+    };
+    this.sessions.set(sessionId, session);
+    this.appendCall({ call: "session/new", sessionId, mcpServers: (params?.mcpServers ?? []).length });
+    this.persistSession(sessionId);
+    if (!CONFIG_OPTIONS_MODE) return { sessionId };
+    session.config = this.freshConfig();
+    return { sessionId, configOptions: buildConfigOptions(session.config) };
+  }
+
+  /**
+   * 2026-10-15:`--config-options` 模式下一個新 session(或接回的 session)的初始設定:永遠是預設 model/思考程度——
+   * 模擬「真實 agent 重啟後不記得使用者先前在 Deskmony 選的 model」,所以 e2e 要證明的是 Deskmony 自己把記住的選擇重新套用
+   * (不是 agent 恰好記得)。對話內容(turns)會落地,設定不會。
+   */
+  freshConfig() {
+    return { model: FAKE_ACP_DEFAULT_MODEL, effort: effortsOf(FAKE_ACP_DEFAULT_MODEL)[0], setCalls: [] };
+  }
+
+  /** 2026-10-06:`--config-options` 模式才會註冊(見 main()),見檔頭。 */
+  async setConfigOption(params) {
+    const config = this.sessions.get(params.sessionId)?.config;
+    if (!config) throw new Error(`未知的 ACP session: ${params.sessionId}`);
+    config.setCalls.push({ configId: params.configId, value: params.value });
+    if (params.configId === FAKE_ACP_MODEL_CONFIG_ID) {
+      if (!FAKE_ACP_CONFIG_MODELS.some((m) => m.value === params.value)) throw new Error(`model not found: ${params.value}`);
+      config.model = params.value;
+      const efforts = effortsOf(config.model);
+      if (!efforts.includes(config.effort)) config.effort = efforts[0];
+    } else if (params.configId === FAKE_ACP_EFFORT_CONFIG_ID) {
+      if (!effortsOf(config.model).includes(params.value)) throw new Error(`effort not found: ${params.value}`);
+      config.effort = params.value;
+    } else {
+      throw new Error(`unknown config option: ${params.configId}`);
+    }
+    return { configOptions: buildConfigOptions(config) };
+  }
+
+  async handleReportConfig(sessionId, cx) {
+    const config = this.sessions.get(sessionId)?.config ?? null;
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text: `CONFIG:${JSON.stringify(config)}` } },
+    });
+  }
+
+  async handleConfigUpdate(sessionId, rawJson, cx) {
+    const config = this.sessions.get(sessionId)?.config;
+    if (config) {
+      const patch = JSON.parse(rawJson);
+      if (patch.model) config.model = patch.model;
+      config.effort = patch.effort ?? (effortsOf(config.model).includes(config.effort) ? config.effort : effortsOf(config.model)[0]);
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "config_option_update", configOptions: buildConfigOptions(config) },
+      });
+    }
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text: "config updated" } },
+    });
+  }
+
+  /** 2026-10-06:`session/close`——取消進行中的回合並標成 closed(真實 agent 會釋放資源)。 */
+  async closeSession(params) {
+    const session = this.sessions.get(params.sessionId);
+    if (session) {
+      session.closed = true;
+      session.abort?.abort();
+    }
+    return {};
   }
 
   async authenticate() {
@@ -250,7 +598,9 @@ class FakeAcpAgent {
   }
 
   cancel(params) {
-    this.sessions.get(params.sessionId)?.abort?.abort();
+    const session = this.sessions.get(params.sessionId);
+    if (session) session.cancelled += 1;
+    session?.abort?.abort();
   }
 
   async prompt(params, cx) {
@@ -262,9 +612,50 @@ class FakeAcpAgent {
     const text = extractText(params.prompt);
     const abort = new AbortController();
     session.abort = abort;
+    session.prompts += 1;
+
+    // 2026-10-06:命名請求排在最前面(引用的使用者訊息裡可能含其他標記),見檔頭。
+    const titleRequest = parseTitleRequestPrompt(text);
+    if (titleRequest) {
+      session.kind = "title";
+      let stopReason;
+      try {
+        stopReason = await this.handleTitleRequest(params.sessionId, titleRequest.firstMessage, abort, cx);
+      } finally {
+        session.abort = null;
+      }
+      return { stopReason: stopReason ?? (abort.signal.aborted ? "cancelled" : "end_turn") };
+    }
+
+    // 2026-10-15:回報這個 agent 自己的記憶(見檔頭 REVIVE_REPORT_MARKER);命名請求之後、其他判斷之前。
+    if (text.trimEnd().endsWith(REVIVE_REPORT_MARKER)) {
+      const priorPrompts = session.turns.map((turn) => turn.prompt);
+      session.turns.push({ prompt: text });
+      this.persistSession(params.sessionId);
+      try {
+        const mode = this.options.load ? "load" : this.options.resume ? "resume" : "none";
+        await this.say(
+          params.sessionId,
+          cx,
+          `REVIVE_REPORT:${JSON.stringify({ agentSessionId: params.sessionId, mode, priorPrompts, prompt: text })}`,
+        );
+      } finally {
+        session.abort = null;
+      }
+      return { stopReason: abort.signal.aborted ? "cancelled" : "end_turn" };
+    }
 
     try {
-      if (DELAY_ECHO_PATTERN.test(text)) {
+      // 2026-10-02(P3):呼叫 bridge 工具的三條路徑**排在最前面**——它們的內文(`message` 參數、巢狀標記)本來就會
+      // 含 `[[E2E_DELAY_ECHO:...]]` 這類標記,先比對 DELAY_ECHO 的話,A 的「呼叫 send_to_session」prompt 會被當成
+      // 回顯而不是真的呼叫工具。
+      if (text.startsWith(CALL_BRIDGE_TOOL_PREFIX)) {
+        await this.handleCallBridgeTool(params.sessionId, text.slice(CALL_BRIDGE_TOOL_PREFIX.length), cx);
+      } else if (text.startsWith(SAY_PREFIX)) {
+        await this.handleSay(params.sessionId, text.slice(SAY_PREFIX.length), cx);
+      } else if (BRIDGE_ON_PROMPT_PATTERN.test(text)) {
+        await this.handleBridgeOnPrompt(params.sessionId, text, cx);
+      } else if (DELAY_ECHO_PATTERN.test(text)) {
         await this.handleDelayEcho(params.sessionId, text, cx);
       } else if (text.startsWith(WRITE_FILE_PREFIX)) {
         await this.handleWriteFile(params.sessionId, text.slice(WRITE_FILE_PREFIX.length), cx);
@@ -278,14 +669,26 @@ class FakeAcpAgent {
         await this.handleAvailableCommands(params.sessionId, text.slice(AVAILABLE_COMMANDS_PREFIX.length), cx);
       } else if (text.startsWith(DIFF_CONTENT_PREFIX)) {
         await this.handleDiffContent(params.sessionId, text.slice(DIFF_CONTENT_PREFIX.length), cx);
-      } else if (text.startsWith(CALL_BRIDGE_TOOL_PREFIX)) {
-        await this.handleCallBridgeTool(params.sessionId, text.slice(CALL_BRIDGE_TOOL_PREFIX.length), cx);
+      } else if (text.startsWith(OPENCODE_TOOL_CALLS_PREFIX)) {
+        await this.handleOpencodeToolCalls(params.sessionId, text.slice(OPENCODE_TOOL_CALLS_PREFIX.length), cx);
       } else if (text === UPSERT_TOOL_CALLS_PREFIX) {
         await this.handleUpsertToolCalls(params.sessionId, cx);
       } else if (text === EMPTY_RESULT_TOOL_NAME_PREFIX) {
         await this.handleEmptyResultToolName(params.sessionId, cx);
+      } else if (text === REPORT_SESSIONS_PREFIX) {
+        await this.handleReportSessions(params.sessionId, cx);
       } else if (text === REPORT_MCP_SERVERS_PREFIX) {
         await this.handleReportMcpServers(params.sessionId, cx);
+      } else if (text === REPORT_ENV_PREFIX) {
+        await this.handleReportEnv(params.sessionId, cx);
+      } else if (text.startsWith(REPORT_SHELL_ENV_PREFIX)) {
+        await this.handleReportShellEnv(params.sessionId, text.slice(REPORT_SHELL_ENV_PREFIX.length), cx);
+      } else if (text.startsWith(REPORT_PRESENCE_PREFIX)) {
+        await this.handleReportPresence(params.sessionId, text.slice(REPORT_PRESENCE_PREFIX.length), cx);
+      } else if (text === REPORT_CONFIG_PREFIX) {
+        await this.handleReportConfig(params.sessionId, cx);
+      } else if (text.startsWith(CONFIG_UPDATE_PREFIX)) {
+        await this.handleConfigUpdate(params.sessionId, text.slice(CONFIG_UPDATE_PREFIX.length), cx);
       } else {
         await this.handleEcho(params.sessionId, cx);
       }
@@ -293,7 +696,92 @@ class FakeAcpAgent {
       session.abort = null;
     }
 
+    // 2026-10-15:這一輪結束,記進這個 agent 自己的記憶(並落地,讓重啟後的 resume/load 找得到)。
+    session.turns.push({ prompt: text });
+    this.persistSession(params.sessionId);
     return { stopReason: abort.signal.aborted ? "cancelled" : "end_turn" };
+  }
+
+  /** 把一段文字當成這一輪的回覆(單一 agent_message_chunk)。 */
+  async say(sessionId, cx, text) {
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text } },
+    });
+  }
+
+  /** 2026-10-06:命名請求(見檔頭)。回傳值有給就當 stopReason。 */
+  async handleTitleRequest(sessionId, firstMessage, abort, cx) {
+    const say = (text) =>
+      cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text } },
+      });
+    if (firstMessage.includes(TITLE_MODE_HANG)) {
+      try {
+        await delay(10 * 60_000, undefined, { signal: abort.signal });
+      } catch {
+        // session/cancel 抵達
+      }
+      return undefined;
+    }
+    if (firstMessage.includes(TITLE_MODE_REFUSE)) {
+      return "refusal";
+    }
+    if (firstMessage.includes(TITLE_MODE_TOOL)) {
+      const toolCallId = `title-tool-${randomUUID()}`;
+      const rawInput = { path: TITLE_TOOL_MARKER_FILE, content: "the title conversation was allowed to run a tool" };
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "tool_call", toolCallId, title: "Write file", kind: "edit", status: "pending", rawInput },
+      });
+      const response = await cx.request(acp.methods.client.session.requestPermission, {
+        sessionId,
+        toolCall: { toolCallId, title: "Write file", kind: "edit", status: "pending", rawInput },
+        options: [
+          { optionId: "allow", name: "Allow", kind: "allow_once" },
+          { optionId: "deny", name: "Reject", kind: "reject_once" },
+        ],
+      });
+      const outcome = response.outcome.outcome === "selected" ? response.outcome.optionId : response.outcome.outcome;
+      this.sessions.get(sessionId)?.permissionOutcomes.push(outcome);
+      if (outcome === "allow") {
+        writeFileSync(TITLE_TOOL_MARKER_FILE, rawInput.content, "utf8");
+        await say("TOOL-RAN");
+      } else {
+        await say("工具被拒");
+      }
+      return undefined;
+    }
+    // 分兩段送(模擬串流),core 收到的是兩段接起來的全文。
+    const reply = fakeTitleReplyFor(firstMessage);
+    const cut = reply.indexOf("\n");
+    await say(reply.slice(0, cut));
+    await say(reply.slice(cut));
+    return undefined;
+  }
+
+  /** 2026-10-06:見 REPORT_SESSIONS_PREFIX。 */
+  async handleReportSessions(sessionId, cx) {
+    const report = [...this.sessions.entries()].map(([id, s]) => ({
+      sessionId: id,
+      kind: s.kind,
+      closed: s.closed,
+      cancelled: s.cancelled,
+      permissionOutcomes: s.permissionOutcomes,
+      prompts: s.prompts,
+      // 2026-10-06(model/思考程度 × 自動命名):這個 session 收過幾次 `session/set_config_option`(沒開 `--config-options` 是 null)——
+      // 命名用臨時 session 不得被套用「記住的上次選擇」,e2e 靠它確認。
+      setConfigCalls: s.config ? s.config.setCalls.length : null,
+    }));
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: { type: "text", text: `SESSIONS:${JSON.stringify(report)}` },
+      },
+    });
   }
 
   async handleEcho(sessionId, cx) {
@@ -437,8 +925,28 @@ class FakeAcpAgent {
    * 檔頭註解對這個分支的完整說明。
    */
   async handleCallBridgeTool(sessionId, rawJson, cx) {
-    const session = this.sessions.get(sessionId);
     const { tool: toolName, args } = JSON.parse(rawJson);
+    await this.runBridgeTool(sessionId, toolName, args, cx, "BRIDGE_TOOL_RESULT");
+  }
+
+  /** P3 e2e 用,見檔頭 BRIDGE_ON_PROMPT_PATTERN 註解:收到含標記的 prompt,自己呼叫標記裡指定的 bridge 工具。 */
+  async handleBridgeOnPrompt(sessionId, text, cx) {
+    const match = text.match(BRIDGE_ON_PROMPT_PATTERN);
+    const { tool: toolName, args } = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
+    await this.runBridgeTool(sessionId, toolName, args, cx, "BRIDGE_ON_PROMPT_RESULT");
+  }
+
+  /** P3 e2e 用,見檔頭 SAY_PREFIX 註解:原封不動把 `text` 當成這一輪的回覆。 */
+  async handleSay(sessionId, text, cx) {
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", messageId: randomUUID(), content: { type: "text", text } },
+    });
+  }
+
+  /** `handleCallBridgeTool()` 與 `handleBridgeOnPrompt()` 共用:真的 spawn bridge 子行程並呼叫一個工具。 */
+  async runBridgeTool(sessionId, toolName, args, cx, resultPrefix) {
+    const session = this.sessions.get(sessionId);
     const mcpServer = session?.mcpServers?.[0];
     const messageId = randomUUID();
 
@@ -448,7 +956,7 @@ class FakeAcpAgent {
         update: {
           sessionUpdate: "agent_message_chunk",
           messageId,
-          content: { type: "text", text: "BRIDGE_TOOL_RESULT_ERROR: no mcpServers configured" },
+          content: { type: "text", text: `${resultPrefix}_ERROR: no mcpServers configured` },
         },
       });
       return;
@@ -470,9 +978,9 @@ class FakeAcpAgent {
     try {
       await client.connect(transport);
       const result = await client.callTool({ name: toolName, arguments: args ?? {} });
-      resultText = `BRIDGE_TOOL_RESULT:${JSON.stringify(result)}`;
+      resultText = `${resultPrefix}:${JSON.stringify(result)}`;
     } catch (err) {
-      resultText = `BRIDGE_TOOL_RESULT_ERROR: ${err instanceof Error ? err.message : String(err)}`;
+      resultText = `${resultPrefix}_ERROR: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       try {
         await client.close();
@@ -487,6 +995,47 @@ class FakeAcpAgent {
         sessionUpdate: "agent_message_chunk",
         messageId,
         content: { type: "text", text: resultText },
+      },
+    });
+  }
+
+  /** 2026-10-03 e2e 用,見 REPORT_ENV_PREFIX 的常數註解。 */
+  async handleReportEnv(sessionId, cx) {
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId,
+        content: { type: "text", text: `ENV:${JSON.stringify({ OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null, serverAuth: describeServerAuth() })}` },
+      },
+    });
+  }
+
+  /** 2026-10-05 e2e 用,見 REPORT_SHELL_ENV_PREFIX 的常數註解。 */
+  async handleReportShellEnv(sessionId, namesCsv, cx) {
+    const shellEnv = await simulateShellEnv(pluginHost.hooks, process.cwd());
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: {
+          type: "text",
+          text: `SHELLENV:${JSON.stringify({ shell: presenceIn(shellEnv, namesCsv), process: presenceIn(process.env, namesCsv), pluginsLoaded: pluginHost.loaded, pluginErrors: pluginHost.errors })}`,
+        },
+      },
+    });
+  }
+
+  /** 2026-10-05 e2e 用,見 REPORT_PRESENCE_PREFIX 的常數註解。 */
+  async handleReportPresence(sessionId, namesCsv, cx) {
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: { type: "text", text: `PRESENCE:${JSON.stringify(describePresence(namesCsv))}` },
       },
     });
   }
@@ -553,6 +1102,63 @@ class FakeAcpAgent {
     await cx.notify(acp.methods.client.session.update, {
       sessionId,
       update: { sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: UPSERT_DONE_TEXT } },
+    });
+  }
+
+  /**
+   * 見檔頭註解的 OPENCODE_TOOL_CALLS_PREFIX:`count` 個照真實 OpenCode ACP 順序的工具呼叫
+   * (`tool_call` 帶 `{}` 佔位 → `tool_call_update` in_progress 才帶真參數 → 重報同一份 →
+   * completed 再帶一次)。`kind: "other"` 且不帶 `locations`,不會碰到 diff 的檔案快照路徑。
+   */
+  async handleOpencodeToolCalls(sessionId, rawJson, cx) {
+    const { count } = JSON.parse(rawJson);
+    for (let i = 0; i < count; i++) {
+      const toolCallId = `opencode-style-${i}-${randomUUID()}`;
+      const input = opencodeToolInput(i);
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId,
+          title: OPENCODE_TOOL_PENDING_TITLE,
+          kind: "other",
+          status: "pending",
+          rawInput: {},
+        },
+      });
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          title: opencodeToolRunningTitle(i),
+          status: "in_progress",
+          rawInput: input,
+        },
+      });
+      // 同一份參數原樣重報:adapter 不能因此再多送一個 tool-call 事件。
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "tool_call_update", toolCallId, status: "in_progress", rawInput: input },
+      });
+      await cx.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "completed",
+          rawInput: input,
+          rawOutput: { ok: true, index: i },
+        },
+      });
+    }
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: { type: "text", text: `opencode-style tool calls sent: ${count}` },
+      },
     });
   }
 
@@ -761,20 +1367,36 @@ function extractText(prompt) {
 }
 
 async function main() {
+  // 2026-10-05:扮演 `opencode acp` 時(環境裡有 OPENCODE_CONFIG_CONTENT),模擬 opencode 載入它的 `plugin`(含 Deskmony 自帶的外掛,
+  // 載入時會寫「載入標記檔」)。沒有這個變數(一般 ACP agent)什麼都不載入。
+  if (process.env.OPENCODE_CONFIG_CONTENT && process.env.FAKE_OPENCODE_SKIP_PLUGINS !== "1") {
+    pluginHost = await loadConfigPlugins(process.env.OPENCODE_CONFIG_CONTENT, process.cwd());
+  }
   const input = Writable.toWeb(process.stdout);
   const output = Readable.toWeb(process.stdin);
   const stream = acp.ndJsonStream(input, output);
-  const agent = new FakeAcpAgent();
+  const flags = new Set(process.argv.slice(2));
+  const agent = new FakeAcpAgent({
+    resume: flags.has("--resume"),
+    load: flags.has("--load"),
+    forget: flags.has("--forget"),
+    stateDir: process.env.FAKE_ACP_STATE_DIR || undefined,
+  });
 
-  acp
+  let app = acp
     .agent({ name: "deskmony-fake-acp-agent" })
     .onRequest(acp.methods.agent.initialize, () => agent.initialize())
     .onRequest(acp.methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
+    .onRequest(acp.methods.agent.session.resume, (ctx) => agent.resumeSession(ctx.params))
+    .onRequest(acp.methods.agent.session.load, (ctx) => agent.loadSession(ctx.params, ctx.client))
     .onRequest(acp.methods.agent.authenticate, () => agent.authenticate())
     .onRequest(acp.methods.agent.session.setMode, () => agent.setSessionMode())
+    .onRequest(acp.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
     .onRequest(acp.methods.agent.session.prompt, (ctx) => agent.prompt(ctx.params, ctx.client))
-    .onNotification(acp.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
-    .connect(stream);
+    .onNotification(acp.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params));
+  // 2026-10-06:沒有 `--config-options` 時不處理 set_config_option(SDK 回 method-not-found),模擬不支援的 agent。
+  if (CONFIG_OPTIONS_MODE) app = app.onRequest(acp.methods.agent.session.setConfigOption, (ctx) => agent.setConfigOption(ctx.params));
+  app.connect(stream);
 }
 
 // 只有「被當成獨立程序直接執行」時才啟動 stdio 連線(即 AcpAdapter.spawn()

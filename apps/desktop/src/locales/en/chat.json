@@ -38,18 +38,15 @@
     "customPlaceholder": "Type your own answer"
   },
   "usage": {
-    "cannotMeasureTitle": "This backend cannot measure cost (or it isn't yet confirmed whether it will report it) — the task/daily cost budget doesn't apply to this session; only the turn time/tool-call count limit still protects it.",
+    "cannotMeasureTitle": "This backend cannot measure cost (or it isn't yet confirmed whether it will report it) — the daily cost budget doesn't apply to this session; only the turn time/tool-call count limit still protects it.",
     "unknownLabel": "Cost unknown",
     "cannotMeasureLabel": "Cannot measure cost",
     "hasValueTitle": "Accumulated cost (this backend reports cost, S3a usage-metering)",
     "noValueYetTitle": "This backend reports accumulated cost, but this session hasn't received its first value yet (sent when a turn ends)"
   },
   "cost": {
-    "taskTrippedLabel": "Task \"{{title}}\" has reached its budget limit — new prompts are blocked",
-    "taskBudgetPercentLabel": "Task budget {{percent}}%",
     "dailyTrippedLabel": "Today's cost kill-switch has been triggered — all sessions are paused",
-    "trippedTitle": "This session/task has been halted by the cost circuit breaker (the worktree/task is preserved — adjust the budget and restart core to continue)",
-    "percentTitle": "Task-level accumulated cost/token usage as a percentage of budget"
+    "trippedTitle": "Today's cost kill-switch has been triggered and new prompts are blocked (conversation history is preserved — adjust the budget and restart core to continue)"
   },
   "empty": {
     "selectOrCreateSession": "Select or create a conversation on the left to get started",
@@ -75,5 +72,28 @@
   },
   "attachment": {
     "tooLarge": "These attachments exceed {{limit}} MB and were skipped: {{files}}"
+  },
+  "origin": {
+    "fromSession": "From {{title}}",
+    "fromSessionTitle": "This message was sent by another session (click to switch to it)",
+    "fromSessionGone": "This message was sent by another session (that session no longer exists)",
+    "forwardedFrom": "Forwarded from {{title}}",
+    "forwardedFromTitle": "You forwarded this message from that session (click to switch to it)",
+    "forwardedFromGone": "You forwarded this message from another session (that session no longer exists)"
+  },
+  "forward": {
+    "button": "Forward to…",
+    "buttonTitle": "Forward this message to another session",
+    "dialogTitle": "Forward to another session",
+    "dialogDescription": "Pick the session that should receive this message (any session works). It will get a message saying you forwarded it from this session and decides for itself what to do with it — nothing is sent back automatically.",
+    "previewLabel": "Content to forward",
+    "targetLabel": "Target session",
+    "targetPlaceholder": "Choose a session…",
+    "noTargets": "There is no other session to forward to",
+    "noteLabel": "Note (optional)",
+    "notePlaceholder": "e.g. Please fix your implementation based on this result",
+    "submit": "Forward",
+    "sending": "Forwarding…",
+    "tooLong": "This message is too long to forward (the limit is {{max}} characters)"
   }
 }

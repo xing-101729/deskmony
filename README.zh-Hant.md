@@ -2,7 +2,7 @@
 
 # Deskmony
 
-**一個給 AI coding agent 團隊用的桌面控制室 —— 讓一整隊 agent 能無人值守跑上好幾個小時,也不會失控。**
+**一個給 AI coding agent 用的桌面控制室 —— 讓 agent 能無人值守跑上好幾個小時,也不會失控。**
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
@@ -18,29 +18,28 @@
 
 ---
 
-Deskmony 讓你跑一整支 AI coding agent **團隊**,而不是側邊欄裡的一個聊天機器人。每個成員有自己的角色、自己的後端(Claude Code、Codex、OpenCode,或任何你手邊已有的 CLI)、自己的 git worktree。他們自己規劃、寫程式、互相審查,透過內建的訊息匯流排彼此傳訊 —— 你可以在旁邊看,也可以不用一直盯著。
+Deskmony 讓你跑 AI coding agent —— 不是側邊欄裡的一個聊天機器人 —— 後端隨你選(Claude Code、Codex、OpenCode,或任何你手邊已有的 CLI),底下有一整套安全罩,你可以在旁邊看,也可以不用一直盯著。
+
+> **2026-10-02:**為了簡化產品(見 [`DECISIONS.md` §H](docs/DECISIONS.md)),agent profile、team、任務看板、每任務一個 git worktree 都已移除。取而代之的是:Deskmony 直接找出你電腦上已經裝好的 agent CLI,從任何一個直接開 session;每個 session 都能找到可用的 agent、開新 session,並和任何其他 session 互傳訊息。
 
 ## 為什麼是 Deskmony
 
 多數多 agent coding 工具只給你兩個選項:每個權限彈窗都自己盯著核准,或者整組開自動核可、然後賭。Deskmony 走第三條路。
 
-論點很簡單:**讓 agent 無人值守運作,靠的不是「更信任它」,而是不管你信不信任它、斷路器都一樣會跳。** 三個各自獨立的斷路器罩住每個 agent、每則訊息、每一分花費。任一條都能單獨叫停失控。訊息與成本兩條**遠端無法停用**;權限那條自 2026-08-25 起遠端與本機同權(有意識、有記錄的翻案,見 [`DECISIONS.md` §G](docs/DECISIONS.md)),詳見下方「遠端能做什麼、不能做什麼」。
+論點很簡單:**讓 agent 無人值守運作,靠的不是「更信任它」,而是不管你信不信任它、斷路器都一樣會跳。** 三個各自獨立的斷路器罩住每個 agent、每則訊息、每一分花費。任一條都能單獨叫停失控。成本與訊息這兩條**遠端無法停用**;權限那條自 2026-08-25 起遠端與本機同權(有意識、有記錄的翻案,見 [`DECISIONS.md` §G](docs/DECISIONS.md)),詳見下方「遠端邊界」。
 
-純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **1,545 行實際程式碼(不含空行與註解),佔 orchestration core 的 22%**,這還沒算上散在 session manager 與 message bus 裡的決策編排。
+純粹為安全罩存在的四個目錄 —— `permissions/`、`cost/`、`enforcement/`、`recovery/` —— 合計 **1,331 行實際程式碼(不含空行與註解),佔 orchestration core 的 26%**(core 共 5,033 行;這個比重在 2026-10-02 移除 team 與任務層之前是 22%、剛移除完是 29%,之後因為 core 多了 agent 目錄與 session 網路而回落)。這還沒算上散在 session manager 裡的決策編排,以及訊息斷路器(`session/message-chain-budget.ts`)—— 它在 `session/` 底下,不在那四個目錄裡。
 
-(這個數字刻意扣掉註解。這份 codebase 有 31% 是註解,把它們算進去會得到比較好看的 2,372 行 —— 但註解不會擋下任何一次工具呼叫,拿來當「安全投入」的證據是假的。**行數本來就證明不了安全性**,真正該看的是下面那張決策流程圖,以及 `scripts/e2e-hard-deny.mjs` 對四類 hard-deny 的逐條斷言。)
+(這個數字刻意扣掉註解。這份 codebase 約三成是註解,把它們算進去會得到比較好看的數字 —— 但註解不會擋下任何一次工具呼叫,拿來當「安全投入」的證據是假的。**行數本來就證明不了安全性**,真正該看的是下面那張決策流程圖,以及 `scripts/e2e-hard-deny.mjs` 對四類 hard-deny 的逐條斷言。)
 
 ## ✨ 亮點
 
-- 🛡️ **三個獨立斷路器** —— 權限、訊息、成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
-- 🤝 **是一支團隊,不是一個聊天機器人** —— 角色(PM / Architect / Coder / Reviewer / QA),每個可綁不同後端與 model。
-- 💬 **agent 之間互相傳訊** —— 內建 `team-bus` MCP server,提供 `send_message`、`broadcast`、`request_review`、`report_status`、`list_teammates`。人類看著即時群聊,隨時可以插話。長命成員收到訊息時若還沒有 session,會自動幫它開一條;每則注入的訊息也會直接點名該用哪個工具回覆,回話才會回到群聊,而不是卡在 agent 自己的對話紀錄裡。那句提示同時會告訴 agent「這則是專門找你的,還是發給全隊的廣播」,並明講不回覆也是正常選項——否則一則廣播給五個人就等於邀請五則回覆,那正是訊息斷路器要防的迴圈。這組工具掛在 `claude-agent-sdk` 與 `acp` 兩種傳輸上(後者涵蓋 Codex、Gemini,以及走 `opencode acp` 的 OpenCode);`pty` 直通**架構上沒有工具通道**,這類成員仍然收得到訊息,但會被如實告知「回覆傳不回去」,而不是被交付一個根本不存在的工具。
-- 🌱 **agent 可以開子 agent** —— 第二個 `subagent` MCP server 讓 session 把子任務委派出去並收回結果。開子 agent **刻意不自動放行**。
-- 🖥️ **貨真價實的桌面 IDE** —— 串流 markdown、行內 diff、內嵌終端機、todo 追蹤、圖片工具輸出、互動式提問元件。
-- 🗂️ **git worktree 隔離** —— 每個任務一個 worktree;合併回主幹永遠需要人類親手點一下。
+- 🛡️ **獨立的斷路器** —— 權限、訊息與成本。全程 default-deny,外加一份任何 auto 模式都繞不過的硬性 deny 清單 —— 唯一刻意留的例外是需要打字確認的「真.無限制」層,詳見下文。
+- 🌱 **每個 session 都能找到可用的 agent、開新 session、和任何 session 互傳訊息** —— Deskmony 會偵測你電腦上已經裝好的 agent CLI;開新 session 只要選一個 agent、(選填)model 與工作資料夾,不必先建 profile。能跑工具的 session(內嵌 Claude Agent SDK,以及所有走 ACP 的 agent:Codex、Gemini,還有走 `opencode acp` 的 OpenCode)會從 `deskmony` MCP server 拿到五個工具 —— `list_agents`、`list_sessions`、`read_session`、`create_session`、`send_to_session`。**不做任何自動回送**:收到訊息的 agent 自己決定要不要回、回給誰。開 session 與傳訊息**刻意不放進自動放行清單** —— 它們和其他工具呼叫走同一道權限階梯 —— 而且有「每條訊息鏈」的預算擋住失控的來回對傳。
+- 🖥️ **貨真價實的桌面 IDE** —— 串流 markdown、行內 diff、內嵌終端機、todo 追蹤、圖片工具輸出、互動式提問元件,能把任何一則 assistant 回覆「轉傳到…」另一個 session 的按鈕,以及可以就地改名的 session 標題——或由 session 自己的 agent 在用完即丟的臨時對話裡替你取名,不會在你的對話裡多一輪。
 - 🔌 **四個 adapter,同一套介面** —— 內嵌 Claude Agent SDK、ACP、OpenCode HTTP/SSE,以及保底的原始 PTY。
 - 🔄 **不靠猜的崩潰復原** —— 孤兒 session 在啟動時對帳,由人逐一分流。**刻意不做任何自動續接。**
-- 🌐 **可遠端,但清楚劃出哪些事只能留在本機** —— 瀏覽器或手機經 token 認證連上;2026-08-25 起遠端在 session 控制與政策編輯上與本機同權,但 profile 管理、綁定介面、預算上限永遠只能本機動。
+- 🌐 **可遠端,但清楚劃出哪些事只能留在本機** —— 瀏覽器或手機經 token 認證連上;2026-08-25 起遠端在 session 控制與政策編輯上與本機同權,但 provider 設定(可能含 API key)與綁定介面永遠只能本機動。
 - 🌍 **多語系** —— 英文、繁體中文、日文、西班牙文。
 
 ## 🛡️ 安全罩
@@ -51,7 +50,7 @@ agent 的每一次工具呼叫都走這道階梯。**順序寫死,不可設定**
 
 ```mermaid
 flowchart TB
-    Req["工具呼叫<br/>(名稱、參數、workingDir、profile、角色)"] --> TU{"0 · 真.無限制?"}
+    Req["工具呼叫<br/>(名稱、參數、workingDir、providerId)"] --> TU{"0 · 真.無限制?"}
     TU -- 是 --> Allow0["ALLOW —— 繞過一切,<br/>包含 hard-deny"]
     TU -- 否 --> HD{"1 · 命中 hard-deny?"}
     HD -- 否 --> Rules{"2 · 依序比對<br/>config 規則"}
@@ -65,34 +64,37 @@ flowchart TB
     Auto -- 否 --> Esc["4 · ESCALATE<br/>default-deny"]
 ```
 
-**四類硬性 deny,config 關不掉**:worktree 外的寫入或刪除 · 讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、`**/credentials`)· 危險 git(`push --force`、刪遠端分支、`branch -D`)· 對非白名單主機的外連。
+**四類硬性 deny,config 關不掉**:session 工作目錄外的寫入或刪除 · 讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、桌面殼自己的本機資料夾、`**/.env*`、`**/id_rsa*`、`**/credentials`)· 危險 git(`push --force`、刪遠端分支、`branch -D`)· 對非白名單主機的外連。
 
 有幾個性質值得直說:
 
 - **YOLO 跟 auto 的差別只有一個**:YOLO 額外跳過 config 的 `deny` 規則。**兩者都絕不跳過 hard-deny。** YOLO 還會在 30 分鐘後過期。
 - **引擎判不出來的一律 escalate**,絕不 allow。這是 `decide()` 的最後一行。
+- **OpenCode 也被強制走同一條階梯。** OpenCode 預設放行所有工具,只有它自己設定檔標成 `"ask"` 的才會詢問 —— 而多數人的設定一個都沒標,所以放著不管的話,它的 bash/edit/webfetch/MCP 呼叫根本到不了引擎。Deskmony 啟動 OpenCode(`opencode` 與 `opencode-acp` 兩個 provider)時,會注入一段 `OPENCODE_CONFIG_CONTENT`,把每個工具都設成 `ask`,並與你原本的設定合併(你的設定保留,但權限規則以 Deskmony 的為準)。看得到的影響:`always-ask` 下的 OpenCode session 現在會停下來問,以前是靜默執行;auto/YOLO 照舊。一個限制:`opencode-acp` provider 的 `task`(subagent)工具會被停用,因為 `opencode acp` 不會轉發 subagent 的權限請求,subagent 會永遠卡住。 OpenCode 在 loopback 開的本機 HTTP 伺服器(`opencode serve`,實測 `opencode acp` 也會開)也加了密碼保護,每次啟動都重新產生隨機密碼,所以本機其他程序無法替 OpenCode 核准權限(繞過引擎),也讀不到設定裡的 scoped token;密碼只存在記憶體與子行程環境裡,你自己設的同名密碼會被覆蓋。OpenCode 自己的 bash 工具本來會繼承那個密碼,所以 2026-10-05 起由 Deskmony 自帶的一個小型 OpenCode 外掛,把它(與注入的設定內容)從 OpenCode 替 agent 執行的 shell 環境裡移除(見 [`DECISIONS.md` §J](docs/DECISIONS.md))。
+- **agent 的環境裡不會有 Deskmony 自己的憑證。** 桌面殼一律把主認證 `DESKMONY_AUTH_TOKEN` 設進 core 的環境,過去每個 adapter 又把整份環境傳給它啟動的 agent —— 於是 agent 的 bash 讀得到 token,連上 gateway 就能自己核准權限、把自己切成 YOLO。現在每個 adapter(Claude、ACP、OpenCode、PTY)都經同一個函式組 agent 的環境,最後一步無條件濾掉主 token、MCP bridge 的 scoped 憑證與繼承來的 OpenCode 伺服器密碼(不分大小寫;你在 provider 環境變數裡自己填的也一樣)。session 網路工具照常可用 —— bridge 的憑證是另外明確交給它的,不靠繼承。這擋不住的是:同一個作業系統使用者的程序讀其他程序的記憶體、或解密 DPAPI 保護的本機檔案 —— 那屬於沙箱的範疇(見 [`DECISIONS.md` §J](docs/DECISIONS.md))。
 - **逾時語意取決於現場有沒有人。** 有人看著 → 待決請求逾時後轉成 deny。沒人看著 → **完全不設計時器**,session 停在 `waiting` 等人回答。把「沒人回應」解讀成「拒絕」,等於把整晚的工作丟掉。真正防止它無限期懸著的是成本斷路器。
 - **「永遠允許」有三條紀律**:寫最窄的規則(`commandEquals` / `pathUnder`);同時寫進設定檔與記憶體,讓重啟前後行為一致;hard-deny 升級來的請求**永遠**不符資格 —— 就算 client 硬塞 `rememberRule`,core 也會把它拔掉。
+- **規則可以限定到某個 agent**(`providerId`,例如只對 Codex 的 session 生效)。舊 profile 時代遺留的規則 —— 在舊版 `config.json` 裡限定 profile id 或角色的 —— 已經對不到任何 session,所以一律往安全的方向收:這類 `allow` 規則不再匹配(該次呼叫改成升級給人),這類 `deny` 規則改成套用到**所有** session,避免被限定範圍的 deny 靜默失效、在 auto 模式下變成自動放行。core 啟動時會逐條記錄受影響的規則。
 - **唯一能跨過 hard-deny 地板的例外,是刻意設計、有稽核的**:疊在 YOLO 之上的「真.無限制」層,需要打對一段確認字串才能啟用,2026-08-25 起本機與遠端皆可用(見 [`DECISIONS.md` §G](docs/DECISIONS.md))。這是 `decide()` 裡唯一能跳過 hard-deny 的路徑 —— 只在該 session 已經開著 YOLO 時才能開、只能逐 session 開、且一定要人打對確認字串;啟用當下會跳桌面通知,也會寫進稽核紀錄。
 
 ### 斷路器二 —— 訊息
 
-在既有投遞策略前面加兩道閘:
+agent 一旦能互傳訊息,要防的失控就是迴圈:A 回 B、B 回 A、永遠不停 —— 或某個 agent 不斷扇出新的 session。原本的預算(core 推導的 contextId + 每 context 的上限)隨訊息匯流排在 2026-10-02 一併移除(見 [`DECISIONS.md` §H](docs/DECISIONS.md));這條斷路器改以另一個單位重建 —— **訊息鏈**:
 
-1. **contextId 由 core 推導,agent 給不了。** 它來自發送者當下綁定的任務;沒有進行中的任務時,則落在 `member:<memberId>` 這個同樣由 core 推導的專屬桶。讓被管制的對象自己申報管制欄位,等於讓它換個名字就能把預算歸零。*(2026-08-28 之前推不出任務一律拒收,但那連帶擋掉了「手上沒任務的成員回覆人類或隊友」——人類插話天然有速度上限,不是同一種風險。現在無任務的情況改成獨立計費的一桶,照樣吃同一條上限,成員之間也互不相干。)*
-2. **每 context 的訊息預算。** 燒完就熔斷,拒收該 context 後續的 `send_message` / `broadcast` / `request_review`。
-
-**只切橫向閒聊,不切縱向進度** —— `report_status` 與 `list_teammates` 照常運作,已熔斷的 context 仍然回報得了自己做到哪。
+- 人類輸入的 prompt —— 或 UI 的轉傳 —— 開一條**新鏈**。agent 在處理某則訊息的那一輪裡呼叫 `send_to_session` / `create_session`,送出的訊息沿用觸發它那一輪的鏈。
+- 一條鏈最多可承載 `messageBudget.maxMessagesPerContext` 則 agent 對 agent 的訊息(預設 50;鍵名沿用舊設計,讓既有設定檔照常解析)。達到 `warnAtPercent` 時發一次軟警告(稽核紀錄 + 通知,不 halt)。
+- **超過上限的第一則訊息就熔斷**:那則訊息被拒絕,工具結果告訴 agent「這條鏈已熔斷、需要人介入」,稽核紀錄與桌面通知會記下來(每條鏈只通知一次,agent 反覆重試也不會洗版)。在已熔斷的鏈上呼叫 `create_session` 不會 spawn 任何東西。
+- 熔斷只擋 **agent 對 agent** 的傳遞。你照樣可以對任何 session 輸入,輸入就會開一條新鏈;UI 轉傳是人類操作,同樣開新鏈、不計數、不會被擋。
+- 計數只存記憶體(core 重啟歸零),而且這個設定不在遠端可改的子集裡 —— 遠端 client 關不掉這條斷路器。
 
 ### 斷路器三 —— 成本
 
 | 元件 | 訊號 | 何時跳 | 怎麼止血 |
 |---|---|---|---|
 | **TurnLimiter** | `tool-call` 事件 + 時間 —— **完全不需要 usage** | 單回合超過 30 分鐘或 200 次工具呼叫 | 立即 interrupt |
-| **CostGovernor**(任務預算) | `usage` 事件 | 任務累計花費超標 | 擋掉後續 prompt,不砍已結束的回合 |
-| **CostGovernor**(每日 kill-switch) | `usage` 事件 | 當日團隊總花費超標 | interrupt 所有 session |
+| **CostGovernor**(每日 kill-switch) | `usage` 事件 | 當日總花費超標 | interrupt 所有 session,並擋後續 prompt |
 | **WaitingWatchdog** T1 | `waiting` 停留時間 | 6 小時 | 只通知,不 halt |
-| **WaitingWatchdog** T2 | `waiting` 停留時間 | 72 小時 | dispose 子程序;任務留 blocked、worktree 保留 |
+| **WaitingWatchdog** T2 | `waiting` 停留時間 | 72 小時 | dispose 子程序;對話紀錄保留 |
 
 > **TurnLimiter 是其中最重要的一個。** 對真實 Claude Code 經 ACP 實測:bridge 回報 **0 筆** usage —— 不是設定問題,是結構性缺口。對那個後端,所有依賴 usage 的預算全部形同虛設,回合硬上限是唯一剩下的保護。
 
@@ -100,7 +102,7 @@ flowchart TB
 
 `isLocal` 由 core 依連線本身的位址判定,**絕不採信 client 自稱**。隧道連線(Tailscale、WireGuard)不是 loopback,一律算**遠端** —— 隧道保護的是傳輸,不代表現場有個操作者。
 
-遠端 client **可以**旁觀、送 prompt、核准或拒絕升級請求、把 session 切成 auto/YOLO、編輯政策允許清單、在核准時附帶「永遠允許」規則 —— 2026-08-25 起與本機同權,這是有意識、有記錄的翻案(見 [`DECISIONS.md` §G](docs/DECISIONS.md)),推翻了先前的遠端限制。遠端甚至能透過與本機相同的打字確認閘門,開啟上面提到的「真.無限制」層。遠端**仍然不可以**:管理 agent profile、改網路綁定位址、調高預算上限。這道閘擋在 dispatch 層,**不是靠 UI 藏按鈕** —— 繞過 UI 直接送 raw request 一樣會被擋。
+遠端 client **可以**旁觀、送 prompt、核准或拒絕升級請求、把 session 切成 auto/YOLO、編輯政策允許清單、在核准時附帶「永遠允許」規則 —— 2026-08-25 起與本機同權,這是有意識、有記錄的翻案(見 [`DECISIONS.md` §G](docs/DECISIONS.md)),推翻了先前的遠端限制。遠端甚至能透過與本機相同的打字確認閘門,開啟上面提到的「真.無限制」層。遠端**仍然不可以**:編輯 provider 設定(它的環境變數可能帶 API key,而且會併進每一個 agent 子程序)、編輯一般設定檔、改網路綁定位址。這道閘擋在 dispatch 層,**不是靠 UI 藏按鈕** —— 繞過 UI 直接送 raw request 一樣會被擋。
 
 綁非 loopback 位址又沒設 `DESKMONY_AUTH_TOKEN` 會**直接拒絕啟動**。token 刻意不是設定檔欄位,所以改設定檔擴大不了曝露面 —— 只能來自環境變數,或(僅桌面殼)Settings「遠端存取」面板用 Electron `safeStorage` 加密保存在本機的值,讓你能複製一組穩定的 token 交給瀏覽器或手機使用。
 
@@ -114,21 +116,18 @@ WebSocket 升級另外有一道**與 token 獨立的同源檢查**(2026-09-04 �
 flowchart TB
     subgraph SHELL["apps/desktop —— Electron 44 + React 18"]
         direction LR
-        Views["views/ 對話・團隊群聊・任務看板・復原"]
-        Stores["stores/ zustand × 4"]
+        Views["views/ 對話・復原"]
+        Stores["stores/ zustand × 2"]
     end
 
     subgraph CORE["apps/core —— headless orchestration server"]
-        GW["gateway/ —— 68 個 RPC + 11 個 push channel"]
+        GW["gateway/ —— 39 個 RPC + 8 個 push channel"]
         subgraph DOMAIN["領域"]
             direction LR
             Sess["session/"]
-            Bus["bus/"]
-            Task["tasks/"]
-            Team["team/"]
-            Work["workspace/"]
+            Agents["agents/"]
         end
-        subgraph SHIELD["安全罩 · 佔 core 22%"]
+        subgraph SHIELD["安全罩 · 佔 core 26%"]
             direction LR
             Perm["permissions/"]
             Cost["cost/"]
@@ -139,9 +138,9 @@ flowchart TB
 
     subgraph PKG["packages/"]
         direction LR
-        Adapters["adapters/ —— 4 個 adapter + 2 個 MCP server"]
+        Adapters["adapters/ —— 4 個 adapter + 1 個 MCP server"]
         Shared["shared/ —— zod 單一事實來源"]
-        Db["db/ —— 11 張表"]
+        Db["db/ —— 5 張表"]
     end
 
     SHELL -- "WebSocket + token 認證" --> GW
@@ -152,56 +151,66 @@ flowchart TB
     CORE --> Db
 ```
 
-**依賴鐵則**:`packages/*` 絕不 import `apps/*`。跨界需求一律在 `packages/shared` 宣告介面(`TeamBusPort`、`SubagentPort`、`ClientPresencePort`、`SessionControlPort`),建構時注入。
+**依賴鐵則**:`packages/*` 絕不 import `apps/*`。adapter 需要 core 提供的東西,一律在 `packages/shared` 宣告介面(session 工具用的 `SessionNetworkPort`、ACP 橋接的 scoped token 用的 `McpBridgeTokenPort`),建構時注入。
 
 ### Adapter
 
-註冊了四個 adapter,全部實作同一套介面,所以權限、訊息匯流排、任務看板都不需要知道對面是哪套 CLI。
+註冊了四個 adapter,全部實作同一套介面,所以權限與 session manager 都不需要知道對面是哪套 CLI。
 
 | Adapter | 對接方式 | 目前涵蓋的後端 | 能力等級 |
 |---|---|---|---|
-| `ClaudeAgentSdkAdapter` | Claude Agent SDK,程式內嵌 | Claude Code | 最深 —— hooks、子 agent、細粒度權限事件、對話中換 model 與 effort |
-| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件——官方 `codex` 執行檔本身不原生講 ACP)、其他 ACP-native agent | 結構化事件 |
-| `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用 |
+| `ClaudeAgentSdkAdapter` | Claude Agent SDK,程式內嵌 | Claude Code | 最深 —— hooks、in-process session 工具、細粒度權限事件、對話中換 model 與 effort |
+| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件——官方 `codex` 執行檔本身不原生講 ACP)、其他 ACP-native agent | 結構化事件;agent 有提供時可換 model 與 effort |
+| `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用;可換 model 與 effort(variant) |
 | `GenericPtyAdapter` | 原始 `node-pty` 直通 | Claude Code CLI、Aider、任意互動式 CLI | **保底 —— 沒有權限事件** |
 
-使用者看到的那一層是八項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,團隊訊息工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY、`custom-pty`。
+使用者看到的那一層是七項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,session 工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY。手動輸入 command 的那一項(`custom-pty`)已於 2026-10-02 移除:session 只能從 Deskmony 自己偵測到的 agent 開出來,gateway 上也沒有任何能新增 command 的入口。
 
 **PTY 這層缺的權限事件是安全邊界,不是待辦事項。** 它是 raw stdin 直通,**結構上**沒辦法被政策引擎管。在真正的執行沙箱做出來之前,PTY agent 一律唯讀、不給無人值守的自主權。Deskmony 刻意**不做** shell 指令攔截:`bash -c`、`$()`、base64 幾秒就能繞過,做了只是 security theater。
 
 **能力回報對「自己不知道的事」很誠實。** usage 與 context 回報是三態 —— `supported` / `unsupported` / `unknown` —— 因為一條連線到底報不報用量,是被 spawn 出來的那個 agent 決定的,不是 adapter。同一個 `AcpAdapter`,對某個 agent 忠實轉發用量,對另一個從頭到尾收不到半個事件。靜態布林值不管填哪邊都是在對 UI 說謊,所以消費端必須靠「這條 session 實際觀察到什麼」自己收斂。
 
-## 📋 任務流程與三道人類把關
+### Agent 與 session
 
-```mermaid
-stateDiagram-v2
-    [*] --> backlog
-    backlog --> assigned: 建立 worktree
-    assigned --> in_progress
-    in_progress --> review: 過驗收閘 或 人類核可
-    review --> in_progress: 退回意見
-    review --> merging
-    merging --> done: 人類點下核准
-    done --> [*]
-    in_progress --> blocked
-    blocked --> in_progress: 回到原本的狀態
-```
+不再有 profile。`AgentCatalog`(`apps/core/src/agents/`)是「哪些 agent 可以開 session」的唯一權威:
 
-1. **機器驗收閘** —— 任務可以帶驗收指令(test / build / typecheck)。`report_status(done)` 必須先過,任務才進得了 review。
-2. **人類 review 閘** —— 沒有驗收條件、或連續失敗達上限時,任務停在 `in-progress` 並標記 `awaitingHumanReview`,等人核可。
-3. **人類合併** —— `task.merge` 是整個系統裡**唯一**會執行 `git merge` 的路徑,而且只從任務看板的按鈕觸發。
+- **偵測。** core 啟動時在背景掃描目錄裡的 agent(不會卡住啟動);側欄或設定裡的「重新偵測」會重新掃描。設定介面仍然能停用某個 agent、調整順序、挑要開放的 model、設定各 agent 的環境變數 —— API key 就放在那裡。
+- **開 session** 就是 `session.create`:帶一個 agent(`providerId`)、選填的 model 與 effort、一個工作資料夾。桌面側欄有這四個選單加上「新對話」鈕;CLI 用 `--agent <providerId>`(預設 `claude-agent-sdk`)、`--model`、`--effort`。偵測不到任何 agent 時,側欄會說明並提供重新偵測。
+- **model 與思考程度向 agent 本身查詢**,不寫死清單,UI 只顯示 agent 真的提供的選項。Claude 是固定的 5 級(Claude Code CLI 在啟動時帶 `--model`/`--effort`);ACP agent(Codex、Gemini、OpenCode ACP)在 `session/new` 的 config options 回報(`model` / `thought_level` 類別),以 `session/set_config_option` 切換;OpenCode 的思考程度就是 model 的 *variant*(例如 `low`/`high`),從 `opencode models --verbose` 與 `/config/providers` 讀取,隨每則訊息送出。思考程度的值由各 agent 定義。ACP agent 要等 session 開起來才知道有哪些選項,所以在對話標題列選;Deskmony 會記住每個 agent 上次的選擇,下次建立時自動套用(agent 這次不提供就略過)。agent 不提供的值一律回明確錯誤,絕不靜默忽略。
+- **session 自帶啟動資訊**(它的 provider,以及走 CLI 的那幾種要用的 command 與參數),所以重啟後續接它不依賴其他東西;若該 agent 已經偵測不到,就改用 session 存下來的 command。這次改版之前建立的 session,會在 core 第一次啟動時依它們原本的 profile 回填;舊的 `agent_profiles` 表只會被讀取、絕不修改。
+- 每個 session 一律從 `always-ask` 開始。切到 auto/YOLO 仍然是逐 session 的操作,跟以前一樣。
+- **標題。** session 可以就地改名:側欄雙擊標題(或用「⋯」/右鍵選單),或點對話上方的標題——Enter 儲存、Esc 取消。gateway 是 `session.rename`(去頭尾空白後 1–100 個字,錯誤碼明確:`session.titleEmpty` / `session.titleTooLong`)。沒給標題建立的 session,會在你送出第一則訊息後自動命名:由這個 session **自己的 agent** 在一個**臨時對話**裡寫一個簡短標題,用完即丟——Claude 是另跑一次性的 SDK 查詢、OpenCode 是同一個伺服器上的臨時 session、ACP 是同一條連線上的第二個 `session/new`——所以你的對話與它的上下文一個字都不會多。臨時對話拿不到任何工具:它的權限請求當場拒絕,一呼叫工具就中止。agent 做不到(PTY)、逾時(60 秒)或失敗時,改用你第一則訊息的第一行;主 session 絕不受影響。你自己取的標題(`titleSource: "user"`)永遠不會被自動覆蓋——只有你按「AI 重新命名」(`session.autoTitle`)才會換。各 agent 的做法見 [`docs/FEATURES.md` §1.5](docs/FEATURES.md)。
 
-**agent 沒有任何一個工具能把自己的工作標成完成。** `report_status` 與 `request_review` 最多把任務推到 `review` 或 `merging`;那些對映到 `done` 的別名會在套用階段被明確擋下。
+### Session 網路
 
-合併不留半完成狀態:`git merge --no-ff` 衝突時,會蒐集衝突檔案清單、跑 `git merge --abort` 還原、然後拋錯 —— 任務維持在 `merging`。主幹分支是動態偵測的(`origin/HEAD` → 本機 `main` → `master` → 都沒有就明確報錯)。**不猜測,不寫死。**
+能跑工具的 session,會從一個 `deskmony` MCP server 拿到五個工具(在 Claude 裡顯示為 `mcp__deskmony__<name>`):
+
+| 工具 | 做什麼 | 權限 |
+|---|---|---|
+| `list_agents` | 現在有哪些 agent 可以開 session(id、label、models、預設 model、該 agent 能不能用工具) | 自動放行 |
+| `list_sessions` | **所有** session —— 不限自己開的子 session:id、標題、agent、model、狀態、工作資料夾、父 session、是不是你自己、對方能不能主動回話。不含對話內容 | 自動放行 |
+| `read_session` | 任一 session 最近 N 則訊息(預設 20、上限 100)—— 只含 user 與 assistant 的回合,每則最多 4,000 字元 | 自動放行 |
+| `create_session` | 用指定的 agent 開一個 session 並送出第一則訊息 | 走權限階梯 |
+| `send_to_session` | 對任何其他 session 傳訊息。對方正忙就排進佇列,等它這一輪結束才送達;對方已關閉、出錯或不存在是明確的錯誤,絕不假裝成功 | 走權限階梯 |
+
+有四條規則決定它的行為:
+
+- **所有 session 互相可見。** 沒有父子限制、沒有工作資料夾限制。用 `create_session` 開出來的 session 會巢狀顯示在建立者底下 —— 只為顯示與溯源,它其實跟其他 session 平等。你也可以手動在任何 session 底下開新 session。
+- **不做任何自動回送。** 訊息送達時會包一層信封,寫明是誰送的、以及「除非收到的人自己決定要回,否則不會得到回覆」。要不要回、回給誰(不一定是寄件者),是收到訊息的 agent 自己用 `send_to_session` 決定。以前「子 agent 完成、結果自動注入父 session」的行為已經不存在。
+- **身分無法冒名。** 呼叫者是誰,來自 adapter(in-process)或橋接 token(ACP),絕不是工具參數。信封只在訊息送到 agent 的那一刻才加;存進歷史的是原始文字加上來源標記。
+- **不是每個 agent 都能主動傳。** Claude Agent SDK(in-process)、所有走 ACP 的 agent —— Codex、Gemini CLI、走 `opencode-acp` provider 的 OpenCode —— 以及走 HTTP 的 OpenCode(`opencode` provider)都能呼叫這些工具;後兩者是透過一個持有 scoped、逐 session token 的橋接子行程(走 HTTP 的 OpenCode 是寫進 OpenCode 自己的 `mcp` 設定來掛載,它的權限確認與其他工具呼叫一樣)。PTY agent(Claude Code CLI、Aider)可以**接收**訊息、但不能傳;`list_agents` 與 `list_sessions` 會回報 `canUseTools: false`,讓寄件者知道對方回不了話。
+
+在桌面 app 裡,收到的訊息會顯示「來自 <session>」(或「轉傳自 <session>」)標籤,每則 assistant 訊息也都有「轉傳到…」動作:選任何其他 session、附上選填的附註,對方就會收到一則來自你的訊息。agent 之間的流量由上面的斷路器二把關。
+
+## 📋 任務流程 —— 2026-10-02 移除
+
+任務看板(backlog → assigned → in-progress → review → merging → done)、每任務一個 git worktree、機器驗收閘、人類 review 閘、人類核可的合併,隨 team 一併移除 —— 見 [`DECISIONS.md` §H](docs/DECISIONS.md)。你 SQLite 檔案裡既有的 `tasks` / `workspaces` 等表原封不動,只是不再有程式碼讀寫它們。
 
 ## 🔄 崩潰復原
 
 最貴的東西 —— agent 累積的推理與 context —— 活在後端行程裡,不在資料庫。replay 事件流重建的是你的帳本,不是 agent 的腦。所以這裡的復原是**對帳 + 人工分流**,不是 replay。
 
-啟動時,在 gateway 接受第一個連線之前,沒被乾淨關閉的 session 會被標記 `interrupted` 並寫進稽核 log。接著由人逐一決定:**繼續**(只有後端真的把 session 持久化到磁碟才行 —— 由 core 重新驗證,絕不採信 client 的舊快照)、**接手**(讀摘要重啟)、**重跑**(在髒 worktree 上會拒絕執行)、**放棄**(worktree 與任務都保留 —— 回收不等於丟棄)。
-
-髒 worktree 會先強制你做一個決定:把工作留在 WIP 分支,還是丟掉 —— 而丟掉需要明確的二次確認。**沒有東西會被默默丟棄,也沒有東西會自動續跑。**
+啟動時,在 gateway 接受第一個連線之前,沒被乾淨關閉的 session 會被標記 `interrupted` 並寫進稽核 log。接著由人逐一決定:**繼續**(只有後端真的把 session 持久化到磁碟才行 —— 由 core 重新驗證,絕不採信 client 的舊快照)、**接手**(讀摘要重啟)、或**放棄**(session 標記為已關閉,對話紀錄仍保留 —— 回收不等於丟棄)。**沒有東西會被默默丟棄,也沒有東西會自動續跑。**
 
 ## 🚀 快速開始
 
@@ -209,7 +218,7 @@ stateDiagram-v2
 
 - **Node.js ≥ 20** 與 **pnpm 10**(repo 釘死 `pnpm@10.13.1`,跑 `corepack enable` 就會抓到)
 - 桌面版封裝安裝檔目前是 Windows 專屬。**core 與 CLI 也能在 Linux 上跑**——每次 PR 都有一個 `ubuntu-latest` CI job 建置它們並跑完整套 CLI e2e。這句話證明的範圍要說清楚:core + CLI 這條路徑在 Linux 上通,用的是不需要任何憑證的假後端;它**不**證明各 adapter 對真實後端在 Linux 上的行為,那還沒有人測過。
-- 至少一個 agent 後端:登入 Claude Code CLI;Codex 只需設定 `OPENAI_API_KEY`/`CODEX_API_KEY`(或改用 ChatGPT 登入)——它透過內附的 `@agentclientprotocol/codex-acp` 橋接套件運作,不需要另外安裝 codex CLI;安裝 OpenCode;或把某個 profile 透過 PTY adapter 指向任何互動式 CLI。**Deskmony 負責調度 agent,不提供 model 存取本身。**
+- 至少一個 Deskmony 偵測得到的 agent 後端:登入 Claude Code CLI;Codex 只需設定 `OPENAI_API_KEY`/`CODEX_API_KEY`(或改用 ChatGPT 登入)——它透過內附的 `@agentclientprotocol/codex-acp` 橋接套件運作,不需要另外安裝 codex CLI;或安裝 OpenCode、Gemini CLI、Aider。core 啟動時會自己找到它們,除了憑證之外,每個 agent 都不需要另外設定。**Deskmony 負責調度 agent,不提供 model 存取本身。**
 
 ### 安裝
 
@@ -248,9 +257,12 @@ deskmony serve                 # 在前景跑 headless core
 deskmony                       # 互動 REPL(等同 deskmony chat)
 deskmony run "找出所有 TODO"    # 一次性:串流輸出後退出
 deskmony run - < prompt.txt    # prompt 從 stdin 讀
+deskmony --agent codex run -   # 指定 agent(provider id;預設 claude-agent-sdk)
 deskmony session list --json   # NDJSON,供腳本消費
 deskmony doctor                # 偵測 agent 後端、檢查連線
 ```
+
+`--agent <providerId>`(搭配 `--model`、`--effort`)決定新 session 跑在哪個 agent 上;`deskmony doctor` 會列出偵測到哪些 agent。
 
 `serve` 與 client 刻意分開:core 持有一份 SQLite,同一個資料目錄上跑兩份 core 是真實的資料危害。在一個終端機跑 `serve`(或讓桌面 app 開著),其餘用 `--url` / `DESKMONY_URL` 指過去。
 
@@ -264,7 +276,7 @@ deskmony doctor                # 偵測 agent 後端、檢查連線
 deskmony tui
 ```
 
-`chat` 和 `run` 一次只看得到一個 session。`tui` 看得到整隊,而這個差別正是它存在的理由:**在行導向的 REPL 裡,由你當下沒在看的那個 session 跳出來的權限請求是完全看不見的,而無人值守的請求不會逾時。** 你讀著第一個 agent 的輸出時,第二個可能已經卡住好幾小時。TUI 不論焦點在哪個 session,都會把跨 session 的待決數量放在畫面上,按 `a` 逐一處理——而且顯示的是工具的實際參數,不是只有工具名稱,因為光看名稱(「Write file」)根本無從判斷。
+`chat` 和 `run` 一次只看得到一個 session。`tui` 看得到所有 session,而這個差別正是它存在的理由:**在行導向的 REPL 裡,由你當下沒在看的那個 session 跳出來的權限請求是完全看不見的,而無人值守的請求不會逾時。** 你讀著第一個 agent 的輸出時,第二個可能已經卡住好幾小時。TUI 不論焦點在哪個 session,都會把跨 session 的待決數量放在畫面上,按 `a` 逐一處理——而且顯示的是工具的實際參數,不是只有工具名稱,因為光看名稱(「Write file」)根本無從判斷。
 
 命中硬性拒絕清單的請求會長得不一樣,行為也不一樣:不提供「永遠允許」,而且要完整打字輸入 `yes`,不接受單鍵。
 
@@ -299,7 +311,7 @@ pnpm package:dir    # 未封裝版本,方便本機快速測試
 | 對話渲染 | react-markdown + remark-gfm + react-syntax-highlighter + 自製 diff-hunk viewer |
 | i18n | i18next / react-i18next —— en、zh-Hant、ja、es |
 | Core | Node.js headless,WebSocket gateway(`ws`) |
-| 資料庫 | SQLite,better-sqlite3 + Drizzle ORM,11 張表 |
+| 資料庫 | SQLite,better-sqlite3 + Drizzle ORM,5 張表 |
 | 驗證 | `packages/shared` 的 zod schema,兩端共用的單一事實來源 |
 | Agent 協議 | Claude Agent SDK、ACP、OpenCode HTTP/SSE、原始 PTY |
 | Monorepo | pnpm workspaces |
@@ -310,32 +322,32 @@ pnpm package:dir    # 未封裝版本,方便本機快速測試
 Deskmony/
 ├─ apps/
 │  ├─ desktop/          # Electron + React 殼
-│  │  ├─ views/         # 對話、團隊群聊、任務看板、復原、各式對話框
-│  │  ├─ stores/        # zustand × 4
+│  │  ├─ views/         # 對話、復原、各式對話框
+│  │  ├─ stores/        # zustand × 2
 │  │  ├─ ui/            # 設計系統(含 ErrorBoundary)
 │  │  └─ locales/       # en、zh-Hant、ja、es
 │  └─ core/             # headless orchestration server
-│     ├─ session/ bus/ tasks/ team/ workspace/     # 領域
+│     ├─ session/ agents/                          # 領域(session、agent 目錄)
 │     ├─ permissions/ cost/ enforcement/ recovery/ # 安全罩
 │     ├─ gateway/ http/ config/ detect/ settings/  # 支撐
 ├─ packages/
-│  ├─ adapters/         # 4 個 adapter + team-bus 與 subagent MCP server
+│  ├─ adapters/         # 4 個 adapter + `deskmony` session 網路 MCP server
 │  ├─ db/               # Drizzle schema、冪等遷移
 │  └─ shared/           # 型別、gateway 協議、zod schema
-├─ scripts/             # 11 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
-├─ .github/workflows/   # CI(typecheck → build → 10 支決定性測試)
+├─ scripts/             # 18 支 e2e、總跑器、建置新鮮度守門員、fake 後端、打包腳本
+├─ .github/workflows/   # CI(build → typecheck → 17 支決定性測試)
 └─ docs/                # 架構、設計定案、分層設計、開發日誌
 ```
 
 ## 🧪 測試
 
 ```bash
-pnpm test          # typecheck + build + 10 支決定性測試(約 8 分鐘)
+pnpm test          # typecheck + build + 18 支決定性測試
 pnpm test:e2e      # 只跑測試(需要 pnpm build 已是最新)
 pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會實際消耗額度
 ```
 
-**十一支端到端測試。** 其中十支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十支:**138 個斷言,全部必須通過。**
+**十九支端到端測試。** 其中十八支是*決定性*的 —— 直接對真實的 headless core 打 WebSocket gateway(**從不經過 Electron**),搭配三個假後端(`fake-acp-agent`、`fake-opencode-server`、`fake-pty-echo`),因此在一台完全沒有憑證的機器上也能重現同樣結果。`pnpm test` 與 CI 跑的就是這十八支:**306 個斷言,全部必須通過。**(2026-10-02 移除 team、任務與訊息匯流排的測試後,斷言數從 221 降到 180;之後新增 `e2e-agent-catalog.mjs` 與取代子 agent 測試的 `e2e-session-network.mjs`,斷言數又升上來;2026-10-03 再加上 `e2e-opencode-permissions.mjs`,釘住每個 OpenCode 工具呼叫都會進政策引擎,之後又多了七個斷言釘住 OpenCode 本機伺服器的密碼;2026-10-05 再加上 `e2e-agent-env.mjs`,以設了 `DESKMONY_AUTH_TOKEN` 的環境啟動 core,釘住 Deskmony 自己的憑證一個都沒有進入 agent 的環境,並擴充 OpenCode 權限那支測試,涵蓋「把伺服器密碼從 agent 的 shell 環境中隱藏」的 OpenCode 外掛,另加一個 hard-deny 斷言涵蓋桌面殼的本機資料夾;同日再加上 `e2e-opencode-long-turn.mjs`,釘住 OpenCode 一輪工作超過五分鐘不再跳出假的「送出失敗」錯誤——prompt 改走 OpenCode 立即回應的 `prompt_async` 端點,並保留舊版 opencode 的退路;2026-10-06 再加上 `e2e-session-title.mjs`,釘住改名、標題來源的規則與遷移,以及自動命名來自不會在主 session 多加任何東西、不能用工具的臨時對話,並在嘗試用工具、逾時、拒答或 PTY 時退回第一行。)session 網路那支測試也會斷言:in-process server 與 ACP 橋接子行程的工具名稱、描述、參數 schema 逐字一致。
 
 `e2e-gateway.mjs` 刻意不在預設範圍內。它需要真實 Claude Code 憑證、會花真的錢,而且有一組 *model-behavior* 斷言依賴模型當輪自由選擇怎麼講 —— 檔案自己標註為已知 flake。一個會因為模型換句話說就變紅的 CI,很快就會被所有人忽略。
 
@@ -358,17 +370,18 @@ pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會�
 
 ## 🗺️ 現況
 
-已完成,並由 CI 上每次 push/PR 都會跑的端到端測試把關(見上方「測試」):團隊與 profile 管理、跨 agent 傳訊、桌面 IDE、git worktree 隔離、帶 token 認證的瀏覽器/遠端存取、完整的三斷路器安全罩、崩潰復原、桌面與 webhook 通知、機器驗收閘、session 子 agent、自助式政策允許清單管理介面、真.無限制繞過層。
+已完成,並由 CI 上每次 push/PR 都會跑的端到端測試把關(見上方「測試」):agent 偵測與從任一偵測到的 agent 開 session、session 網路(agent 之間的工具、訊息信封、UI 轉傳)、桌面 IDE、帶 token 認證的瀏覽器/遠端存取、安全罩的三個斷路器(權限、每條訊息鏈的訊息、成本)、崩潰復原、桌面與 webhook 通知、自助式政策允許清單管理介面、真.無限制繞過層,以及 session 改名與自動命名。2026-10-02 已移除(見 [`DECISIONS.md` §H](docs/DECISIONS.md)):agent profile、team、任務看板、每任務一個 git worktree、驗收閘、訊息匯流排(它的斷路器已重建給 session 之間的訊息),以及「子完成 → 結果自動注入父 session」的子 agent 行為。
 
 **刻意留白的部分,在你依賴它之前值得先知道:**
 
 - **PTY 層沒有執行沙箱。** 在做出來之前,PTY agent 就是唯讀 —— 這是誠實的後果,不是疏忽。
-- **沒有 LLM lead。** 任務拆解目前純人工,`TaskService` 是完全確定性的。
 - **沒有回合中途的成本熔斷。** 唯一會發 usage 的 adapter 是在回合結束時才發,根本沒有可觀測的「回合進行中收到 usage」情境可以對著做。硬分岔只是憑空編造行為。
-- **只有 Claude SDK 與 ACP 的 session 能「主動」傳訊。** ACP agent(Codex、Gemini CLI)透過一個持有 scoped、逐 session token 的橋接子行程接到同樣那兩個 MCP server;`opencode` 這個 provider(bespoke HTTP/SSE)與 PTY 沒有掛載 —— 但 `opencode-acp` 有,因為它是把 OpenCode 走 ACP 跑。「接收」注入的訊息則在所有後端都能運作。
+- **只有部分 agent 能主動傳訊息。** Claude Agent SDK 的 session(in-process)、所有走 ACP 的 agent(Codex、Gemini CLI、走 `opencode-acp` provider 的 OpenCode)與走 HTTP 的 OpenCode(`opencode` provider)能拿到那五個 session 工具 —— 後兩者透過一個持有 scoped、逐 session token 的橋接子行程。PTY agent(Claude Code CLI、Aider)沒有掛載任何工具:它們可以**接收**訊息,但不能呼叫 `send_to_session` 或 `create_session`,所以除非有人替它們轉傳,否則自己回不了話。
+- **排給忙碌 session 的訊息只存在記憶體。** 若 core 在對方這一輪結束前重啟,排隊中的訊息就遺失了(寄件者當時只被告知「已排隊」,並不是「已讀」)。
+- **agent 清單是固定的。** 偵測範圍是 Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider。手動輸入 command 的入口是刻意移除的;要支援別的 agent,就得在目錄裡加一項。
 - **provider 的密鑰對外遮罩,本機是明文儲存**,與 Paseo 對它的設定檔採取同一種取捨。
 - **孤兒 agent 行程只能在下次啟動時回收。** core 若被 SIGKILL / 強制終止 / 斷電,優雅關機路徑完全沒機會跑,已 spawn 的 agent 與它們的 MCP 孫程序會繼續活著。現在會把 pid 記到 `<dataDir>/child-pids.json`,下次啟動時比對行程建立時間後回收(對不上就**不殺**,防 pid 重用誤傷)。真正的當下回收需要 Windows Job Object,那要多一個原生相依 —— 這個專案刻意不要求打包機器具備 MSVC 工具鏈。
-- **SQLite 遷移只能加欄位。** `packages/db/src/client.ts` 是十餘個「查 `PRAGMA table_info` → 沒有就 `ALTER TABLE ADD COLUMN`」的手刻函式,沒有版本表。改型別 / rename / drop / 加約束都做不到,將來要做破壞性遷移得先換成正式的 migration 機制。
+- **SQLite 遷移只能加欄位。** `packages/db/src/client.ts` 是幾個「查 `PRAGMA table_info` → 沒有就 `ALTER TABLE ADD COLUMN`」的手刻函式,沒有版本表。改型別 / rename / drop / 加約束都做不到,將來要做破壞性遷移得先換成正式的 migration 機制。
 - **聊天記錄在畫面上最多保留 2,000 則。** 超出會砍最舊的(完整歷史仍在 SQLite,切走再切回會重新載入)。這是為了擋住失控迴圈把 renderer 記憶體吃爆,一般對話遠遠碰不到。
 - **目前只支援 Windows 打包。**
 

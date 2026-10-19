@@ -236,11 +236,5 @@ function commonColumnsFor(event: EnforcementEvent): {
       // requestId/toolName/effect 這種單一目標欄位(targetIds 可能多個,完整
       // 清單留在 payload JSON 裡,不重複拉出來)。
       return { reason: event.reason };
-    case "task-review":
-      // S5(dispose-gate)新增:見 `TaskReviewEnforcementEventSchema` 頂端註解
-      // ——沒有 sessionId/requestId/toolName(不是工具權限請求),taskId/
-      // teamId/taskTitle 完整內容留在 payload JSON 裡,這裡只把 reason 拉出來
-      // 供快速篩選用。
-      return { reason: event.reason };
   }
 }

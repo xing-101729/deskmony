@@ -1,0 +1,6 @@
+{
+  "config": {
+    "patchWriteFailed": "No se pudo analizar el archivo de configuración ({{configPath}}); se rechaza la escritura para no sobrescribir su contenido actual: {{detail}}",
+    "policyRuleWriteFailed": "No se pudo analizar el archivo de configuración ({{configPath}}); se rechaza la escritura de la regla para no sobrescribir su contenido actual: {{detail}}"
+  }
+}

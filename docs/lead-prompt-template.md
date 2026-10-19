@@ -1,5 +1,7 @@
 # Lead(協調者)systemPrompt 範本
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](./DECISIONS.md)
+
 > 對應 [S5 L4 §2.2](./LAYER-4-detail-design/dispose-gate-and-lead_detail.md#22-systemprompt-契約提供一份可編輯的範本不寫死在程式碼)。
 > 這是一份**可編輯的檔案**,不寫死在程式碼——建立 Lead 角色的 AgentProfile 時,
 > 桌面 UI(`ProfileCreateDialog.tsx`)會把下面「範本內容」區塊原樣預填進

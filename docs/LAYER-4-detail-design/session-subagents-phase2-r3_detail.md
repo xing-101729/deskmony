@@ -1,5 +1,7 @@
 # S12 Phase 2 — Round 3：UI（從 session 開子 agent + 父子巢狀顯示）
 
+> ⚠️ 2026-10-02 已由 session 網路取代,見 [simplify-agents-sessions_detail.md](./simplify-agents-sessions_detail.md)
+
 > 上層：S12 + Phase 2 R1/R2。階段：UI，加法、非破壞性。
 > 對應實作者：opencode subagent（`opencode/deepseek-v4-flash-free`）。
 

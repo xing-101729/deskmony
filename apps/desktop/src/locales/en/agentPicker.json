@@ -1,0 +1,20 @@
+{
+  "agentAriaLabel": "Choose agent",
+  "agentLabel": "Agent",
+  "redetect": "Re-detect",
+  "modelAriaLabel": "Choose model",
+  "modelLabel": "Model",
+  "defaultModelOption": "(Default model)",
+  "effortAriaLabel": "Choose thinking effort",
+  "effortLabel": "Thinking effort",
+  "defaultEffortOption": "(Default effort)",
+  "optionsAfterStartHint": "This agent only reports its models and thinking-effort levels once the conversation starts — pick them in the conversation header after creating it. Your last choice is remembered and applied next time.",
+  "workingDirLabel": "Working folder",
+  "workingDirPlaceholder": "Default: {{dir}}",
+  "workingDirPlaceholderNoDefault": "Working folder (leave empty for the default)",
+  "browseButton": "Browse…",
+  "noAgent": {
+    "title": "No usable agent detected",
+    "description": "No agent software that can start a conversation was found on this computer, or all of them are disabled in Settings. Install one and click \"Re-detect\", or check the agent list in Settings."
+  }
+}

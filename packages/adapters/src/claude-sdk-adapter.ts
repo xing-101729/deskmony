@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { getSessionInfo, query } from "@anthropic-ai/claude-agent-sdk";
 import type {
   McpServerConfig,
   ModelUsage,
@@ -12,16 +12,30 @@ import type {
   SlashCommand,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
-import type { SubagentPort } from "@deskmony/shared";
-import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, TeamSpawnContext, Workspace } from "./types.js";
+import type { SessionNetworkPort } from "@deskmony/shared";
+import { DeskmonyError, EffortLevelSchema, ErrorCodes } from "@deskmony/shared";
+import type {
+  AdapterCapabilities,
+  AgentAdapter,
+  AgentHandle,
+  ResumeOptions,
+  TitleGenerationRequest,
+  TitleGenerationResult,
+  Workspace,
+} from "./types.js";
+import { TITLE_SYSTEM_PROMPT, titleAbortedError, titleAgentFailedError, titleToolUseError } from "./title-generation.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
 import { killProcessTree, waitForChildExit } from "./child-process.js";
-import { TEAM_BUS_MCP_SERVER_NAME, TEAM_BUS_TOOL_NAMES, createTeamBusMcpServer } from "./team-bus-mcp.js";
-import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMcpServer } from "./subagent-mcp.js";
+import { buildAgentChildEnv } from "./agent-env.js";
+import { invalidOptionError } from "./agent-options.js";
+import {
+  SESSION_NETWORK_MCP_SERVER_NAME,
+  SESSION_NETWORK_ALLOWED_TOOL_NAMES,
+  createSessionNetworkMcpServer,
+} from "./session-network-mcp.js";
 
 /**
  * ClaudeAgentSdkAdapter — 使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` API
@@ -103,12 +117,12 @@ import { SUBAGENT_MCP_SERVER_NAME, SUBAGENT_ALLOWED_TOOL_NAMES, createSubagentMc
  */
 export class ClaudeAgentSdkAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, InternalSession>();
-  // S12 Phase2 R2:spawn_subagent 的注入 port(apps/core 的 SessionManager 在
-  // 啟動時用 setSubagentPort() 事後注入,比照 setTeamBus() 的「先建構、後注入」
-  // 手法打破建構循環——adapter 建立時 core 的 SessionManager 還沒好)。
-  private subagentPort?: SubagentPort;
-  setSubagentPort(port: SubagentPort): void {
-    this.subagentPort = port;
+  // 2026-10-02(P3:session 網路):`list_agents`/`list_sessions`/`read_session`/`create_session`/
+  // `send_to_session` 五個工具的注入 port(apps/core 在啟動時用 setSessionNetworkPort() 事後注入,
+  // 「先建構、後注入」手法打破建構循環——adapter 建立時 core 的 SessionManager 還沒好)。
+  private sessionNetworkPort?: SessionNetworkPort;
+  setSessionNetworkPort(port: SessionNetworkPort): void {
+    this.sessionNetworkPort = port;
   }
 
   capabilities(): AdapterCapabilities {
@@ -137,16 +151,30 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // 憑證實測,見 spawn() 內呼叫點的註解),可靠性等同上面的
       // usageReporting:"supported"。
       slashCommands: "supported",
+      // 2026-10-06:SDK 的 `Query.setModel()`/`applyFlagSettings({ effortLevel })`,adapter 自己保證做得到。
+      modelSwitching: "supported",
+      effortSwitching: "supported",
     };
   }
 
   async spawn(
-    profile: AgentProfile,
+    launch: AgentLaunchSpec,
     workspace: Workspace,
-    team?: TeamSpawnContext,
     resume?: ResumeOptions,
   ): Promise<AgentHandle> {
-    const handle: AgentHandle = { id: randomUUID(), profile, workspace };
+    // 續接時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`):session 網路工具的呼叫者身分
+    // 是這個 handle.id 的閉包捕捉,必須等於 SessionManager 用來登記這條 session 的 id。
+    const handle: AgentHandle = { id: resume?.sessionId ?? randomUUID(), launch, workspace };
+    const agentLabel = launch.providerId ?? "claude-agent-sdk";
+
+    // 2026-10-15(session 自動復活):帶了 backendSessionId 時,先確認 SDK 那邊的對話檔還在才 `resume`。`resume` 指到不存在的
+    // session 時 CLI 要等第一則訊息送進去才報錯結束,session 會卡在 error、使用者的訊息也沒人回;提早知道就能改開全新的對話,
+    // 並由呼叫端(SessionManager)用 Deskmony 存的對話紀錄補上脈絡。`handle.resumed` 據實回報。
+    const resumeBackendSessionId =
+      resume?.backendSessionId && (await claudeSessionExists(resume.backendSessionId, workspace.path, agentLabel))
+        ? resume.backendSessionId
+        : undefined;
+    if (resume?.backendSessionId) handle.resumed = resumeBackendSessionId !== undefined;
 
     const inputQueue = new AsyncQueue<SDKUserMessage>();
     const outputQueue = new AsyncQueue<AgentEvent>({
@@ -190,8 +218,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
 
     const options: SdkOptions = {
       cwd: workspace.path,
-      model: profile.model,
-      effort: profile.effort,
+      model: launch.model,
+      effort: toClaudeEffort(launch.effort),
       includePartialMessages: true,
       permissionMode: "default",
       spawnClaudeCodeProcess: (spawnOptions) => {
@@ -202,8 +230,12 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
           signal: spawnOptions.signal,
           windowsHide: true,
         });
-        // 2026-09-04(稽核修補):見 child-registry.ts。
-        registerChild(spawned.pid, `claude-agent-sdk:${spawnOptions.command}`);
+        // 2026-09-04(稽核修補):見 child-registry.ts。2026-10-12:非同步登記,不 await。
+        void registerChild(
+          spawned.pid,
+          `claude-agent-sdk:${spawnOptions.command}`,
+          () => spawned.exitCode !== null || spawned.signalCode !== null,
+        );
         // SDK 內建的 spawn 會自己讀掉 stderr(拿來組錯誤訊息的 tail);換成自訂
         // spawner 之後沒有人讀它,pipe 緩衝區(預設 64KB)填滿就會**卡住**
         // 子程序的寫入 —— 這裡必須自己排掉。內容轉給 console.error,與
@@ -211,7 +243,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         // 子程序的錯誤輸出仍看得到)。
         spawned.stderr?.on("data", (chunk: Buffer) => {
           const text = chunk.toString().trimEnd();
-          if (text) console.error(`[claude-sdk-adapter] ${profile.name} stderr: ${text}`);
+          if (text) console.error(`[claude-sdk-adapter] ${agentLabel} stderr: ${text}`);
         });
         spawned.stderr?.on("error", () => {
           // 子程序已結束時讀取 stderr 可能報錯,忽略。
@@ -219,34 +251,34 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         child = spawned;
         return spawned;
       },
-      // 這輪新增(provider 目錄重構):`profile.env`(provider 層級預設 +
-      // profile 自己的覆寫,已由 SessionManager.createSession() 合併好)併入
+      // 這輪新增(provider 目錄重構):`launch.env`(provider 層級 env,已由
+      // SessionManager.prepareSpawnSpec() 從 settings 讀出併好)併入
       // SDK 子程序的環境變數(見 sdk.d.ts 對 `Options.env` 的官方註解——設定
-      // 這個欄位會**整個取代**子程序環境,不會自動 merge process.env,故這裡
-      // 手動 `...process.env` 展開,子程序仍會繼承 PATH/HOME 等既有變數)。
-      // 沒有任何 provider/profile env 時(最常見情況)刻意省略這個欄位,讓
-      // SDK 沿用「省略時繼承 process.env」的預設行為,不改變既有 profile 的
-      // spawn 結果。
-      ...(profile.env && Object.keys(profile.env).length > 0 ? { env: { ...process.env, ...profile.env } } : {}),
+      // 這個欄位會**整個取代**子程序環境,不會自動 merge process.env,而
+      // `buildAgentChildEnv()` 從 process.env 出發,所以 PATH/HOME 等既有變數都保留)。
+      // 2026-10-05(安全):**一律明確傳** sanitized env,不再依賴「省略 `env` 時 SDK 繼承整份 process.env」
+      // ——那樣沒有 provider env 的 Claude session(最常見情況)裡,agent 的 bash 讀得到 core 的
+      // `DESKMONY_AUTH_TOKEN`,連上 gateway 就能自己核准權限/切 YOLO。完整理由見 agent-env.ts。
+      env: buildAgentChildEnv(launch.env) as Record<string, string>,
       // S6(crash-recovery)L4 §4.1:「繼續(保有記憶)」——見檔案頂端查證說明。
-      ...(resume ? { resume: resume.backendSessionId } : {}),
-      // S8(agent-lifecycle)L4 §3.2 修正實作:`profile.systemPrompt` 在這輪之前
+      ...(resumeBackendSessionId ? { resume: resumeBackendSessionId } : {}),
+      // S8(agent-lifecycle)L4 §3.2 修正實作:`systemPrompt` 在這輪之前
       // **從未被任何 adapter 轉發過**(查證:acp-adapter.ts/opencode-adapter.ts/
       // pty-adapter.ts 均無 systemPrompt 相關程式碼)——是一個存在於 schema/DB/
       // UI,但完全不會真的送到任何被 spawn 的 agent 的欄位。S8 的「筆記指路」
-      // (SessionManager.prepareSpawnProfile() 把 `.deskmony/notes/` 指路段落
-      // 附加在 `profile.systemPrompt` 尾端)若這裡不接上,整段機制就只是把文字
+      // (SessionManager.prepareSpawnSpec() 把 `.deskmony/notes/` 指路段落
+      // 設成 `launch.systemPrompt`)若這裡不接上,整段機制就只是把文字
       // 寫進一個沒人讀的欄位,等於沒有指路——這裡補上轉發,讓它至少對這個
       // (最主要、也是官方推薦給長命 agent 的)adapter 生效。
       //
       // 用 SDK 的 `{ type: 'preset', preset: 'claude_code', append }` 形式而
-      // **不是**直接 `systemPrompt: profile.systemPrompt`(純字串會整個取代
+      // **不是**直接 `systemPrompt: launch.systemPrompt`(純字串會整個取代
       // Claude Code 的預設系統提示,等於讓「順便設定過 systemPrompt」的既有
-      // profile 突然失去所有預設工具/行為指引,是遠超本輪範圍的行為變動)——
+      // agent 突然失去所有預設工具/行為指引,是遠超本輪範圍的行為變動)——
       // `append` 保留預設提示,只追加自訂內容,這才是這個欄位原本應有的語意
       // (使用者過去設定它從未生效,現在生效時,選最小驚訝的解讀:附加而非取代)。
-      ...(profile.systemPrompt
-        ? { systemPrompt: { type: "preset", preset: "claude_code", append: profile.systemPrompt } }
+      ...(launch.systemPrompt
+        ? { systemPrompt: { type: "preset", preset: "claude_code", append: launch.systemPrompt } }
         : {}),
       canUseTool: async (toolName, input, callOptions) => {
         const requestId = callOptions.requestId;
@@ -278,28 +310,20 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       },
     };
 
-    // M3 Round A:session 屬於某個 team 成員時,掛載內建的 team-bus MCP
-    // server(見 packages/adapters/src/team-bus-mcp.ts),讓這個 agent 拿到
-    // send_message/broadcast/list_teammates/report_status 四個工具。這幾個
-    // 工具只是傳訊/查詢,不涉及檔案/指令執行,額外放進 allowedTools 讓它們
-    // 略過 canUseTool 的權限彈窗(ARCHITECTURE.md 4.1 節「內建 team-bus MCP
-    // server」—— 純粹的平台內部管線,不需要每次都要人類核可)。
-    // S12 Phase2 R2:改成累積式掛載——team 與 subagent 各自獨立判斷,兩者皆
-    // 有時同時掛上(各自獨立,不互相影響)。
+    // 2026-10-02(P3):掛載內建的 session 網路 MCP server(名稱 `deskmony`,見
+    // packages/adapters/src/session-network-mcp.ts)。純查詢的三個工具額外放進
+    // allowedTools 略過 canUseTool 的權限彈窗(純粹的平台內部管線)。
+    // (原本還有一組團隊訊息工具與 S12 的 subagent 四件套,分別隨 team 與 P3 移除,見 docs/DECISIONS.md §H。)
     const mcpServers: Record<string, McpServerConfig> = {};
     const allowedTools: string[] = [];
-    if (team) {
-      mcpServers[TEAM_BUS_MCP_SERVER_NAME] = createTeamBusMcpServer(team);
-      allowedTools.push(...TEAM_BUS_TOOL_NAMES);
-    }
-    if (this.subagentPort) {
-      // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生(line 101),
-      // 這裡閉包捕捉當作 parentSessionId,agent 無法覆寫。
-      mcpServers[SUBAGENT_MCP_SERVER_NAME] = createSubagentMcpServer(this.subagentPort, handle.id);
-      // list_profiles/list_subagents 是純查詢,自動放行;spawn_subagent/
-      // send_to_subagent 刻意 **不** 放進 allowedTools —— 見 §4「權限」(兩者
+    if (this.sessionNetworkPort) {
+      // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生,這裡閉包捕捉當作**呼叫者身分**,
+      // agent 無法覆寫(工具參數裡沒有任何 caller 欄位)。
+      mcpServers[SESSION_NETWORK_MCP_SERVER_NAME] = createSessionNetworkMcpServer(this.sessionNetworkPort, handle.id);
+      // list_agents/list_sessions/read_session 是純查詢,自動放行;create_session/
+      // send_to_session 刻意 **不** 放進 allowedTools —— 見 §4「權限」(兩者
       // 都會讓某個 session 多跑一輪、燒 token,必須走權限彈窗)。
-      allowedTools.push(...SUBAGENT_ALLOWED_TOOL_NAMES);
+      allowedTools.push(...SESSION_NETWORK_ALLOWED_TOOL_NAMES);
     }
     if (Object.keys(mcpServers).length > 0) {
       options.mcpServers = mcpServers;
@@ -321,6 +345,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       getChild: () => child,
       currentMessageId: null,
       backendSessionId: undefined,
+      currentModel: launch.model,
+      titleAborts: new Set(),
     };
     this.sessions.set(handle.id, internal);
 
@@ -331,6 +357,11 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
         message: "Claude Agent SDK 串流中斷",
         detail: err instanceof Error ? err.message : String(err),
       });
+      // 2026-10-15:CLI 子行程被殺/崩潰時(非 0 結束),SDK 的訊息串流就是從這裡丟出 `Claude Code process exited with code N`
+      // (sdk.mjs `ProcessTransport.readMessages()`),之後不會再有任何訊息。修正前佇列沒關,core 的事件迴圈永遠等下去,
+      // runtime 一直留著、送出的訊息進了沒人讀的 inputQueue。關掉佇列讓 core 收掉它,下一則人類訊息重新啟動(--resume 接回),
+      // 見 SessionManager.detachEndedRuntime()。
+      outputQueue.close();
     });
 
     // 這輪(slash command)新增:取得這個 session 目前的 "/" 指令清單(已用
@@ -347,7 +378,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       })
       .catch((err: unknown) => {
         console.error(
-          `[claude-sdk-adapter] ${profile.name} supportedCommands() 失敗(不影響對話,只影響 "/" 選單): ${String(err)}`,
+          `[claude-sdk-adapter] ${agentLabel} supportedCommands() 失敗(不影響對話,只影響 "/" 選單): ${String(err)}`,
         );
       });
 
@@ -422,7 +453,7 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
    * (`node_modules` 內 `sdk.d.ts` 明載)回傳的 `Promise` 在「查詢確實停止
    * 處理、控制權交還呼叫端」時才 resolve,不是單純送出中斷請求就算數 ——
    * 修正前這裡是 `void internal.sdkQuery.interrupt()`(fire-and-forget),
-   * 呼叫端(MessageBus)緊接著就 await 注入新 prompt,可能與尚未真正停下的
+   * 呼叫端緊接著就 await 注入新 prompt,可能與尚未真正停下的
    * 回合競爭。這裡改成 `await`,把「中斷確實生效」這個保證往外傳遞。
    */
   async interrupt(handle: AgentHandle): Promise<void> {
@@ -446,10 +477,10 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
    * cwd = 任務 worktree**,而 SDK 從頭到尾只碰得到直接子程序。實測:`close()`
    * 之後 `claude.exe` 約 1 秒內結束,但整個 worktree 目錄要到約 3 秒才真正
    * 可刪 —— 撐著不放的是那些比父程序晚死的孫程序。呼叫端
-   * (TaskService.deleteTask → WorkspaceManager.removeWorkspace)的重試窗口
+   * (原任務刪除流程(2026-10-02 已移除,見 docs/DECISIONS.md §H))的重試窗口
    * 只有 1.8 秒,於是 `git worktree remove` 撞上 `Permission denied` /
    * `EBUSY: resource busy or locked`。這在 S8 之前不會發生 —— S8 讓
-   * `assignTask()` 自動 spawn session,worktree 才第一次被子程序當成 cwd 佔住,
+   * 任務指派自動 spawn session,worktree 才第一次被子程序當成 cwd 佔住,
    * 把這個既有的外洩暴露出來。
    *
    * 修正後的順序(順序本身就是修正的一部分):
@@ -481,6 +512,8 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       pending.resolve({ behavior: "allow", updatedInput: { ...pending.input, answers: {} } });
     }
     internal.pendingAskUserQuestion.clear();
+    // 進行中的命名臨時對話一併中止(它們各自的 finally 會殺掉自己的子程序)。
+    for (const controller of internal.titleAborts) controller.abort();
     internal.inputQueue.close();
     internal.outputQueue.close();
     try {
@@ -495,7 +528,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
       // 2026-09-04(稽核修補):已乾淨收掉,不需要下次啟動時回收。
       unregisterChild(child.pid);
     }
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——CLI 自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   /**
@@ -509,6 +544,135 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   async setModel(handle: AgentHandle, model: string): Promise<void> {
     const internal = this.mustGet(handle);
     await internal.sdkQuery.setModel(model);
+    // 命名用的臨時對話(`generateTitle()`)要跟主對話用同一個 model。
+    internal.currentModel = model;
+  }
+
+  /**
+   * 2026-10-06(AI 自動命名):另跑一次**一次性**的 SDK `query()` 產生標題,跟主對話的 `query()` 完全分開(不同的 CLI
+   * 子程序、不同的 SDK session)——主對話的上下文一個字都不會多。介面紀律見 types.ts 的 `AgentAdapter.generateTitle()`。
+   *
+   * 與主對話相同的:model(`setModel()` 換過就用換過的)、環境(`buildAgentChildEnv(launch.env)`,同一份 sanitized env——
+   * 認證、provider 層級的 base URL 都一樣)、工作目錄。刻意不同的(全是為了「臨時對話沒有任何工具/權限,用完即丟」):
+   *   - `tools: []`(官方語意:停用所有內建工具)+ `mcpServers: {}` + `strictMcpConfig: true`(不載入使用者/專案的 MCP 設定),
+   *     不掛 Deskmony 的 session 網路工具。
+   *   - `settingSources: []`:不讀 settings.json/CLAUDE.md——不會跑使用者的 hooks、不載入外掛,也不把專案說明塞進這個小請求。
+   *     代價:使用者若把端點/金鑰設定寫在 `~/.claude/settings.json` 的 `env`(而不是 Deskmony 的 provider 環境變數),
+   *     臨時查詢讀不到,命名會失敗並退回截取首句(`claude` 登入的 OAuth 憑證不在 settings 裡,不受影響,2026-10-06 實測)。
+   *   - `allowedTools: []` + `canUseTool` 一律 deny(`interrupt: true`):萬一還是冒出一個工具呼叫,直接拒絕並中止。
+   *   - `systemPrompt`:純字串,**取代** Claude Code 的預設系統提示(那裡全是工具使用說明),只說「你只負責取標題」。
+   *   - `maxTurns: 1`、`persistSession: false`(不寫 `~/.claude/projects/` 的 session 檔,用完即丟)、`effort: "low"`。
+   *   - 收到任何 `tool_use` 區塊就丟錯(core 退回截取首句)。
+   *
+   * 用量:這個 `query()` 的 result 帶它自己的 `total_cost_usd`/`modelUsage`(這次臨時對話的總量,不是主對話的累計),
+   * 原樣回傳給 core 計入該 session 與當日的 rollup。
+   *
+   * 子程序:比照 `spawn()` 用 `spawnClaudeCodeProcess` 自己 spawn、登記到 child-registry,結束(含逾時中止)時殺整棵樹。
+   */
+  async generateTitle(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult> {
+    const internal = this.mustGet(handle);
+    const agentLabel = handle.launch.providerId ?? "claude-agent-sdk";
+    if (request.signal.aborted) throw titleAbortedError();
+    const abortController = new AbortController();
+    const onAbort = (): void => abortController.abort();
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    internal.titleAborts.add(abortController);
+    let child: ChildProcess | undefined;
+
+    const options: SdkOptions = {
+      cwd: handle.workspace.path,
+      model: internal.currentModel,
+      effort: "low",
+      env: buildAgentChildEnv(handle.launch.env) as Record<string, string>,
+      tools: [],
+      allowedTools: [],
+      mcpServers: {},
+      strictMcpConfig: true,
+      settingSources: [],
+      persistSession: false,
+      maxTurns: 1,
+      permissionMode: "default",
+      systemPrompt: TITLE_SYSTEM_PROMPT,
+      abortController,
+      canUseTool: async () => ({
+        behavior: "deny",
+        message: "這是只負責產生標題的臨時對話,不允許使用任何工具。",
+        interrupt: true,
+      }),
+      spawnClaudeCodeProcess: (spawnOptions) => {
+        const spawned = spawn(spawnOptions.command, spawnOptions.args, {
+          cwd: spawnOptions.cwd,
+          env: spawnOptions.env,
+          stdio: ["pipe", "pipe", "pipe"],
+          signal: spawnOptions.signal,
+          windowsHide: true,
+        });
+        void registerChild(
+          spawned.pid,
+          `claude-agent-sdk-title:${spawnOptions.command}`,
+          () => spawned.exitCode !== null || spawned.signalCode !== null,
+        );
+        // 理由同 spawn():自訂 spawner 之後沒有人讀 stderr,不排掉會把子程序卡住。
+        spawned.stderr?.on("data", (chunk: Buffer) => {
+          const text = chunk.toString().trimEnd();
+          if (text) console.error(`[claude-sdk-adapter] ${agentLabel} (命名用臨時對話) stderr: ${text}`);
+        });
+        spawned.stderr?.on("error", () => {
+          // 子程序已結束時讀取 stderr 可能報錯,忽略。
+        });
+        child = spawned;
+        return spawned;
+      },
+    };
+
+    try {
+      const titleQuery = query({ prompt: request.prompt, options });
+      let text: string | undefined;
+      let usage: TitleGenerationResult["usage"];
+      for await (const message of titleQuery) {
+        if (abortController.signal.aborted) throw titleAbortedError();
+        if (message.type === "assistant") {
+          const content = message.message?.content;
+          if (Array.isArray(content) && content.some((block) => isRecord(block) && block.type === "tool_use")) {
+            throw titleToolUseError("claude-agent-sdk");
+          }
+        } else if (message.type === "result") {
+          const tokens = aggregateModelUsage(message.modelUsage);
+          const modelKeys = Object.keys(message.modelUsage ?? {});
+          if (modelKeys.length > 0 || message.total_cost_usd) {
+            usage = {
+              costAmount: message.total_cost_usd,
+              costCurrency: "USD",
+              inputTokens: tokens.inputTokens,
+              outputTokens: tokens.outputTokens,
+              ...(modelKeys.length === 1 ? { model: modelKeys[0] } : {}),
+            };
+          }
+          if (message.subtype !== "success") {
+            throw titleAgentFailedError("claude-agent-sdk", `result subtype ${message.subtype}`);
+          }
+          text = message.result;
+        }
+      }
+      if (abortController.signal.aborted) throw titleAbortedError();
+      if (text === undefined) {
+        throw titleAgentFailedError("claude-agent-sdk", "沒有回傳結果");
+      }
+      return { text, usage };
+    } catch (err) {
+      // SDK 在 abortController 觸發後丟的是自己的 AbortError,統一成同一個錯誤碼,core 的 log 比較好讀。
+      if (abortController.signal.aborted) throw titleAbortedError();
+      throw err;
+    } finally {
+      request.signal.removeEventListener("abort", onAbort);
+      internal.titleAborts.delete(abortController);
+      const spawned = child as ChildProcess | undefined;
+      if (spawned) {
+        killProcessTree(spawned);
+        await waitForChildExit(spawned, 3_000);
+        unregisterChild(spawned.pid);
+      }
+    }
   }
 
   /**
@@ -518,9 +682,9 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
    * `applyFlagSettings()` 的官方文件)。同樣不需要 dispose 現有連線或重新
    * spawn,對話上下文原封不動保留。
    */
-  async setEffort(handle: AgentHandle, effort: EffortLevel): Promise<void> {
+  async setEffort(handle: AgentHandle, effort: string): Promise<void> {
     const internal = this.mustGet(handle);
-    await internal.sdkQuery.applyFlagSettings({ effortLevel: effort });
+    await internal.sdkQuery.applyFlagSettings({ effortLevel: toClaudeEffort(effort) });
   }
 
   resolvePermission(handle: AgentHandle, requestId: string, decision: "allow" | "deny"): void {
@@ -839,6 +1003,10 @@ interface InternalSession {
   currentMessageId: string | null;
   /** S6(crash-recovery)L4 §4.1:見檔案頂端查證說明。 */
   backendSessionId: string | undefined;
+  /** 目前的 model(`setModel()` 換過就是換過的)——命名用的臨時對話要用同一個,見 `generateTitle()`。 */
+  currentModel: string | undefined;
+  /** 進行中的命名臨時對話(`generateTitle()`),`dispose()` 時一併中止。 */
+  titleAborts: Set<AbortController>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -861,4 +1029,33 @@ function mapSlashCommands(commands: SlashCommand[]): SlashCommandInfo[] {
     description: c.description || undefined,
     argumentHint: c.argumentHint || undefined,
   }));
+}
+
+/**
+ * SDK 的磁碟對話檔(`~/.claude/projects/<專案目錄>/<sessionId>.jsonl`)還在嗎?`getSessionInfo()` 的官方註解:
+ * 找不到檔案(或是 sidechain、沒有可擷取摘要)回傳 `undefined`。查詢本身失敗(磁碟讀取錯誤等)不代表對話不在——
+ * 保守地當成存在、照舊走 `resume`(維持這個檢查出現之前的行為),只留一筆警告。
+ */
+async function claudeSessionExists(backendSessionId: string, cwd: string, agentLabel: string): Promise<boolean> {
+  try {
+    const info = await getSessionInfo(backendSessionId, { dir: cwd });
+    if (info === undefined) {
+      console.warn(`[claude-sdk-adapter] ${agentLabel} 的後端對話 ${backendSessionId} 在 ${cwd} 底下找不到,改開全新的對話`);
+    }
+    return info !== undefined;
+  } catch (err) {
+    console.warn(`[claude-sdk-adapter] ${agentLabel} 確認後端對話 ${backendSessionId} 是否存在時失敗,照常嘗試 resume: ${String(err)}`);
+    return true;
+  }
+}
+
+/**
+ * 2026-10-06:思考程度的值改成各 agent 自己定義的字串(見 packages/shared/src/session-options.ts),Claude 只認
+ * `EffortLevelSchema` 的 5 級——其他值丟明確錯誤,不能原樣塞給 SDK。
+ */
+function toClaudeEffort(effort: string | undefined): EffortLevel | undefined {
+  if (effort === undefined) return undefined;
+  const parsed = EffortLevelSchema.safeParse(effort);
+  if (!parsed.success) throw invalidOptionError("effort", "Claude", effort, [...EffortLevelSchema.options]);
+  return parsed.data;
 }

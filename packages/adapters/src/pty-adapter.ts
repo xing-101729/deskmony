@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
-import type { AgentEvent, AgentProfile, PromptInput } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, PromptInput } from "@deskmony/shared";
 import { DeskmonyError, ErrorCodes } from "@deskmony/shared";
-import type { AdapterCapabilities, AgentAdapter, AgentHandle, Workspace } from "./types.js";
+import type { AdapterCapabilities, AgentAdapter, AgentHandle, ResumeOptions, Workspace } from "./types.js";
 import { AsyncQueue } from "./async-queue.js";
 import { registerChild, unregisterChild } from "./child-registry.js";
+import { buildAgentChildEnv } from "./agent-env.js";
 
 /**
  * GenericPtyAdapter — ARCHITECTURE.md 3.4 節「保底方案,無結構化事件,功能
@@ -41,7 +42,7 @@ import { registerChild, unregisterChild } from "./child-registry.js";
  * terminal = false` 並在 spawn() 丟出清楚的錯誤訊息),不在本次改動範圍內。
  *
  * 已知限制 / TODO(M2 Round B 範圍):
- *  - 終端尺寸(`cols`/`rows`)只能在 spawn 當下透過 `AgentProfile.ptyConfig`
+ *  - 終端尺寸(`cols`/`rows`)只能在 spawn 當下透過 `AgentLaunchSpec.ptyConfig`
  *    決定,`AgentAdapter` 介面尚未有 `resize()` 方法,UI 端 xterm 視圖 resize
  *    不會回傳給後端的實際 pty(僅前端顯示跟著容器縮放,不影響 CLI 內部
  *    换行寬度判斷)。
@@ -88,16 +89,21 @@ export class GenericPtyAdapter implements AgentAdapter {
       // 清單」這個概念本身都不存在,這是**結構上**的不可能。若底層 CLI 自己
       // 有互動式 "/" 選單,終端視圖裡直接打字就已經能用,不需要這裡額外支援。
       slashCommands: "unsupported",
+      // 2026-10-06:對話中換 model/思考程度結構上不可能——claude-cli 只能在建立時把 `--model`/`--effort` 烤進
+      // 啟動參數(見 AgentCatalog.buildLaunch())。
+      modelSwitching: "unsupported",
+      effortSwitching: "unsupported",
     };
   }
 
-  async spawn(profile: AgentProfile, workspace: Workspace): Promise<AgentHandle> {
-    const ptyConfig = profile.ptyConfig;
+  async spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle> {
+    const ptyConfig = launch.ptyConfig;
     if (!ptyConfig) {
+      const agentLabel = launch.providerId ?? "pty";
       throw new DeskmonyError(
         ErrorCodes.ADAPTER_MISSING_CONFIG,
-        { profileId: profile.id, software: "pty", configField: "command" },
-        `AgentProfile "${profile.id}" 的 software="pty" 缺少 ptyConfig(command)`,
+        { providerId: agentLabel, software: "pty", configField: "command" },
+        `agent "${agentLabel}" 的 software="pty" 缺少 ptyConfig(command)`,
       );
     }
 
@@ -114,17 +120,17 @@ export class GenericPtyAdapter implements AgentAdapter {
 
     let ptyProcess: IPty;
     try {
-      // 這輪新增:profile.env 疊在 process.env 之上,ptyConfig.env(既有欄位)
+      // launch.env(provider 層級 env)疊在 process.env 之上,ptyConfig.env(既有欄位)
       // 最優先——同 acp-adapter.ts 的合併順序說明。
+      // 2026-10-05(安全):最後一律濾掉 Deskmony 內部憑證(主認證 token 等)——PTY 裡的終端 agent 同樣能 `echo $DESKMONY_AUTH_TOKEN`。
+      // 見 agent-env.ts。
       ptyProcess = pty.spawn(ptyConfig.command, ptyConfig.args ?? [], {
         cwd: workspace.path,
-        env: { ...process.env, ...profile.env, ...ptyConfig.env } as Record<string, string>,
+        env: buildAgentChildEnv(launch.env, ptyConfig.env) as Record<string, string>,
         cols: ptyConfig.cols ?? 80,
         rows: ptyConfig.rows ?? 24,
         name: "xterm-color",
       });
-      // 2026-09-04(稽核修補):見 child-registry.ts。
-      registerChild(ptyProcess.pid, `pty:${ptyConfig.command}`);
     } catch (err) {
       throw new DeskmonyError(
         "adapterProcess.spawnFailed",
@@ -133,7 +139,10 @@ export class GenericPtyAdapter implements AgentAdapter {
       );
     }
 
-    const handle: AgentHandle = { id: randomUUID(), profile, workspace };
+    // 2026-10-15(session 自動復活):終端程式沒有「後端 session」可以接回,重新啟動就是一個全新的程序,`resumed` 恆為 false
+    // (呼叫端據此在對話裡說明「這個 agent 不保留先前的記憶」,且不把對話紀錄灌進終端)。只沿用呼叫端指定的 Deskmony
+    // session id,讓 handle.id 與 DB 的 session id 一致。
+    const handle: AgentHandle = { id: resume?.sessionId ?? randomUUID(), launch, workspace, resumed: false };
     const internal: InternalSession = {
       handle,
       ptyProcess,
@@ -158,6 +167,12 @@ export class GenericPtyAdapter implements AgentAdapter {
       }
       outputQueue.close();
     });
+
+    // 2026-09-04(稽核修補):見 child-registry.ts。2026-10-12:非同步登記,不 await;
+    // 排在 onExit 掛上之後才能用 `internal.exited` 回報是否已結束 —— 仍與 spawn 在
+    // 同一個同步區段,中間沒有處理任何事件。node-pty 的 onExit 比行程真正結束晚
+    // 至少 1 秒,這個旗標因此有一段空窗,見 child-registry.ts「登記不能卡住事件迴圈」。
+    void registerChild(ptyProcess.pid, `pty:${ptyConfig.command}`, () => internal.exited);
 
     return handle;
   }
@@ -232,7 +247,9 @@ export class GenericPtyAdapter implements AgentAdapter {
     await this.waitForPtyExit(internal, 3_000);
     // 2026-09-04(稽核修補):同上。
     unregisterChild(internal.ptyProcess.pid);
-    this.sessions.delete(handle.id);
+    // 2026-10-15:只刪掉自己這一份——終端程式自己結束後 core 會收掉這個 handle,而等上面那幾秒的期間,同一個 session 可能已經
+    // 重新啟動、用同一個 handle id 登記了新的(見 SessionManager.detachEndedRuntime())。
+    if (this.sessions.get(handle.id) === internal) this.sessions.delete(handle.id);
   }
 
   /** 見 `dispose()`:`IPty` 版的 `waitForChildExit()`。逾時放棄等待且不丟錯
@@ -263,6 +280,7 @@ export class GenericPtyAdapter implements AgentAdapter {
    * M5 Round C:pty 是無結構化的終端直通,連「model」這個概念本身都不存在
    * (終端裡跑的可能根本不是任何 LLM CLI)——明確拋出錯誤,不可靜默忽略成功
    * (見 packages/adapters/src/types.ts 的 `AgentAdapter.setModel()` 介面註解)。
+   * claude-cli 的 model/思考程度只能在建立 session 時決定(`--model`/`--effort`,見 AgentCatalog.buildLaunch())。
    */
   async setModel(handle: AgentHandle): Promise<void> {
     this.mustGet(handle); // 驗證 handle 有效(未知 handle 仍應先報這個錯,而非「不支援」)

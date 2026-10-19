@@ -160,3 +160,137 @@ Deskmony 的核心不是「多 agent 能互聊」,而是**讓一隊 agent 能無
 **為何 `trueUnrestricted` 不算打破 C2 的 default-deny 鐵則**:它不是新的「未分類自動放行」規則,而是**單一 session、需先已處於 YOLO、且要求額外顯式開啟**的例外閘門——沒有規則比對或 autoMode 能觸發它。`decide()` 把這個短路刻意放在函式最開頭(第 0 步,先於 hard-deny 判斷本身),不是埋在 hard-deny 分支裡——grep `trueUnrestricted` 找到的就是這個唯一入口,審查者不需要先看懂 hard-deny 邏輯才發現這裡有例外。
 
 **對應修訂**:**C6**「真 YOLO…遠端禁用」已改為本機遠端同權;**F3**「遠端不可:開 YOLO、切 auto mode、改 allowlist/政策」三項已移至「遠端可」;**F4**——三斷路器中只有**權限**這條新增遠端可達的鬆綁路徑,訊息(A5)、成本(E1–E3)不受影響。
+
+---
+
+## H. 2026-10-02 修訂:簡化——拿掉 profile 與 team/看板,改成全 session 互傳訊息
+
+> 使用者要求「功能簡單化」:從電腦找到各種 agent 軟體直接使用、不用每個都建 profile、每個 session
+> 知道有哪些 agent 可用並能建 session、session 之間能互傳對話。追問後四項定案由使用者親自選定。
+> 完整規格:[`LAYER-4-detail-design/simplify-agents-sessions_detail.md`](./LAYER-4-detail-design/simplify-agents-sessions_detail.md)。
+
+**撤銷 / 改寫的決策**:
+
+| 原決策 | 之後 |
+|---|---|
+| **A1** 混合協作(階層骨架 + peer)、**A4** 角色決定生命週期 | 撤銷。沒有 team、沒有角色;所有 session 平等、互相可見,誰建了誰只用來顯示巢狀與溯源。 |
+| **A2** LLM 提議、人/規則裁決(lead + dispose-gate) | 撤銷 lead/dispose-gate。收斂決策回到人類直接在各 session 裡下指示。 |
+| **A3** done = 機器驗收閘 | 撤銷(隨 task 一起移除)。 |
+| **A5** peer 訊息綁 task/review 脈絡 + 每 context 訊息預算 | **改寫**:不再要求脈絡(使用者要任意 session 互傳),改為「**每條訊息鏈**的訊息數預算」——人類輸入開新鏈,agent 轉發沿用觸發它那一輪的鏈,超過 `messageBudget.maxMessagesPerContext` 即熔斷並通知人。訊息斷路器仍是三條斷路器之一,遠端仍不可停用。 |
+| **D3** 任務永不自動續接 + 復原視圖列髒 worktree、**D4** Mailbox 持久化 | 任務部分撤銷;session 對帳(D2)保留。跨 session 訊息若目標忙碌,在記憶體佇列等待,core 重啟即遺失(不再有 Mailbox)。 |
+| **E2** 任務預算硬上限 | 撤銷(隨 task 一起移除)。E1 用量量測、E3 每日 kill-switch 保留。 |
+| **F3** 遠端不可建改 agent profile | profile 已不存在,此項自然失效。 |
+
+**新增**:
+
+- 回覆語意:**不做任何自動回送**。收到訊息的 agent 自己決定要不要回、回給誰(使用者原話:「畢竟不一定給 A」)。S12 的「子完成 → 結果注入父」一併移除。
+- 跨 session 工具 `create_session` / `send_to_session` 走既有權限流程(default-deny 不變);`list_agents` / `list_sessions` / `read_session` 純查詢,自動放行。
+
+**沒改什麼**:§C 權限斷路器全部規則、§E1/E3、§F 其餘項、§G。
+
+
+---
+
+## I. 2026-10-03 修訂:OpenCode 也走政策引擎、HTTP 版也掛 session 工具、本機伺服器加認證
+
+> 在簡化重構(§H)之後的三個相關修補。§C 的規則本身一條都沒改——補的是「OpenCode 對這些規則形同虛設」的洞。
+
+**1. OpenCode 的工具呼叫一律經過 PolicyEngine(C2 / C5 / C6 對它補上)。** opencode **預設所有工具權限都是 allow**,
+只有它自己設定裡標成 `"ask"` 的才會發 `permission.asked`(HTTP)/ `session/request_permission`(ACP);使用者的 opencode
+設定通常沒有 `permission` 段,所以過去 OpenCode session 的 bash / edit / webfetch / MCP 呼叫大多**根本到不了**政策引擎
+——default-deny、hard-deny 四類、auto/YOLO 對它全部失效。現在 Deskmony 啟動 opencode 子行程時(`opencode` 與
+`opencode-acp` 兩個 provider)用環境變數 `OPENCODE_CONFIG_CONTENT` 注入「所有工具都 ask」的設定,與使用者既有的值
+深度合併(Deskmony 的 `permission` 優先)。寫法、實測依據與已知邊界見 `packages/adapters/src/opencode-config.ts` 檔頭。
+
+- **使用者可見的改變**:`always-ask` 下的 OpenCode session 原本靜默執行的操作,現在會跳權限確認;auto/YOLO 照常放行。
+- **為了讓它真的有效而一併補的**:(a) `permission-request` 帶上工具參數(沒有 input,hard-deny 與 allowlist 規則只能「猜不到 →
+  不命中」,YOLO 下 `git push --force` 會被當成未分類操作自動放行);(b) HTTP 轉發 subagent 子 session 的權限請求(否則全 ask 後
+  subagent 會永遠等一個沒人回的權限);(c) `opencode-acp` 停用 `task`(subagent)工具——`opencode acp` 不會轉發子 session 的
+  權限請求,實測 subagent 卡死;(d) 三個唯讀查詢工具預先放行(語意等同 Claude SDK 的 `allowedTools`)。
+- **已知邊界**:`agent.<name>.permission`(使用者自己在 opencode 設定檔針對某個 agent 寫的)是 opencode 在全域 `permission`
+  **之後**才疊的,這裡管不到;另外 ACP 對接下,MCP 工具的 `permission-request.input` 只有 opencode 在請求當下給的
+  (實測是 `{}`,真參數稍後才到),政策引擎對它們只能依工具名判斷。
+
+**2. OpenCode(HTTP)也掛 session 網路工具(推翻 §H「不做」清單的一項)。** 同一個 `mcp-bridge-server` 子行程、同一套
+scoped token(`mintMcpBridgeLaunch()`,核發/撤銷沿用 ACP 那條),寫進 opencode 設定的 `mcp.deskmony`;token 只放
+`environment`、不放 `command`,呼叫者身分仍由 token 綁定。`create_session` / `send_to_session` 因為上一項自然走權限流程。
+`softwareCanUseTools("opencode")` 改為 true;provider 目錄的 OpenCode 兩項差別只剩對接方式(HTTP + SSE / ACP)。
+
+**3. Deskmony 啟動的 opencode 本機伺服器一律加 basic auth(上面兩項的前提)。** `opencode serve`(HTTP)與 `opencode acp`
+(實測 1.18.7,看行程樹的 LISTEN port)**都會**在 loopback 開 HTTP 伺服器,而且預設**沒有任何認證**;最常見的第一個伺服器還
+固定落在 opencode 的預設 port 4096(`--port 0` 是「先試 4096、被占用才隨機」,不是純隨機)。本機任何程序就能:
+`POST /permission/{id}/reply` 替 opencode 核准權限請求——直接繞過第 1 項費力接上的政策引擎與使用者本人;`GET /config` 讀到第 2
+項才放進設定裡的 scoped bridge token(只能呼叫 session 網路的五個 gateway 方法,但仍是能冒充該 session 傳訊息、開 session 的憑證);
+對 session 送 prompt、讀對話。所以每次 spawn 都產生一組新的隨機密碼(32 bytes、base64url),以 `OPENCODE_SERVER_PASSWORD` /
+`OPENCODE_SERVER_USERNAME` **環境變數**(不放 command args)交給子行程;`OpenCodeAdapter` 對該伺服器的每個請求(含 SSE `/event`)
+都帶 `Authorization: Basic`,`opencode acp` 那條路 Deskmony 不打它的 HTTP API,只設密碼讓別人進不去。密碼只在 adapter 記憶體,
+不寫 log、不寫 DB、不進任何事件;使用者自己設的同名環境變數一律**被覆蓋**(不沿用長效秘密)。實作與實測見
+`packages/adapters/src/opencode-server-auth.ts` 檔頭。
+
+- **使用者可見的改變**:Deskmony 內部的對話、權限、提問流程完全不變;唯一的差別是從外部(別的程序、手動 `curl`)不帶密碼連不進
+  Deskmony 啟動的 opencode 伺服器了——那正是要擋的事,密碼只有 Deskmony 知道。
+- **已知邊界**:(a) 密碼在 opencode 行程的環境變數裡,而 opencode **不會**把它從 bash 工具的環境濾掉(實測模型跑 bash 讀得到),所以這道鎖
+  擋的是 **agent 以外**的本機程序,擋不住 agent 自己;要連 agent 一起擋得在 opencode 端清掉那個變數——**2026-10-05 已用 opencode 的
+  `shell.env` 外掛 hook 補上,見 §J**。(b) 不認這個環境變數的舊版 opencode 不會鎖;`OpenCodeAdapter.spawn()` 就緒後會不帶認證探測一次,仍回 2xx 就
+  `console.warn`,但**不拒絕啟動**(拒絕會讓舊版使用者整個 OpenCode 功能壞掉)。
+
+## J. 2026-10-05 修訂:agent 子行程的環境不得含 Deskmony 憑證
+
+> 稽核補的洞,不限 OpenCode(master 同樣有)。§C 的規則本身一條都沒改——補的是「**agent 自己就能拆掉整個安全罩**」的洞:
+> 安全罩罩得住「agent 想做什麼」,但罩不到「agent 跑在什麼環境裡」。
+
+**1. 主認證 token 不再傳進任何 agent 的環境。** 桌面殼(`apps/desktop/electron/main.ts`)啟動 core 之前**一律**把
+`DESKMONY_AUTH_TOKEN` 設好(使用者沒設定時也會產生一組 session-only 的),所以真實 app 裡的 core 帶著**主 token**。四個 adapter 原本都用
+`{ ...process.env, ...launch.env, ...config.env }` 組 agent 子行程的環境(Claude SDK 那條在沒有 provider env 時乾脆省略 `env`,讓 SDK
+繼承整份 `process.env`)——於是**任何 agent 的 bash 都讀得到 `DESKMONY_AUTH_TOKEN`**。拿著它連上 gateway(`ws://127.0.0.1:<port>`)就等於使用者本人:
+核准自己的權限請求、把自己切成 YOLO 與「真.無限制」(§G)、新增政策 allowlist。現在四個 adapter(`AcpAdapter`、`OpenCodeAdapter`、`GenericPtyAdapter`、
+`ClaudeAgentSdkAdapter`)一律經 `packages/adapters/src/agent-env.ts` 的 `buildAgentChildEnv()` 組環境:從 `process.env` 出發、疊上 provider / launch /
+config 各層,**最後一步無條件刪除 denylist**:
+
+| 刪掉的變數 | 為什麼 |
+|---|---|
+| `DESKMONY_AUTH_TOKEN` | 主認證 token。沒有任何正當理由讓 agent 拿到,所以連使用者自己在 provider 環境變數裡填了它也照樣刪(denylist 排在所有 layer 之後) |
+| `DESKMONY_MCP_BRIDGE_*`(token / gateway 位址 / session id / 開關) | bridge 子行程需要的值是**另外明確交給它的**(ACP:`session/new` 的 `mcpServers[].env`;OpenCode HTTP:`mcp.deskmony.environment`;Claude SDK:in-process,沒有子行程),不是靠 agent 環境繼承;agent 環境裡有的話,它的 bash 就能冒充該 session 傳訊息、開 session |
+| `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME`(**從父行程繼承來的**) | OpenCode 的兩個 adapter 在 denylist 之後才自己設一組新的隨機密碼(opencode 行程本身需要它,§I-3);其他 agent 完全不該拿到別人的 opencode 伺服器密碼 |
+
+- **使用者可見的改變**:agent 在 bash 裡看到的環境少了這幾個變數;session 網路工具(`list_sessions` 等)照常可用。唯一會感覺到的:若有人刻意讓 agent 在 bash 裡用
+  `deskmony` CLI 連回 gateway(`DESKMONY_AUTH_TOKEN` 環境變數是 CLI 的預設 token 來源),現在得自己明確帶 `--token`——那等於使用者明確把主 token 交給 agent,
+  不再是「沒注意到就被繼承」。
+
+比對**不分大小寫**(Windows 的環境變數名稱不分大小寫,`{ ...process.env }` 展開出來的一般物件卻保留原本的大小寫)。`ClaudeAgentSdkAdapter` 現在**一律明確傳**
+sanitized env(SDK 的 `env` 選項整個取代子行程環境,所以從 `process.env` 出發才保留 PATH 等)。連 agent 偵測(`agent-detector.ts`)對使用者機器上的
+agent 執行檔跑 `--version` / `models` 時也不再帶著 core 的憑證。
+
+**2. OpenCode 的伺服器密碼與設定內容,連它自己的 bash 工具都看不到(補 §I-3 的已知邊界 (a))。** opencode 不會把
+`OPENCODE_SERVER_PASSWORD` 與含 bridge scoped token 的 `OPENCODE_CONFIG_CONTENT`(HTTP 版)從它啟動的 bash 工具環境濾掉(2026-10-03 實測)——YOLO 下的 agent
+能拿密碼 `curl` 自家伺服器的 `POST /permission/{id}/reply` 自我核准,而 hard-deny 的「非白名單外連」只看工具 input 裡結構化的 host/url 欄位,不解析 bash 指令字串。
+所以 Deskmony 自帶一個 opencode 外掛(`packages/adapters/src/opencode-shell-env-plugin.ts`,編譯到 `dist/`、打包後同樣在 `core-bundle` 裡),在 opencode 的
+`shell.env` hook 把 `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` / `OPENCODE_CONFIG_CONTENT`(縱深防禦:再加 `DESKMONY_AUTH_TOKEN`、`DESKMONY_MCP_BRIDGE_*`)
+從 shell 環境移除,經注入的 `OPENCODE_CONFIG_CONTENT` 的 `plugin` 陣列載入(`opencode` 與 `opencode-acp` 兩種都掛;附加在使用者自己的 `plugin` 之後)。
+
+- **實測依據(opencode 1.18.7,不是讀文件猜的)**:hook 名稱 `shell.env`,簽名 `(input: {cwd, sessionID?, callID?}, output: {env})`,opencode 在每次啟動 shell 前呼叫,子 shell 環境是
+  `{ ...process.env, ...output.env }`;**把值設成 `undefined` 就真的移除**(agent 的 `process.env.X !== undefined` 是 false,不是空字串)。外掛可用 `file://` URL 載入
+  (含空白與中文的路徑,`pathToFileURL()` 百分比編碼),`plugin` 陣列與使用者全域/專案設定的**串接**(我們附加在最後,hook 依序執行,不會被蓋回去);`[spec, options]`
+  元組的選項會傳給工廠函式。**opencode 會把外掛模組的每個函式匯出都當外掛工廠呼叫**(實測多匯出的 helper 被呼叫了),所以外掛檔只匯出一個函式。
+- **外掛載入失敗不影響 session**:找不到外掛檔、或 opencode 沒載入它(不認 `shell.env` 的舊版、載入時丟例外),adapter 只 `console.warn`、session 照常啟動。偵測靠外掛
+  載入時寫的「載入標記檔」(adapter 在 session 建立之後背景輪詢,最多 10 秒)。沒載入的這種情況下,agent 的 bash 環境仍拿得到密碼——與這個外掛出現之前相同。
+- **使用者可見的改變**:無。agent 在 bash 裡看到的環境少了這幾個變數;`opencode` 的伺服器密碼、MCP bridge 的運作、對話與權限流程完全不變。
+
+**3. hard-deny 的「讀秘密路徑」多涵蓋桌面殼自己的本機資料夾。** 桌面殼把遠端存取 token 用 Electron `safeStorage`(Windows DPAPI)加密存在 `<userData>/auth-token.enc`
+(`apps/desktop/electron/main.ts`)。core 不知道 Electron 的真實 userData 路徑,所以依平台慣例推算(appData 基底:Windows `%APPDATA%`、macOS `~/Library/Application Support`、
+Linux `$XDG_CONFIG_HOME`/`~/.config`),整個目錄樹納入秘密路徑:`Deskmony`(打包後,electron-builder 的 `productName`)與 `@deskmony`(開發模式,app 名稱是 `@deskmony/desktop`;
+2026-10-05 對這台機器的真實目錄結構核對過)。跟 `~/.deskmony` 一樣只看工具 input 裡結構化的路徑欄位。
+
+**驗證**:`scripts/e2e-agent-env.mjs`(core 以設了 `DESKMONY_AUTH_TOKEN` 的環境啟動;fake ACP / OpenCode / PTY 後端只回報「環境裡有沒有這個變數」、絕不回顯值;另有攔截
+`ClaudeAgentSdkAdapter` 實際 spawn 的探針——本機沒登入 Claude,所以涵蓋範圍是「adapter 傳給 claude 子行程的環境」)、`e2e-opencode-permissions.mjs` PM18–PM21
+(fake 後端內建外掛宿主模擬,規則照上面的實測)、`e2e-hard-deny.mjs` 2d;另用真實 opencode 1.18.7 + `opencode/big-pickle`、帶著隨機 `DESKMONY_AUTH_TOKEN` 的隔離 core,
+對 `opencode` 與 `opencode-acp` 各建一個 YOLO session 實測:agent 的 bash 看不到 `DESKMONY_AUTH_TOKEN` / `DESKMONY_MCP_BRIDGE_*` / `OPENCODE_SERVER_PASSWORD` /
+`OPENCODE_SERVER_USERNAME` / `OPENCODE_CONFIG_CONTENT`,而 session 照常回覆、`list_sessions` 照常可用。
+
+**仍然擋不住的(誠實記錄,屬沙箱 / 作業系統隔離的範疇,不是環境變數層級能解的)**:
+
+- 同一個作業系統使用者底下的程序,能讀其他程序的記憶體——例如 agent 在 bash 裡用 PowerShell / P-Invoke 讀 core 或 opencode 行程的環境區塊(PEB),環境變數濾得再乾淨也一樣。
+- 同一個作業系統使用者的程序能解密 DPAPI 保護的本機檔案(Electron `safeStorage` 的 `auth-token.enc`)。hard-deny 的路徑規則只擋「工具 input 裡結構化的路徑」,
+  agent 在 bash 指令字串裡 `cat` 它看不到(§C7 的誠實限制)。
+- 要真正擋住這些,需要讓 agent 跑在不同的 OS 使用者 / 容器 / 沙箱裡——目前沒有,PTY 那條路同樣沒有(§C7)。這次補的是「agent 不需要任何特殊技巧、一行 `echo $VAR`
+  就拿到主 token」這個最便宜的路徑。

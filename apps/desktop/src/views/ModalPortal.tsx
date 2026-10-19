@@ -15,7 +15,7 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
 /**
  * ModalPortal(問題 2 修復,根因見 SessionList.tsx 的 `<aside>`):所有
  * `fixed inset-0` 全螢幕遮罩彈窗(ProfileCreateDialog / SettingsDialog /
- * PermissionModal / TeamManagementDialog)一律透過這個共用元件,把實際 DOM
+ * PermissionModal)一律透過這個共用元件,把實際 DOM
  * 節點渲染到 `document.body`,而不是直接留在 React 元件樹原本的巢狀位置。
  *
  * ---- 根因(務必先讀,避免以後又在某個祖先元件加 transform 而重踩)----
@@ -47,9 +47,8 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
  * portal):ProfileCreateDialog(根因觸發點,渲染在 SessionList 的 `<aside>`
  * 內)、SettingsDialog、PermissionModal(兩者渲染在 App.tsx 頂層,沒有
  * transform 祖先,這次沒有實際受影響,但統一走 portal 避免未來任何祖先
- * 元件加 transform 時又中招)、TeamManagementDialog(渲染在
- * TeamChatView.tsx/TaskBoardView.tsx 的 `<main>` 內,同樣沒有 transform
- * 祖先,同樣為求一致與未來安全統一改用 portal)。
+ * 元件加 transform 時又中招)。(2026-10-02:原本還有 TeamManagementDialog,
+ * 已隨 team 視圖一併移除。)
  */
 export function ModalPortal({ children }: { children: React.ReactNode }): JSX.Element | null {
   const wrapperRef = useRef<HTMLDivElement | null>(null);

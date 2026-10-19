@@ -29,12 +29,15 @@
  *     的紀錄:不殺孫程序,只印「疑似殘留」提示。
  *  E. 【崩潰當下整棵樹都還活著】wrapper 與子孫都在:對 wrapper 下 `taskkill /T` 之後,
  *     必須重查行程表才判斷下一筆,不能拿殺之前的快照去殺剛被我們自己釋放的 pid。
- *  F. 【dispose 路徑】`unregisterChild()` 整組移除;查詢途中被 unregister,子孫不會被
- *     寫回紀錄檔。
+ *  F. 【dispose 路徑】`unregisterChild()` 整組移除;子孫查詢途中、或根的建立時間查詢
+ *     途中被 unregister,查完之後都不會寫回紀錄檔。
  *  G. 【adapter 接線】`OpenCodeAdapter` / `AcpAdapter` 經 `.cmd` shim spawn 之後,紀錄檔
  *     裡真的出現 wrapper 底下的行程;dispose 之後整組移除。
+ *  H. 【不卡事件迴圈】(2026-10-12)`registerChild()` 立刻返回,CIM 查詢期間計時器照常
+ *     觸發;查回來時子程序已經結束就不寫(pid 可能已經被別人拿走);根還在查的時候
+ *     就呼叫 `registerChildDescendants()`,會等根寫入再登記子孫。
  *
- * B–G 需要 Windows(`.cmd`、CIM、`taskkill`);其他平台只跑 A,其餘印 SKIP 不計分。
+ * B–H 需要 Windows(`.cmd`、CIM、`taskkill`);其他平台只跑 A,其餘印 SKIP 不計分。
  *
  * ---- 清理紀律 ----------------------------------------------------------
  *
@@ -115,6 +118,11 @@ const ownChildren = [];
 function trackOwnChild(child) {
   ownChildren.push(child);
   return child;
+}
+
+/** `registerChild()` 的 `hasExited`,與 adapter 傳的一樣(見 child-registry.ts)。 */
+function exitedOf(child) {
+  return () => child.exitCode !== null || child.signalCode !== null;
 }
 
 /**
@@ -404,16 +412,16 @@ console.log("\n=== A. collectDescendants():登記子孫時的 pid 重用防護(�
 }
 
 // ===========================================================================
-// B–G:真實行程(Windows)
+// B–H:真實行程(Windows)
 // ===========================================================================
 
 if (!IS_WINDOWS) {
-  skip("B–G 真實行程測試", `平台為 ${process.platform}:shell wrapper 問題與這幾個情境只存在於 Windows(.cmd / CIM / taskkill)。`);
+  skip("B–H 真實行程測試", `平台為 ${process.platform}:shell wrapper 問題與這幾個情境只存在於 Windows(.cmd / CIM / taskkill)。`);
 } else {
   try {
     await runWindowsCases();
   } catch (err) {
-    record("B–G 執行過程沒有未預期的例外", false, err instanceof Error ? (err.stack ?? err.message) : String(err));
+    record("B–H 執行過程沒有未預期的例外", false, err instanceof Error ? (err.stack ?? err.message) : String(err));
   } finally {
     await cleanupOwnProcesses();
   }
@@ -429,7 +437,8 @@ async function runWindowsCases() {
     registry.initChildRegistry(dataDir);
     const shim = makeShim("B-shim");
     const { child, agentPid } = spawnShim(shim);
-    registry.registerChild(child.pid, `e2e:${shim}`);
+    // 不 await,比照 adapter:registerChildDescendants() 會自己等根查完。
+    void registry.registerChild(child.pid, `e2e:${shim}`, exitedOf(child));
     const agent = await agentPid;
     trackTreeOf(child.pid, "B");
     await registry.registerChildDescendants(child.pid);
@@ -540,8 +549,10 @@ async function runWindowsCases() {
     registry.initChildRegistry(dataDir);
     const shim = makeShim("D-shim");
     const { child, agentPid } = spawnShim(shim);
-    registry.registerChild(child.pid, `e2e:${shim}`);
+    const registered = registry.registerChild(child.pid, `e2e:${shim}`, exitedOf(child));
     const agent = await agentPid;
+    // 等根寫入再殺 wrapper:查詢回來時 wrapper 已經結束的話,根本不會寫(見 H2)。
+    await registered;
     // 刻意**不**呼叫 registerChildDescendants():紀錄檔長得跟使用者機器上那份一模一樣。
     const agentCreatedAt = trackTreeOf(child.pid, "D").get(agent)?.createdAt;
 
@@ -569,7 +580,7 @@ async function runWindowsCases() {
     registry.initChildRegistry(dataDir);
     const shim = makeShim("E-shim");
     const { child, agentPid } = spawnShim(shim);
-    registry.registerChild(child.pid, `e2e:${shim}`);
+    void registry.registerChild(child.pid, `e2e:${shim}`, exitedOf(child));
     const agent = await agentPid;
     trackTreeOf(child.pid, "E");
     await registry.registerChildDescendants(child.pid);
@@ -599,7 +610,7 @@ async function runWindowsCases() {
     registry.initChildRegistry(dataDir);
     const shim = makeShim("F-shim");
     const { child, agentPid } = spawnShim(shim);
-    registry.registerChild(child.pid, `e2e:${shim}`);
+    void registry.registerChild(child.pid, `e2e:${shim}`, exitedOf(child));
     const agent = await agentPid;
     trackTreeOf(child.pid, "F");
     await registry.registerChildDescendants(child.pid);
@@ -614,15 +625,30 @@ async function runWindowsCases() {
     );
 
     // 模擬 adapter 的 fire-and-forget:子孫查詢還在跑(要 1 秒多),dispose 就先 unregister 了。
-    registry.registerChild(child.pid, `e2e:${shim}`);
+    // 根要先寫進去(await),測的才是「子孫查詢途中」,不是下面 F3 的「根查詢途中」。
+    await registry.registerChild(child.pid, `e2e:${shim}`, exitedOf(child));
+    const rootWritten = readRegistryFile(dataDir).some((e) => e.pid === child.pid && e.rootPid === undefined);
     const inFlight = registry.registerChildDescendants(child.pid);
     registry.unregisterChild(child.pid);
     await inFlight;
     const afterRace = readRegistryFile(dataDir);
     record(
-      "F2: 查詢途中被 unregister —— 查完之後不會把子孫寫回去(不留沒有根、永遠移除不掉的紀錄)",
-      afterRace.length === 0,
-      `紀錄檔:${JSON.stringify(afterRace)}`,
+      "F2: 子孫查詢途中被 unregister —— 查完之後不會把子孫寫回去(不留沒有根、永遠移除不掉的紀錄)",
+      rootWritten && afterRace.length === 0,
+      `開始查子孫前根已寫入=${rootWritten}, 紀錄檔:${JSON.stringify(afterRace)}`,
+    );
+
+    // 2026-10-12:registerChild() 自己的建立時間查詢還在跑,dispose 就先 unregister 了
+    // (例如 session 一建立就被刪掉)。
+    const rootQuery = registry.registerChild(child.pid, `e2e:${shim}`, exitedOf(child));
+    registry.unregisterChild(child.pid);
+    const writtenBeforeQueryReturned = readRegistryFile(dataDir).length;
+    await rootQuery;
+    const afterRootRace = readRegistryFile(dataDir);
+    record(
+      "F3: 根的建立時間查詢途中被 unregister —— 查回來之後不會再把根寫進去(子程序此刻仍活著,沒被取消的話一定會寫)",
+      child.exitCode === null && writtenBeforeQueryReturned === 0 && afterRootRace.length === 0,
+      `wrapper 仍活著=${child.exitCode === null}, 紀錄檔:${JSON.stringify(afterRootRace)}`,
     );
   }
 
@@ -640,14 +666,14 @@ async function runWindowsCases() {
         labelPrefix: "opencode:",
         backend: path.join(REPO_ROOT, "scripts", "fake-opencode-server.mjs"),
         adapter: new OpenCodeAdapter(),
-        profileFor: (command, workingDir) => ({ software: "opencode", workingDir, opencodeConfig: { command } }),
+        launchFor: (command) => ({ software: "opencode", opencodeConfig: { command } }),
       },
       {
         name: "AcpAdapter",
         labelPrefix: "acp:",
         backend: path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs"),
         adapter: new AcpAdapter(),
-        profileFor: (command, workingDir) => ({ software: "acp", workingDir, acpConfig: { command, args: [] } }),
+        launchFor: (command) => ({ software: "acp", acpConfig: { command, args: [] } }),
       },
     ];
 
@@ -659,20 +685,16 @@ async function runWindowsCases() {
       writeFileSync(shimPath, `@echo off\r\n"${process.execPath}" "${c.backend}"\r\n`);
       registry.initChildRegistry(dataDir);
 
-      const now = Date.now();
-      const profile = {
-        id: `e2e-child-registry-${c.name}`,
-        name: `E2E child-registry ${c.name}`,
-        role: "Coder",
-        permissionLevel: "always-ask",
-        createdAt: now,
-        updatedAt: now,
-        ...c.profileFor(shimPath, workspaceDir),
+      // 2026-10-02(P2:移除 profile):`adapter.spawn()` 吃的是 `AgentLaunchSpec`(software + 各 adapter 的
+      // *Config),不再是 AgentProfile。
+      const launch = {
+        providerId: `e2e-child-registry-${c.name}`,
+        ...c.launchFor(shimPath),
       };
 
       let handle;
       try {
-        handle = await withTimeout(c.adapter.spawn(profile, { path: workspaceDir }), 60_000, `${c.name}.spawn()`);
+        handle = await withTimeout(c.adapter.spawn(launch, { path: workspaceDir }), 60_000, `${c.name}.spawn()`);
         // adapter 刻意不 await 子孫登記(見 adapter 內註解),這裡輪詢紀錄檔。
         const saved = await pollRegistryFile(dataDir, (list) => list.some((e) => e.rootPid !== undefined));
         const root = saved.find((e) => e.rootPid === undefined && e.label.startsWith(c.labelPrefix));
@@ -707,6 +729,84 @@ async function runWindowsCases() {
         }
       }
     }
+  }
+
+  // =========================================================================
+  // H. registerChild() 不能卡住事件迴圈(2026-10-12)
+  // =========================================================================
+  console.log("\n=== H. registerChild():不卡事件迴圈,改成非同步之後 pid 身分的保證不打折 ===\n");
+  {
+    const dataDir = tempDir("H-data");
+    registry.initChildRegistry(dataDir);
+
+    // H1:心跳每 20ms 一次。修正前 registerChild() 同步跑 PowerShell CIM 查詢,呼叫本身
+    // 就卡 1.3–1.7 秒(2026-10-12 在這台機器上量到),整段期間心跳一次都進不來。
+    const longLived = trackOwnChild(
+      spawn(process.execPath, ["-e", "setInterval(() => {}, 1 << 30)"], { stdio: "ignore", windowsHide: true }),
+    );
+    let last = performance.now();
+    let maxGapMs = 0;
+    let ticks = 0;
+    const heartbeat = setInterval(() => {
+      const now = performance.now();
+      maxGapMs = Math.max(maxGapMs, now - last);
+      last = now;
+      ticks += 1;
+    }, 20);
+    const started = performance.now();
+    const registration = registry.registerChild(longLived.pid, "e2e:H1", exitedOf(longLived));
+    const returnedMs = performance.now() - started;
+    await registration;
+    const settledMs = performance.now() - started;
+    clearInterval(heartbeat);
+    const live = queryProcesses([longLived.pid]).get(longLived.pid);
+    trackOwn(longLived.pid, live?.createdAt, "H1 long-lived");
+    const entry = readRegistryFile(dataDir).find((e) => e.pid === longLived.pid);
+    record(
+      "H1: registerChild() 立刻返回,CIM 查詢期間事件迴圈照常運轉;查完寫入的建立時間就是這個行程的",
+      returnedMs < 200 && maxGapMs < 500 && Boolean(live && entry && entry.createdAt === live.createdAt),
+      `呼叫本身 ${Math.round(returnedMs)}ms(上限 200)、到寫入共 ${Math.round(settledMs)}ms、` +
+        `期間心跳 ${ticks} 次、最長間隔 ${Math.round(maxGapMs)}ms(上限 500);紀錄=${JSON.stringify(entry ?? null)}`,
+    );
+    registry.unregisterChild(longLived.pid);
+
+    // H2:查詢回來時 JS 已經處理過子程序的結束事件 —— 那時行程 handle 已經關了,pid 可能
+    // 已經被別的程式拿走。用一個活著的無辜行程扮演「拿走 pid 的新主人」、`hasExited` 回
+    // true 扮演「我們的子程序已經結束」:CIM 一定查得到建立時間,但絕不能寫進紀錄檔 ——
+    // 寫了,core 下次崩潰重開時回收比對會完全一致,殺掉這個無辜行程。
+    const innocent = trackOwnChild(
+      spawn(process.execPath, ["-e", "setInterval(() => {}, 1 << 30)"], { stdio: "ignore", windowsHide: true }),
+    );
+    await registry.registerChild(innocent.pid, "e2e:H2", () => true);
+    const innocentCreatedAt = queryProcesses([innocent.pid]).get(innocent.pid)?.createdAt;
+    trackOwn(innocent.pid, innocentCreatedAt, "H2 innocent");
+    const afterExited = readRegistryFile(dataDir);
+    record(
+      "H2: 查詢回來時子程序已經結束(hasExited)—— 就算這個 pid 此刻有活著的行程(pid 已被別人拿走),也不寫入",
+      innocentCreatedAt !== undefined && !afterExited.some((e) => e.pid === innocent.pid),
+      `該 pid 此刻的行程建立於 ${innocentCreatedAt}, 紀錄檔:${JSON.stringify(afterExited)}`,
+    );
+
+    // H3:agent 可能比根的建立時間查詢先就緒(不只 WMI 慢的時候:G 的假 OpenCode 後端就是),
+    // adapter 這時呼叫 registerChildDescendants(),根還沒寫進紀錄檔。必須等根查完,不能當成
+    // 「沒有根」跳過。
+    const shim = makeShim("H3-shim");
+    const { child, agentPid } = spawnShim(shim);
+    void registry.registerChild(child.pid, `e2e:${shim}`, exitedOf(child));
+    const rootPendingAtCall = !readRegistryFile(dataDir).some((e) => e.pid === child.pid);
+    const descendantsDone = registry.registerChildDescendants(child.pid);
+    const agent = await agentPid;
+    trackTreeOf(child.pid, "H3");
+    await descendantsDone;
+    const saved = readRegistryFile(dataDir);
+    const root = saved.find((e) => e.pid === child.pid && e.rootPid === undefined);
+    const agentEntry = saved.find((e) => e.pid === agent && e.rootPid === child.pid);
+    record(
+      "H3: 根還在查的時候就呼叫 registerChildDescendants() —— 等根寫入後,照樣登記 wrapper 底下的 agent",
+      rootPendingAtCall && Boolean(root && agentEntry && agentEntry.rootCreatedAt === root.createdAt),
+      `呼叫時根尚未寫入=${rootPendingAtCall};紀錄檔:${JSON.stringify(saved)}`,
+    );
+    registry.unregisterChild(child.pid);
   }
 }
 

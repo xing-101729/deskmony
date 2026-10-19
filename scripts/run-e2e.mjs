@@ -21,7 +21,7 @@
  * 別人第一次 clone 下來跑就失敗(沒有憑證),以及 CI 會週期性地因為模型
  * 換句話說而變紅 —— 而一個會無故變紅的 CI,很快就會被所有人忽略。
  *
- * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這十五支是**決定性**
+ * 所以它留給人工執行:`node scripts/e2e-gateway.mjs`。下面這二十支是**決定性**
  * 的(全部走 fake-acp-agent / fake-opencode-server / fake-pty-echo 假後端,
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
@@ -50,7 +50,13 @@ const SUITES = [
   "e2e-hard-deny",
   // 2026-10-14:GatewayClient 首次連線失敗後的補載(假 WebSocket,不啟動 core,約 4 秒)。
   "e2e-gateway-client-startup",
-  "e2e-session-subagents",
+  // 2026-10-02(P3:session 網路):五個工具(list_agents/list_sessions/read_session/create_session/send_to_session)
+  // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
+  // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。
+  "e2e-session-network",
+  // 2026-10-06:session 手動改名 + AI 自動命名(臨時對話不污染主對話、不得用工具、各種退回截取首句、使用者改過不覆蓋、
+  // title_source 遷移)——一個 core + fake ACP/OpenCode/PTY,一分多鐘跑完。
+  "e2e-session-title",
   // 2026-09-17:OpenCode 的 `question` 工具(模型向使用者提問)——一個 core +
   // fake-opencode-server,幾秒跑完。
   "e2e-opencode-question",
@@ -59,17 +65,38 @@ const SUITES = [
   // core + fake-opencode-server,十幾秒跑完。放在 e2e-cost-governor 之後:它驗的
   // 是同一個斷路器,底層的回合上限若本身就壞了,應該先在那支看到訊號。
   "e2e-opencode-tool-input",
-  "e2e-message-budget",
-  "e2e-lead-gate",
+  // 2026-10-05:OpenCode(HTTP)一輪超過約 5 分鐘不得跳出假的「送出失敗」錯誤——prompt 改走立即回應的 `prompt_async`、
+  // 舊版 opencode 的 `/message` 退路與 undici 等待逾時分類、`session.error` 回報;fake server 的 `/message` 永遠不回應,
+  // 不用真的等 300 秒。一個 core,十幾秒跑完。
+  "e2e-opencode-long-turn",
+  // 2026-10-03:OpenCode 的工具呼叫一律經過 Deskmony 權限引擎(啟動時注入「所有工具 ask」的 OPENCODE_CONFIG_CONTENT)——
+  // 一個 core + fake-opencode-server/fake-acp-agent,十幾秒跑完。
+  "e2e-opencode-permissions",
+  // 2026-10-05(安全):agent 子行程的環境不得含 Deskmony 憑證(主認證 token、MCP bridge 的 scoped token、繼承來的 opencode
+  // 伺服器密碼)——core 以設了 DESKMONY_AUTH_TOKEN 的環境啟動,fake ACP/OpenCode/PTY 後端回報環境裡「有沒有」這些變數,
+  // 另有 Claude SDK 的 spawn 攔截探針;一個 core,十幾秒跑完。
+  "e2e-agent-env",
   "e2e-notification",
   "e2e-policy-engine",
   "e2e-agent-lifecycle",
+  // 2026-10-02(P2:移除 profile):session 以 providerId 建立(AgentCatalog)——provider → 啟動規格、錯誤碼、
+  // 重啟後接手仍是 ACP(含 provider 已不在偵測清單的退路)、舊 schema 的 agent_profiles/sessions 遷移。
+  // 這些都能用 fake backend 決定性驗證,所以放在 `pnpm test` 跑得到的地方(e2e-gateway.mjs 不在其中)。
+  "e2e-agent-catalog",
+  // 2026-10-06:各 agent 選 model 與思考程度——ACP 的 configOptions / set_config_option、OpenCode 的 variants、記住
+  // provider 上次的選擇、不支援/不合法時的明確錯誤。fake ACP agent(`--config-options`)+ fake opencode server
+  // (`--variants`),一個 core,約半分鐘。
+  "e2e-agent-options",
   // 2026-09-17:OS 層級的孤兒**行程**回收(packages/adapters/src/child-registry.ts),
   // 與下一支處理的 DB 孤兒**紀錄**是崩潰後的兩半(見 crash-recovery_hld.md 開頭)。
   // 不啟動 core,但會真的開 `.cmd` shim / node 行程並反覆查 PowerShell CIM(每次約
   // 1.4 秒),所以不算快。
   "e2e-child-registry",
   "e2e-crash-recovery",
+  // 2026-10-15:app 關閉/崩潰重開之後,對沒有活 runtime 的 session 送訊息會自動重新啟動 agent(ACP resume/load、OpenCode 沿用 session、
+  // Claude resume、PTY 全新程序;接不回時退回對話紀錄),復原視圖的「繼續」走同一個流程。十幾個 core 開關,約 1~2 分鐘;
+  // 放在 e2e-crash-recovery 之後:它疊在崩潰對帳(interrupted/closed 的分類)之上。
+  "e2e-session-revive",
   "e2e-auto-mode-yolo",
   // 2026-09-09(cli_hld.md §9):驅動編譯後的 `apps/cli/dist/bin.js` 子程序,
   // 疊在其餘每一支都假設能正常運作的 gateway/adapters/policy-engine 之上

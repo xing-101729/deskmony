@@ -7,6 +7,7 @@ import { Dialog } from "../ui/Dialog.js";
 import { Button } from "../ui/Button.js";
 import { Badge } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
+import { displaySessionTitle } from "./SessionTitle.js";
 
 /**
  * 權限請求彈窗:一次只顯示佇列中最早的一筆,其餘排隊等待。
@@ -205,7 +206,7 @@ export function PermissionModal(): JSX.Element | null {
   return (
     <Dialog
       title={strong ? t("permission:titleStrong") : t("permission:titleNormal")}
-      description={strong ? t("permission:descriptionStrong") : (session?.title ?? current.sessionId)}
+      description={strong ? t("permission:descriptionStrong") : (session ? displaySessionTitle(session, t) : current.sessionId)}
       icon={strong ? "shield" : "zap"}
       tone={strong ? "danger" : "default"}
       size="sm"

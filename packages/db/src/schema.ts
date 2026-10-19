@@ -2,15 +2,50 @@ import { sqliteTable, text, integer, real, primaryKey } from "drizzle-orm/sqlite
 
 /**
  * M1 資料表:sessions 與 messages(ARCHITECTURE.md 3.5 節、第 6 節 ERD 的 M1 子集)。
- * M3 Round A:新增 agent_profiles(AgentProfile 落地成資料表,取代 M1 的
- * 純記憶體 ProfileStore)、teams / team_members / team_messages(TeamManager
- * + MessageBus,見 apps/core/src/team、apps/core/src/bus)。
+ *
+ * 2026-10-02(P2:移除 profile,見 docs/DECISIONS.md §H):原本的 `agent_profiles` 表定義
+ * 已移除。**這張表沒有被 DROP**——使用者既有 SQLite 檔案裡的表與資料原封不動留著,
+ * 只有 `packages/db/src/client.ts` 的 `backfillLegacySessionsProvider()` 會用 raw SQL
+ * 唯讀地讀它一次,把舊 session 補上自帶的 `provider_id`/`launch_*` 欄位。全新安裝不再建立它。
+ *
+ * 2026-10-02(P1:移除 team/task/看板,見 docs/DECISIONS.md §H):原本的 `teams`/
+ * `team_members`/`team_messages`/`tasks`/`workspaces` 五張表定義已移除。**這些表
+ * 沒有被 DROP**——使用者既有 SQLite 檔案裡的表與資料原封不動留著,只是不再有
+ * 任何 drizzle 定義或程式碼讀寫它們(見 client.ts 檔頭說明)。
  */
 
 export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
   title: text("title").notNull().default("新對話"),
-  agentProfileId: text("agent_profile_id").notNull(),
+  /**
+   * 2026-10-06:標題來源 `"default" | "auto" | "user"`(見 packages/shared/src/session.ts 的 `SessionTitleSourceSchema`)。
+   * nullable 只是為了讓 `ALTER TABLE ADD COLUMN` 對舊列合法——啟動時 client.ts 的 `ensureSessionsTitleSourceColumn()`
+   * 冪等補欄位並回填(標題是「新對話」→ default,其他 → user),新 session 一律寫入值。
+   */
+  titleSource: text("title_source"),
+  /**
+   * 舊欄位(2026-10-02 P2 起不再是 profile id,原名 `agentProfileId`):`agent_profile_id` 在
+   * 既有 DB 裡是 `NOT NULL`,SQLite 不能直接改約束,所以欄位保留——**新 session 寫入
+   * `providerId` 當值**(只為滿足約束,沒有任何程式碼讀它);舊 session 這欄仍是當年的
+   * profile id,僅供 `backfillLegacySessionsProvider()` 回填時對照。
+   */
+  legacyAgentProfileId: text("agent_profile_id").notNull(),
+  /**
+   * 2026-10-02(P2):這個 session 是用哪個 provider 目錄項目建立的(見
+   * packages/shared/src/session.ts 的 `SessionSchema.providerId`)。nullable 只是為了讓
+   * `ALTER TABLE ADD COLUMN` 補欄位時對舊列合法——啟動時的回填遷移之後一律非 NULL。
+   * 既有 DB 靠 client.ts 的 `ensureSessionsLaunchColumns()` 冪等補欄位。
+   */
+  providerId: text("provider_id"),
+  /**
+   * 2026-10-02(P2):session 自帶的啟動資訊(`AgentLaunchSpec` 中 acp/pty/opencode 的
+   * `command`/`args`;claude-agent-sdk 兩者皆 NULL,`launch_args` 是 JSON 字串陣列)。
+   * 續接時先走 `AgentCatalog.buildLaunchSpec(providerId)`,provider 已不存在/未安裝時才
+   * 退回 `adapterType + launch_command + launch_args`。**不存 env**(可能含 API key,
+   * 每次 spawn 重新從 settings 讀)。
+   */
+  launchCommand: text("launch_command"),
+  launchArgs: text("launch_args"),
   adapterType: text("adapter_type").notNull(),
   status: text("status").notNull().default("idle"),
   workingDir: text("working_dir").notNull(),
@@ -65,6 +100,14 @@ export const messages = sqliteTable("messages", {
    * `ensureMessagesAttachmentsColumn()` 冪等 `ALTER TABLE` 補上。
    */
   attachments: text("attachments"),
+  /**
+   * 2026-10-02(P3:session 網路):這則 user 訊息是別的 session 送來的(`send_to_session`/`create_session`)
+   * 或使用者從別的 session 轉傳來的——`MessageOrigin`(packages/shared/src/session.ts)序列化成的 JSON 字串。
+   * `content` 存**原始 message 本體**,給 agent 看的信封樣板文字不落地(只在送進 adapter 那一刻組裝)。
+   * Nullable——人類自己輸入的訊息與 assistant/system/tool 訊息都是 NULL。既有的舊 DB 檔案靠
+   * `packages/db/src/client.ts` 的 `ensureMessagesOriginColumn()` 冪等 `ALTER TABLE` 補上。
+   */
+  origin: text("origin"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -74,195 +117,12 @@ export type MessageRow = typeof messages.$inferSelect;
 export type NewMessageRow = typeof messages.$inferInsert;
 
 /**
- * agent_profiles(M3 Round A):AgentProfile 落地成資料表,取代 M1 的純記憶體
- * ProfileStore(README 已知限制:「profile 僅記憶體,core 重啟後消失」)。
- * mcpConfig/acpConfig/ptyConfig 是巢狀物件,以 JSON 字串存放(比照
- * drizzle-orm 對 SQLite 沒有原生 JSON 欄位型別時的常見作法)。
- */
-export const agentProfiles = sqliteTable("agent_profiles", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  role: text("role").notNull().default("Coder"),
-  software: text("software").notNull(),
-  /** 這輪新增(provider 目錄重構):`ProviderCatalogEntry.id`,見
-   *  packages/shared/src/agent-profile.ts 的 `AgentProfileObjectSchema.providerId`
-   *  註解。既有的舊 DB 檔案靠 `packages/db/src/client.ts` 的
-   *  `ensureAgentProfilesProviderColumnsColumn()` 冪等 `ALTER TABLE` 補上。 */
-  providerId: text("provider_id"),
-  model: text("model"),
-  effort: text("effort"),
-  systemPrompt: text("system_prompt"),
-  mcpConfig: text("mcp_config"),
-  permissionLevel: text("permission_level").notNull().default("always-ask"),
-  workingDir: text("working_dir").notNull(),
-  /** 這輪新增:profile 層級的 env 覆寫(JSON 字串),見
-   *  packages/shared/src/agent-profile.ts 的 `AgentProfileObjectSchema.env` 註解。 */
-  env: text("env"),
-  acpConfig: text("acp_config"),
-  ptyConfig: text("pty_config"),
-  /** software="opencode" 時的子程序啟動設定(這輪新增,見 OpencodeAgentConfigSchema)。 */
-  opencodeConfig: text("opencode_config"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-});
-export type AgentProfileRow = typeof agentProfiles.$inferSelect;
-export type NewAgentProfileRow = typeof agentProfiles.$inferInsert;
-
-/** teams(M3 Round A):TeamManager,見 apps/core/src/team/team-manager.ts。 */
-export const teams = sqliteTable("teams", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  workingDir: text("working_dir"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-});
-export type TeamRow = typeof teams.$inferSelect;
-export type NewTeamRow = typeof teams.$inferInsert;
-
-/**
- * team_members(M3 Round A):引用 agent_profiles.id,name 在同一個 team 內
- * 唯一(MessageBus 用 name 比對 send_message 的 to / @mention)。
- */
-export const teamMembers = sqliteTable("team_members", {
-  id: text("id").primaryKey(),
-  teamId: text("team_id").notNull(),
-  agentProfileId: text("agent_profile_id").notNull(),
-  name: text("name").notNull(),
-  role: text("role").notNull(),
-  canInterrupt: integer("can_interrupt").notNull().default(0),
-  /** S8(agent-lifecycle):"persistent" | "ephemeral",見
-   *  packages/shared/src/team.ts 的 `LifecycleSchema` 註解。既有的舊 DB 檔案
-   *  靠 `packages/db/src/client.ts` 的 `ensureTeamMembersLifecycleColumn()`
-   *  冪等 `ALTER TABLE` 補上,一律預設 `'ephemeral'`(遷移只改預設值,不改變
-   *  正在跑的東西,見 agent-lifecycle_detail.md §1「遷移」)。 */
-  lifecycle: text("lifecycle").notNull().default("ephemeral"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-});
-export type TeamMemberRow = typeof teamMembers.$inferSelect;
-export type NewTeamMemberRow = typeof teamMembers.$inferInsert;
-
-/**
- * team_messages(M3 Round A):MessageBus 收到的每一則訊息(agent 互傳或人類
- * 插話)都會先落地在這裡,再依投遞策略決定要不要立即注入 / 進 Mailbox 排隊
- * (見 apps/core/src/bus/message-bus.ts,對應 ARCHITECTURE.md 4.2 節)。
- *
- * S2(message-budget)新增兩欄(見
- * docs/LAYER-4-detail-design/message-budget_detail.md §1):
- *   - `deliveredAt`:null = 尚未送達(即在 Mailbox 中,DB 是這個事實的**權威
- *     來源**,取代原本只在記憶體的 `Map<memberId, TeamMessage[]>`——崩潰重啟後
- *     `deliveredAt IS NULL` 的訊息自然還在,不需要額外復原邏輯)。既有的舊 DB
- *     檔案靠 `packages/db/src/client.ts` 的 `ensureTeamMessagesBudgetColumns()`
- *     冪等 `ALTER TABLE` 補上,並**只在這次遷移當下**把所有既有列標記為已送達
- *     (`deliveredAt = timestamp`)——絕不能是「每次啟動都執行」的無條件
- *     UPDATE,否則會把當時真正待投遞的訊息也一併誤標成已送達(見該函式註解)。
- *   - `contextId`:訊息所屬的 task context(agent 端一律由 Core 依 session 當下
- *     綁定的任務自動推導,agent 無法指定,見 message-bus.ts 的
- *     `deriveContextId()`)。舊資料(遷移當下已存在的列)填哨兵值 `"legacy"`,
- *     不參與訊息預算計算。
- */
-export const teamMessages = sqliteTable("team_messages", {
-  id: text("id").primaryKey(),
-  teamId: text("team_id").notNull(),
-  fromName: text("from_name").notNull(),
-  fromRole: text("from_role"),
-  toTarget: text("to_target").notNull(),
-  content: text("content").notNull(),
-  priority: text("priority").notNull(),
-  timestamp: integer("timestamp").notNull(),
-  source: text("source").notNull(),
-  note: text("note"),
-  /** S2:null = 尚未送達(Mailbox 中的權威狀態)。 */
-  deliveredAt: integer("delivered_at"),
-  /** S2:所屬任務 context id;"legacy" = 遷移前的舊資料,不參與預算計算。 */
-  contextId: text("context_id").notNull().default("legacy"),
-  /**
-   * 2026-08-31:這則訊息是不是「一次發給全隊」的廣播展開出來的其中一筆。
-   *
-   * **為什麼需要一個獨立欄位而不是看 `toTarget`**:`deliverBroadcast()` 真正
-   * 投遞時會把一則廣播展開成 N 筆、每筆 `to_target` 各自填收件者的名字(S2
-   * L4 §5.1,這樣每個收件者的送達狀態才能各自獨立)——展開之後
-   * `to_target === "broadcast"` 就再也不成立了,廣播這個事實在投遞路徑上被抹掉。
-   * 結果是 agent 收到訊息時分不出「這是專門找我的」還是「全隊都收到了同一則」,
-   * 而那正是它判斷該不該回覆最主要的依據(一則廣播若 N 個成員都回,就是 N 則
-   * 訊息,正是 S2 訊息預算存在要防的放大)。
-   *
-   * 忙碌成員的訊息會先留在 Mailbox、之後才從 DB 撈出來批次注入,所以這個旗標
-   * 必須**持久化**,不能只在記憶體裡傳遞。舊資料一律視為 false(非廣播)——
-   * `ALTER TABLE ADD COLUMN ... DEFAULT 0` 對既有列天生就填 0,語意正確,
-   * 不需要額外回填。
-   */
-  isBroadcast: integer("is_broadcast", { mode: "boolean" }).notNull().default(false),
-});
-export type TeamMessageRow = typeof teamMessages.$inferSelect;
-export type NewTeamMessageRow = typeof teamMessages.$inferInsert;
-
-/**
- * tasks(M4 Round A):TaskService,見 apps/core/src/tasks/task-service.ts,對應
- * ARCHITECTURE.md 3.3 節 TaskService、第 5 節「任務協作流程」狀態機、第 6 節
- * ERD 的 TASK。欄位比 ERD 描述的最小集合(id/title/status/assigneeId)多兩個:
- *   - `workspace_id`:綁定的 WORKSPACE(第 6 節 ERD「TASK ||--o| WORKSPACE」)。
- *   - `blocked_from`:只有 status = "blocked" 時有意義,記錄進入 blocked 前的
- *     狀態,供 TaskService.isValidTransition 判斷「blocked → 回原狀態」這個
- *     ARCHITECTURE.md 第 5 節狀態圖沒有明講存放位置、但語意上必須有地方記錄
- *     的資訊(見 task-service.ts 內完整設計說明)。
- */
-export const tasks = sqliteTable("tasks", {
-  id: text("id").primaryKey(),
-  teamId: text("team_id").notNull(),
-  title: text("title").notNull(),
-  description: text("description"),
-  status: text("status").notNull().default("backlog"),
-  assigneeMemberId: text("assignee_member_id"),
-  workspaceId: text("workspace_id"),
-  blockedFrom: text("blocked_from"),
-  /**
-   * S4(機器驗收閘):`TaskAcceptance` 的 JSON 字串,null = 無機器驗收(退回
-   * 人類判定)。比照 agent_profiles 巢狀物件欄位的既有慣例(JSON 字串存放,
-   * 見上方 agentProfiles 的 mcpConfig/acpConfig 等欄位註解)。既有 row 會是
-   * NULL(見 client.ts 的 `ensureTasksAcceptanceColumn()` 遷移),無破壞性。
-   */
-  acceptance: text("acceptance"),
-  /**
-   * S5(dispose-gate):任務完成判定沒有機器驗收條件(或連續驗收失敗達上限)
-   * 時,任務維持 `in-progress` 並設這個旗標,等待人類經 `task.approveReview`
-   * 核可才轉進 `review`(見 apps/core/src/tasks/task-service.ts 的
-   * `applyHumanReviewGate()`)。0/1 存 SQLite,比照 `team_members.can_interrupt`
-   * 既有慣例(不用 `{ mode: "boolean" }`,讀寫端各自用 `Boolean()`/`? 1 : 0`
-   * 轉換,見 team-manager.ts 的 rowToMember/memberToRow)。既有 row 會是 0
-   * (見 client.ts 的 `ensureTasksAwaitingHumanReviewColumn()` 遷移),無破壞性。
-   */
-  awaitingHumanReview: integer("awaiting_human_review").notNull().default(0),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-});
-export type TaskRow = typeof tasks.$inferSelect;
-export type NewTaskRow = typeof tasks.$inferInsert;
-
-/**
- * workspaces(M4 Round A):WorkspaceManager,見
- * apps/core/src/workspace/workspace-manager.ts。每一列對應一個任務綁定的
- * git worktree(baseDir = team.workingDir,worktreePath/branch 見
- * WorkspaceManager 內的佈局/命名設計決策)。
- */
-export const workspaces = sqliteTable("workspaces", {
-  id: text("id").primaryKey(),
-  taskId: text("task_id").notNull(),
-  baseDir: text("base_dir").notNull(),
-  worktreePath: text("worktree_path").notNull(),
-  branch: text("branch").notNull(),
-  createdAt: integer("created_at").notNull(),
-});
-export type WorkspaceRow = typeof workspaces.$inferSelect;
-export type NewWorkspaceRow = typeof workspaces.$inferInsert;
-
-/**
  * settings(M5 Round E:「設定」介面的持久化 key/value store)。目前唯一的
  * 使用者是 apps/core/src/settings/settings-store.ts 的 `SettingsStore`
  * (啟用哪些偵測到的 Claude model,見該檔案 `ENABLED_CLAUDE_MODELS_KEY`),但
  * 刻意設計成通用的 `key TEXT PRIMARY KEY, value TEXT`(value 存 JSON 字串)
  * ——不是「一列存所有設定欄位」那種寬表,未來要新增其他偏好只需要多一個
- * key,不需要再一次 schema 遷移。比照 sessions/agent_profiles 既有的
+ * key,不需要再一次 schema 遷移。比照 sessions 既有的
  * "CREATE TABLE IF NOT EXISTS" 自我修復策略(見 packages/db/src/client.ts),
  * 這是全新的表、不含需要對舊 DB 補欄位的既有資料,所以不需要
  * `ensureXxxColumn()` 那種 ALTER TABLE 遷移。
@@ -285,8 +145,7 @@ export type NewSettingsRow = typeof settings.$inferInsert;
  * 欄位設計:`sessionId`/`requestId`/`toolName`/`effect`/`reason` 是最常被查詢
  * 的欄位,獨立拉出來(nullable——`trip` 事件沒有 sessionId/requestId/toolName/
  * effect,只有 reason);`payload` 存完整事件的 JSON 字串(含上述欄位重複一份
- * 也沒關係,單純圖查詢方便,不是 normalize 的資料庫設計),比照
- * agent_profiles 的 mcpConfig 等既有慣例。
+ * 也沒關係,單純圖查詢方便,不是 normalize 的資料庫設計)。
  */
 export const enforcementAudit = sqliteTable("enforcement_audit", {
   id: text("id").primaryKey(),
@@ -305,12 +164,13 @@ export type NewEnforcementAuditRow = typeof enforcementAudit.$inferInsert;
 /**
  * usage_rollup(S3b:CostGovernor,見
  * docs/LAYER-4-detail-design/cost-governor_detail.md §1):S3a 是 ephemeral
- * (只顯示最新值、reload 歸零),這裡補上治理所需的**權威持久層**——三個
- * scope(session/task/day)各自的累計花費/token,供任務預算(E2)、每日
+ * (只顯示最新值、reload 歸零),這裡補上治理所需的**權威持久層**——scope
+ * (session/day;2026-10-02 起不再寫入 task scope,舊 DB 裡既有的 task 列留著不動)
+ * 各自的累計花費/token,供每日
  * kill-switch(E3)門檻檢查與崩潰重啟後還原(見該文件 §6 失敗模式表)。
  *
- * 複合主鍵 `(scope, scopeId)`:`scope` 是 "session" | "task" | "day"
- * (`scopeId` 依序是 sessionId / taskId / 本地日期字串 "YYYY-MM-DD"),同一個
+ * 複合主鍵 `(scope, scopeId)`:`scope` 是 "session" | "day"
+ * (`scopeId` 依序是 sessionId / 本地日期字串 "YYYY-MM-DD"),同一個
  * scope+scopeId 只會有一列,`CostGovernor` 用 select-then-update-or-insert
  * 的方式維護(見 apps/core/src/cost/cost-governor.ts),不是 append-only 事件
  * 記錄(這裡要的是「目前累計到多少」,不是「發生過哪些事件」,append-only 的

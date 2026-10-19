@@ -1,0 +1,6 @@
+{
+  "config": {
+    "patchWriteFailed": "設定檔({{configPath}})目前無法解析,拒絕寫入以避免覆蓋既有內容:{{detail}}",
+    "policyRuleWriteFailed": "設定檔({{configPath}})目前無法解析,拒絕寫入規則以避免覆蓋既有內容:{{detail}}"
+  }
+}

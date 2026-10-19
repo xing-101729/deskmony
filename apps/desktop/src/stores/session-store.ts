@@ -2,18 +2,15 @@ import { create } from "zustand";
 import {
   type AdapterCapabilities,
   type AgentDetectionEntry,
-  type AgentOverride,
-  type AgentProfile,
   type AgentSoftware,
   type CapabilitySupport,
   type ConfigSetFilePatchInput,
-  type CreateAgentProfileInput,
   type DialogAnswer,
   type EffectiveCoreConfig,
-  type EffortLevel,
   type EnforcementNotificationPush,
   type GatewayCapabilities,
   type KnownClaudeModel,
+  type MessageOrigin,
   type MessageRecord,
   type PermissionRequestEvent,
   type PermissionResolvedPush,
@@ -27,7 +24,9 @@ import {
   type ResolvedProvider,
   type Session,
   type SessionEventEnvelope,
+  type SessionMessagePush,
   type SessionPermissionMode,
+  type SessionTitleMethod,
   type SlashCommandInfo,
   type UserDialogRequestEvent,
   type UserDialogResolvedPush,
@@ -38,6 +37,7 @@ import {
   ConfigGetEffectiveResultSchema,
   ConfigSetFileResultSchema,
   CostGetSummaryResultSchema,
+  DeskmonyError,
   DetectAgentsResultSchema,
   EnforcementNotificationPushSchema,
   formatEnforcementNotificationText,
@@ -46,14 +46,14 @@ import {
   PolicyAddRuleResultSchema,
   PolicyListRulesResultSchema,
   PolicyRemoveRuleResultSchema,
-  ProfileCreateResultSchema,
-  ProfileListResultSchema,
   resolveCapabilitySupport,
   resolveProviders,
+  SessionAutoTitleResultSchema,
   SessionCreateResultSchema,
   SessionGetSlashCommandsResultSchema,
   SessionHistoryResultSchema,
   SessionListResultSchema,
+  SessionRenameResultSchema,
   SessionSetEffortResultSchema,
   SessionSetModelResultSchema,
   SessionSetPermissionModeResultSchema,
@@ -95,6 +95,12 @@ export type ChatItem =
        *  history 兩條路徑都會填(見 sendPrompt() action 與
        *  messageRecordsToItems())。 */
       attachments?: PendingAttachment[];
+      /**
+       * 2026-10-02(P3:session 網路):這則訊息是別的 session 送來的(`send_to_session`/`create_session`)或使用者
+       * 轉傳來的(`forward`)——不是人類在這個 session 輸入的。`content` 是**原始 message 本體**(信封樣板文字只給
+       * agent 看,不落地)。DB reload 後的 history 與即時的 `session-message` push 兩條路徑都會填。
+       */
+      origin?: MessageOrigin;
     }
   | { kind: "assistant"; id: string; content: string; createdAt: number; streaming: boolean }
   | {
@@ -160,9 +166,17 @@ export interface SessionUsage {
   contextSeen?: boolean;
 }
 
+/** `session.create` 的輸入(2026-10-02 P2:取代原本的 `agentProfileId` + `agentOverride`)。 */
+export interface NewSessionRequest {
+  providerId: string;
+  workingDir: string;
+  title?: string;
+  model?: string;
+  effort?: string;
+}
+
 interface SessionStoreState {
   status: "connecting" | "open" | "closed";
-  profiles: AgentProfile[];
   sessions: Session[];
   currentSessionId: string | null;
   itemsBySession: Record<string, ChatItem[]>;
@@ -190,7 +204,7 @@ interface SessionStoreState {
    * 全部啟用**(未曾設定過,或已連線但尚未載入完成時的初始值)——讀取端
    * 一律透過下方 `selectEnabledClaudeModels()` 這個共用 selector 取得「實際
    * 要顯示的清單」,不要直接讀這個欄位就判斷要不要顯示某個 model,避免
-   * ProfileCreateDialog 與 ChatView 各自複寫一份判斷邏輯而漂移。
+   * SessionList 與 ChatView 各自複寫一份判斷邏輯而漂移。
    */
   enabledModelIds: string[];
   /**
@@ -199,7 +213,7 @@ interface SessionStoreState {
    * settings-store.ts)。**注意:這裡的 `env` 一律是遮罩過的**(值固定是
    * `"***"`,只有 key 名稱是真的)——UI 只能拿它顯示「已設定哪些 key」,
    * 絕不能把這裡讀到的值當作真正的 env 拿去做任何事(見
-   * ProfileCreateDialog/SettingsDialog 的 env 編輯器實作說明)。初始為空
+   * SettingsDialog 的 env 編輯器實作說明)。初始為空
    * 物件(尚未載入 = 全部 provider 皆維持 BUILTIN_PROVIDERS 目錄預設值)。
    */
   providerPrefs: Record<string, ProviderPrefs>;
@@ -238,8 +252,8 @@ interface SessionStoreState {
    * ⚠️ 2026-08-25 修訂(見 docs/DECISIONS.md §G):`canToggleAuto`/
    * `canEnableYolo`/`canEditPolicy`/`canEnableTrueUnrestricted` 現在**恆為
    * `true`**(本機遠端同權,使用者明確翻案)——這幾個欄位不再用來決定要不要
-   * 隱藏對應的控制項,只有 `canManageProfiles` 仍然是真正的顯示門檻。
-   * `isRemoteConnection` 純顯示用,給危險操作的警告文案多加一句「這是遠端
+   * 隱藏對應的控制項。(2026-10-02 P2:原本唯一仍有門檻作用的 `canManageProfiles` 已隨
+   * profile 移除。)`isRemoteConnection` 純顯示用,給危險操作的警告文案多加一句「這是遠端
    * 連線」提醒,不是任何門檻。
    */
   gatewayCapabilities: GatewayCapabilities;
@@ -252,22 +266,14 @@ interface SessionStoreState {
    * 更新維持同步(比照 `sessions` 陣列的既有模式)。
    */
   policyRules: PolicyRule[];
+  /** 2026-10-06:正在「AI 重新命名」的 session(側欄與對話標題列共用,顯示進行中狀態、避免重複觸發)。 */
+  titleGenerating: Record<string, true>;
 
   connect: () => void;
-  refreshProfiles: () => Promise<void>;
   refreshSessions: () => Promise<void>;
-  /** 這輪新增最後一個選填參數 `agentOverride`——不落地新 profile,就這一次
-   *  建立臨時覆寫要用的 agent software/model(見 packages/shared/src/
-   *  session.ts 的 `AgentOverrideSchema` 註解)。 */
-  createSession: (
-    agentProfileId: string,
-    workingDir: string,
-    title?: string,
-    teamMemberId?: string,
-    agentOverride?: AgentOverride,
-  ) => Promise<void>;
-  createProfile: (input: CreateAgentProfileInput) => Promise<AgentProfile>;
-  deleteProfile: (id: string) => Promise<void>;
+  /** 2026-10-02(P2:移除 profile):session 直接以偵測到的 agent(`providerId`)+ 選填
+   *  model/effort 建立(見 packages/shared/src/session.ts 的 `CreateSessionInputSchema`)。 */
+  createSession: (input: NewSessionRequest) => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
   /**
    * 刪除一個對話(功能2)。呼叫 `session.delete` 後從本地 `sessions`/
@@ -286,17 +292,36 @@ interface SessionStoreState {
    * 打架或造成畫面閃爍。
    */
   deleteSession: (sessionId: string) => Promise<void>;
-  /** S12 Phase2 R3:從一個既有 session 開子 agent —— agentProfileId 由呼叫端
-   *  (SpawnChildDialog)指定,預設值是父 session 自己的 profile,但使用者可以
-   *  改選別的(這輪新增,不再寫死繼承)。呼叫既有 `session.spawnChild` RPC。
-   *  `agentOverride` 選填,語意同 `createSession()`。 */
-  spawnChild: (
+  /**
+   * 2026-10-06:手動改名(`session.rename`)。成功後立即更新本地 sessions(稍後抵達的 "session-updated" 推播內容相同);
+   * 失敗(空白、超過長度上限、session 不存在)原樣丟錯,呼叫端顯示。
+   */
+  renameSession: (sessionId: string, title: string) => Promise<void>;
+  /**
+   * 2026-10-06:「AI 重新命名」(`session.autoTitle`)——用 session 自己的 agent 在臨時對話裡產生標題,做不到就退回截取
+   * 第一則訊息。最多約 60 秒;期間 `titleGenerating[sessionId]` 為 true。回傳實際用的方式與是否套用。
+   */
+  autoTitleSession: (sessionId: string) => Promise<{ method: SessionTitleMethod; applied: boolean }>;
+  /**
+   * 使用者手動從某個 session 底下開一個新 session(側欄的「在這個 session 底下開新 session」對話框,與側欄
+   * 「新對話」同一組 agent/model 選單)。2026-10-02(P3):呼叫 `session.create`(帶 `parentSessionId`,工作資料夾沿用
+   * 該 session)後,再用 `session.sendPrompt` 送第一則訊息——這是**人類輸入**(開新訊息鏈、沒有 `origin`),
+   * 與 agent 用 `create_session` 開的不同;新 session 掛在該 session 底下只為巢狀顯示與溯源。
+   * (原本的 `session.spawnChild` gateway 方法與「子完成 → 結果自動注入父」已整個移除。)
+   */
+  createChildSession: (
     parentSessionId: string,
     prompt: string,
-    agentProfileId: string,
+    agent: { providerId: string; model?: string; effort?: string },
     title?: string,
-    agentOverride?: AgentOverride,
   ) => Promise<void>;
+  /**
+   * 「轉傳到…」:把 `sourceSessionId` 畫面上某個氣泡的文字(`text`)轉給 `targetSessionId`
+   * (`session.forwardMessage`)。轉傳是人類操作、等同使用者自己貼上這段文字,所以直接把使用者按下轉傳的
+   * 那個氣泡的內容送出,不回頭用 id/內容去比對持久化的原訊息(即時串流中的訊息 id 是 adapter 的
+   * messageId、對不上 DB 那一筆,比對會在 ACP 一輪有多個氣泡時轉錯)。
+   */
+  forwardMessage: (sourceSessionId: string, text: string, targetSessionId: string, note?: string) => Promise<void>;
   /** Phase 6:`attachments` 選填——composer 沒有待送附件時省略/傳空陣列皆可,
    *  action 內部一律正規化成「非空才附加」,樂觀回顯與 wire payload 兩處共用
    *  同一份判斷(見下方實作)。 */
@@ -395,11 +420,11 @@ interface SessionStoreState {
    * 其餘 adapter 呼叫這個方法會讓回傳的 Promise reject,呼叫端(ChatView)
    * 需自行 catch 並顯示錯誤。
    */
-  setSessionEffort: (sessionId: string, effort: EffortLevel) => Promise<void>;
+  setSessionEffort: (sessionId: string, effort: string) => Promise<void>;
   /**
    * M5 Round E(需求4):載入目前啟用的 model 偏好(`settings.getEnabledModels`)。
    * `connect()` 會呼叫一次;SettingsDialog 儲存成功後也會呼叫(見
-   * `setEnabledModels()`)以確保同一份 store 狀態,ProfileCreateDialog/
+   * `setEnabledModels()`)以確保同一份 store 狀態,SessionList/
    * ChatView 兩個 model picker 共用、不會漂移。失敗時安靜保留舊值(通常是
    * 初始的空陣列 = 全部啟用),不阻塞畫面。
    */
@@ -412,7 +437,7 @@ interface SessionStoreState {
   setEnabledModels: (enabledModelIds: string[]) => Promise<void>;
   /** 載入目前所有已顯式覆寫過的 per-provider 偏好(`settings.getProviderPrefs`)。
    *  `connect()` 會呼叫一次;`setProviderPrefs()` 成功後也會重新整份設定,
-   *  確保 ProfileCreateDialog/SettingsDialog/ChatView 共用同一份 store 狀態。
+   *  確保 SessionList/SettingsDialog/ChatView 共用同一份 store 狀態。
    *  失敗時安靜保留舊值(通常是初始空物件 = 全部維持目錄預設)。 */
   loadProviderPrefs: () => Promise<void>;
   /** 對單一 provider 的偏好送出**部分欄位 patch**(見 apps/core/src/settings/
@@ -460,9 +485,9 @@ interface SessionStoreState {
 }
 
 /**
- * M3 Round B:匯出這個模組層級的 singleton,讓 team-store.ts 共用同一條 WS
- * 連線(而不是另開一條連線)—— gateway 本身允許多個 client 連線,但 renderer
- * 端沒有理由開兩條,徒增重連/事件去重的複雜度。team-store.ts 只讀
+ * M3 Round B:匯出這個模組層級的 singleton,讓其他 store(例如 recovery-store.ts)
+ * 共用同一條 WS 連線(而不是另開一條連線)—— gateway 本身允許多個 client 連線,
+ * 但 renderer 端沒有理由開兩條,徒增重連/事件去重的複雜度。其他 store 只讀
  * `client.call()`/`client.onPush()`,不會改動這裡的連線生命週期管理
  * (`connect()`/`disconnect()` 仍只由 App.tsx 透過 session-store 呼叫一次)。
  *
@@ -543,7 +568,7 @@ function appendTerminalData(sessionId: string, data: string): void {
 
 /**
  * M5 Round E(需求4):「目前實際要顯示的已啟用 Claude model 清單」的唯一
- * 資料流入口——ProfileCreateDialog(選 model 建 profile)與 ChatView 的
+ * 資料流入口——SessionList(選 model 建 session)與 ChatView 的
  * `ModelControl`(對話中切換 model)都必須呼叫這個 selector,不要各自實作
  * 一份判斷邏輯,否則兩處對「設定改了之後該顯示哪些 model」的認知會漂移。
  *
@@ -577,7 +602,7 @@ export function selectEnabledClaudeModels(detectedAgents: AgentDetectionEntry[],
 
 /**
  * 這輪新增(provider 目錄重構):「目前的 provider 目錄解析結果」的唯一入口
- * ——ProfileCreateDialog(選 provider 建 profile)與 SettingsDialog(provider
+ * ——SessionList(選 agent 建 session)與 SettingsDialog(provider
  * 管理)都必須呼叫這個 selector,不要各自重新呼叫 `resolveProviders()`,避免
  * 兩處對「合併偵測結果 + 使用者偏好」的認知漂移(呼應 `selectEnabledClaudeModels()`
  * 既有的單一資料流原則)。
@@ -596,27 +621,47 @@ export function selectResolvedProviders(
 }
 
 /**
- * 「這個 profile 應該顯示哪些可選 model」的唯一入口——同時涵蓋:
- *   - 這輪之後建立、帶 `providerId` 的新 profile:讀該 provider 目前已啟用的
- *     模型清單(`resolveProviders()` 已經套用 `enabledModelIds` 過濾)。
- *   - 這輪之前建立、沒有 `providerId` 的舊 profile:退回舊行為——
- *     `software==="claude-agent-sdk"` 用 `selectEnabledClaudeModels()`,其餘
- *     一律回傳空陣列(與過去 ChatView/ProfileCreateDialog 只支援 Claude
- *     model 選單的既有行為一致,不改變舊 profile 的既有觀感)。
+ * 2026-10-02(P2:移除 profile)新增:「現在真的能用來開 session 的 agent」清單——對應 core 端
+ * `AgentCatalog.listAvailable()`(`enabled && installed`),但在 UI 端用同一份偵測結果 + 偏好
+ * 自己算(UI 已經有這兩份資料,不需要多一個 RPC)。內嵌的 claude-agent-sdk 不需要偵測,只要沒被停用就一定在。
+ * SessionList 的 agent 下拉、`⌘N`、「在這個 session 底下開新 session」對話框都走這個 selector,不要各自過濾。
+ */
+export function selectAvailableProviders(
+  detectedAgents: AgentDetectionEntry[],
+  providerPrefs: Record<string, ProviderPrefs>,
+): ResolvedProvider[] {
+  return selectResolvedProviders(detectedAgents, providerPrefs).filter(
+    (p) => p.enabled && (p.software === "claude-agent-sdk" || p.installed),
+  );
+}
+
+/** session 的 agent 顯示名稱:providerId → provider label;provider 已不在目錄裡(舊 session 的
+ *  `legacy-*`、被移除的 agent)時退回 providerId 本身,不騙使用者。 */
+export function providerLabelOf(
+  providerId: string | undefined,
+  detectedAgents: AgentDetectionEntry[],
+  providerPrefs: Record<string, ProviderPrefs>,
+): string {
+  if (!providerId) return "?";
+  return selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === providerId)?.label ?? providerId;
+}
+
+/**
+ * 「這個 session 的 agent 應該顯示哪些可選 model」的唯一入口——讀該 provider 目前已啟用的模型清單
+ * (`resolveProviders()` 已經套用 `enabledModelIds` 過濾)。provider 不在目錄裡(舊 session 的
+ * `legacy-*`)時,`adapterType==="claude-agent-sdk"` 退回 `selectEnabledClaudeModels()`,其餘一律回傳
+ * 空陣列(與過去 ChatView 只支援 Claude model 選單的既有行為一致)。
  */
 export function selectProviderModels(
-  profile: Pick<AgentProfile, "providerId" | "software"> | undefined,
+  session: Pick<Session, "providerId" | "adapterType"> | undefined,
   detectedAgents: AgentDetectionEntry[],
   providerPrefs: Record<string, ProviderPrefs>,
   enabledModelIds: string[],
 ): ProviderModel[] {
-  if (!profile) return [];
-  if (profile.providerId) {
-    const resolved = selectResolvedProviders(detectedAgents, providerPrefs);
-    const provider = resolved.find((p) => p.id === profile.providerId);
-    if (provider) return provider.models;
-  }
-  if (profile.software === "claude-agent-sdk") return selectEnabledClaudeModels(detectedAgents, enabledModelIds);
+  if (!session) return [];
+  const provider = selectResolvedProviders(detectedAgents, providerPrefs).find((p) => p.id === session.providerId);
+  if (provider) return provider.models;
+  if (session.adapterType === "claude-agent-sdk") return selectEnabledClaudeModels(detectedAgents, enabledModelIds);
   return [];
 }
 
@@ -707,6 +752,7 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
         content: msg.content,
         createdAt: msg.createdAt,
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(msg.origin ? { origin: msg.origin } : {}),
       });
     } else if (msg.role === "assistant") {
       items.push({ kind: "assistant", id: msg.id, content: msg.content, createdAt: msg.createdAt, streaming: false });
@@ -766,7 +812,6 @@ function messageRecordsToItems(messages: MessageRecord[]): ChatItem[] {
 
 export const useSessionStore = create<SessionStoreState>((set, get) => ({
   status: "connecting",
-  profiles: [],
   sessions: [],
   currentSessionId: null,
   itemsBySession: {},
@@ -785,11 +830,11 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     canToggleAuto: false,
     canEnableYolo: false,
     canEditPolicy: false,
-    canManageProfiles: false,
     canEnableTrueUnrestricted: false,
     isRemoteConnection: false,
   },
   policyRules: [],
+  titleGenerating: {},
 
   connect: () => {
     client.onStatus((status) => set({ status }));
@@ -811,6 +856,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         handleUserDialogResolved(set, push.payload as UserDialogResolvedPush);
       } else if (push.channel === "enforcement-notification") {
         handleEnforcementNotification(push.payload as EnforcementNotificationPush);
+      } else if (push.channel === "session-message") {
+        handleSessionMessage(set, push.payload as SessionMessagePush);
       } else if (push.channel === "policy-updated") {
         const { action, rule } = push.payload as PolicyUpdatedPush;
         set((state) => ({
@@ -839,7 +886,6 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
      */
     client.onReconnected(() => {
       console.info("[gateway] 重新連上,重新同步狀態(斷線期間的推播事件已遺失)");
-      void get().refreshProfiles();
       void get().refreshSessions();
       // 本機裝了哪些 agent 不會因為斷線而改變,只在還沒拿到結果時補偵測
       // (典型情境:app 啟動時 core 尚未就緒,初始那次偵測隨連線失敗)。
@@ -854,7 +900,6 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     });
 
     client.connect();
-    void get().refreshProfiles();
     void get().refreshSessions();
     void get().detectAgents();
     void get().loadEnabledModels();
@@ -864,22 +909,16 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void get().loadPolicyRules();
   },
 
-  refreshProfiles: async () => {
-    const raw = await client.call("profile.list", {});
-    const { profiles } = ProfileListResultSchema.parse(raw);
-    set({ profiles });
-    // 預先把目前所有 profile 用到的 software 能力都查一遍、快取起來,
-    // SessionView 才能在使用者選到某個 session 的當下就同步讀到快取,不用
-    // 每次切換 session 都先等一次 RPC 往返才知道要渲染哪種視圖。
-    for (const software of new Set(profiles.map((p) => p.software))) {
-      void get().fetchCapabilities(software);
-    }
-  },
-
   refreshSessions: async () => {
     const raw = await client.call("session.list", {});
     const { sessions } = SessionListResultSchema.parse(raw);
     set({ sessions });
+    // 預先把目前所有 session 用到的 software 能力都查一遍、快取起來(2026-10-02 P2:原本由
+    // `refreshProfiles()` 依 profile 的 software 預先查詢),SessionView 才能在使用者選到某個
+    // session 的當下就同步讀到快取,不用每次切換 session 都先等一次 RPC 往返才知道要渲染哪種視圖。
+    for (const software of new Set(sessions.map((s) => s.adapterType))) {
+      void get().fetchCapabilities(software);
+    }
   },
 
   fetchCapabilities: async (software) => {
@@ -914,8 +953,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     }
   },
 
-  createSession: async (agentProfileId, workingDir, title, teamMemberId, agentOverride) => {
-    const raw = await client.call("session.create", { agentProfileId, workingDir, title, teamMemberId, agentOverride });
+  createSession: async (input) => {
+    const raw = await client.call("session.create", input);
     const { session } = SessionCreateResultSchema.parse(raw);
     set((state) => ({
       sessions: [...state.sessions, session],
@@ -925,35 +964,37 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     void get().fetchCapabilities(session.adapterType);
   },
 
-  spawnChild: async (parentSessionId, prompt, agentProfileId, title, agentOverride) => {
+  createChildSession: async (parentSessionId, prompt, agent, title) => {
     const parent = get().sessions.find((s) => s.id === parentSessionId);
     if (!parent) return;
-    const raw = await client.call("session.spawnChild", {
-      parentSessionId,
-      agentProfileId,
-      prompt,
+    const raw = await client.call("session.create", {
+      providerId: agent.providerId,
+      model: agent.model,
+      effort: agent.effort,
+      workingDir: parent.workingDir,
       title,
-      agentOverride,
+      parentSessionId,
     });
     const { session } = SessionCreateResultSchema.parse(raw);
+    // 樂觀回顯第一則訊息(人類輸入,沒有 origin)——與 `sendPrompt()` action 同一種處理。
     set((state) => ({
-      sessions: [...state.sessions, session],
-      itemsBySession: { ...state.itemsBySession, [session.id]: [] },
+      sessions: state.sessions.some((s) => s.id === session.id) ? state.sessions : [...state.sessions, session],
+      itemsBySession: {
+        ...state.itemsBySession,
+        [session.id]: [{ kind: "user", id: crypto.randomUUID(), content: prompt, createdAt: Date.now() }],
+      },
     }));
     void get().fetchCapabilities(session.adapterType);
+    await client.call("session.sendPrompt", { sessionId: session.id, prompt: { text: prompt } });
   },
 
-  createProfile: async (input) => {
-    const raw = await client.call("profile.create", input);
-    const { profile } = ProfileCreateResultSchema.parse(raw);
-    set((state) => ({ profiles: [...state.profiles, profile] }));
-    void get().fetchCapabilities(profile.software);
-    return profile;
-  },
-
-  deleteProfile: async (id) => {
-    await client.call("profile.delete", { id });
-    set((state) => ({ profiles: state.profiles.filter((p) => p.id !== id) }));
+  forwardMessage: async (sourceSessionId, text, targetSessionId, note) => {
+    await client.call("session.forwardMessage", {
+      sourceSessionId,
+      targetSessionId,
+      text,
+      ...(note && note.trim() ? { note: note.trim() } : {}),
+    });
   },
 
   selectSession: async (sessionId) => {
@@ -987,21 +1028,31 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         ],
       },
     }));
-    await client.call("session.sendPrompt", {
-      sessionId,
-      prompt: {
-        text,
-        // `PendingAttachment` 與 wire payload 形狀一致(見型別註解),不需要
-        // 再組一次。
-        ...(validAttachments ? { attachments: validAttachments } : {}),
-      },
-    });
+    // 2026-10-15:過去 ChatView 是 `void sendPrompt(...)`,這個 RPC 被 core 拒絕(session 無法重新啟動、被預算擋下……)時
+    // rejection 直接被吞掉——使用者只看到自己那則樂觀回顯的訊息,什麼事都沒發生。現在失敗時在對話裡插入一則錯誤提示。
+    // 這裡自己接住而不是往外丟:呼叫端(ChatView)沒有地方顯示,往外丟只會變成 unhandled rejection。
+    try {
+      await client.call("session.sendPrompt", {
+        sessionId,
+        prompt: {
+          text,
+          // `PendingAttachment` 與 wire payload 形狀一致(見型別註解),不需要
+          // 再組一次。
+          ...(validAttachments ? { attachments: validAttachments } : {}),
+        },
+      });
+    } catch (err) {
+      appendSendFailure(set, sessionId, err);
+    }
   },
 
   sendTerminalInput: (text) => {
     const sessionId = get().currentSessionId;
     if (!sessionId) return;
-    void client.call("session.sendPrompt", { sessionId, prompt: { text } });
+    // 2026-10-15:同 `sendPrompt()`——送出失敗(例如已關閉的終端 session 無法重新啟動)要讓使用者看到。
+    void client.call("session.sendPrompt", { sessionId, prompt: { text } }).catch((err: unknown) => {
+      appendSendFailure(set, sessionId, err);
+    });
   },
 
   sendTerminalRawInput: (data) => {
@@ -1171,6 +1222,29 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
     }
   },
 
+  renameSession: async (sessionId, title) => {
+    const raw = await client.call("session.rename", { sessionId, title });
+    const { session } = SessionRenameResultSchema.parse(raw);
+    set((state) => ({ sessions: state.sessions.map((s) => (s.id === session.id ? session : s)) }));
+  },
+
+  autoTitleSession: async (sessionId) => {
+    if (get().titleGenerating[sessionId]) return { method: "agent", applied: false };
+    set((state) => ({ titleGenerating: { ...state.titleGenerating, [sessionId]: true } }));
+    try {
+      const raw = await client.call("session.autoTitle", { sessionId });
+      const { session, method, applied } = SessionAutoTitleResultSchema.parse(raw);
+      set((state) => ({ sessions: state.sessions.map((s) => (s.id === session.id ? session : s)) }));
+      return { method, applied };
+    } finally {
+      set((state) => {
+        const titleGenerating = { ...state.titleGenerating };
+        delete titleGenerating[sessionId];
+        return { titleGenerating };
+      });
+    }
+  },
+
   setSessionModel: async (sessionId, model) => {
     const raw = await client.call("session.setModel", { sessionId, model });
     const { session } = SessionSetModelResultSchema.parse(raw);
@@ -1324,7 +1398,11 @@ function handlePermissionResolved(
 ): void {
   set((state) => {
     const next: Partial<SessionStoreState> = {
-      pendingPermissions: state.pendingPermissions.filter((p) => p.requestId !== payload.requestId),
+      // `requestId` 只保證在同一個 session 內唯一(同 `resolvePermission()` 的說明)——只比 requestId 會把別的 session
+      // 剛好同號、還在等回覆的彈窗一起關掉(例如某個 session 的 agent 停止時,core 以 source "agent-stopped" 收掉它的請求)。
+      pendingPermissions: state.pendingPermissions.filter(
+        (p) => !(p.sessionId === payload.sessionId && p.requestId === payload.requestId),
+      ),
     };
     if (payload.source === "timeout") {
       const items = [...(state.itemsBySession[payload.sessionId] ?? [])];
@@ -1395,6 +1473,73 @@ function handleEnforcementNotification(rawPayload: unknown): void {
   void window.deskmony.notify({ title, body, sessionId: payload.sessionId });
 }
 
+/**
+ * 2026-10-02(P3):別的 session 送來的訊息(或使用者轉傳來的)剛寫進 `sessionId` 的歷史——把它接進這條 session 的時間軸,
+ * 讓正在看它的人即時看到「來自 <title>」的訊息。以訊息 id 去重(`selectSession()` 重新載入 history 與這個 push
+ * 可能在時間上交錯)。這條 session 的時間軸還沒載入過(從沒選過)時只是先放著:`selectSession()` 一律從
+ * `session.history` 重新載入整串,不會漏。
+ */
+function handleSessionMessage(
+  set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
+  push: SessionMessagePush,
+): void {
+  const { sessionId, message } = push;
+  // 2026-10-15:除了別的 session 送來的 user 訊息,也接 core 在 agent 重新啟動後留下的系統說明(`role: "system"`,
+  // content 是 `{event, params}` JSON,由 `resolveSystemEventText()` 在渲染時翻譯)。
+  if (message.role !== "user" && message.role !== "system") return;
+  set((state) => {
+    const items = state.itemsBySession[sessionId] ?? [];
+    if (items.some((item) => item.id === message.id)) return {};
+    const item: ChatItem =
+      message.role === "system"
+        ? { kind: "system", id: message.id, content: message.content, createdAt: message.createdAt }
+        : {
+            kind: "user",
+            id: message.id,
+            content: message.content,
+            createdAt: message.createdAt,
+            ...(message.origin ? { origin: message.origin } : {}),
+          };
+    return {
+      itemsBySession: {
+        ...state.itemsBySession,
+        [sessionId]: capItems([...items, item]),
+      },
+    };
+  });
+}
+
+/**
+ * 2026-10-15:`session.sendPrompt` 失敗時在對話裡插入一則本地的錯誤提示(系統訊息,不落地——重新載入歷史就沒了,
+ * 因為 core 那邊沒有任何東西需要保留:這則訊息根本沒有送出)。內容是 `{event: "session.sendFailed", params}` JSON,
+ * 由 `resolveSystemEventText()` 在渲染時翻譯:`DeskmonyError` 帶 code/params(用 `errors:<code>` 翻譯,例如
+ * `session.reviveFailed`、`agent.notInstalled`),其餘錯誤只有 message。
+ */
+function appendSendFailure(
+  set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
+  sessionId: string,
+  err: unknown,
+): void {
+  const message = err instanceof Error ? err.message : String(err);
+  const params: Record<string, unknown> =
+    err instanceof DeskmonyError ? { code: err.code, errorParams: err.params ?? {}, message } : { message };
+  console.error("[session] session.sendPrompt 失敗:", err);
+  set((state) => ({
+    itemsBySession: {
+      ...state.itemsBySession,
+      [sessionId]: capItems([
+        ...(state.itemsBySession[sessionId] ?? []),
+        {
+          kind: "system",
+          id: crypto.randomUUID(),
+          content: JSON.stringify({ event: "session.sendFailed", params }),
+          createdAt: Date.now(),
+        },
+      ]),
+    },
+  }));
+}
+
 function handleSessionEvent(
   set: (fn: (state: SessionStoreState) => Partial<SessionStoreState>) => void,
   get: () => SessionStoreState,
@@ -1462,6 +1607,9 @@ function handleSessionEvent(
     }));
     return;
   }
+  // 2026-10-06:agent 回報的 model/思考程度選項不在這裡處理——core 收到後會把它掛在 `Session.options`、
+  // 廣播 session-updated(上面 connect() 的 "session-updated" 分支整個替換 session 物件)。
+  if (event.type === "session-options") return;
 
   set((state) => {
     const items = [...(state.itemsBySession[sessionId] ?? [])];

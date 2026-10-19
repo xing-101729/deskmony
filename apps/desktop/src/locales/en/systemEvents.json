@@ -8,6 +8,15 @@
       "label": "[Error]"
     },
     "contextCheckpointRestarted": "[S8] Context usage reached the threshold — automatically checkpoint-restarted (resumed from the previous conversation summary, same session)",
-    "permissionTimeoutDenied": "The permission request timed out and was automatically denied"
+    "permissionTimeoutDenied": "The permission request timed out and was automatically denied",
+    "revivedResumed": "The agent was restarted and reconnected to its earlier conversation.",
+    "revivedFromTranscript": "The agent was restarted, but its backend couldn't pick the earlier conversation back up. Deskmony attaches the earlier transcript ({{count}} messages) to the first message the agent receives so it can read it — it continues from the record, it doesn't actually remember.",
+    "revivedFromTranscriptTruncated": "The agent was restarted, but its backend couldn't pick the earlier conversation back up. Deskmony attaches the earlier transcript (the most recent {{count}} messages — older ones were left out because it is too long) to the first message the agent receives so it can read it — it continues from the record, it doesn't actually remember.",
+    "revivedWithoutMemory": "The agent was restarted. This agent (a terminal program) doesn't keep memory of the earlier conversation, so it starts from scratch.",
+    "revivedFresh": "The agent was restarted.",
+    "agentStopped": "The agent stopped running (its process exited or its connection to Deskmony was lost). Sending your next message will restart it automatically.",
+    "sendFailed": {
+      "label": "[Not sent]"
+    }
   }
 }

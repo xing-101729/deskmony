@@ -1,5 +1,7 @@
 # Layer-2:Design Spec 與模組/功能清單
 
+> ⚠️ 2026-10-02:本文件中與 team / 任務 / 任務 worktree 相關的部分已移除,見 [DECISIONS §H](./DECISIONS.md)(其餘部分仍有效)
+
 > 上層約束:[`DECISIONS.md`](./DECISIONS.md)(L1 定案)。本層把 L1 的決策拆成**模組清單**與**設計規格清單**,每一條規格 = 一份 L3 HLD。
 > 狀態圖例:🟢 已存在（codebase 有）｜🟠 已存在但需改造｜🔴 淨新增（現況沒有）
 

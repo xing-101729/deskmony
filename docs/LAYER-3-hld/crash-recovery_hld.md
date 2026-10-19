@@ -1,5 +1,7 @@
 # S6 HLD:崩潰復原(對帳 + 人工分流)
 
+> ⚠️ 2026-10-02:本文件中與 team / 任務 / 任務 worktree 相關的部分已移除,見 [DECISIONS §H](../DECISIONS.md)(其餘部分仍有效)
+
 > 階段:**Phase 1**(最後一份)｜對應 L1:**D1–D4**｜上層:[L2 §3](../LAYER-2-design-spec.md)、[DECISIONS §D](../DECISIONS.md)
 > 前置:[S3b](./cost-governor_hld.md)(資源回收/blocked 語意)、[S7](./auto-mode-and-yolo_hld.md)(暫態消失)、[S11](./notification_hld.md)(掛起狀態)
 > **核心立場(D1)**:崩潰復原的本質是「**對帳你的帳本 + 人工分流在途工作**」,**不是 replay**——最貴的東西(agent 累積的推理/context)活在**後端 agent 行程**裡,不在你的 DB。你 replay 自己的事件,重建的是帳本,不是 agent 的腦。
@@ -17,6 +19,8 @@
 > 也就是說崩潰後有**兩種**孤兒要處理,不是一種:DB 裡的孤兒**紀錄**(本文件描述的對帳流程),以及 OS 上的孤兒**行程**(2026-09-04 新增的 `packages/adapters/src/child-registry.ts`——spawn 時把 pid 與其建立時間記進 `<dataDir>/child-pids.json`,下次啟動時比對建立時間後回收;對不上就**不殺**,pid 重用絕不能誤傷無關行程)。
 >
 > **2026-09-17 補充**:Windows 上經 `.cmd` shim(`shell: true`)、`.ps1` 或多層 launcher(codex-acp)啟動的 agent,spawn 當下登記到的 pid 只是**外殼**(`cmd.exe` 等)。外殼先死時,回收查不到它就跳過,真正的 agent 永遠收不到——使用者機器上實際發生過(`opencode.exe serve` 殘留到隔天)。現在 adapter 在 agent 確認就緒後,會把外殼底下當下的子孫也各自連同建立時間登記(`registerChildDescendants()`);回收規則不變,每一筆仍只看自己的 pid + 建立時間。只有外殼紀錄、沒有子孫資料的(升級前的紀錄檔,或 core 在 agent 就緒前就終止),回收時只印「疑似殘留」提示、**不殺**。完整取捨見該檔案頂端。
+>
+> **2026-10-12 補充**:spawn 時的登記(`registerChild()`)原本同步查建立時間,每個 `session.create` 讓 core 整個事件迴圈卡 1.5–5.5 秒;現在改成非同步、查回來才寫入。改非同步會失去「查詢途中 pid 不可能被重用」這個原本順帶的保證,所以查回來時若子程序已經結束(adapter 傳入的 `hasExited`)就整筆不寫;查詢途中被 unregister 則取消登記。啟動時的回收(`reapOrphans()`)跑在 gateway listen 之前,**刻意維持同步**。理由見該檔案頂端「登記不能卡住事件迴圈」與 `reapOrphans()` 註解。
 
 ---
 

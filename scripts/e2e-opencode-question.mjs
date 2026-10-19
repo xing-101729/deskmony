@@ -37,6 +37,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { QUESTION_PREFIX, TEST_QUESTIONS } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_OPENCODE } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
 
@@ -44,7 +45,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_PORT = 4740;
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
-const FAKE_SERVER = path.join(REPO_ROOT, "scripts", "fake-opencode-server.mjs");
 const [Q_COLOR, Q_FEATURES] = TEST_QUESTIONS.map((q) => q.question);
 
 function sleep(ms) {
@@ -74,6 +74,8 @@ function startCore(port, homeDir, dataDir, workspaceDir) {
     DESKMONY_HOME: homeDir,
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
@@ -248,14 +250,8 @@ async function main() {
     client = new GatewayClient(gatewayUrl);
     await client.connect();
 
-    const { profile } = await client.rpc("profile.create", {
-      name: "E2E Fake OpenCode (question)",
-      software: "opencode",
-      workingDir: workspaceDir,
-      opencodeConfig: { command: process.execPath, args: [FAKE_SERVER] },
-    });
     const { session } = await client.rpc("session.create", {
-      agentProfileId: profile.id,
+      providerId: FAKE_OPENCODE,
       workingDir: workspaceDir,
       title: "e2e-opencode-question",
     });

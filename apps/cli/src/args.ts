@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EffortLevelSchema, SessionPermissionModeSchema, type EffortLevel, type SessionPermissionMode } from "@deskmony/shared";
+import { EffortValueSchema, SessionPermissionModeSchema, type SessionPermissionMode } from "@deskmony/shared";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,9 +36,10 @@ export interface GlobalOptions {
   urlExplicit: boolean;
   token: string | undefined;
   cwd: string;
-  profile: string;
+  /** 2026-10-02(P2:移除 profile):`--agent <providerId>`,取代原本的 `--profile`。預設 claude-agent-sdk。 */
+  agent: string;
   model: string | undefined;
-  effort: EffortLevel | undefined;
+  effort: string | undefined;
   json: boolean;
   /** 已經套用 isTTY / NO_COLOR / --no-color / --json 全部規則後的最終值,
    *  render.ts 只看這個欄位,不重新判斷任何一個來源。 */
@@ -59,8 +60,8 @@ export interface GlobalOptions {
    * 現在先開始寫腳本帶這個旗標也不會在那次改動後突然壞掉。
    */
   ascii: boolean;
-  /** 只有 run/chat 會讀。省略時沿用 session 建立當下 profile 的
-   *  permissionLevel,不主動呼叫 session.setPermissionMode。 */
+  /** 只有 run/chat 會讀。省略時 session 維持建立當下的初始模式(always-ask),
+   *  不主動呼叫 session.setPermissionMode。 */
   permissionMode: SessionPermissionMode | undefined;
   /** 只有 chat 會讀。省略則建立新 session。 */
   session: string | undefined;
@@ -75,7 +76,6 @@ export type ParsedCommand =
   | { kind: "tui"; options: GlobalOptions }
   | { kind: "session-list"; options: GlobalOptions }
   | { kind: "session-rm"; options: GlobalOptions; sessionId: string }
-  | { kind: "profile-list"; options: GlobalOptions }
   | { kind: "doctor"; options: GlobalOptions }
   | { kind: "config-show"; options: GlobalOptions };
 
@@ -90,7 +90,7 @@ const FLAG_SPECS: Record<string, FlagKind> = {
   "--url": "string",
   "--token": "string",
   "--cwd": "string",
-  "--profile": "string",
+  "--agent": "string",
   "--model": "string",
   "--effort": "string",
   "--permission-mode": "string",
@@ -107,7 +107,8 @@ const FLAG_SPECS: Record<string, FlagKind> = {
 };
 
 const DEFAULT_URL = "ws://127.0.0.1:4317";
-const DEFAULT_PROFILE = "default-claude-code";
+/** 2026-10-02(P2):預設 agent = 內嵌的 Claude Agent SDK(BUILTIN_PROVIDERS 的 id)。 */
+const DEFAULT_AGENT = "claude-agent-sdk";
 const DEFAULT_RUN_TIMEOUT_MS = 600_000;
 
 /**
@@ -191,11 +192,16 @@ function parseTimeout(raw: string | undefined, fallback: number): number {
   return Math.floor(n);
 }
 
-function parseEffort(raw: string | undefined): EffortLevel | undefined {
+/**
+ * 2026-10-06:思考程度的值由各 agent 定義(Claude 是 low…max,codex/opencode 有 none/minimal……,見
+ * packages/shared/src/session-options.ts),這裡只擋空字串,合不合法交給 core 依那個 agent 的清單判斷
+ * (不合法時 session.create 回明確錯誤)。
+ */
+function parseEffort(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  const parsed = EffortLevelSchema.safeParse(raw);
+  const parsed = EffortValueSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new CliUsageError(`--effort 必須是以下其中之一:${EffortLevelSchema.options.join("、")}(收到:${raw})`);
+    throw new CliUsageError(`--effort 不能是空字串(收到:${JSON.stringify(raw)})`);
   }
   return parsed.data;
 }
@@ -219,7 +225,7 @@ function buildOptions(raw: Map<string, string | true>): GlobalOptions {
     urlExplicit: strFlag(raw, "--url") !== undefined || process.env.DESKMONY_URL !== undefined,
     token: strFlag(raw, "--token") ?? process.env.DESKMONY_AUTH_TOKEN ?? undefined,
     cwd: path.resolve(strFlag(raw, "--cwd") ?? process.cwd()),
-    profile: strFlag(raw, "--profile") ?? DEFAULT_PROFILE,
+    agent: strFlag(raw, "--agent") ?? DEFAULT_AGENT,
     model: strFlag(raw, "--model"),
     effort: parseEffort(strFlag(raw, "--effort")),
     json,
@@ -281,14 +287,6 @@ export function parseArgv(argv: string[]): ParsedCommand {
       }
       throw new CliUsageError(`未知的 session 子指令:${sub ?? "(缺少)"}(可用:list、rm)`);
     }
-    case "profile": {
-      const [sub, ...subRest] = rest;
-      if (sub === "list") {
-        if (subRest.length > 0) throw new CliUsageError("profile list 不接受額外參數");
-        return { kind: "profile-list", options };
-      }
-      throw new CliUsageError(`未知的 profile 子指令:${sub ?? "(缺少)"}(可用:list)`);
-    }
     case "doctor": {
       if (rest.length > 0) throw new CliUsageError("doctor 不接受額外參數");
       return { kind: "doctor", options };
@@ -345,7 +343,6 @@ export function printHelp(): void {
     "  tui                        全螢幕 TUI(需要 Node 22+ 與真正的終端機)",
     "  session list               列出 session(可加 --json)",
     "  session rm <id>            刪除 session",
-    "  profile list               列出 agent profile(可加 --json)",
     "  doctor                     環境偵測 + 連線自我檢查",
     "  config show                顯示 core 生效設定",
     "  --version, -v              顯示版本",
@@ -356,9 +353,10 @@ export function printHelp(): void {
     "                             或環境變數 DESKMONY_URL)",
     "  --token <t>                認證 token(或環境變數 DESKMONY_AUTH_TOKEN)",
     "  --cwd <path>               session 的 workingDir(預設目前目錄)",
-    "  --profile <id>             agent profile(預設 default-claude-code)",
-    "  --model <m>                建 session 時覆寫 model",
-    "  --effort <e>               建 session 時覆寫 effort",
+    "  --agent <id>               用哪個 agent 建 session(providerId,預設 claude-agent-sdk;",
+    "                             例如 codex / opencode / opencode-acp / gemini / claude-cli / aider)",
+    "  --model <m>                建 session 時指定 model",
+    "  --effort <e>               建 session 時指定思考程度(值依 agent 而定,例如 Claude 的 low…max)",
     "  --permission-mode <mode>   對應 session.setPermissionMode:",
     "                             always-ask / auto-accept-edits /",
     "                             auto-accept-all(僅 run/chat 適用)",
@@ -370,7 +368,7 @@ export function printHelp(): void {
     "",
     "範例:",
     "  deskmony run \"幫我看一下這個 repo 有哪些 TODO\"",
-    "  deskmony --profile my-acp run - < prompt.txt",
+    "  deskmony --agent codex run - < prompt.txt",
     "  deskmony session list --json",
     "  deskmony serve",
   ];

@@ -1,0 +1,11 @@
+{
+  "untitled": "New conversation",
+  "editorAriaLabel": "Conversation title",
+  "menuLabel": "Conversation options",
+  "rename": "Rename",
+  "autoTitle": "Rename with AI",
+  "autoTitleRunning": "Naming with AI…",
+  "autoTitleHint": "Rename with AI: this conversation's agent suggests a short title from its content (nothing is added to the conversation)",
+  "clickToRename": "Click to rename",
+  "doubleClickToRename": "Double-click to rename"
+}

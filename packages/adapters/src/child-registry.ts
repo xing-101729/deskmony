@@ -84,6 +84,38 @@ import path from "node:path";
  * 最多等 15 秒,ACP 通常幾秒),子孫還沒登記,那個孤兒一樣收不到;升級前寫下的
  * 舊紀錄檔也沒有子孫資料。這兩種情況回收時用 (b) 的條件找出「疑似殘留」,但
  * **只印 log、不殺**(`reportUntrackedChildren()`)—— fail-safe 方向不變。
+ *
+ * ---- 2026-10-12 補充:登記不能卡住事件迴圈 ---------------------------------
+ *
+ * `registerChild()` 原本在 spawn 之後**同步**查建立時間(`spawnSync` PowerShell,
+ * 逾時 5 秒)。2026-10-06 用事件迴圈心跳實測:每個 `session.create` 讓 core 整個
+ * 事件迴圈卡 1.5–5.5 秒(5 秒 = WMI 慢時直接撞到逾時),gateway 上所有連線的
+ * 請求都跟著等。現在改成非同步查詢,查回來才寫入。
+ *
+ * 同步查詢原本**順帶**提供了一個保證,改成非同步之後要自己補回來:查到的建立時間
+ * 一定是我們這個子程序的。同步時事件迴圈卡著,子程序的 exit 事件不可能被處理;
+ * 而 Node(libuv)在處理 exit 事件**之前**一直握著該行程的 handle,Windows 不會把
+ * 還有 handle 開著的行程的 pid 給別人 —— 查詢途中 pid 不可能被重用。非同步之後,
+ * 查詢途中子程序可能結束、handle 被關、pid 被別的程式拿走,CIM 查到的就是那個
+ * 陌生行程的建立時間;寫進紀錄檔,core 哪天崩潰重開時回收比對會「完全一致」——
+ * 殺錯人,正是本模組最不能發生的事。
+ *
+ * 補法:呼叫端傳 `hasExited`,查詢回來時 JS 這邊若**已經**處理過它的結束事件,
+ * 整筆不寫(它已經不在了,也沒有東西要回收)。還沒處理過 = 從 spawn 到此刻
+ * handle 一直開著 = 查詢的整段期間 pid 都還是它的 —— 與同步版同一個保證,
+ * 不靠時間窗口,也不靠推測。
+ *
+ * node-pty 是例外:它在自己的原生執行緒上等行程結束,結束當下就關掉 handle,
+ * JS 的 `onExit` 要再晚至少 1 秒(等輸出 flush 完)才來,所以 pty 有一段「已經
+ * 結束、還沒回報」的空窗。這段空窗不是這次改出來的,而且變小了:同步版卡住的
+ * 只有 JS,node-pty 的原生執行緒照樣在查詢途中關 handle,空窗是**整段查詢時間**;
+ * 現在只剩查詢回來前那約 1 秒。
+ *
+ * 查詢途中 `unregisterChild()` 先到(dispose 很快、或等子程序結束逾時)時,這次
+ * 登記直接取消,查回來也不寫 —— 跟 `registerChildDescendants()` 查詢途中被
+ * unregister 的處理是同一個原則:不留下一筆已經沒有人會移除的紀錄。
+ *
+ * 啟動時的 `reapOrphans()` **刻意維持同步**,理由見該函式。
  */
 
 interface RegisteredChild {
@@ -151,8 +183,23 @@ const SNAPSHOT_TIMEOUT_MS = 10_000;
  */
 const UNTRACKED_CHILD_HINT_WINDOW_MS = 10_000;
 
+/**
+ * 2026-10-12:`registerChild()` 查建立時間的逾時。同步查詢的年代是 5 秒 —— 那時
+ * 逾時越長 core 卡越久,只能壓短;改成非同步之後等待不擋任何人,放寬到 60 秒:
+ * WMI 間歇性會慢到數十秒(開發機上 `taskkill /T` 與 Get-CimInstance 都實測過約
+ * 60 秒),逾時的代價是這個 agent 沒有登記、core 若之後非正常終止就回收不到。
+ */
+const CREATED_AT_QUERY_TIMEOUT_MS = 60_000;
+
 let registryPath: string | undefined;
 let entries: RegisteredChild[] = [];
+
+/**
+ * 2026-10-12:建立時間還在查詢中的 `registerChild()`,以 pid 為鍵,值是那次登記
+ * 本身的 Promise(同時當作身分:查回來時發現對不上,代表這次登記已經被取消或
+ * 取代)。見 `registerChild()`。
+ */
+const pendingRoots = new Map<number, Promise<void>>();
 
 /**
  * 由 `apps/core/src/index.ts` 在啟動時呼叫一次,指定紀錄檔位置
@@ -160,6 +207,8 @@ let entries: RegisteredChild[] = [];
  * e2e 與單元測試不需要為了這個機制額外準備環境。
  */
 export function initChildRegistry(dataDir: string): void {
+  // 換了登記簿:還在查的登記一律作廢,查回來也不寫進新的這一份。
+  pendingRoots.clear();
   try {
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
     registryPath = path.join(dataDir, "child-pids.json");
@@ -191,35 +240,96 @@ function flush(): void {
 }
 
 /**
- * 查詢某個 pid 目前的建立時間(epoch ms);查不到 / 平台不支援回 `undefined`。
+ * 查詢某個 pid 目前建立時間的指令。
  *
  * Windows 用 PowerShell 的 CIM 查詢(`wmic` 已被 Microsoft 標為淘汰)。
  * POSIX 用 `ps -o lstart=`。兩者都是唯讀查詢,不會有副作用。
  */
+function createdAtQuery(pid: number): [command: string, args: string[]] {
+  if (process.platform === "win32") {
+    return [
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue; ` +
+          "if ($p) { [int64]([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds() }",
+      ],
+    ];
+  }
+  return ["ps", ["-o", "lstart=", "-p", String(pid)]];
+}
+
+/** `createdAtQuery()` 的輸出 → 建立時間(epoch ms);沒有輸出(查不到)回 `undefined`。 */
+function parseCreatedAt(stdout: string): number | undefined {
+  const text = stdout.trim();
+  if (!text) return undefined;
+  if (process.platform === "win32") {
+    const value = Number(text);
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  }
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * 查詢某個 pid 目前的建立時間(同步版);查不到 / 平台不支援回 `undefined`。
+ *
+ * 只剩 POSIX 上的 `reapOrphans()` 在用(Windows 的回收改查整張行程快照)——
+ * 跑在 core 啟動、gateway 開始 listen 之前,見 `reapOrphans()`。
+ */
 function queryProcessCreatedAt(pid: number): number | undefined {
   try {
-    if (process.platform === "win32") {
-      const out = spawnSync(
-        "powershell",
-        [
-          "-NoProfile",
-          "-Command",
-          `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue; ` +
-            "if ($p) { [int64]([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds() }",
-        ],
-        { encoding: "utf8", timeout: 5_000 },
-      );
-      const value = Number((out.stdout ?? "").trim());
-      return Number.isFinite(value) && value > 0 ? value : undefined;
-    }
-    const out = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5_000 });
-    const text = (out.stdout ?? "").trim();
-    if (!text) return undefined;
-    const ms = Date.parse(text);
-    return Number.isFinite(ms) ? ms : undefined;
+    const [command, args] = createdAtQuery(pid);
+    const out = spawnSync(command, args, { encoding: "utf8", timeout: 5_000, windowsHide: true });
+    return parseCreatedAt(out.stdout ?? "");
   } catch {
     return undefined;
   }
+}
+
+/** 同上的非同步版,給 `registerChild()` 用(理由見檔案頂端「登記不能卡住事件迴圈」)。 */
+async function queryProcessCreatedAtAsync(pid: number): Promise<number | undefined> {
+  const [command, args] = createdAtQuery(pid);
+  const stdout = await runQueryAsync(command, args, CREATED_AT_QUERY_TIMEOUT_MS);
+  return stdout === undefined ? undefined : parseCreatedAt(stdout);
+}
+
+/**
+ * 非同步跑一個唯讀查詢指令:正常結束(exit code 0)給 stdout;啟動失敗、非 0、
+ * 逾時一律給 `undefined`。永遠 resolve。
+ */
+function runQueryAsync(command: string, args: string[], timeoutMs: number): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (stdout: string | undefined): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(stdout);
+    };
+    try {
+      const query = spawn(command, args, {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      let stdout = "";
+      query.stdout.setEncoding("utf8");
+      query.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      query.once("error", () => finish(undefined));
+      query.once("close", (code) => finish(code === 0 ? stdout : undefined));
+      timer = setTimeout(() => {
+        query.kill();
+        finish(undefined);
+      }, timeoutMs);
+      timer.unref?.();
+    } catch {
+      finish(undefined);
+    }
+  });
 }
 
 function parseSnapshot(stdout: string): Map<number, ProcessSnapshotEntry> {
@@ -262,37 +372,10 @@ function snapshotProcessesSync(): Map<number, ProcessSnapshotEntry> | undefined 
  * 不能用同步版:它在 session 建立途中執行,1 秒多的 `spawnSync` 會讓 core 整個
  * 事件迴圈(包括 gateway 上其他人的連線)卡住。永遠 resolve,查不到給 `undefined`。
  */
-function snapshotProcessesAsync(): Promise<Map<number, ProcessSnapshotEntry> | undefined> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let timer: NodeJS.Timeout | undefined;
-    const finish = (table: Map<number, ProcessSnapshotEntry> | undefined): void => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      resolve(table && table.size > 0 ? table : undefined);
-    };
-    try {
-      const query = spawn("powershell", ["-NoProfile", "-Command", SNAPSHOT_COMMAND], {
-        stdio: ["ignore", "pipe", "ignore"],
-        windowsHide: true,
-      });
-      let stdout = "";
-      query.stdout.setEncoding("utf8");
-      query.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
-      });
-      query.once("error", () => finish(undefined));
-      query.once("close", (code) => finish(code === 0 ? parseSnapshot(stdout) : undefined));
-      timer = setTimeout(() => {
-        query.kill();
-        finish(undefined);
-      }, SNAPSHOT_TIMEOUT_MS);
-      timer.unref?.();
-    } catch {
-      finish(undefined);
-    }
-  });
+async function snapshotProcessesAsync(): Promise<Map<number, ProcessSnapshotEntry> | undefined> {
+  const stdout = await runQueryAsync("powershell", ["-NoProfile", "-Command", SNAPSHOT_COMMAND], SNAPSHOT_TIMEOUT_MS);
+  const table = stdout === undefined ? undefined : parseSnapshot(stdout);
+  return table && table.size > 0 ? table : undefined;
 }
 
 /**
@@ -378,18 +461,53 @@ function isSameProcess(currentCreatedAt: number, recordedCreatedAt: number): boo
   return Math.abs(currentCreatedAt - recordedCreatedAt) <= 2_000;
 }
 
-/** spawn 之後立刻呼叫。`pid` 為 undefined(spawn 失敗)時直接忽略。 */
-export function registerChild(pid: number | undefined, label: string): void {
-  if (!registryPath || pid === undefined) return;
-  const createdAt = queryProcessCreatedAt(pid);
-  if (createdAt === undefined) {
-    // 查不到建立時間就不記 —— 記了也無法在回收時安全驗證,只會變成一筆
-    // 永遠不敢動的紀錄。
-    return;
+/**
+ * spawn 之後、**同一個同步區段內**呼叫(中間不能 await —— 要在 JS 有機會處理這個
+ * 子程序的任何事件之前)。`pid` 為 undefined(spawn 失敗)時直接忽略。
+ *
+ * 2026-10-12:改成非同步,不再卡住事件迴圈;建立時間查回來才寫入。
+ *
+ * `hasExited`:JS 這邊是否**已經處理過**這個子程序的結束事件。`ChildProcess` 傳
+ * `() => child.exitCode !== null || child.signalCode !== null`(Node 在 exit 事件
+ * 裡設定這兩個欄位、緊接著關掉行程 handle)。查回來時它若為 true,查到的可能
+ * 已經是別人的建立時間,整筆不寫 —— 為什麼這樣就夠、node-pty 為什麼差一點,
+ * 見檔案頂端「登記不能卡住事件迴圈」。
+ *
+ * 永遠不會 reject。呼叫端應該 `void` 掉;回傳 Promise 只是讓
+ * `registerChildDescendants()` 與測試能等它寫完。
+ */
+export function registerChild(pid: number | undefined, label: string, hasExited: () => boolean): Promise<void> {
+  if (!registryPath || pid === undefined) return Promise.resolve();
+
+  // 此刻這個 pid 屬於剛 spawn 的子程序,所以同 pid 的任何舊紀錄都是已經不在的
+  // 行程 —— 現在就清,不等查詢回來:否則查詢途中的 unregisterChild() 會把那筆
+  // 舊紀錄當成這次的根移除,連同登記在它底下、可能還活著、下次還要回收的子孫。
+  if (entries.some((e) => e.pid === pid)) {
+    entries = entries.filter((e) => e.pid !== pid);
+    flush();
   }
-  entries = entries.filter((e) => e.pid !== pid);
-  entries.push({ pid, createdAt, label });
-  flush();
+
+  const registration: Promise<void> = queryProcessCreatedAtAsync(pid).then((createdAt) => {
+    // 查詢途中被 unregisterChild() 取消、被同一個 pid 的新登記取代,或
+    // initChildRegistry() 換了登記簿。
+    if (pendingRoots.get(pid) !== registration) return;
+    pendingRoots.delete(pid);
+    // 已經結束:pid 可能在查詢途中被別人拿走,查到的不一定是它(見上)。
+    if (hasExited()) return;
+    if (createdAt === undefined) {
+      // 查不到建立時間就不記 —— 記了也無法在回收時安全驗證,只會變成一筆
+      // 永遠不敢動的紀錄。
+      console.warn(
+        `[child-registry] 查不到 pid ${pid}(${label})的建立時間,沒有登記 —— ` +
+          "core 若之後非正常終止,這個 agent 行程可能無法在下次啟動時自動回收。",
+      );
+      return;
+    }
+    entries.push({ pid, createdAt, label });
+    flush();
+  });
+  pendingRoots.set(pid, registration);
+  return registration;
 }
 
 /**
@@ -411,8 +529,12 @@ export function registerChild(pid: number | undefined, label: string): void {
  */
 export async function registerChildDescendants(pid: number | undefined): Promise<void> {
   if (!registryPath || pid === undefined || process.platform !== "win32") return;
+  // 2026-10-12:registerChild() 不再同步寫入,根的建立時間可能還在查 —— 不只 WMI 慢的
+  // 時候:agent 就緒跟這個查詢是同一個量級(e2e 的假 OpenCode 後端就比它快)。先等它有結果。
+  await pendingRoots.get(pid);
   const root = findRoot(pid);
-  // 沒有根:registerChild() 當初就沒記到(查不到建立時間),或已經 unregister 了。
+  // 沒有根:registerChild() 沒記到(查不到建立時間、或查詢途中子程序已經結束),
+  // 或已經 unregister 了。
   if (!root) return;
 
   // 必須在開始查詢「之前」取,見 collectDescendants() 規則 3。
@@ -455,9 +577,12 @@ export async function registerChildDescendants(pid: number | undefined): Promise
  * 2026-09-17:連同 `registerChildDescendants()` 登記在它底下的子孫一起移除
  * (dispose 用的 `taskkill /T` 已經整棵樹一起殺了)。只認根:某筆子孫剛好跟
  * 這個 pid 相同時不動它 —— 那代表這個 pid 早就換過主人,是別組的紀錄。
+ *
+ * 2026-10-12:`registerChild()` 的建立時間還在查時,取消那次登記(查回來也不寫)。
  */
 export function unregisterChild(pid: number | undefined): void {
   if (!registryPath || pid === undefined) return;
+  pendingRoots.delete(pid);
   const root = findRoot(pid);
   if (!root) return;
   entries = entries.filter(
@@ -473,6 +598,21 @@ export function unregisterChild(pid: number | undefined): void {
  * 2026-09-17:Windows 改成一次查整張行程表(見 `SNAPSHOT_COMMAND`),不再每筆
  * 紀錄各開一次 PowerShell —— 有了子孫紀錄之後筆數會變多,逐筆查會讓崩潰後的
  * 那次啟動多卡好幾秒。判斷規則本身沒變:每一筆只看它自己的 pid + 建立時間。
+ *
+ * 2026-10-12:`registerChild()` 改成非同步了,這裡**刻意維持同步**(`spawnSync`
+ * 的行程快照與 `taskkill`):
+ *
+ *  - 它跑在 `gateway.listen()` 之前(見 `apps/core/src/index.ts`)。事件迴圈卡住
+ *    的這幾秒沒有任何連線、任何請求在等 —— `registerChild()` 要修的是卡住**別人的**
+ *    請求,這裡沒有別人。
+ *  - 改成非同步也得在同一個位置 await 完才能往下走:對帳必須等上一輪的行程
+ *    死透(見 index.ts 呼叫處),core 不會因此早一秒開始服務。只會多出「回收途中
+ *    有別的程式碼改 `entries`」要處理的交錯 —— 例如查不到快照時,這裡會把剩下的
+ *    紀錄整批寫回 `entries`,中間插進來的登記會被蓋掉。
+ *  - 上一輪乾淨關閉時紀錄檔通常是空的,迴圈一圈都不跑、一個 PowerShell 都不開;
+ *    主要是崩潰後的那次啟動才付這個成本。
+ *
+ * 若之後 gateway 改成先 listen 再回收,這個決定要重新評估。
  */
 export function reapOrphans(): { killed: number; skipped: number } {
   if (!registryPath) return { killed: 0, skipped: 0 };

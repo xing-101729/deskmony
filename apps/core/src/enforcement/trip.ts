@@ -64,8 +64,9 @@ export interface EnforcementTripInput {
   /**
    * 這次 trip 是否需要真的 interrupt(HLD §3.3「halt 粒度與急迫性相稱」):
    *   - `true`:回合硬上限/mid-turn 成本熔斷/每日 kill-switch——立即中斷。
-   *   - `false`:任務預算(回合邊界才發現)——只擋後續 prompt,不打斷已結束
-   *     的回合,這裡完全不呼叫 `sessionControl.interrupt()`。
+   *   - `false`:回合邊界才發現的越線(例如 P3 的訊息鏈預算,只擋後續傳遞)——
+   *     不打斷已結束的回合,這裡完全不呼叫 `sessionControl.interrupt()`。
+   *     (2026-10-02:原本的唯一呼叫端是任務預算,已隨 task 移除。)
    */
   interrupt: boolean;
   sessionControl?: SessionControlPort;

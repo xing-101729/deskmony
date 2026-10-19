@@ -24,7 +24,9 @@ const COMMAND_KEYS = ["command", "cmd", "script"];
 
 /** 常見的「目標路徑」欄位名稱(檔案類工具),依序嘗試,可能同時命中多個
  *  (例如同一個 input 物件裡剛好有 `path` 也有 `directory`)。 */
-const PATH_KEYS = ["file_path", "filePath", "path", "notebook_path", "directory", "dir_path", "target_path"];
+// `filepath`(全小寫):OpenCode 的 `permission.asked` 在工具 part 的完整 input 還沒收到時,退而求其次用的
+// metadata(實測 edit 是 `{filepath, diff}`),見 packages/adapters/src/opencode-adapter.ts。
+const PATH_KEYS = ["file_path", "filePath", "filepath", "path", "notebook_path", "directory", "dir_path", "target_path"];
 
 /** 常見的「host/URL」欄位名稱(網路類工具)。 */
 const HOST_KEYS = ["host", "hostname"];

@@ -1,5 +1,7 @@
 # S12 Phase 2 — Round 1：子 agent 結果回注父 session
 
+> ⚠️ 2026-10-02 已由 session 網路取代,見 [simplify-agents-sessions_detail.md](./simplify-agents-sessions_detail.md)
+
 > 上層：[`session-subagents_detail.md`](./session-subagents_detail.md)（S12 Round 1 已完成）。
 > 階段：**加法/演進**，非破壞性。
 > L4 完成度標準：**另一個工程師照著寫，不用問你。**

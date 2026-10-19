@@ -36,9 +36,9 @@
  *      config.json 且 in-memory 立即生效
  *   G. 握手能力集(gateway.capabilities)依 isLocal 正確回報。⚠️ 2026-08-25
  *      修訂:canToggleAuto/canEnableYolo/canEditPolicy/canEnableTrueUnrestricted
- *      現在本機遠端皆恆為 true;canManageProfiles 未變動,仍只有本機 true。
- *   H. DB 遷移:舊資料 permission_level="auto-accept-all" 被降級為
- *      "auto-accept-edits",且 console.warn 有印
+ *      現在本機遠端皆恆為 true。(2026-10-02 P2:原本的 canManageProfiles 已隨 profile 移除。)
+ *   H. (2026-10-02 P2 已移除:舊資料 permission_level="auto-accept-all" 的 DB 遷移——
+ *      permission_level 是 agent_profiles 的欄位,profile 已不存在。)
  *   J(2026-08-25 新增,見 docs/DECISIONS.md §G):session 還在 always-ask
  *      (未曾開過 YOLO)時直接呼叫 session.setTrueUnrestricted({enabled:true})
  *      被拒(errorCode=session.trueUnrestrictedRequiresYolo),且之後這個
@@ -56,6 +56,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -64,7 +65,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 
 const results = [];
@@ -209,6 +209,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -318,14 +320,7 @@ async function testAutoAndYolo() {
   const createdSessions = [];
 
   const createAttendedSession = async (title) => {
-    const { profile } = await client.rpc("profile.create", {
-      name: `E2E ${title}`,
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-      permissionLevel: "always-ask",
-    });
-    const { session } = await client.rpc("session.create", { agentProfileId: profile.id, workingDir: workspaceDir, title }, 30_000);
+    const { session } = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
     createdSessions.push(session.id);
     return session.id;
   };
@@ -642,14 +637,7 @@ async function testYoloExpiry() {
     client = new MiniGatewayClient(`ws://127.0.0.1:${PORT}`);
     await client.connect();
 
-    const { profile } = await client.rpc("profile.create", {
-      name: "E2E YOLO Expiry",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-      permissionLevel: "always-ask",
-    });
-    const { session } = await client.rpc("session.create", { agentProfileId: profile.id, workingDir: workspaceDir, title: "D-yolo-expiry" }, 30_000);
+    const { session } = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title: "D-yolo-expiry" }, 30_000);
     const sessionId = session.id;
 
     const setResult = await client.rpc("session.setPermissionMode", { sessionId, mode: "auto-accept-all" });
@@ -701,16 +689,9 @@ async function testYoloExpiry() {
     //          原本該有的 escalate-strong(走 waiting、strong:true),不是
     //          allow——如果 trueUnrestricted 殘留未清,這筆請求會被直接放行。 ----
     {
-      const { profile: profile2 } = await client.rpc("profile.create", {
-        name: "E2E YOLO Expiry Clears TrueUnrestricted",
-        software: "acp",
-        workingDir: workspaceDir,
-        acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-        permissionLevel: "always-ask",
-      });
       const { session: session2 } = await client.rpc(
         "session.create",
-        { agentProfileId: profile2.id, workingDir: workspaceDir, title: "D2-expiry-clears-true-unrestricted" },
+        { providerId: FAKE_ACP, workingDir: workspaceDir, title: "D2-expiry-clears-true-unrestricted" },
         30_000,
       );
       const sessionId2 = session2.id;
@@ -818,8 +799,8 @@ async function testRemoteRejection() {
     // ---- G【2026-08-25 修訂,見 docs/DECISIONS.md §G】: 握手能力集——
     //          canToggleAuto/canEnableYolo/canEditPolicy/canEnableTrueUnrestricted
     //          這輪翻案後本機遠端皆恆為 true(F3 舊限制解除,見
-    //          ws-gateway.ts 的 buildCapabilities() 修訂註解);canManageProfiles
-    //          未變動,仍只有本機 true(profile 管理這輪沒有翻案);
+    //          ws-gateway.ts 的 buildCapabilities() 修訂註解);
+    //          (2026-10-02 P2:原本的 canManageProfiles 已隨 profile 移除);
     //          isRemoteConnection 純顯示連線類型本身(本機 false、遠端 true,
     //          不是安全邊界,真正的把關在每次呼叫時 Gateway 的伺服器端檢查)。----
     const localCapsViaAuth = localClient.capabilities;
@@ -831,7 +812,6 @@ async function testRemoteRejection() {
       canToggleAuto: true,
       canEnableYolo: true,
       canEditPolicy: true,
-      canManageProfiles: true,
       canEnableTrueUnrestricted: true,
       isRemoteConnection: false,
     };
@@ -839,14 +819,13 @@ async function testRemoteRejection() {
       canToggleAuto: true,
       canEnableYolo: true,
       canEditPolicy: true,
-      canManageProfiles: false,
       canEnableTrueUnrestricted: true,
       isRemoteConnection: true,
     };
     const capsMatch = (caps, expected) => Object.keys(expected).every((key) => caps?.[key] === expected[key]);
 
     record(
-      "G: 握手能力集(auth 回應 + 獨立的 gateway.capabilities)——canToggleAuto/canEnableYolo/canEditPolicy/canEnableTrueUnrestricted 本機遠端皆恆為 true;canManageProfiles 仍只有本機 true;isRemoteConnection 本機 false、遠端 true",
+      "G: 握手能力集(auth 回應 + 獨立的 gateway.capabilities)——canToggleAuto/canEnableYolo/canEditPolicy/canEnableTrueUnrestricted 本機遠端皆恆為 true;isRemoteConnection 本機 false、遠端 true",
       capsMatch(localCapsViaAuth, expectedLocalCaps) &&
         capsMatch(localCapsViaMethod, expectedLocalCaps) &&
         capsMatch(remoteCapsViaAuth, expectedRemoteCaps) &&
@@ -856,15 +835,8 @@ async function testRemoteRejection() {
     );
 
     // 建一個 session 供下面的 setPermissionMode 呼叫用(用本機連線建立,
-    // profile.create/session.create 本身不是這次要測的重點)。
-    const { profile } = await localClient.rpc("profile.create", {
-      name: "E2E Remote Reject",
-      software: "acp",
-      workingDir: workspaceDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-      permissionLevel: "always-ask",
-    });
-    const { session } = await localClient.rpc("session.create", { agentProfileId: profile.id, workingDir: workspaceDir, title: "E-remote" }, 30_000);
+    // session.create 本身不是這次要測的重點)。
+    const { session } = await localClient.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title: "E-remote" }, 30_000);
 
     // ---- E-1【2026-08-25 修訂,見 docs/DECISIONS.md §G】: session.setPermissionMode
     //          已從 LOCAL_ONLY_METHODS 移除(原 F3/C6「遠端不可切 auto/YOLO」
@@ -911,24 +883,21 @@ async function testRemoteRejection() {
     /**
      * ---- E-3b(2026-09-04 稽核修補的回歸測試)----------------------------
      *
-     * 這三條擋的是**繞過整個安全罩的任意程式碼執行路徑**,與 §G 刻意開放給遠端
+     * 這條擋的是**繞過整個安全罩的任意程式碼執行路徑**,與 §G 刻意開放給遠端
      * 的那些(切 auto/YOLO、編 allowlist)本質不同:那些放寬的是「工具呼叫要不要
-     * 放行」,每次執行仍走 `PolicyEngine.decide()`;下面這些完全不經過工具呼叫,
+     * 放行」,每次執行仍走 `PolicyEngine.decide()`;下面這個完全不經過工具呼叫,
      * 因此政策引擎、hard-deny、三個斷路器全都看不到。
      *
-     *   - `task.setAcceptance`/`task.runAcceptance` → `acceptance-runner.ts` 的
-     *     `spawn(command, { shell: true })`,指令字串不受任何限制。
      *   - `settings.setProviderPrefs` → `ProviderPrefs.env` 無 key 白名單,會被
      *     併進**每一個** agent 子程序的環境變數(例如 `NODE_OPTIONS`)。
-     *   - `task.create` 的 `acceptance` 欄位:方法本身遠端可用(建立普通任務無害),
-     *     但挾帶驗收指令等於繞過上面第一條,所以改用欄位層級的閘門擋
-     *     (`findRemoteForbiddenField()`)。
+     *
+     * 2026-10-02(P1:移除 team/task/看板):原本同組的 E-3b-1(`task.create` 挾帶
+     * `acceptance` 的欄位層級閘門)與 E-3b-2(`task.setAcceptance`/
+     * `task.runAcceptance`)隨 task 一併移除——那兩條擋的是驗收指令的 shell 執行路徑。
      *
      * 只斷言「遠端被拒」還不夠——那樣把方法名打錯也會通過(不存在的方法一樣會
-     * 拋錯)。所以每一條都同時驗證**本機仍然可用**,證明擋掉的是來源而不是功能。
+     * 拋錯)。所以同時驗證**本機仍然可用**,證明擋掉的是來源而不是功能。
      */
-    const gateTeam = await localClient.rpc("team.create", { name: "E-3b gate team", workingDir: workspaceDir });
-    const gateTeamId = gateTeam.team.id;
     // `err.code` 是 MiniGatewayClient 掛上去的 errorCode(見這個檔案上方
     // handleMessage 的 response 分支),不是 `err.errorCode`。
     const callBothWays = async (method, params) => {
@@ -950,53 +919,6 @@ async function testRemoteRejection() {
       }
       return { remoteRejected, remoteErrCode, localOk, localErr };
     };
-
-    // E-3b-1:task.create 挾帶 acceptance —— 欄位層級閘門。
-    const createWithAcceptance = await callBothWays("task.create", {
-      teamId: gateTeamId,
-      title: "E-3b acceptance gate",
-      acceptance: { commands: ["echo pwned"] },
-    });
-    // 對照組:同一個方法、拿掉 acceptance,遠端必須仍然可用(證明擋的是欄位不是方法)。
-    let remotePlainTaskOk = false;
-    try {
-      await remoteClient.rpc("task.create", { teamId: gateTeamId, title: "E-3b plain task" });
-      remotePlainTaskOk = true;
-    } catch {
-      remotePlainTaskOk = false;
-    }
-    record(
-      "【稽核修補】E-3b-1: task.create 挾帶 acceptance(= shell 指令)遠端被拒(gateway.localOnlyField),本機仍可建立;拿掉 acceptance 後遠端建立普通任務仍然成功——擋的是欄位不是整個方法",
-      createWithAcceptance.remoteRejected &&
-        createWithAcceptance.remoteErrCode === "gateway.localOnlyField" &&
-        createWithAcceptance.localOk &&
-        remotePlainTaskOk,
-      `remoteRejected=${createWithAcceptance.remoteRejected}(code=${createWithAcceptance.remoteErrCode}), localOk=${createWithAcceptance.localOk}(err=${createWithAcceptance.localErr}), remotePlainTaskOk=${remotePlainTaskOk}`,
-    );
-
-    // E-3b-2:task.setAcceptance / task.runAcceptance —— 方法層級閘門。
-    const gateTask = await localClient.rpc("task.create", { teamId: gateTeamId, title: "E-3b setAcceptance gate" });
-    const setAcceptance = await callBothWays("task.setAcceptance", {
-      taskId: gateTask.task.id,
-      acceptance: { commands: ["echo ok"] },
-    });
-    let runAcceptanceRemoteRejected = false;
-    let runAcceptanceRemoteErrCode = "";
-    try {
-      await remoteClient.rpc("task.runAcceptance", { taskId: gateTask.task.id });
-    } catch (err) {
-      runAcceptanceRemoteRejected = true;
-      runAcceptanceRemoteErrCode = err?.code ?? String(err?.message ?? err);
-    }
-    record(
-      "【稽核修補】E-3b-2: task.setAcceptance / task.runAcceptance 遠端皆被拒(gateway.localOnlyMethod),setAcceptance 本機仍可用——驗收指令是 shell:true 執行,不可由遠端定義或觸發",
-      setAcceptance.remoteRejected &&
-        setAcceptance.remoteErrCode === "gateway.localOnlyMethod" &&
-        setAcceptance.localOk &&
-        runAcceptanceRemoteRejected &&
-        runAcceptanceRemoteErrCode === "gateway.localOnlyMethod",
-      `setAcceptance: remoteRejected=${setAcceptance.remoteRejected}(code=${setAcceptance.remoteErrCode}), localOk=${setAcceptance.localOk}(err=${setAcceptance.localErr}); runAcceptance: remoteRejected=${runAcceptanceRemoteRejected}(code=${runAcceptanceRemoteErrCode})`,
-    );
 
     // E-3b-3:settings.setProviderPrefs —— 方法層級閘門(env 注入)。
     const setProviderPrefs = await callBothWays("settings.setProviderPrefs", {
@@ -1029,7 +951,7 @@ async function testRemoteRejection() {
     const newAlwaysAskSession = async (title) => {
       const { session: s } = await localClient.rpc(
         "session.create",
-        { agentProfileId: profile.id, workingDir: workspaceDir, title },
+        { providerId: FAKE_ACP, workingDir: workspaceDir, title },
         30_000,
       );
       return s.id;
@@ -1046,7 +968,7 @@ async function testRemoteRejection() {
     {
       const { session: trueUnrestrictedSession } = await remoteClient.rpc(
         "session.create",
-        { agentProfileId: profile.id, workingDir: workspaceDir, title: "E6-remote-true-unrestricted-bypasses-harddeny" },
+        { providerId: FAKE_ACP, workingDir: workspaceDir, title: "E6-remote-true-unrestricted-bypasses-harddeny" },
         30_000,
       );
       const sessionId = trueUnrestrictedSession.id;
@@ -1199,85 +1121,16 @@ async function testRemoteRejection() {
 }
 
 // =======================================================================
-// H: DB 遷移——舊資料 permission_level="auto-accept-all" 被降級為
-//    "auto-accept-edits",且 console.warn 有印(不可靜默)。
+// I: session 的初始權限模式一律是 always-ask——**client 沒有任何參數能讓 session 一開始就是
+//    auto/YOLO**。
+//    (2026-10-02 P2:原本這裡是「CreateAgentProfileInputSchema 不再接受 permissionLevel:
+//    "auto-accept-all"」,以及 H「DB 遷移把舊 profile 的 auto-accept-all 降級」——兩者都是
+//    agent_profiles.permission_level 的保證,profile 整個移除後不再有那個欄位。對應的安全性質
+//    搬到 session 本身:YOLO 只能經 `session.setPermissionMode` 事後切換(30 分鐘後惰性過期)。)
+//    `CreateSessionInputSchema` 不是 strict,未知欄位會被 zod 丟掉——這個測試確認舊 client 還在送
+//    `permissionLevel:"auto-accept-all"`/`agentProfileId` 時,不會被「誤解成」任何提權。
 // =======================================================================
-async function testDbMigration() {
-  const dbDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-migration-"));
-  const dbPath = path.join(dbDir, "deskmony.db");
-
-  try {
-    // 先開一次資料庫,讓 createDb() 的 CREATE TABLE IF NOT EXISTS 建好 schema,
-    // 再透過 drizzle 暴露的底層 better-sqlite3 handle(`.$client`)塞一筆
-    // 「舊值」進去,模擬升級前的資料——刻意不透過 ProfileStore/zod(那條路徑
-    // 現在已經拒絕 "auto-accept-all",無法用來製造這筆舊資料;直接寫 SQL 才能
-    // 誠實模擬「這是升級前就存在的資料列」)。
-    const dbMod = await import(pathToFileURL(path.join(REPO_ROOT, "packages", "db", "dist", "client.js")).href);
-    const firstOpen = dbMod.createDb(dbPath);
-    const now = Date.now();
-    firstOpen.$client
-      .prepare(
-        `INSERT INTO agent_profiles (id, name, role, software, permission_level, working_dir, created_at, updated_at)
-         VALUES (?, ?, 'Coder', 'claude-agent-sdk', 'auto-accept-all', ?, ?, ?)`,
-      )
-      .run("legacy-profile-1", "舊 YOLO Profile", os.tmpdir(), now, now);
-    firstOpen.$client.close();
-
-    // 攔截 console.warn,確認遷移時真的有印警告(不可靜默)。
-    const warnCalls = [];
-    const originalWarn = console.warn;
-    console.warn = (...args) => {
-      warnCalls.push(args.join(" "));
-      originalWarn(...args);
-    };
-    let migratedDb;
-    try {
-      migratedDb = dbMod.createDb(dbPath); // 這次會跑 migrateAutoAcceptAllPermissionLevel()
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    const rows = migratedDb.$client.prepare("SELECT id, permission_level FROM agent_profiles WHERE id = ?").all("legacy-profile-1");
-    migratedDb.$client.close();
-
-    const downgraded = rows.length === 1 && rows[0].permission_level === "auto-accept-edits";
-    const warnedAboutProfile = warnCalls.some((line) => line.includes("legacy-profile-1") && line.includes("auto-accept-edits"));
-    const warnedAtAll = warnCalls.length > 0;
-
-    record(
-      "H: DB 遷移——permission_level='auto-accept-all' 的舊 profile 被降級為 'auto-accept-edits',且 console.warn 有列出該 profile(不可靜默)",
-      downgraded && warnedAboutProfile && warnedAtAll,
-      `downgraded=${downgraded}, warnedAtAll=${warnedAtAll}, warnedAboutProfile=${warnedAboutProfile}, warnCalls=${JSON.stringify(warnCalls)}`,
-    );
-
-    // 冪等驗證:再開一次,這次不應該再有任何降級警告(已經沒有 auto-accept-all 資料列)。
-    const warnCalls2 = [];
-    console.warn = (...args) => warnCalls2.push(args.join(" "));
-    let secondOpen;
-    try {
-      secondOpen = dbMod.createDb(dbPath);
-    } finally {
-      console.warn = originalWarn;
-    }
-    secondOpen.$client.close();
-    const idempotent = !warnCalls2.some((line) => line.includes("auto-accept-all"));
-    record("H-2: DB 遷移冪等——再次開啟同一個 DB,已經沒有舊資料可降級,不會重複印警告", idempotent, `warnCalls2=${JSON.stringify(warnCalls2)}`);
-  } catch (err) {
-    record("H: DB 遷移 執行過程發生未預期錯誤", false, String(err));
-  }
-
-  try {
-    rmSync(dbDir, { recursive: true, force: true });
-  } catch {
-    // ignore
-  }
-}
-
-// =======================================================================
-// I: 破壞性 schema 收窄——CreateAgentProfileInputSchema(profile.create)不再
-//    接受 permissionLevel:"auto-accept-all"(協議層面就拒絕,不是執行期才發現)。
-// =======================================================================
-async function testSchemaNarrowing() {
+async function testInitialPermissionModeIsAlwaysAsk() {
   const PORT = 4344;
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-schema-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-schema-home-"));
@@ -1291,23 +1144,28 @@ async function testSchemaNarrowing() {
     client = new MiniGatewayClient(`ws://127.0.0.1:${PORT}`);
     await client.connect();
 
-    let rejected = false;
-    try {
-      await client.rpc("profile.create", {
-        name: "Should Be Rejected",
-        software: "acp",
+    const { session } = await client.rpc(
+      "session.create",
+      {
+        providerId: FAKE_ACP,
         workingDir: workspaceDir,
-        acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
+        title: "I-initial-mode",
+        // 舊 client 可能還在送的欄位——必須完全沒有效果。
         permissionLevel: "auto-accept-all",
-      });
-    } catch {
-      rejected = true;
-    }
+        agentProfileId: "default-claude-code",
+      },
+      30_000,
+    );
+    const { sessions } = await client.rpc("session.list", {});
+    const listed = sessions.find((x) => x.id === session.id);
 
     record(
-      "I: PermissionLevelSchema 收窄——profile.create 帶 permissionLevel:\"auto-accept-all\" 在協議層面直接被拒(zod 驗證失敗),不是「建立後才發現行為怪怪的」",
-      rejected,
-      `rejected=${rejected}`,
+      "I: session 初始權限模式一律 always-ask——session.create 帶舊欄位 permissionLevel:\"auto-accept-all\" 也無法讓 session 一開始就是 YOLO(create 回應與 session.list 都是 always-ask,沒有 yoloExpiresAt)",
+      session.permissionMode === "always-ask" &&
+        listed?.permissionMode === "always-ask" &&
+        session.yoloExpiresAt === undefined &&
+        session.providerId === FAKE_ACP,
+      `create.permissionMode=${session.permissionMode}, list.permissionMode=${listed?.permissionMode}, yoloExpiresAt=${session.yoloExpiresAt}`,
     );
   } catch (err) {
     record("I 執行過程發生未預期錯誤", false, String(err));
@@ -1341,11 +1199,8 @@ async function main() {
   console.log("\n=== S7 e2e:E/G(關鍵案例② 遠端 LOCAL_ONLY_METHODS + 握手能力集)===");
   await testRemoteRejection();
 
-  console.log("\n=== S7 e2e:H(DB 遷移)===");
-  await testDbMigration();
-
-  console.log("\n=== S7 e2e:I(schema 收窄)===");
-  await testSchemaNarrowing();
+  console.log("\n=== S7 e2e:I(session 初始權限模式一律 always-ask)===");
+  await testInitialPermissionModeIsAlwaysAsk();
 
   const failed = results.filter((r) => !r.ok);
   const skipped = results.filter((r) => r.skipped);

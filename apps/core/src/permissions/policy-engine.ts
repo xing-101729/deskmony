@@ -28,10 +28,13 @@ export interface PolicyDecision {
 
 /**
  * 一次待決策的權限請求。`workingDir` 是這個 session 的 worktree 邊界(見
- * hard-deny.ts 的 `HardDenyCheckInput.workingDir` 註解),`profileId`/`role`
- * 供 `scope` 精確比對(Phase 1 不做繼承,見 core-config.ts 的
- * `PolicyRuleScopeSchema` 註解)——都由呼叫端(session-manager.ts)組裝,
- * PolicyEngine 本身不查詢 profile/DB。
+ * hard-deny.ts 的 `HardDenyCheckInput.workingDir` 註解),`providerId` 供 `scope.providerId`
+ * 精確比對(不做繼承,見 core-config.ts 的 `PolicyRuleScopeSchema` 註解)——都由呼叫端
+ * (session-manager.ts)組裝,PolicyEngine 本身不查詢 DB。
+ *
+ * 2026-10-02(P2:移除 profile):原本的 `profileId`/`role` 已拿掉,改由 `providerId`
+ * (= `Session.providerId`)取代。舊規則帶的 `scope.profileId`/`scope.role` 怎麼處理見
+ * `ruleMatches()`。
  */
 export interface PermissionRequest {
   sessionId: string;
@@ -39,8 +42,33 @@ export interface PermissionRequest {
   toolName: string;
   input: unknown;
   workingDir: string;
-  profileId?: string;
-  role?: string;
+  providerId?: string;
+}
+
+/** 規則是否帶著 2026-10-02 起已無對應概念的舊 profile 範圍(`scope.profileId`/`scope.role`)。 */
+export function hasLegacyProfileScope(rule: PolicyRule): boolean {
+  return rule.scope !== undefined && (rule.scope.profileId !== undefined || rule.scope.role !== undefined);
+}
+
+/**
+ * 啟動時對每一條帶舊 profile 範圍的規則逐條 `console.warn`(規則 id + 處理方式),不靜默——
+ * 使用者要知道自己 config.json 裡的哪些規則因為 profile 移除而行為改變了。處理方式見
+ * `PolicyEngine.ruleMatches()`。回傳這些規則(供呼叫端/測試使用)。
+ */
+export function warnLegacyScopedRules(rules: PolicyRule[]): PolicyRule[] {
+  const legacy = rules.filter(hasLegacyProfileScope);
+  for (const rule of legacy) {
+    const scope = JSON.stringify({ profileId: rule.scope?.profileId, role: rule.scope?.role });
+    const treatment =
+      rule.effect === "allow"
+        ? "allow 規則 → 已停用(一律不匹配,原本放行的操作現在會升級給人確認)"
+        : "deny 規則 → 忽略舊範圍、對所有 session 套用(原本只擋某個 profile 的,現在全部都擋)";
+    console.warn(
+      `[policy][legacy-scope] 規則 id=${rule.id ?? "(無 id)"}(tool="${rule.tool}", effect="${rule.effect}")帶有已不存在的 profile 範圍 ${scope}:${treatment}。` +
+        "profile 功能已於 2026-10-02 移除,請到「設定 > 權限」刪除這條規則,或改成指定 agent 的新規則。",
+    );
+  }
+  return legacy;
 }
 
 /**
@@ -227,8 +255,14 @@ export class PolicyEngine {
     if (rule.tool !== "*" && rule.tool !== req.toolName) return false;
 
     if (rule.scope) {
-      if (rule.scope.profileId !== undefined && rule.scope.profileId !== req.profileId) return false;
-      if (rule.scope.role !== undefined && rule.scope.role !== req.role) return false;
+      // ⚠️ 安全項目(2026-10-02 P2.8):帶**舊 profile 範圍**(`profileId`/`role`)的規則。profile 已不存在,
+      // 這兩個範圍永遠對不上任何 session——若照舊邏輯比對,deny 規則會**靜默失效**,而在 auto 模式下
+      // 那個被擋的操作會落入下面「未分類中間地帶自動放行」,等於 fail-open。所以兩個方向都往安全側偏:
+      //   - allow:一律不匹配(原本放行的改成升級給人,變嚴格);
+      //   - deny:忽略舊範圍、對所有 session 匹配(原本只擋某個 profile 的,現在全擋,變寬)。
+      // (其餘條件——tool/when/providerId——照常比對。)
+      if (hasLegacyProfileScope(rule) && rule.effect === "allow") return false;
+      if (rule.scope.providerId !== undefined && rule.scope.providerId !== req.providerId) return false;
     }
 
     if (rule.when) {

@@ -1,13 +1,14 @@
 import React, { useEffect, useReducer } from "react";
 import { Box, render, Text } from "ink";
 import type { GatewayClient } from "@deskmony/client";
-import type { EffectiveCoreConfig, MessageRecord, Session, SessionEventEnvelope } from "@deskmony/shared";
+import type { EffectiveCoreConfig, MessageRecord, Session, SessionEventEnvelope, SessionMessagePush } from "@deskmony/shared";
 import type { GlobalOptions } from "../args.js";
 import { CliExitError, closeGateway, connectGateway } from "../connect.js";
 import {
   advancePermissionModal,
   appendPermissionYesInput,
   applyPermissionResolved,
+  applySessionMessage,
   applySessionEvent,
   backspacePermissionYesInput,
   buildPermissionResolution,
@@ -297,7 +298,7 @@ export async function runTui(options: GlobalOptions): Promise<void> {
   function onSigterm(): void {
     quit(0);
   }
-  // bin.ts 對 run/session/profile/doctor/config 刻意**不**裝 SIGINT/SIGTERM
+  // bin.ts 對 run/session/doctor/config 刻意**不**裝 SIGINT/SIGTERM
   // handler(見該檔案檔頭:讓 Node 的預設行為接管最安全)。這個 TUI 是
   // 唯一的例外,理由是 raw mode 已經接管了 stdin——沒有這個 handler,
   // 外部送來的 SIGTERM(沒有 listener 時的 Node 預設行為)會直接跳過
@@ -629,6 +630,8 @@ export async function runTui(options: GlobalOptions): Promise<void> {
       } else if (push.channel === "permission-resolved") {
         const payload = push.payload as { sessionId: string; requestId: string };
         applyPermissionResolved(model, payload.sessionId, payload.requestId);
+      } else if (push.channel === "session-message") {
+        applySessionMessage(model, push.payload as SessionMessagePush);
       }
     }),
   );

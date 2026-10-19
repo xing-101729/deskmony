@@ -1,0 +1,7 @@
+{
+  "session": {
+    "titleEmpty": "タイトルを空にすることはできません",
+    "titleTooLong": "タイトルは最大 {{max}} 文字です(現在 {{length}} 文字)",
+    "autoTitleNoContent": "この会話にはまだテキストメッセージがないため、自動で名前を付けられません"
+  }
+}

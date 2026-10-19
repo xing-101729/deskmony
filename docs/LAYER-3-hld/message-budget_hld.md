@@ -1,5 +1,7 @@
 # S2 HLD:訊息預算與熔斷 + Mailbox 持久化(第三條斷路器)
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 階段:**Phase 2**｜對應 L1:**A5**、**D4**(S6 移交)｜上層:[L2 §3](../LAYER-2-design-spec.md)、[DECISIONS §A](../DECISIONS.md)
 > 前置:[S1](./policy-engine_hld.md)(共用底座 `trip`/`AuditLog`)、[S11](./notification_hld.md)(送達)、[S3b](./cost-governor_hld.md)(trip 的先例)
 > 定位:三斷路器的**最後一條**。管的不是錢也不是權限,而是**agent 之間的對話會不會失控**。

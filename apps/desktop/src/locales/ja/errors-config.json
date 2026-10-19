@@ -1,0 +1,6 @@
+{
+  "config": {
+    "patchWriteFailed": "設定ファイル({{configPath}})を解析できないため、既存の内容を上書きしないよう書き込みを拒否しました: {{detail}}",
+    "policyRuleWriteFailed": "設定ファイル({{configPath}})を解析できないため、既存の内容を上書きしないようルールの書き込みを拒否しました: {{detail}}"
+  }
+}

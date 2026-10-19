@@ -54,6 +54,12 @@ boundary tells you what counts as a vulnerability:
 - **Remote clients have parity with local on permission mode and the policy
   allowlist** as of 2026-08-25 — a deliberate, documented reversal. The message
   and cost breakers remain non-disableable from remote. See `docs/DECISIONS.md` §G.
+- **An agent's shell runs as your OS user.** As of 2026-10-05 Deskmony keeps its
+  own credentials (the master auth token, the MCP bridge's scoped token, OpenCode's
+  server password) out of every agent's environment, but it cannot stop a process of
+  the same user from reading another process's memory or decrypting a
+  DPAPI-protected file such as the desktop shell's encrypted token. That needs a
+  real sandbox / separate OS user. See `docs/DECISIONS.md` §J.
 - **Provider API keys are stored in plaintext locally** (masked over the wire).
   Documented in the README's "deliberate gaps".
 - Anything requiring an attacker who already has local code execution as your

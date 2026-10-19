@@ -3,7 +3,8 @@
  * scripts/fake-pty-echo.mjs
  *
  * 給 scripts/e2e-gateway.mjs 步驟 10 使用的最小互動式 CLI —— 用來當作
- * `software="pty"` 的 `AgentProfile.ptyConfig.command`,讓 `GenericPtyAdapter`
+ * `software="pty"` 的 `AgentLaunchSpec.ptyConfig.command`(2026-10-02 P2 起經
+ * `DESKMONY_E2E_EXTRA_PROVIDERS` 注入,見 scripts/lib/e2e-providers.mjs),讓 `GenericPtyAdapter`
  * 的 e2e 測試不必依賴 `cmd.exe`/`bash` 的當地語系化輸出或分行慣例(那些會
  * 因作業系統/語系而不同,不夠決定性),而是有一個完全確定性、跨平台一致的
  * 終端輸出可以斷言。
@@ -24,6 +25,9 @@
  *     再接著送 "exit" 驗證正常結束的路徑,不用為了測 interrupt 另開一個
  *     session。
  *
+ *   - 2026-10-05(安全:agent 子行程環境不得含 Deskmony 憑證)e2e 用:輸入 `REPORT_PRESENCE:<逗號分隔的變數名稱>` →
+ *     印出 `PRESENCE:` + JSON(`{ <名稱>: boolean }`),**只回報環境裡有沒有這個變數(不分大小寫),絕不回顯值**。
+ *
  * 這支腳本本身就是一支普通的 Node CLI(不像 fake-acp-agent.mjs 需要 ACP
  * JSON-RPC over stdio),`GenericPtyAdapter` 是用 `node-pty` 幫它另外開一個
  * 偽終端(pty)再把它跑起來,stdin/stdout 走的是 pty 的行編輯層,不是原始
@@ -39,8 +43,23 @@ process.on("SIGINT", () => {
   process.stdout.write("SIGINT-RECEIVED\n");
 });
 
+const REPORT_PRESENCE_PREFIX = "REPORT_PRESENCE:";
+
 rl.on("line", (line) => {
   const trimmed = line.trim();
+  if (trimmed.startsWith(REPORT_PRESENCE_PREFIX)) {
+    const upperKeys = new Set(Object.keys(process.env).map((k) => k.toUpperCase()));
+    const presence = Object.fromEntries(
+      trimmed
+        .slice(REPORT_PRESENCE_PREFIX.length)
+        .split(",")
+        .map((n) => n.trim())
+        .filter(Boolean)
+        .map((name) => [name, upperKeys.has(name.toUpperCase())]),
+    );
+    process.stdout.write(`PRESENCE:${JSON.stringify(presence)}\n`);
+    return;
+  }
   process.stdout.write(`ECHO:${trimmed}\n`);
   if (trimmed === "exit") {
     process.stdout.write("BYE\n");

@@ -13,10 +13,10 @@ import { DEFAULT_LOCALE, readStoredLocale } from "./lib/locale-storage.js";
  * 查,不需要知道 code 實際落在哪個實體檔案裡。
  *
  * **為什麼是深度合併、不是 shallow spread**:`ErrorCodes`(packages/shared/src/
- * errors.ts)刻意設計成跨檔案共用同一個 dot-path 第一段(例如 "task.invalidTransition"
- * 落在 errors-common.json,另一個批次的 errors-tasks.json 又在同一個 "task"
- * 底下新增 "task.workingDirMissing" 之類的專屬 code)——若用 shallow spread
- * (`{...a, ...b}`),後載入的檔案會把同名的第一層 key(例如整個 "task" 物件)
+ * errors.ts)刻意設計成跨檔案共用同一個 dot-path 第一段(例如 "recovery.xxx"
+ * 落在 errors-recovery.json,另一個檔案又在同一個 "recovery" 底下新增別的
+ * 專屬 code)——若用 shallow spread
+ * (`{...a, ...b}`),後載入的檔案會把同名的第一層 key(例如整個 "recovery" 物件)
  * 整個蓋掉,悄悄砍掉另一個檔案已經定義的葉節點翻譯而不報錯。遞迴合併只在真的
  * 撞到同一個「完整 leaf path」(值是字串)時才用後者覆蓋前者——理論上不應該
  * 發生,各批次的 code 不重複定義同一個 leaf。

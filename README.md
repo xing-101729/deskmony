@@ -2,7 +2,7 @@
 
 # Deskmony
 
-**A desktop control room for teams of AI coding agents — built so they can run unattended for hours without going off the rails.**
+**A desktop control room for AI coding agents — built so they can run unattended for hours without going off the rails.**
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white)
@@ -18,29 +18,28 @@
 
 ---
 
-Deskmony lets you run a **team** of AI coding agents — not one chatbot in a sidebar. Each member gets a role, a backend (Claude Code, Codex, OpenCode, or any CLI you already have), and its own git worktree. They plan, code, review, and message each other through a built-in team bus, while you watch — or don't have to.
+Deskmony lets you run AI coding agents — not one chatbot in a sidebar — on a backend of your choice (Claude Code, Codex, OpenCode, or any CLI you already have), with a safety shield underneath so you can watch, or not have to.
+
+> **2026-10-02:** the product was simplified (see [`DECISIONS.md` §H](docs/DECISIONS.md)). Agent profiles, teams, the task board and git-worktree-per-task are gone. In their place, Deskmony finds the agent CLIs already installed on your machine and starts a session from any of them directly, and every session can find the available agents, start new sessions, and message any other session.
 
 ## Why Deskmony
 
 Most multi-agent coding tools give you two options: approve every permission prompt yourself, or switch on full auto-approve and hope. Deskmony takes a third path.
 
-The thesis is simple: **letting agents run unattended isn't about trusting them more — it's about circuit breakers that don't care how much you trust them.** Three independent breakers sit underneath every agent, every message, and every dollar spent. Any one of them can halt a runaway on its own. The message and cost breakers cannot be switched off remotely; the permission breaker reached remote/local parity on 2026-08-25 — a deliberate, documented reversal (see [`DECISIONS.md` §G](docs/DECISIONS.md)), spelled out under "What remote can and cannot do" below.
+The thesis is simple: **letting agents run unattended isn't about trusting them more — it's about circuit breakers that don't care how much you trust them.** Three independent breakers sit underneath every agent, every message, and every dollar spent. Any one of them can halt a runaway on its own. The cost and message breakers cannot be switched off remotely; the permission breaker reached remote/local parity on 2026-08-25 — a deliberate, documented reversal (see [`DECISIONS.md` §G](docs/DECISIONS.md)), spelled out under "The remote boundary" below.
 
-The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **1,545 lines of actual code (blanks and comments excluded), 22% of the orchestration core**, before counting the decision plumbing inside the session manager and message bus.
+The four directories that exist purely to serve the safety shield — `permissions/`, `cost/`, `enforcement/`, `recovery/` — are **1,331 lines of actual code (blanks and comments excluded), 26% of the orchestration core** (5,033 lines; the share was 22% before the team and task layer was removed on 2026-10-02, 29% right after, and fell back as the agent catalog and the session network were added to the core). That is before counting the decision plumbing inside the session manager, and the message breaker (`session/message-chain-budget.ts`), which lives in `session/` rather than in those four directories.
 
-(That figure deliberately excludes comments. This codebase is 31% comments; counting them gives a nicer-looking 2,372 — but a comment has never blocked a tool call, so citing it as evidence of safety investment would be dishonest. **Line counts can't prove safety anyway**: what actually should convince you is the decision flow below, and the per-category assertions in `scripts/e2e-hard-deny.mjs`.)
+(That figure deliberately excludes comments. This codebase is roughly 30% comments; counting them gives a nicer-looking number — but a comment has never blocked a tool call, so citing it as evidence of safety investment would be dishonest. **Line counts can't prove safety anyway**: what actually should convince you is the decision flow below, and the per-category assertions in `scripts/e2e-hard-deny.mjs`.)
 
 ## ✨ Highlights
 
-- 🛡️ **Three independent circuit breakers** — permissions, messages, and cost. Default-deny throughout, with a hard-deny list that no auto-mode can bypass — the one deliberate exception is an explicit, typed-confirmation "true-unrestricted" tier, covered below.
-- 🤝 **Agent teams, not a single chatbot** — roles (PM / Architect / Coder / Reviewer / QA), each bound to a different backend and model.
-- 💬 **Agents message each other** — a built-in `team-bus` MCP server offers `send_message`, `broadcast`, `request_review`, `report_status`, and `list_teammates`. Humans watch the live team chat and can interject at any time. A persistent member with no session yet gets one spawned on delivery, and every injected message names the tool to reply with, so answers land back in the team chat instead of being stranded in the agent's own transcript. That hint also tells the agent whether the message was aimed at it or broadcast to the whole team, and says outright that sending nothing is a normal outcome — otherwise a broadcast to five members invites five replies, which is exactly the loop the message breaker exists to stop. The tools are mounted on the `claude-agent-sdk` and `acp` transports (the latter covers Codex, Gemini, and OpenCode via `opencode acp`); a `pty` passthrough has no tool channel at all, so members on it still *receive* messages but are told plainly that their reply cannot get back — never handed a tool that isn't there.
-- 🌱 **Agents can spawn sub-agents** — a second `subagent` MCP server lets a session delegate to children and collect their results. Spawning is deliberately *not* auto-approved.
-- 🖥️ **A real desktop IDE** — streaming markdown, inline diffs, an embedded terminal, todo tracking, image tool output, and interactive question prompts.
-- 🗂️ **Git-worktree isolation** — every task gets its own worktree; merging back to the trunk always takes a human click.
+- 🛡️ **Independent circuit breakers** — permissions, messages and cost. Default-deny throughout, with a hard-deny list that no auto-mode can bypass — the one deliberate exception is an explicit, typed-confirmation "true-unrestricted" tier, covered below.
+- 🌱 **Every session can find agents, start sessions and message any other session** — Deskmony detects the agent CLIs already on your machine; a new session is just an agent, an optional model and a working folder, with no profile to set up. Sessions that can run tools (the embedded Claude Agent SDK and every ACP agent: Codex, Gemini, and OpenCode via `opencode acp`) get five tools from a `deskmony` MCP server — `list_agents`, `list_sessions`, `read_session`, `create_session`, `send_to_session`. Nothing is routed back automatically: whoever receives a message decides whether to reply, and to whom. Starting a session and sending a message are deliberately *not* on the auto-allow list — they go through the same permission ladder as any other tool call — and a per-chain message budget stops runaway ping-pong.
+- 🖥️ **A real desktop IDE** — streaming markdown, inline diffs, an embedded terminal, todo tracking, image tool output, interactive question prompts, a "forward to…" button that hands any assistant reply to another session, and session titles you can rename in place — or that the session's own agent writes for you in a throwaway side conversation, without adding a turn to yours.
 - 🔌 **Four adapters, one interface** — embedded Claude Agent SDK, ACP, OpenCode HTTP/SSE, and a raw PTY fallback for anything else.
 - 🔄 **Crash recovery that doesn't guess** — orphaned sessions are reconciled on startup and triaged by a human. Nothing auto-resumes, by design.
-- 🌐 **Remote-capable, with a clear line on what stays local** — connect from a browser or phone over token auth; remote now shares session control and policy edits with local (2026-08-25), but never profile management, network binding, or budget caps.
+- 🌐 **Remote-capable, with a clear line on what stays local** — connect from a browser or phone over token auth; remote now shares session control and policy edits with local (2026-08-25), but never provider settings (which can hold API keys) or network binding.
 - 🌍 **Localized** — English, Traditional Chinese, Japanese, Spanish.
 
 ## 🛡️ The safety shield
@@ -51,7 +50,7 @@ Every tool call an agent makes runs this ladder. The order is fixed and cannot b
 
 ```mermaid
 flowchart TB
-    Req["Tool call<br/>(name, input, workingDir, profile, role)"] --> TU{"0 · true-unrestricted?"}
+    Req["Tool call<br/>(name, input, workingDir, providerId)"] --> TU{"0 · true-unrestricted?"}
     TU -- yes --> Allow0["ALLOW — bypasses everything,<br/>including hard-deny"]
     TU -- no --> HD{"1 · hard-deny hit?"}
     HD -- no --> Rules{"2 · config rules,<br/>in order"}
@@ -65,34 +64,37 @@ flowchart TB
     Auto -- no --> Esc["4 · ESCALATE<br/>default-deny"]
 ```
 
-**Four hard-deny categories, not overridable by config:** writes or deletes outside the worktree · reading secret paths (`~/.ssh`, `~/.aws`, `~/.deskmony`, `**/.env*`, `**/id_rsa*`, `**/credentials`) · dangerous git (`push --force`, deleting remote branches, `branch -D`) · network calls to non-allowlisted hosts.
+**Four hard-deny categories, not overridable by config:** writes or deletes outside the session's working directory · reading secret paths (`~/.ssh`, `~/.aws`, `~/.deskmony`, the desktop app's own local data folder, `**/.env*`, `**/id_rsa*`, `**/credentials`) · dangerous git (`push --force`, deleting remote branches, `branch -D`) · network calls to non-allowlisted hosts.
 
 A few properties worth stating plainly:
 
 - **YOLO mode differs from auto mode in exactly one way**: it additionally skips config `deny` rules. **Neither skips hard-deny.** YOLO also expires after 30 minutes.
 - **Anything the engine can't classify escalates.** Never allows. That's the last line of `decide()`.
+- **OpenCode is forced through the same ladder.** OpenCode allows every tool by default and only asks for the ones its own config marks `"ask"` — and most people's config marks none — so left alone its bash/edit/webfetch/MCP calls would never reach the engine. When Deskmony launches OpenCode (both the `opencode` and `opencode-acp` providers) it injects an `OPENCODE_CONFIG_CONTENT` that sets every tool to `ask`, merged over whatever you already have (yours is kept, Deskmony's permission rules win). The visible consequence: an OpenCode session in `always-ask` now stops to ask where it used to run silently; auto/YOLO behave as usual. One limitation: on the `opencode-acp` provider the `task` (subagent) tool is turned off, because `opencode acp` never forwards a subagent's permission requests and the subagent would hang forever. The local HTTP servers OpenCode opens on loopback (`opencode serve`, and — as measured — `opencode acp` too) are password-protected with a fresh random password per launch, so another process on the machine can't approve permissions on OpenCode's behalf (bypassing the engine) or read the scoped token out of its config; the password lives only in memory and in the child's environment, and a password you set yourself is overridden. OpenCode's own bash tool would inherit that password, so since 2026-10-05 a small Deskmony-supplied OpenCode plugin strips it (and the injected config) from the environment of the shell commands OpenCode runs for the agent (see [`DECISIONS.md` §J](docs/DECISIONS.md)).
+- **An agent's environment never contains Deskmony's own credentials.** The desktop shell always puts the master `DESKMONY_AUTH_TOKEN` into core's environment, and every adapter used to hand the whole environment to the agent it launches — so an agent's bash could read the token, connect to the gateway, approve its own permission requests and switch itself to YOLO. Every adapter (Claude, ACP, OpenCode, PTY) now builds the agent's environment through one function that finally strips the master token, the MCP bridge's scoped credentials and any inherited OpenCode server password (case-insensitively; a token you typed into a provider's variables is stripped too). The session-network tools keep working — the bridge's credentials are handed to it explicitly, not inherited. What this cannot stop: a process of the same OS user reading another process's memory or decrypting a DPAPI-protected file — that is sandbox territory (see [`DECISIONS.md` §J](docs/DECISIONS.md)).
 - **Timeout semantics depend on who's around.** Someone watching → a pending request times out into a deny. Nobody watching → **no timer at all**; the session sits in `waiting` until a human answers. Treating "no reply" as "denied" would throw away an entire night's work. The cost breaker is what stops that from hanging forever.
 - **"Always allow" has three rules**: write the narrowest possible rule (`commandEquals` / `pathUnder`); write it to both the config file and memory so behaviour is identical before and after a restart; and hard-deny escalations are **never** eligible — the core strips `rememberRule` even if a client sends one.
+- **Rules can be scoped to an agent** (`providerId`, e.g. a rule that only applies to Codex sessions). Rules left over from the profile era — scoped to a profile id or role in an older `config.json` — can no longer match anything, so they fail toward safety: such `allow` rules stop matching (the call escalates instead), and such `deny` rules now apply to every session, so a scoped deny never goes quiet and turns into an automatic allow under auto mode. Core logs each affected rule at startup.
 - **One explicit, audited exception can cross the hard-deny floor**: a session-scoped "true-unrestricted" tier, layered on top of YOLO, gated behind a typed confirmation phrase, available locally *and* remotely since 2026-08-25 (see [`DECISIONS.md` §G](docs/DECISIONS.md)). It's the only path through `decide()` that skips hard-deny — it only arms per session, only once that session is already in YOLO, and only after a human types the confirmation phrase; enabling it fires a desktop notification and an audit-log entry.
 
 ### Breaker 2 — Messages
 
-Two gates in front of the existing delivery strategy:
+Once agents can message each other, the failure to guard against is a loop: A answers B, B answers A, forever — or one agent fanning out new sessions without end. The original budget (a core-derived context id plus a per-context ceiling) went away with the message bus on 2026-10-02 (see [`DECISIONS.md` §H](docs/DECISIONS.md)); the breaker was rebuilt on a different unit, the **message chain**:
 
-1. **The context id is derived by the core, never supplied by the agent.** It comes from whichever task the sender is currently bound to — and when the sender has no live task, from `member:<memberId>`, a per-member bucket the core derives exactly the same way. Letting the thing being rate-limited declare its own bucket means it can reset the budget by renaming it. *(Until 2026-08-28 a message with no derivable task was refused outright. That also silenced a member with no task in hand answering a human or a teammate — a case with a human's own speed limit on it — so the no-task path now gets its own metered bucket instead of a wall. It is still metered by the same per-context ceiling, and members stay isolated from each other.)*
-2. **Per-context message budget.** Blow through it and the breaker trips, refusing further `send_message` / `broadcast` / `request_review` for that context.
-
-**It severs lateral chatter, not vertical progress** — `report_status` and `list_teammates` keep working, so a tripped context can still report where it got to.
+- A prompt typed by a human — or a forward from the UI — starts a **new chain**. Every `send_to_session` / `create_session` an agent makes while handling a message stays on the chain of the turn that triggered it.
+- A chain may carry up to `messageBudget.maxMessagesPerContext` agent-to-agent messages (default 50; the key name is kept from the earlier design so existing configs still parse). A soft warning (audit entry + notification, no halt) fires at `warnAtPercent`.
+- **The first message over the ceiling trips the breaker**: it is refused, the tool result tells the agent the chain has tripped and a human has to step in, and the audit log plus a desktop notification record it (once per chain, so a retrying agent can't spam you). `create_session` on a tripped chain doesn't spawn anything.
+- The trip stops **agent-to-agent** delivery only. You can still type into any session, and doing so starts a fresh chain; a UI forward is a human action, so it also opens a new chain and is never counted or blocked.
+- Counters live in memory (core restart resets them) and the setting is not in the remotely editable subset — remote clients can't turn this breaker off.
 
 ### Breaker 3 — Cost
 
 | Component | Signal | Trips on | What it halts |
 |---|---|---|---|
 | **TurnLimiter** | `tool-call` events + wall clock — **no usage data needed** | 30 min or 200 tool calls in one turn | Interrupts immediately |
-| **CostGovernor** (task budget) | `usage` events | Task spend over budget | Blocks further prompts; doesn't cut a finished turn |
-| **CostGovernor** (daily kill-switch) | `usage` events | Team spend for the day | Interrupts every session |
+| **CostGovernor** (daily kill-switch) | `usage` events | Spend for the day | Interrupts every session, blocks further prompts |
 | **WaitingWatchdog** T1 | Time in `waiting` | 6 hours | Notifies only — no halt |
-| **WaitingWatchdog** T2 | Time in `waiting` | 72 hours | Disposes the process; task stays blocked, worktree preserved |
+| **WaitingWatchdog** T2 | Time in `waiting` | 72 hours | Disposes the process; the conversation history is preserved |
 
 > **TurnLimiter matters most.** Measured against real Claude Code over ACP: the bridge reports **zero** usage — not a config problem, a structural gap. For that backend, every usage-based budget is inert, and the turn hard-cap is the only protection left.
 
@@ -100,7 +102,7 @@ Two gates in front of the existing delivery strategy:
 
 `isLocal` is decided by the core from the connection's own address and is **never taken from the client's word for it**. Tunnelled connections (Tailscale, WireGuard) are not loopback and count as **remote** — a tunnel secures transport, it doesn't put an operator in the room.
 
-Remote clients **can** watch, send prompts, approve or deny escalations, switch a session to auto/YOLO, edit the policy allowlist, and attach an "always allow" rule to an approval — parity with local as of 2026-08-25, a deliberate, documented reversal of the earlier remote restriction (see [`DECISIONS.md` §G](docs/DECISIONS.md)). Remote can even arm the "true-unrestricted" tier described above, through the same typed-confirmation gate as local. What remote still **cannot** do: manage agent profiles, change the network bind address, or raise budget caps. That's enforced at the dispatch layer, not by hiding buttons in the UI — a raw request bypassing the UI gets rejected the same way.
+Remote clients **can** watch, send prompts, approve or deny escalations, switch a session to auto/YOLO, edit the policy allowlist, and attach an "always allow" rule to an approval — parity with local as of 2026-08-25, a deliberate, documented reversal of the earlier remote restriction (see [`DECISIONS.md` §G](docs/DECISIONS.md)). Remote can even arm the "true-unrestricted" tier described above, through the same typed-confirmation gate as local. What remote still **cannot** do: edit provider settings (their environment variables can carry API keys and are merged into every agent process), edit the general config file, or change the network bind address. That's enforced at the dispatch layer, not by hiding buttons in the UI — a raw request bypassing the UI gets rejected the same way.
 
 Binding to a non-loopback address without `DESKMONY_AUTH_TOKEN` **refuses to start**. The token is deliberately not a config-file field, so editing config can't widen exposure — it comes only from the env var, or (desktop shell only) a value the Settings "remote access" panel keeps encrypted at rest via Electron's `safeStorage`, letting you copy a stable token to hand to a browser or phone.
 
@@ -114,21 +116,18 @@ Three tiers. The desktop shell is deliberately just one client of the core — t
 flowchart TB
     subgraph SHELL["apps/desktop — Electron 44 + React 18"]
         direction LR
-        Views["views/ chat · team chat · task board · recovery"]
-        Stores["stores/ zustand × 4"]
+        Views["views/ chat · recovery"]
+        Stores["stores/ zustand × 2"]
     end
 
     subgraph CORE["apps/core — headless orchestration server"]
-        GW["gateway/ — 68 RPC methods + 11 push channels"]
+        GW["gateway/ — 39 RPC methods + 8 push channels"]
         subgraph DOMAIN["domain"]
             direction LR
             Sess["session/"]
-            Bus["bus/"]
-            Task["tasks/"]
-            Team["team/"]
-            Work["workspace/"]
+            Agents["agents/"]
         end
-        subgraph SHIELD["safety shield · 22% of core"]
+        subgraph SHIELD["safety shield · 26% of core"]
             direction LR
             Perm["permissions/"]
             Cost["cost/"]
@@ -139,9 +138,9 @@ flowchart TB
 
     subgraph PKG["packages/"]
         direction LR
-        Adapters["adapters/ — 4 adapters + 2 MCP servers"]
+        Adapters["adapters/ — 4 adapters + 1 MCP server"]
         Shared["shared/ — zod, single source of truth"]
-        Db["db/ — 11 tables"]
+        Db["db/ — 5 tables"]
     end
 
     SHELL -- "WebSocket + token auth" --> GW
@@ -152,56 +151,66 @@ flowchart TB
     CORE --> Db
 ```
 
-**Dependency rule:** `packages/*` must never import `apps/*`. Cross-boundary needs are declared as interfaces in `packages/shared` (`TeamBusPort`, `SubagentPort`, `ClientPresencePort`, `SessionControlPort`) and injected at construction time.
+**Dependency rule:** `packages/*` must never import `apps/*`. What the adapters need from the core is declared as interfaces in `packages/shared` (`SessionNetworkPort` for the session tools, `McpBridgeTokenPort` for the ACP bridge's scoped tokens) and injected at construction time.
 
 ### Adapters
 
-Four adapters are registered. Every one implements the same interface, so permissions, the message bus, and the task board never need to know which CLI is on the other end.
+Four adapters are registered. Every one implements the same interface, so permissions and the session manager never need to know which CLI is on the other end.
 
 | Adapter | Transport | Backends today | Capability tier |
 |---|---|---|---|
-| `ClaudeAgentSdkAdapter` | Claude Agent SDK, embedded in-process | Claude Code | Deepest — hooks, sub-agents, fine-grained permission events, live model and effort switching |
-| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com) over stdio JSON-RPC | Gemini CLI, Codex (via the `@agentclientprotocol/codex-acp` bridge package — the official `codex` binary doesn't speak ACP natively), other ACP-native agents | Structured events |
-| `OpenCodeAdapter` | OpenCode's HTTP + SSE server | OpenCode | Native server, works remotely |
+| `ClaudeAgentSdkAdapter` | Claude Agent SDK, embedded in-process | Claude Code | Deepest — hooks, in-process session tools, fine-grained permission events, live model and effort switching |
+| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com) over stdio JSON-RPC | Gemini CLI, Codex (via the `@agentclientprotocol/codex-acp` bridge package — the official `codex` binary doesn't speak ACP natively), other ACP-native agents | Structured events; model and effort switching when the agent offers them |
+| `OpenCodeAdapter` | OpenCode's HTTP + SSE server | OpenCode | Native server, works remotely; model and effort (variant) switching |
 | `GenericPtyAdapter` | Raw `node-pty` passthrough | Claude Code CLI, Aider, any interactive CLI | **Fallback — no permission events** |
 
-The user-facing layer is a **provider catalog** of eight entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `opencode-acp` → ACP (OpenCode driven through `opencode acp`, which is what gives it the team-bus tools), `codex` → ACP (via the `@agentclientprotocol/codex-acp` bridge, not a locally installed codex CLI), `aider` → PTY, `custom-pty`.
+The user-facing layer is a **provider catalog** of seven entries, each guaranteed at the type level to map onto one of those four: `claude-agent-sdk`, `claude-cli` → PTY, `gemini` → ACP, `opencode`, `opencode-acp` → ACP (OpenCode driven through `opencode acp`, which is what gives it the session tools), `codex` → ACP (via the `@agentclientprotocol/codex-acp` bridge, not a locally installed codex CLI), `aider` → PTY. The manual "type any command" entry (`custom-pty`) was removed on 2026-10-02: a session can only be started from an agent Deskmony itself detected, and nothing on the gateway can add a command.
 
 **The PTY tier's missing permission events are a security boundary, not a to-do item.** It's raw stdin passthrough — structurally unmanageable by the policy engine. Until a real execution sandbox exists, PTY agents stay read-only with no unattended autonomy. Deskmony deliberately does **not** try to intercept shell commands: `bash -c`, `$()`, and base64 defeat that in seconds, and shipping it would be security theater.
 
 **Capability reporting is honest about what it doesn't know.** Usage and context reporting are tri-state — `supported` / `unsupported` / `unknown` — because whether a connection reports usage is decided by the agent that got spawned, not the adapter. The same `AcpAdapter` forwards usage faithfully for one agent and never sees a single event from another. A static boolean would mean lying to the UI in one direction or the other, so consumers must converge on the truth from what a session actually observed.
 
-## 📋 Task flow, and the three human gates
+### Agents and sessions
 
-```mermaid
-stateDiagram-v2
-    [*] --> backlog
-    backlog --> assigned: worktree created
-    assigned --> in_progress
-    in_progress --> review: acceptance gate passed, or human approval
-    review --> in_progress: changes requested
-    review --> merging
-    merging --> done: human clicks approve
-    done --> [*]
-    in_progress --> blocked
-    blocked --> in_progress: returns to whatever it was
-```
+There are no profiles. `AgentCatalog` (`apps/core/src/agents/`) is the one place that knows which agents can start a session:
 
-1. **Machine acceptance gate** — a task can carry acceptance commands (test / build / typecheck). `report_status(done)` has to pass them before the task can reach review.
-2. **Human review gate** — with no acceptance conditions, or after repeated failures, the task holds at `in-progress` flagged `awaitingHumanReview` until a person approves.
-3. **Human merge** — `task.merge` is the **only** path in the entire system that runs `git merge`, and it only fires from the task board button.
+- **Detection.** Core scans for the agents in the catalog in the background at startup (it never blocks startup); "Re-detect" in the sidebar or in Settings re-scans. Settings still lets you disable an agent, reorder them, pick which models are offered and set per-agent environment variables — that is where an API key goes.
+- **Starting a session** is `session.create` with an agent (`providerId`), an optional model and effort, and a working folder. The desktop sidebar has those four pickers plus a "New conversation" button; the CLI has `--agent <providerId>` (default `claude-agent-sdk`), `--model` and `--effort`. If no agent is detected, the sidebar says so and offers to re-detect.
+- **Model and thinking effort come from the agent itself**, not a hard-coded list, and the UI only shows what the agent really offers. Claude takes its five effort levels (the Claude Code CLI gets `--model`/`--effort` at start). ACP agents (Codex, Gemini, OpenCode ACP) report their choices in the `session/new` config options (`model` / `thought_level` categories) and switch through `session/set_config_option`. OpenCode's effort is the model's *variant* (e.g. `low`/`high`), read from `opencode models --verbose` and `/config/providers` and sent with every prompt. Effort values are agent-defined strings. Because ACP agents only reveal their choices once the session starts, you pick them in the conversation header, and Deskmony remembers the last choice per agent and applies it to the next session (skipped if the agent no longer offers it). Anything the agent does not offer is rejected with a clear error — never silently ignored.
+- **A session carries its own launch information** (its provider, plus the command and arguments for the CLI-based ones), so continuing it after a restart never depends on anything else. If the agent is no longer detected, the stored command is used. Sessions created before this change are backfilled from their old profile the first time core starts; the old `agent_profiles` table is only ever read, never modified.
+- Every session starts in `always-ask`. The switch to auto/YOLO stays per session, as before.
+- **Titles.** Rename a session in place: double-click its title in the sidebar (or use its "⋯"/right-click menu), or click the title above the conversation — Enter saves, Esc cancels. Over the gateway that is `session.rename` (1–100 characters after trimming, with explicit `session.titleEmpty` / `session.titleTooLong` errors). A session created without a title is named automatically after your first message: the session's **own agent** writes a short title in a *temporary side conversation* that is thrown away afterwards — a separate one-shot SDK query for Claude, a temporary OpenCode session on the same server, a second `session/new` on the same ACP connection — so nothing is added to your conversation or its context. That side conversation gets no tools: its permission requests are refused on the spot and any tool call aborts it. If the agent can't do it (PTY), times out (60 s) or fails, the first line of your message is used instead; the main session is never affected. A title you set yourself (`titleSource: "user"`) is never overwritten automatically — only by "Rename with AI" (`session.autoTitle`), which you trigger. Details per agent: [`docs/FEATURES.md` §1.5](docs/FEATURES.md).
 
-**No agent has any tool that can mark its own work done.** `report_status` and `request_review` can push a task as far as `review` or `merging`; the aliases that map to `done` are explicitly rejected at the apply step.
+### Session network
 
-Merges refuse to leave half-finished state: a conflicting `git merge --no-ff` collects the conflicted paths, runs `git merge --abort` to restore the base, and throws — the task stays at `merging`. The trunk branch is detected dynamically (`origin/HEAD`, then local `main`, then `master`, then a hard error). Never guessed, never hardcoded.
+Sessions that can run tools get five tools from a `deskmony` MCP server (Claude shows them as `mcp__deskmony__<name>`):
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_agents` | Which agents can start a session right now (id, label, models, default model, whether that agent can use tools) | auto-allowed |
+| `list_sessions` | **Every** session, not just your own children: id, title, agent, model, status, working folder, parent, whether it is you, whether it can message back. No conversation content | auto-allowed |
+| `read_session` | The last N messages (default 20, max 100) of any session — user and assistant turns only, each cut at 4,000 characters | auto-allowed |
+| `create_session` | Start a session with a chosen agent and send it a first message | goes through the permission ladder |
+| `send_to_session` | Send a message to any other session. If it is busy the message waits in a queue until its current turn ends; a closed, errored or missing target is a clear error, never a silent success | goes through the permission ladder |
+
+Four rules shape how this behaves:
+
+- **Everyone can see everyone.** No parent/child restriction, no per-folder restriction. A session started with `create_session` is shown nested under its creator in the sidebar — for display and provenance only; it is otherwise a peer. You can also open a new session under any session by hand.
+- **Nothing is sent back automatically.** A message arrives wrapped in an envelope saying who sent it and that it will not be answered unless the receiver chooses to. Whether to reply — and to whom, which need not be the sender — is the receiving agent's decision, made with `send_to_session`. The earlier "child finished, so inject its result into the parent" behaviour is gone.
+- **Identity can't be forged.** Who is calling comes from the adapter (in-process) or from the bridge token (ACP), never from a tool argument. The envelope is added only when the message reaches the agent; the saved history keeps the original text plus its origin.
+- **Not every agent can send.** The Claude Agent SDK (in-process), every ACP agent — Codex, Gemini CLI, OpenCode via the `opencode-acp` provider — and OpenCode over HTTP (the `opencode` provider) can call the tools; the last two reach them through a bridge subprocess holding a scoped, per-session token (for OpenCode over HTTP it is mounted through OpenCode's own `mcp` config, and its permission prompts work like any other tool call). PTY agents (Claude Code CLI, Aider) can *receive* messages but not send them; `list_agents` and `list_sessions` report `canUseTools: false` so a sender knows they can't answer.
+
+In the desktop app a received message shows an "From <session>" tag (or "Forwarded from <session>"), and every assistant message has a "Forward to…" action: pick any other session, add an optional note, and the target receives it as a message from you. Agent-to-agent traffic is bounded by Breaker 2 above.
+
+## 📋 Task flow — removed 2026-10-02
+
+The task board (backlog → assigned → in-progress → review → merging → done), the per-task git worktree, the machine acceptance gate, the human review gate and the human-approved merge were removed together with teams — see [`DECISIONS.md` §H](docs/DECISIONS.md). Existing `tasks` / `workspaces` tables in your SQLite file are left untouched; nothing reads them any more.
 
 ## 🔄 Crash recovery
 
 The expensive thing — an agent's accumulated reasoning and context — lives in the backend process, not the database. Replaying an event log rebuilds your ledger, not the agent's mind. So recovery here is **reconciliation plus human triage**, not replay.
 
-On startup, before the gateway accepts a single connection, sessions that weren't closed cleanly are marked `interrupted` and written to the audit log. Then a human decides, per session: **continue** (only where the backend genuinely persists sessions to disk — re-verified by the core, never trusted from a stale client snapshot), **take over** (restart from a summary), **rerun** (refuses to run on a dirty worktree), or **abandon** (worktree and task both preserved — reclaiming isn't discarding).
-
-Dirty worktrees get a forced decision first: keep the work on a WIP branch, or discard it — and discarding demands an explicit second confirmation. **Nothing is ever silently thrown away, and nothing auto-resumes.**
+On startup, before the gateway accepts a single connection, sessions that weren't closed cleanly are marked `interrupted` and written to the audit log. Then a human decides, per session: **continue** (only where the backend genuinely persists sessions to disk — re-verified by the core, never trusted from a stale client snapshot), **take over** (restart from a summary), or **abandon** (the session is closed but its history is preserved — reclaiming isn't discarding). **Nothing is ever silently thrown away, and nothing auto-resumes.**
 
 ## 🚀 Getting started
 
@@ -209,7 +218,7 @@ Dirty worktrees get a forced decision first: keep the work on a WIP branch, or d
 
 - **Node.js ≥ 20** and **pnpm 10** (the repo pins `pnpm@10.13.1` — `corepack enable` picks it up)
 - Windows for the packaged desktop installer. **The core and the CLI also run on Linux** — a `ubuntu-latest` CI job builds them and runs the CLI end-to-end suite on every PR. Be precise about what that proves: the core + CLI path works there, against a fake backend that needs no credentials. It does *not* prove that every adapter drives every real backend on Linux — nobody has tested that yet.
-- At least one agent backend: log into the Claude Code CLI, set an `OPENAI_API_KEY`/`CODEX_API_KEY` (or use ChatGPT login) for Codex — it runs through a bundled `@agentclientprotocol/codex-acp` bridge, no separate codex CLI install needed — install OpenCode, or point a profile at any interactive CLI through the PTY adapter. **Deskmony orchestrates agents; it does not ship model access.**
+- At least one agent backend that Deskmony can detect: log into the Claude Code CLI, set an `OPENAI_API_KEY`/`CODEX_API_KEY` (or use ChatGPT login) for Codex — it runs through a bundled `@agentclientprotocol/codex-acp` bridge, no separate codex CLI install needed — or install OpenCode, Gemini CLI or Aider. Core finds them on startup; there is nothing to configure per agent except credentials. **Deskmony orchestrates agents; it does not ship model access.**
 
 ### Install
 
@@ -248,9 +257,12 @@ deskmony serve                 # run the headless core in the foreground
 deskmony                       # interactive REPL (same as `deskmony chat`)
 deskmony run "find the TODOs"  # one-shot: stream the answer, then exit
 deskmony run - < prompt.txt    # read the prompt from stdin
+deskmony --agent codex run -   # pick the agent (a provider id; default claude-agent-sdk)
 deskmony session list --json   # NDJSON, for scripts
 deskmony doctor                # detect agent backends, check the connection
 ```
+
+`--agent <providerId>` (with `--model` and `--effort`) chooses what the new session runs on; `deskmony doctor` shows which agents were detected.
 
 `serve` and the clients are separate on purpose: the core owns a SQLite database, and two cores on one data directory is a real hazard. Start `serve` in one terminal (or leave the desktop app running) and point the others at it with `--url` / `DESKMONY_URL`.
 
@@ -264,7 +276,7 @@ Outside a TTY, `run` never invents permission for itself: it denies, names the t
 deskmony tui
 ```
 
-`chat` and `run` show you one session. `tui` shows the whole team, and that difference is the reason it exists: **a permission request raised by a session you are not currently watching is invisible in a line-oriented REPL, and unattended requests never time out.** A second agent can sit blocked for hours while you read the first one's output. The TUI puts a cross-session pending count on screen no matter which session has focus, and `a` walks the queue one request at a time — showing the tool's actual arguments, not just its name, because the name alone ("Write file") tells you nothing you could judge.
+`chat` and `run` show you one session. `tui` shows every session, and that difference is the reason it exists: **a permission request raised by a session you are not currently watching is invisible in a line-oriented REPL, and unattended requests never time out.** A second agent can sit blocked for hours while you read the first one's output. The TUI puts a cross-session pending count on screen no matter which session has focus, and `a` walks the queue one request at a time — showing the tool's actual arguments, not just its name, because the name alone ("Write file") tells you nothing you could judge.
 
 Escalations that hit the hard-deny list look different and behave differently: no "always allow", and a typed `yes` rather than a keystroke.
 
@@ -299,7 +311,7 @@ The packaged core runs on Electron's bundled Node with `better-sqlite3` rebuilt 
 | Chat rendering | react-markdown + remark-gfm + react-syntax-highlighter + a custom diff-hunk viewer |
 | i18n | i18next / react-i18next — en, zh-Hant, ja, es |
 | Core | Node.js headless, WebSocket gateway (`ws`) |
-| Database | SQLite via better-sqlite3 + Drizzle ORM, 11 tables |
+| Database | SQLite via better-sqlite3 + Drizzle ORM, 5 tables |
 | Validation | zod schemas in `packages/shared` as the single source of truth for both sides |
 | Agent protocols | Claude Agent SDK, ACP, OpenCode HTTP/SSE, raw PTY |
 | Monorepo | pnpm workspaces |
@@ -310,32 +322,32 @@ The packaged core runs on Electron's bundled Node with `better-sqlite3` rebuilt 
 Deskmony/
 ├─ apps/
 │  ├─ desktop/          # Electron + React shell
-│  │  ├─ views/         # chat, team chat, task board, recovery, dialogs
-│  │  ├─ stores/        # zustand × 4
+│  │  ├─ views/         # chat, recovery, dialogs
+│  │  ├─ stores/        # zustand × 2
 │  │  ├─ ui/            # design system (incl. ErrorBoundary)
 │  │  └─ locales/       # en, zh-Hant, ja, es
 │  └─ core/             # headless orchestration server
-│     ├─ session/ bus/ tasks/ team/ workspace/     # domain
+│     ├─ session/ agents/                          # domain (sessions, agent catalog)
 │     ├─ permissions/ cost/ enforcement/ recovery/ # safety shield
 │     ├─ gateway/ http/ config/ detect/ settings/  # plumbing
 ├─ packages/
-│  ├─ adapters/         # 4 adapters + team-bus & subagent MCP servers
+│  ├─ adapters/         # 4 adapters + the `deskmony` session-network MCP server
 │  ├─ db/               # Drizzle schema, idempotent migrations
 │  └─ shared/           # types, gateway protocol, zod schemas
-├─ scripts/             # 11 e2e suites, the runner, the build-freshness guard, fake backends, packaging
-├─ .github/workflows/   # CI (typecheck → build → the 10 deterministic suites)
+├─ scripts/             # 18 e2e suites, the runner, the build-freshness guard, fake backends, packaging
+├─ .github/workflows/   # CI (build → typecheck → the 17 deterministic suites)
 └─ docs/                # architecture, decisions, layered design, dev log
 ```
 
 ## 🧪 Testing
 
 ```bash
-pnpm test          # typecheck + build + the 10 deterministic suites (~8 min)
+pnpm test          # typecheck + build + the 18 deterministic suites
 pnpm test:e2e      # just the suites (requires a current pnpm build)
 pnpm test:e2e:live # e2e-gateway.mjs — needs real Claude Code credentials, spends real tokens
 ```
 
-**Eleven end-to-end suites.** Ten of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those ten are what `pnpm test` and CI run: **138 assertions, all of which must pass.**
+**Nineteen end-to-end suites.** Eighteen of them are *deterministic* — they drive a real headless core over the WebSocket gateway (**never through Electron**) against three fake backends (`fake-acp-agent`, `fake-opencode-server`, `fake-pty-echo`), so they reproduce identically on a machine with no credentials at all. Those eighteen are what `pnpm test` and CI run: **306 assertions, all of which must pass.** (The count fell from 221 to 180 on 2026-10-02 when the team, task and message-bus suites were removed along with the features, then rose as `e2e-agent-catalog.mjs` and `e2e-session-network.mjs` — which replaced the sub-agent suite — were added; 2026-10-03 added `e2e-opencode-permissions.mjs`, which pins that every OpenCode tool call reaches the permission engine, and grew by seven assertions pinning the password on OpenCode's local servers; 2026-10-05 added `e2e-agent-env.mjs`, which starts core with `DESKMONY_AUTH_TOKEN` set and pins that none of Deskmony's own credentials reach an agent's environment, extended the OpenCode permissions suite to cover the OpenCode plugin that hides the server password from the agent's shell, and added one hard-deny assertion for the desktop app's local data folder; also 2026-10-05, `e2e-opencode-long-turn.mjs` pins that an OpenCode turn running past five minutes no longer surfaces a false "send failed" error — prompts now go through OpenCode's non-blocking `prompt_async` endpoint, with a fallback for older OpenCode versions; 2026-10-06 added `e2e-session-title.mjs`, which pins renaming, the title-source rules and their migration, and that automatic titles come from a side conversation that adds nothing to the main session, cannot use tools, and falls back to the first line on tool use, timeout, refusal or PTY.) The session-network suite also asserts that the tool names, descriptions and parameter schemas of the in-process server and the ACP bridge subprocess are word-for-word identical.
 
 `e2e-gateway.mjs` is excluded from the default run on purpose. It needs real Claude Code credentials, costs real money, and carries a *model-behavior* group whose assertions depend on what a model chose to say that run — the file marks those as known-flaky. A CI that goes red because a model rephrased itself is a CI people learn to ignore.
 
@@ -358,17 +370,18 @@ Two guards keep the suite honest:
 
 ## 🗺️ Status
 
-Built, and guarded by end-to-end tests that CI runs on every push and PR (see Testing above): team and profile management, cross-agent messaging, the desktop IDE, git-worktree isolation, browser/remote access with token auth, the full three-breaker safety shield, crash recovery, desktop and webhook notifications, the machine acceptance gate, session sub-agents, a self-service policy allowlist UI, and the true-unrestricted bypass tier.
+Built, and guarded by end-to-end tests that CI runs on every push and PR (see Testing above): agent detection and starting a session from any detected agent, the session network (agent-to-agent tools, message envelopes, UI forwarding), the desktop IDE, browser/remote access with token auth, all three breakers of the safety shield (permissions, per-chain messages, cost), crash recovery, desktop and webhook notifications, a self-service policy allowlist UI, the true-unrestricted bypass tier, and session renaming with automatic titles. Removed on 2026-10-02 (see [`DECISIONS.md` §H](docs/DECISIONS.md)): agent profiles, teams, the task board, git-worktree-per-task isolation, the acceptance gate, the message bus (its breaker was rebuilt for session-to-session messages), and the "child finished, so inject its result into the parent" sub-agent behaviour.
 
 Open by design, and worth knowing before you rely on it:
 
 - **No execution sandbox for the PTY tier.** Until there is one, PTY agents stay read-only — that's the honest consequence, not an oversight.
-- **No LLM lead.** Task decomposition is manual; `TaskService` is fully deterministic.
 - **No mid-turn cost cutoff.** The only adapter that emits usage does so as a turn ends, so there is no observable "usage arrived mid-turn" case to build against. Branching on it would be inventing behaviour.
-- **Only Claude SDK and ACP sessions can *initiate* messages.** ACP agents (Codex, Gemini CLI) reach the same two MCP servers through a bridge subprocess holding a scoped, per-session token; the `opencode` provider (bespoke HTTP/SSE) and PTY don't mount them — but the `opencode-acp` provider does, since it runs OpenCode through ACP. *Receiving* injected messages works across every backend.
+- **Only some agents can send messages on their own.** Claude Agent SDK sessions (in-process), every ACP agent (Codex, Gemini CLI, OpenCode via the `opencode-acp` provider) and OpenCode over HTTP (the `opencode` provider) get the five session tools — the latter two through a bridge subprocess holding a scoped, per-session token. PTY agents (Claude Code CLI, Aider) mount no tools: they can *receive* messages, but can't call `send_to_session` or `create_session`, so they can't answer unless a human relays it.
+- **Messages queued for a busy session live in memory.** If core restarts before the target's turn ends, the queued message is lost (the sender was already told it was queued, not that it was read).
+- **The agent list is fixed.** Detection covers the Claude Agent SDK, Claude Code CLI, Gemini CLI, OpenCode, Codex and Aider. The manual "type a command" entry was removed deliberately; supporting another agent means adding a catalog entry.
 - **Provider secrets are masked over the wire but stored in plaintext locally**, the same trade-off Paseo makes with its config file.
 - **Orphaned agent processes are only reclaimed on the next start.** If core is SIGKILLed, force-quit, or loses power, the graceful shutdown path never runs and spawned agents — plus the MCP grandchildren they started — keep running. Their pids are now recorded in `<dataDir>/child-pids.json` and reaped at the next start after matching the process creation time (**no match, no kill** — pid reuse must never cost you an unrelated process). Reclaiming them at the moment of death needs a Windows Job Object, which means a native dependency; this project deliberately does not require an MSVC toolchain on the packaging machine.
-- **SQLite migrations can only add columns.** `packages/db/src/client.ts` is a dozen hand-rolled "check `PRAGMA table_info` → `ALTER TABLE ADD COLUMN`" functions with no version table. Type changes, renames, drops and new constraints are all out of reach; a destructive migration would need a real migration mechanism first.
+- **SQLite migrations can only add columns.** `packages/db/src/client.ts` is a handful of hand-rolled "check `PRAGMA table_info` → `ALTER TABLE ADD COLUMN`" functions with no version table. Type changes, renames, drops and new constraints are all out of reach; a destructive migration would need a real migration mechanism first.
 - **The chat view keeps at most 2,000 items in memory.** Older ones are dropped (the full history stays in SQLite and reloads when you switch away and back). This bounds what a runaway loop can do to renderer memory; ordinary conversations never come close.
 - **Windows packaging only** so far.
 

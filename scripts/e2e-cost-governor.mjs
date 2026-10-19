@@ -13,14 +13,15 @@
  * 後端**唯一**的保護。這份 e2e 刻意全程用 ACP 假 agent(`software: "acp"`)
  * 測試,不是疏漏——這正是在驗證「一個從頭到尾不回報任何 usage/cost 的後端,
  * 依然被回合硬上限保護」這個最重要的宣稱(見測試 A 最後的「不報 usage 的
- * 後端只有回合上限生效」斷言)。任務預算/每日 kill-switch 兩項則利用假 agent
+ * 後端只有回合上限生效」斷言)。每日 kill-switch 則利用假 agent
  * 既有的 `ACP_USAGE_UPDATE` 指令(S3a e2e 已有的機制)決定性地灌入假造的
  * `cost`,不需要真實模型/API 金鑰。
  *
  * 涵蓋(§7 檢查清單「e2e」項目逐一對應):
  *   A. 回合硬上限:工具呼叫次數超標 → 立即 interrupt(§0.1 優先項目)
  *   B. 回合硬上限:時間超標 → 立即 interrupt
- *   C. 任務預算超標 → 擋後續 prompt,不打斷已結束的回合
+ *   C.(2026-10-02 移除:任務預算超標 → 擋後續 prompt;task 已移除,見
+ *      docs/DECISIONS.md §H,編號保留不重排)
  *   D. 每日 kill-switch → 全部 session interrupt,且擋後續 prompt
  *   E. T1 防遺忘(waiting 超過短版 T1)→ 只發通知,不 halt
  *   F. T2 資源回收(waiting 超過短版 T2)→ 真 trip,dispose 子程序(session 狀態
@@ -33,13 +34,14 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WRITE_FILE_PREFIX, USAGE_UPDATE_PREFIX, MANY_TOOL_CALLS_PREFIX, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
 // 這支 e2e 測的是編譯產物,忘記先 pnpm build 的話會安靜地驗證舊程式碼並全綠
@@ -48,7 +50,6 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const FAKE_AGENT_PATH = path.join(REPO_ROOT, "scripts", "fake-acp-agent.mjs");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 
 const results = [];
@@ -59,9 +60,6 @@ function record(name, ok, detail) {
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-function runGitSync(args, cwd) {
-  return spawnSync("git", args, { cwd, encoding: "utf8" });
 }
 
 // =======================================================================
@@ -193,6 +191,8 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
     DESKMONY_WORKSPACE: workspaceDir,
+    // 2026-10-02(P2:移除 profile):fake ACP agent 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+    ...e2eProvidersEnv(),
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -245,67 +245,16 @@ async function killProcessTree(proc) {
 /** 寫一份帶 `budget` 區塊的 config.json——`budget` 只能靠設定檔覆寫(F4,遠端
  *  不可改,見 packages/shared/src/core-config.ts 的 `ConfigSetFilePatchSchema`
  *  刻意不含 `budget` 的說明),沒有對應的環境變數,只能在啟動前寫好這個檔案。 */
-/**
- * 清掉這個測試自己建立的任務 worktree。
- *
- * task.assign 建立的 worktree **不在** repoDir 底下,而是
- * `<repoDir 的上層>/.deskmony-worktrees/<repoDir 名稱>-task-<8 碼>`(見
- * apps/core/src/workspace/workspace-manager.ts 的 `createWorkspaceForTask()`),
- * 所以收尾的 `rmSync([dataDir, homeDir, repoDir])` 掃不到它們,每跑一次就在
- * 系統暫存目錄留下殘留。這個測試收尾時已經先 kill 掉 core,gateway 不在了,
- * 沒辦法走 `task.delete` 那條正規路徑 —— 直接用檔案系統清理。
- *
- * ⚠️ `.deskmony-worktrees` 這個根目錄是**所有** e2e 共用的(都在 os.tmpdir()
- * 底下),絕不能整個刪掉:可能有另一支 e2e 正在跑。這裡只刪前綴對得上這個
- * repoDir 的項目,根目錄則只在「刪完之後恰好是空的」時才順手移除。
- */
-function rmTaskWorktrees(repoDir) {
-  const root = path.join(path.dirname(repoDir), ".deskmony-worktrees");
-  if (!existsSync(root)) return;
-  const prefix = `${path.basename(repoDir)}-task-`;
-  let entries;
-  try {
-    entries = readdirSync(root);
-  } catch {
-    return;
-  }
-  for (const name of entries) {
-    if (!name.startsWith(prefix)) continue;
-    try {
-      rmSync(path.join(root, name), { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
-  }
-  try {
-    if (readdirSync(root).length === 0) rmdirSync(root);
-  } catch {
-    // 還有別的測試的 worktree 在裡面(或剛好有人在用),留著即可。
-  }
-}
-
 function writeConfigWithBudget(configPath, budget) {
   // `warnAtPercent` 是 `BudgetConfigSchema` 的必填欄位(沒有 `.default()`,見
   // packages/shared/src/core-config.ts)——這裡統一補上預設值 80,呼叫端只需要
-  // 指定這次測試真正關心的欄位(task/daily/turn)。
+  // 指定這次測試真正關心的欄位(daily/turn)。
   writeFileSync(configPath, JSON.stringify({ version: 1, budget: { warnAtPercent: 80, ...budget } }, null, 2), "utf8");
 }
 
-async function createAcpSession(client, workspaceDir, title, extra = {}) {
-  const { profile } = await client.rpc("profile.create", {
-    name: `E2E ${title}`,
-    software: "acp",
-    workingDir: workspaceDir,
-    acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    permissionLevel: "always-ask",
-    ...extra.profileFields,
-  });
-  const { session } = await client.rpc(
-    "session.create",
-    { agentProfileId: profile.id, workingDir: workspaceDir, title, teamMemberId: extra.teamMemberId },
-    30_000,
-  );
-  return { profileId: profile.id, sessionId: session.id };
+async function createAcpSession(client, workspaceDir, title) {
+  const { session } = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
+  return { sessionId: session.id };
 }
 
 // =======================================================================
@@ -468,119 +417,6 @@ async function testTurnLimitDuration() {
 }
 
 // =======================================================================
-// C:任務預算超標 → 擋後續 prompt,不打斷已結束的回合。
-// =======================================================================
-async function testTaskBudget() {
-  const gitVersion = runGitSync(["--version"], process.cwd());
-  if (gitVersion.status !== 0) {
-    record("C: 任務預算(git 不可用,整個步驟略過)", false, `找不到可用的 git 執行檔: ${gitVersion.error ?? gitVersion.stderr}`);
-    return;
-  }
-
-  const PORT = 4362;
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-c-data-"));
-  const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-c-home-"));
-  const repoDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-c-repo-"));
-  const configPath = path.join(homeDir, "config.json");
-  writeConfigWithBudget(configPath, { task: { maxCostUsd: 1 }, turn: { maxToolCalls: 100_000, maxDurationMs: 600_000 } });
-
-  let coreProc;
-  let client;
-  try {
-    runGitSync(["init"], repoDir);
-    runGitSync(["config", "user.email", "e2e@deskmony.local"], repoDir);
-    runGitSync(["config", "user.name", "Deskmony E2E"], repoDir);
-    writeFileSync(path.join(repoDir, "README.md"), "# e2e cost-governor task-budget repo\n", "utf8");
-    runGitSync(["add", "."], repoDir);
-    runGitSync(["commit", "-m", "initial commit"], repoDir);
-
-    coreProc = startCore({ port: PORT, dataDir, homeDir, workspaceDir: repoDir });
-    await waitForPort(`ws://127.0.0.1:${PORT}`, 20_000);
-    client = new MiniGatewayClient(`ws://127.0.0.1:${PORT}`);
-    await client.connect();
-
-    const team = await client.rpc("team.create", { name: "E2E Cost Team", workingDir: repoDir });
-    const { profile } = await client.rpc("profile.create", {
-      name: "E2E Cost Member Profile",
-      software: "acp",
-      workingDir: repoDir,
-      acpConfig: { command: process.execPath, args: [FAKE_AGENT_PATH] },
-    });
-    const { member } = await client.rpc("team.addMember", {
-      teamId: team.team.id,
-      agentProfileId: profile.id,
-      name: "Coder",
-      role: "Coder",
-      canInterrupt: false,
-    });
-    const { task } = await client.rpc("task.create", { teamId: team.team.id, title: "E2E Cost Task" });
-    await client.rpc("task.assign", { taskId: task.id, memberId: member.id });
-
-    const { session } = await client.rpc(
-      "session.create",
-      { agentProfileId: profile.id, workingDir: repoDir, title: "C-task-budget", teamMemberId: member.id },
-      30_000,
-    );
-    const sessionId = session.id;
-
-    // 灌一筆假造的 cost(2.0 USD > maxCostUsd=1)——用既有的 ACP_USAGE_UPDATE
-    // 指令(S3a e2e 既有機制),不需要真實模型/API 金鑰。
-    const startIdx = client.events.length;
-    await client.rpc("session.sendPrompt", {
-      sessionId,
-      prompt: { text: `${USAGE_UPDATE_PREFIX}${JSON.stringify({ used: 1000, size: 100_000, cost: { amount: 2, currency: "USD" } })}` },
-    });
-    // 這個回合應該正常結束(不被打斷)——等到 agent 自己送出的 "usage reported"
-    // 訊息完整送達,證明回合沒有被腰斬。
-    const chunkEvent = await client.waitForEvent(
-      (e) => e.sessionId === sessionId && e.event.type === "message-delta" && e.event.delta === "usage reported",
-      15_000,
-      startIdx,
-    );
-    await client.waitForEvent((e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error"), 15_000);
-    const turnNotCutShort = Boolean(chunkEvent); // 完整訊息送達,代表回合走完全程,沒被 interrupt() 腰斬
-
-    const notification = await client
-      .waitForEnforcementNotification((n) => n.kind === "trip" && n.tripReason === "task-budget", 5_000)
-      .catch(() => undefined);
-    const tripNotified = Boolean(notification);
-
-    // 後續 prompt 應該被擋下(擋的是「後續」,不是這次已經結束的回合)。
-    let blocked = false;
-    let blockedErr = "";
-    try {
-      await client.rpc("session.sendPrompt", { sessionId, prompt: { text: "hello again" } });
-    } catch (err) {
-      blocked = true;
-      blockedErr = String(err);
-    }
-
-    const summary = await client.rpc("cost.getSummary", { sessionId });
-    const taskTripped = summary.task?.tripped === true;
-
-    record(
-      "C: 任務預算超標(maxCostUsd=1,灌入 cost=2)→ 觸發的這次回合正常走完全程(不打斷已結束的回合)、收到 trip 通知(reason=task-budget)、cost.getSummary 回報 task.tripped=true,且後續 sendPrompt 被擋下",
-      turnNotCutShort && tripNotified && taskTripped && blocked,
-      `turnNotCutShort=${turnNotCutShort}, tripNotified=${tripNotified}, taskTripped=${taskTripped}, blocked=${blocked}(${blockedErr})`,
-    );
-  } catch (err) {
-    record("C 執行過程發生未預期錯誤", false, String(err));
-  } finally {
-    client?.close();
-    await killProcessTree(coreProc);
-  }
-
-  rmTaskWorktrees(repoDir); // 見該函式註解:worktree 不在 repoDir 底下
-  for (const dir of [dataDir, homeDir, repoDir]) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
-  }
-}
-
-// =======================================================================
 // D:每日 kill-switch → 全部 session interrupt,且擋後續 prompt。
 // =======================================================================
 async function testDailyKillSwitch() {
@@ -708,7 +544,11 @@ async function testWaitingWatchdog() {
       sessionId,
       prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath, content: "x" })}` },
     });
-    await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "permission-request", 15_000, startIdx);
+    const permissionRequest = await client.waitForEvent(
+      (e) => e.sessionId === sessionId && e.event.type === "permission-request",
+      15_000,
+      startIdx,
+    );
     await client.waitForSessionUpdate((u) => u.id === sessionId && u.status === "waiting", 5_000);
 
     // ---- E: T1(800ms)→ 只發通知,session 仍維持 waiting(不 halt)----
@@ -732,14 +572,26 @@ async function testWaitingWatchdog() {
     await sleep(500);
     const sessionAfterT2 = (await client.rpc("session.list", {})).sessions.find((s) => s.id === sessionId);
     const reclaimedToError = sessionAfterT2?.status === "error" && (sessionAfterT2?.lastError ?? "").includes("回收");
+    // 2026-10-15:回收的正是在等權限回覆的 agent——那筆請求要一起收掉,client 才會關閉彈窗(修正前彈窗一直留著、按了也沒反應)。
+    const releasedPush = client.permissionResolvedEvents.find(
+      (p) => p.sessionId === sessionId && p.requestId === permissionRequest.event.requestId,
+    );
+    const pendingReleased = releasedPush?.decision === "deny" && releasedPush?.source === "agent-stopped";
 
-    // 子程序已經被 dispose、runtime 已移除——sendPrompt 應得到明確錯誤(而非
-    // 靜默失敗),證明「需要人工重新建立 session 才能續行」這個預期行為。
-    let sendPromptFailsAfterReclaim = false;
+    // 子程序已經被 dispose、runtime 已移除。2026-10-15 之前 sendPrompt 在這裡會得到 SESSION_NOT_RUNNING
+    // (「需要人工重新建立 session 才能續行」);現在人類對沒有 runtime 的 session 送訊息會重新啟動 agent 再送出
+    // (自動復活,見 e2e-session-revive.mjs)——能收到新一輪的 completed、狀態離開 error 回到 idle,同樣證明舊的
+    // runtime 確實已被釋放(新的回合是由一個新啟動的 agent 完成的)。
+    const reviveIdx = client.events.length;
+    let revivedAfterReclaim = false;
     try {
-      await client.rpc("session.sendPrompt", { sessionId, prompt: { text: "should fail" } });
+      await client.rpc("session.sendPrompt", { sessionId, prompt: { text: "after reclaim" } }, 60_000);
+      await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "completed", 15_000, reviveIdx);
+      await sleep(300);
+      const revived = (await client.rpc("session.list", {})).sessions.find((s) => s.id === sessionId);
+      revivedAfterReclaim = revived?.status === "idle";
     } catch {
-      sendPromptFailsAfterReclaim = true;
+      revivedAfterReclaim = false;
     }
 
     // session 記錄本身(DB)仍然保留——不是被 deleteSession() 那種連 DB 都清掉
@@ -747,10 +599,10 @@ async function testWaitingWatchdog() {
     const sessionStillListed = Boolean(sessionAfterT2);
 
     record(
-      "F: T2 資源回收(waiting 超過 2000ms 短版 T2)→ 真 trip(收到 trip 通知,reason=waiting-ttl),session 狀態變成 error(lastError 說明已回收)、子程序已釋放(sendPrompt 明確失敗),但 session 記錄本身仍保留(回收 ≠ 丟棄)",
-      t2Tripped && reclaimedToError && sendPromptFailsAfterReclaim && sessionStillListed,
+      "F: T2 資源回收(waiting 超過 2000ms 短版 T2)→ 真 trip(收到 trip 通知,reason=waiting-ttl),session 狀態變成 error(lastError 說明已回收)、子程序已釋放(人類再送訊息會重新啟動 agent 並跑完一輪、回到 idle),但 session 記錄本身仍保留(回收 ≠ 丟棄);等待中的權限請求一起收掉(permission-resolved deny、source=agent-stopped)",
+      t2Tripped && reclaimedToError && revivedAfterReclaim && sessionStillListed && pendingReleased,
       `t2Tripped=${t2Tripped}, status=${sessionAfterT2?.status}, lastError=${sessionAfterT2?.lastError}, ` +
-        `sendPromptFailsAfterReclaim=${sendPromptFailsAfterReclaim}, sessionStillListed=${sessionStillListed}`,
+        `revivedAfterReclaim=${revivedAfterReclaim}, sessionStillListed=${sessionStillListed}, releasedPush=${JSON.stringify(releasedPush)}`,
     );
   } catch (err) {
     record("E/F 執行過程發生未預期錯誤", false, String(err));
@@ -780,9 +632,6 @@ async function main() {
 
   console.log("\n=== S3b e2e:B(回合硬上限:時間)===");
   await testTurnLimitDuration();
-
-  console.log("\n=== S3b e2e:C(任務預算超標,只擋後續 prompt)===");
-  await testTaskBudget();
 
   console.log("\n=== S3b e2e:D(每日 kill-switch,全部 interrupt)===");
   await testDailyKillSwitch();

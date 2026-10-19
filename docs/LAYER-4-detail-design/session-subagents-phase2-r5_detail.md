@@ -1,5 +1,7 @@
 # S12 Phase 2 — Round 5：`list_subagents`(父查詢自己名下的子 agent)
 
+> ⚠️ 2026-10-02 已由 session 網路取代,見 [simplify-agents-sessions_detail.md](./simplify-agents-sessions_detail.md)
+
 > 上層：S12 + [Phase 2 R1](./session-subagents-phase2_detail.md)（子回注父）+
 > [R2](./session-subagents-phase2-r2_detail.md)（`spawn_subagent`）+
 > [R4](./session-subagents-phase2-r4_detail.md)（`send_to_subagent`）。

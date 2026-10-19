@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CLAUDE_MODEL_ALIASES } from "./known-models.js";
+import { EffortLevelSchema } from "./agent-launch.js";
 
 /**
  * provider-catalog.ts(這輪新增):把「Paseo 的 provider 設計」——具名 provider
@@ -8,31 +9,40 @@ import { CLAUDE_MODEL_ALIASES } from "./known-models.js";
  * (Deskmony 的設定存在 SQLite,見 apps/core/src/settings/settings-store.ts),
  * 而是移植這套「provider 目錄 + 繼承覆寫」的**概念**。
  *
+ * 2026-10-02(P2:移除 profile):這份目錄現在是「session 能以哪些 agent 建立」的唯一
+ * 來源——`AgentCatalog`(apps/core/src/agents/agent-catalog.ts)把它與偵測結果、使用者偏好
+ * 合併後,`session.create({providerId})` 直接依此建 session,不再有 profile 當中介。
+ *
  * 這裡只定義**內建 provider 目錄**本身(靜態常數 + zod schema),純函式
  * `resolveProviders()`(見 resolve-providers.ts)才是「內建目錄 + 偵測結果 +
- * 使用者偏好 → 可直接用來建立 profile 的清單」這件事的實際邏輯,兩者分開
+ * 使用者偏好 → 可直接用來建立 session 的清單」這件事的實際邏輯,兩者分開
  * 是因為目錄是靜態資料、resolve 是每次呼叫都要重新套用偵測/偏好的計算。
  *
+ * 2026-10-06:思考程度(對應 Paseo 模型物件的 `thinkingOptions`)已補上——provider 層級的固定清單
+ * (`efforts`,Claude 的 low…max)、model 層級的清單(`ProviderModel.efforts`,OpenCode 偵測到的 variants),
+ * 以及「要等 session 開起來才由 agent 回報」的 ACP agent(`optionsAfterStart`,見 session-options.ts)。
+ *
  * 刻意不做(記入未來項目,對齊需求描述「這輪不做」的範圍)：
- *   - `thinkingOptions`(Paseo 模型物件的思考預算選項)。
  *   - `disallowedTools`(Paseo provider 層級的工具黑名單)。
  *   - Paseo 的「具名 provider 多實例」(例如同時存在 `claude-work`/
- *     `claude-personal` 兩個都 extends `claude` 的具名 provider)——這輪改用
- *     更簡單的對應:`AgentProfile` 本身新增 `providerId`/`env`(見
- *     agent-profile.ts),同一個 provider 目錄項目可以被多個 profile 引用,
- *     每個 profile 各自帶不同的 `env`(例如不同的 `ANTHROPIC_API_KEY`),效果
- *     等同 Paseo 的「同 provider 多組憑證」,但資料模型更貼近 Deskmony 既有的
- *     「profile 是可建立 session 的具體設定檔」這個核心概念,不需要在 provider
- *     目錄本身之外再發明一層「具名 provider 實例」。
+ *     `claude-personal` 兩個都 extends `claude` 的具名 provider)。(曾經用
+ *     `AgentProfile.providerId`/`env` 的組合對應過;2026-10-02 profile 整個移除後,
+ *     同一個 provider 只有一組 provider 層級 env,見 settings-store.ts 的
+ *     `getProviderEnv()`——要多組憑證得在目錄裡多加一個項目。)
  */
 
-/** 對齊 Paseo 模型物件的形狀(id/label/description/isDefault),先不含
- *  `thinkingOptions`(見上方檔案註解「刻意不做」)。 */
+/** 對齊 Paseo 模型物件的形狀(id/label/description/isDefault)。 */
 export const ProviderModelSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   description: z.string().optional(),
   isDefault: z.boolean().optional(),
+  /**
+   * 2026-10-06:這個 model 可選的思考程度(值由 agent 定義)。目前只有 OpenCode 會有:偵測時用
+   * `opencode models --verbose` 讀每個 model 的 `variants`(見 apps/core/src/detect/agent-detector.ts)。
+   * 空陣列 = 這個 model 沒有可選的思考程度;省略 = 不知道。
+   */
+  efforts: z.array(z.string()).optional(),
 });
 export type ProviderModel = z.infer<typeof ProviderModelSchema>;
 
@@ -44,12 +54,29 @@ export type ProviderModel = z.infer<typeof ProviderModelSchema>;
  * 手法(那裡用 TS 的 `Extract<...>`,這裡用獨立的 zod enum 常數,避免依賴
  * zod 版本是否支援 `ZodEnum.extract()`),在型別與執行期驗證兩層都保證
  * `BUILTIN_PROVIDERS`/使用者自訂的 provider 不會產生 AdapterRegistry 建不起來
- * 的組合(呼應 e2e 步驟22 系列「codex 不可產生建不起來的 profile」的既有精神,
- * 這裡是對 provider 目錄套用同一條原則,見 scripts/e2e-gateway.mjs 新增的
- * provider-catalog 決定性測試)。
+ * 的組合(呼應「codex 不可產生建不起來的 session」的既有精神,這裡是對
+ * provider 目錄套用同一條原則,見 scripts/e2e-gateway.mjs 的 provider-catalog
+ * 決定性測試)。
  */
 export const RegisteredAgentSoftwareSchema = z.enum(["claude-agent-sdk", "acp", "pty", "opencode"]);
 export type RegisteredAgentSoftware = z.infer<typeof RegisteredAgentSoftwareSchema>;
+
+/**
+ * 「agent 家族」:這個 provider 底下跑的是哪一個**有自己的預設權限策略、Deskmony 必須在啟動時介入**的
+ * 外部 agent,與 `software`(Deskmony 用哪個 adapter 對接)是**正交**的兩件事。
+ *
+ * 目前只有 `"opencode"`:opencode **預設所有工具權限都是 allow**,只有它自己設定檔裡標成 `"ask"`
+ * 的工具才會發權限請求——使用者的 opencode 設定通常沒有 `permission` 段,所以不處理的話,
+ * OpenCode session 跑 bash/edit/webfetch/MCP 工具時**完全不經過** Deskmony 的政策引擎
+ * (docs/DECISIONS.md §C 的 default-deny、hard-deny 四類、auto/YOLO 對它全部失效)。
+ * Deskmony 啟動這一家的子行程時,會透過環境變數 `OPENCODE_CONFIG_CONTENT` 注入「所有工具都 ask」
+ * 的設定(見 packages/adapters/src/opencode-config.ts)——`opencode`(HTTP,`software: "opencode"`)與
+ * `opencode-acp`(`software: "acp"`)兩種對接方式都是這一家,所以不能只靠 `software` 判斷。
+ *
+ * 未來若有別的 agent 也有「預設放行、要靠啟動設定改成逐項詢問」的行為,在這裡加一個成員即可。
+ */
+export const AgentFamilySchema = z.enum(["opencode"]);
+export type AgentFamily = z.infer<typeof AgentFamilySchema>;
 
 export const ProviderCatalogEntrySchema = z.object({
   /** 穩定識別碼(例如 "claude-agent-sdk"、"gemini"),使用者偏好(settings 的
@@ -58,11 +85,15 @@ export const ProviderCatalogEntrySchema = z.object({
   label: z.string().min(1),
   description: z.string().optional(),
   software: RegisteredAgentSoftwareSchema,
+  /** 見 `AgentFamilySchema`。省略 = 沒有需要 Deskmony 在啟動時介入的預設權限策略。
+   *  e2e 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入的測試 provider 也可以宣告它,測試才走得到注入邏輯。 */
+  family: AgentFamilySchema.optional(),
   /**
    * 對應 `AgentDetectionEntry.key`(見 detect.ts),`resolveProviders()` 依此
    * 帶入安裝狀態與解析出的執行檔路徑。省略代表這個 provider 沒有對應的自動
-   * 偵測項(目前只有 `custom-pty` 這個逃生閥)——一律視為「可選,但 command
-   * 需要使用者手動輸入」,不臆測任何路徑。
+   * 偵測項——2026-10-02(P2)起內建目錄裡已沒有這種項目(原本唯一的一個是手動輸入
+   * command 的 `custom-pty` 逃生閥,新模型的前提是「從電腦找到的 agent」,已移除);
+   * 只有 e2e 經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入的測試 provider 會省略它。
    */
   detectKey: z.string().optional(),
   /** 附加在偵測到的 command 後面的固定參數(例如 gemini 需要 `--acp` 才會講
@@ -73,6 +104,20 @@ export const ProviderCatalogEntrySchema = z.object({
    *  不臆測)。 */
   models: z.array(ProviderModelSchema),
   supportsModelSelection: z.boolean(),
+  /**
+   * 2026-10-06:建立 session 時能不能指定思考程度(`AgentCatalog.buildLaunch()` 只對 true 的 provider 帶 effort)。
+   * 可選的值:provider 層級的 `efforts`、model 層級的 `ProviderModel.efforts`,或 agent 開起來之後回報的
+   * (`optionsAfterStart`)。省略 = false。
+   */
+  supportsEffortSelection: z.boolean().optional(),
+  /** 2026-10-06:與 model 無關的固定思考程度清單(Claude 的 low…max)。省略 = 沒有固定清單。 */
+  efforts: z.array(z.string()).optional(),
+  /**
+   * 2026-10-06:這個 agent 的 model/思考程度清單**要等 session 開起來才知道**(ACP 的 `session/new` 回應才帶
+   * `configOptions`,見 session-options.ts)。建立 session 的選單因此沒有選項可列,改成建立後在對話標題列選,
+   * 並記住這個 provider 上次的選擇、下次建立後自動套用(見 SessionManager)。省略 = false。
+   */
+  optionsAfterStart: z.boolean().optional(),
   /** UI 排序(數字越小越前面),使用者偏好的 `order` 可覆寫。 */
   order: z.number().int(),
 });
@@ -171,9 +216,9 @@ export type ProviderPrefsPatchInput = z.infer<typeof ProviderPrefsPatchInputSche
  *     `defaultArgs`(這個項目刻意不寫 `defaultArgs`,見下方 codex 項目定義)。
  *     `docs/DECISIONS.md` B2 對這個取捨(依賴非 OpenAI 官方維護的第三方套件)
  *     有更完整的說明。
- *   - `custom-pty`:逃生閥,無 `detectKey`,`resolveProviders()` 一律回傳
- *     `command: undefined`,由使用者在 UI 手動輸入(比照既有
- *     ProfileCreateDialog 的「自訂…」選項)。
+ *   - (2026-10-02 P2 移除:`custom-pty` 逃生閥——手動輸入 command 與「session 只能用
+ *     從電腦偵測到的 agent 建立」的前提衝突,而且 gateway 不能有任何接受任意
+ *     command 的入口。)
  */
 export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
   {
@@ -188,6 +233,8 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // 永遠至少有這幾個別名可選,不會完全空白。
     models: CLAUDE_MODEL_ALIASES,
     supportsModelSelection: true,
+    supportsEffortSelection: true,
+    efforts: [...EffortLevelSchema.options],
     order: 0,
   },
   {
@@ -198,11 +245,14 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     detectKey: "claude-code-cli",
     // pty 是無結構化終端直通,建立後不能像 SDK 一樣中途切換 model(見
     // packages/adapters/src/pty-adapter.ts 的 setModel() 一律 throw)——這裡的
-    // 「支援 model 選擇」意思是「建立 profile 時把 --model <別名> 烤進固定的
-    // 啟動參數」(見 ProfileCreateDialog.tsx 的 resolveTarget()),不是隨時可
+    // 「支援 model 選擇」意思是「建立 session 時把 --model <別名> 烤進固定的
+    // 啟動參數」(見 AgentCatalog.buildLaunchSpec()),不是隨時可
     // 切換。底層是同一支 claude 執行檔,同樣的別名清單直接適用。
+    // 2026-10-06:思考程度同理——`claude --effort <level>`(2.1.199 實測,值同 SDK 的 5 級),建立時烤進參數。
     models: CLAUDE_MODEL_ALIASES,
     supportsModelSelection: true,
+    supportsEffortSelection: true,
+    efforts: [...EffortLevelSchema.options],
     order: 10,
   },
   {
@@ -213,14 +263,23 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     detectKey: "gemini-cli",
     defaultArgs: ["--acp"],
     models: [],
+    // 2026-10-06:model/思考程度由 agent 在 `session/new` 回報(ACP configOptions),見 session-options.ts。
+    // 本機未安裝 gemini,沒有實測過它回什麼;沒宣告的項目 UI 就不顯示。
     supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
     order: 20,
   },
   {
     id: "opencode",
-    label: "OpenCode",
-    description: "OpenCode 的 HTTP + SSE headless server API。",
+    label: "OpenCode(HTTP)",
+    description:
+      "OpenCode 的 HTTP + SSE headless server API,事件即時、可遠端。" +
+      "與下面的「OpenCode(ACP)」一樣能用 session 網路工具(list_sessions / create_session / send_to_session 等)," +
+      "看到其他 session 並主動傳訊息——兩者差別只剩對接方式(HTTP + SSE 或 ACP),不是能力。" +
+      "所有工具呼叫(含 bash / edit / MCP)都會經過 Deskmony 的權限引擎。",
     software: "opencode",
+    family: "opencode",
     detectKey: "opencode-cli",
     // 這輪起:目錄本身的靜態清單仍是空的(這裡不臆測任何固定 model
     // 清單——opencode 支援的 provider/model 組合完全依使用者本機安裝/設定
@@ -232,17 +291,22 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // 的既有先例一致,不是這輪新發明的模式。
     models: [],
     supportsModelSelection: true,
+    // 2026-10-06:思考程度 = opencode 的 model variants(各 model 不同,偵測時讀 `opencode models --verbose`),
+    // 隨每則訊息的 `variant` 欄位送出,見 opencode-adapter.ts。
+    supportsEffortSelection: true,
     order: 30,
   },
   {
     id: "opencode-acp",
-    label: "OpenCode(ACP,支援團隊訊息)",
+    label: "OpenCode(ACP)",
     description:
       "同一個 opencode 執行檔,但改用它內建的 `opencode acp` 子命令以 ACP 對接。" +
-      "與上面的「OpenCode」項目差別只有一個、但很關鍵:ACP 這條路會掛載 team-bus MCP 工具," +
-      "所以這個 provider 建立的成員**能把回覆送回團隊聊天**;走 HTTP server API 的那個不行" +
-      "(adapter 內沒有任何 MCP 掛載,見 SOFTWARE_WITH_TEAM_BUS)。單機使用兩者差異不大。",
+      "與上面的「OpenCode(HTTP)」一樣能自己呼叫 list_sessions / create_session / send_to_session 等工具," +
+      "看到其他 session 並主動傳訊息,所有工具呼叫也都經過 Deskmony 的權限引擎;差別只剩對接方式。" +
+      "ACP 這條路的 subagent(task 工具)會被停用——opencode acp 不會轉發 subagent 的權限請求,subagent 會卡死。" +
+      "單機使用兩者差異不大。",
     software: "acp",
+    family: "opencode",
     detectKey: "opencode-cli",
     // `opencode acp`——2026-08-28 對本機實際安裝的 opencode 1.18.7 實測驗證
     // (比照本 repo「以實際觀察到的行為為準,不臆測」的一貫紀律):
@@ -254,7 +318,11 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // mcp-bridge-server.ts 正是 stdio 型,所以不需要對 AcpAdapter 做任何修改。
     defaultArgs: ["acp"],
     models: [],
-    supportsModelSelection: false,
+    // 2026-10-06:`session/new` 回應的 configOptions 有 `model`(category model)與 `mode`;目前 model 有 variants
+    // 時另有 `effort`(category thought_level)——opencode 1.18.7 實測 + 讀它的 ACP 實作確認,見 session-options.ts。
+    supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
     order: 31,
   },
   {
@@ -268,7 +336,11 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     // 只能在偵測階段動態解析,見 resolve-providers.ts 的
     // `defaultArgs: detected?.args ?? entry.defaultArgs`。
     models: [],
-    supportsModelSelection: false,
+    // 2026-10-06:codex-acp 1.4.0 的 configOptions 有 `model`(category model)與 `reasoning_effort`
+    // (category thought_level),見 session-options.ts。
+    supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
     order: 40,
   },
   {
@@ -280,14 +352,5 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     models: [],
     supportsModelSelection: false,
     order: 50,
-  },
-  {
-    id: "custom-pty",
-    label: "自訂…(進階,手動輸入 command)",
-    description: "沒有自動偵測,command 需要手動輸入(逃生閥,比照既有 ProfileCreateDialog 的自訂選項)。",
-    software: "pty",
-    models: [],
-    supportsModelSelection: false,
-    order: 9999,
   },
 ];

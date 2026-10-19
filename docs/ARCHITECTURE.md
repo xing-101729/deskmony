@@ -11,6 +11,14 @@
 > | [`LAYER-2-design-spec.md`](./LAYER-2-design-spec.md) → [`LAYER-3-hld/`](./LAYER-3-hld/) → [`LAYER-4-detail-design/`](./LAYER-4-detail-design/) | 逐模組的規格 → 高階設計 → 詳細設計 | 單一模組的細節以對應的 L3/L4 文件為準 |
 > | [`DEVLOG.md`](./DEVLOG.md) | 逐輪做了什麼、踩過什麼坑 | 歷史紀錄 |
 > | [`ARCHITECTURE-legacy-2026-07.md`](./ARCHITECTURE-legacy-2026-07.md) | 2026-07 的早期概念草圖 | **已封存**,多處與現況不符,見文末附錄 A |
+>
+> ⚠️ **2026-10-02(簡化重構,P1–P3 已全部完成)**:team / 任務 / 看板 / lead / 驗收閘 /
+> message-bus / 任務 worktree(P1)、agent profile(P2)、S12 的子 agent 工具與
+> 「子完成 → 結果注入父」(P3)**已整套移除**,由「偵測 agent 直接建 session +
+> 全 session 互傳訊息」取代(見 [`DECISIONS.md` §H](./DECISIONS.md)與
+> [`simplify-agents-sessions_detail.md`](./LAYER-4-detail-design/simplify-agents-sessions_detail.md))。
+> 本文件已改成現況;原本描述被移除功能的章節(§5.2 的舊訊息預算、§9.2、§10)只留
+> 說明,章節編號不變(程式碼註解與附錄 B 仍引用這些編號)。
 
 ---
 
@@ -20,14 +28,17 @@ Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 
 這句話決定了整個架構的重心。「多 agent 能互聊」只是功能,不是護城河;真正的主軸是
 **由三個獨立斷路器組成的安全罩**(見 §5)。專門服務安全罩的四個目錄
-(`permissions/`、`cost/`、`enforcement/`、`recovery/`)合計 **1,545 行實際
-程式碼(不含空行與註解),佔 `apps/core` 的 22%**;若再算上
+(`permissions/`、`cost/`、`enforcement/`、`recovery/`)合計 **1,331 行實際
+程式碼(不含空行與註解),佔 `apps/core` 的 26%**(2026-10-03 簡化重構完成後重新
+計算,`apps/core/src` 實際程式碼共 5,033 行;2026-10-02 移除 team/任務/訊息匯流
+之前是 1,545 行 / 22%,剛移除完是 1,322 行 / 29%,之後 core 多了 `agents/` 與
+session 網路而回落);若再算上
 `session-permission-coordinator.ts`(`buildExecContext()`、`checkAndExpireYolo()`)、
-`session-manager.ts` 的 `resolvePermission()` 與 `MessageBus` 的訊息預算閘,
-實際比重更高。
+`session-manager.ts` 的 `resolvePermission()`,以及不在那四個目錄裡的訊息斷路器
+`session/message-chain-budget.ts`,實際比重更高。
 
-> ⚠️ 這個數字刻意扣掉註解。這份 codebase 有 31% 是註解,算進去會得到比較好看的
-> 2,372 行 —— 但註解擋不下任何一次工具呼叫。**行數本身證明不了安全性**,
+> ⚠️ 這個數字刻意扣掉註解。這份 codebase 有約三成是註解,算進去會得到比較好看的
+> 數字 —— 但註解擋不下任何一次工具呼叫。**行數本身證明不了安全性**,
 > 真正的證據是 §5 的決策流程與 `scripts/e2e-hard-deny.mjs` 對四類 hard-deny 的
 > 逐條斷言(那支測試是 2026-09-04 新增的,在此之前四類裡有三類零覆蓋)。
 
@@ -36,10 +47,11 @@ Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 | 能力 | 落地位置 |
 |---|---|
 | 對話式操作單一 agent(串流、diff、工具呼叫、權限彈窗、內嵌終端) | `apps/desktop/src/views/`、`apps/core/src/session/` |
-| 一隊 agent 互相傳訊、共用任務看板 | `apps/core/src/bus/`、`apps/core/src/team/`、`apps/core/src/tasks/` |
-| 多種 agent 後端(Claude Code / Codex / OpenCode / 任意 CLI) | `packages/adapters/` |
-| 任務級 git worktree 隔離 | `apps/core/src/workspace/` |
-| **無人值守安全罩(權限 / 訊息 / 成本三斷路器)** | `apps/core/src/permissions/`、`bus/`、`cost/`、`enforcement/` |
+| 偵測本機 agent、直接以偵測到的 agent 建 session(沒有 profile) | `apps/core/src/agents/agent-catalog.ts`、`packages/shared/src/provider-catalog.ts` |
+| Session 網路(每個 session 都能列出可用 agent / 所有 session、讀取、建立、傳訊息給任一 session;不自動回送) | `apps/core/src/session/`、`packages/adapters/src/session-network-mcp.ts`、`mcp-bridge-server.ts`、`packages/shared/src/session-network.ts` |
+| 多種 agent 後端(Claude Code / Codex / OpenCode / Gemini / Aider) | `packages/adapters/` |
+| ~~一隊 agent 互相傳訊(團隊)、共用任務看板、任務級 git worktree 隔離~~ | **已於 2026-10-02 移除**,見 [`DECISIONS.md` §H](./DECISIONS.md);改由上面的 session 網路取代 |
+| **無人值守安全罩(權限 / 訊息 / 成本三斷路器)** | `apps/core/src/permissions/`、`cost/`、`enforcement/`、`session/message-chain-budget.ts` |
 | 崩潰復原(對帳 + 人工分流) | `apps/core/src/recovery/` |
 | 遠端存取(瀏覽器/手機)——安全罩機制本身遠端關不掉,但 2026-08-25 起遠端可與本機同權操作 auto/YOLO 與允許清單(見 §5.5) | `apps/core/src/gateway/`、`apps/core/src/http/` |
 
@@ -51,21 +63,18 @@ Deskmony 讓一隊 AI coding agent **無人值守跑數小時而不失控**。
 flowchart TB
     subgraph SHELL["apps/desktop — 桌面殼(Electron 44 + React 18)"]
         direction LR
-        Views["views/ 對話・團隊群聊・任務看板・復原視圖"]
-        Stores["stores/ zustand × 4"]
+        Views["views/ 對話・復原視圖"]
+        Stores["stores/ zustand × 2"]
         GWC["lib/gateway-client.ts"]
     end
 
     subgraph CORE["apps/core — headless orchestration server(Node.js)"]
         direction TB
-        GW["gateway/ WsGateway — 68 個 RPC + 11 個 push channel"]
+        GW["gateway/ WsGateway — 39 個 RPC + 8 個 push channel"]
         subgraph DOMAIN["領域模組"]
             direction LR
             Sess["session/"]
-            Bus["bus/"]
-            Task["tasks/"]
-            Team["team/"]
-            Work["workspace/"]
+            Agents["agents/"]
         end
         subgraph SHIELD["安全罩"]
             direction LR
@@ -84,9 +93,9 @@ flowchart TB
     end
 
     subgraph PKG["packages/"]
-        Adapters["adapters/ — 4 個 AgentAdapter + 2 個 MCP server"]
+        Adapters["adapters/ — 4 個 AgentAdapter + 1 個 MCP server(deskmony)"]
         Shared["shared/ — zod schema 單一事實來源"]
-        Db["db/ — Drizzle schema(11 張表)"]
+        Db["db/ — Drizzle schema(5 張表)"]
     end
 
     subgraph BACKENDS["agent 後端"]
@@ -109,9 +118,11 @@ flowchart TB
     CORE -.-> Shared
 ```
 
-**依賴方向鐵則**:`packages/*` **不得** import `apps/*`。跨界需求一律在
-`packages/shared` 宣告介面(`TeamBusPort`、`SubagentPort`、`ClientPresencePort`、
-`SessionControlPort`),由 `apps/core/src/index.ts` 在建構時注入實例。
+**依賴方向鐵則**:`packages/*` **不得** import `apps/*`。adapter 需要 core 提供的
+東西,一律在 `packages/shared` 宣告介面(session 工具用的 `SessionNetworkPort`、
+ACP 橋接 scoped token 用的 `McpBridgeTokenPort`),由 `apps/core/src/index.ts` 在
+建構時注入實例。(`ClientPresencePort`、`SessionControlPort` 是 `apps/core` 內部
+模組之間的介面,分別定義在 `session/session-manager.ts` 與 `enforcement/trip.ts`。)
 
 ---
 
@@ -148,14 +159,26 @@ token 可用;它落在獨立的加密檔案,**不會**進 `~/.deskmony/config.js
 
 | 模組 | 檔案 | 職責 |
 |---|---|---|
-| **SessionManager** | `session/session-manager.ts`(~2.1k 行,仍是最大的單一模組) | session 生命週期與狀態機、adapter 事件消費、子 agent、context checkpoint、啟動對帳、優雅關閉 |
+| **SessionManager** | `session/session-manager.ts`(~2.1k 行,仍是最大的單一模組) | session 生命週期與狀態機、adapter 事件消費、session 網路(五個工具的後端實作、跨 session 訊息的投遞與佇列、訊息鏈追蹤、UI 轉傳)、啟動對帳、優雅關閉 |
 | **SessionPermissionCoordinator** | `session/session-permission-coordinator.ts` | 每個 session 的暫態權限模式(auto / YOLO / 真.無限制)、政策規則 CRUD、`ExecContext` 組裝、YOLO 惰性過期。2026-09-04 從 SessionManager 抽出的第一塊(見該檔案頂端說明);SessionManager 保留同名的薄委派,gateway 呼叫端不受影響 |
-| **TeamManager** | `team/team-manager.ts` | team / team member CRUD;member 帶 `lifecycle`(persistent / ephemeral) |
-| **MessageBus** | `bus/message-bus.ts` | 訊息路由、Mailbox(DB 驅動)、投遞策略、**contextId 綁定與訊息預算斷路器** |
-| **TaskService** | `tasks/task-service.ts` | 任務狀態機、指派、機器驗收閘、人類 review 閘、合併並完成 |
-| **AcceptanceRunner** | `tasks/acceptance-runner.ts` | 跑任務定義的驗收指令(test / build / typecheck) |
-| **WorkspaceManager** | `workspace/workspace-manager.ts` | git worktree 建立 / 合併 / 清理;主幹分支動態偵測 |
-| **ProfileStore** | `profiles.ts` | AgentProfile CRUD + 冪等 seed |
+| **AgentCatalog** | `agents/agent-catalog.ts` | 「這台電腦上有哪些 agent 可以開 session」的唯一權威:持有偵測結果快取(啟動時背景偵測、不阻塞啟動;`env.detectAgents` 重新偵測)、`resolve()` / `listAvailable()`(`BUILTIN_PROVIDERS` + 偵測結果 + 使用者偏好)、`buildLaunchSpec(providerId, model?, effort?)`(找不到 / 未安裝 / 已停用丟 `DeskmonyError`)、`buildLaunchSpecForSession()`(續接 / 接手一律從 session 自己的資料重建,見下)。取代已移除的 `ProfileStore` |
+| **session 信封** | `session/session-envelope.ts` | 純函式:跨 session 訊息送進 adapter 那一刻才組裝的信封(標明來源 session、agent,並說明「這則訊息不會自動得到回覆」);UI 轉傳另有一個樣板 |
+
+> 2026-10-02 已移除:`TeamManager`(`team/`)、`MessageBus`(`bus/`)、`TaskService` 與
+> `AcceptanceRunner`(`tasks/`)、`WorkspaceManager`(`workspace/`)、`ProfileStore`
+> (`profiles.ts`)——見 [`DECISIONS.md` §H](./DECISIONS.md)。SessionManager 原有的
+> persistent 成員 context checkpoint 重啟也因此失去觸發條件,一併移除。
+>
+> **session 自帶啟動資訊**:`sessions` 表存 `provider_id` / `launch_command` /
+> `launch_args`(不存 env;env 每次 spawn 重新從 provider 偏好讀)。`continueSession()`
+> 與復原的「接手」等任何重新 spawn 既有 session 的路徑,都先用 `providerId` 走
+> `AgentCatalog.buildLaunchSpec()`;provider 已不存在 / 未安裝 / 已停用(或 software
+> 對不上 session 的 `adapterType`)時,退回 `adapterType + launch_command +
+> launch_args`;連退路都沒有(舊資料回填不出來)才丟明確錯誤。**不得再讀
+> `agent_profiles`**。這同時修掉一個舊 bug:以前用 `agentOverride` 建的 session,續接時
+> 會讀回 base profile 而換成錯的 agent。舊 session 於 core 啟動時一次、冪等地從
+> `agent_profiles` 回填(`packages/db/src/client.ts` 的
+> `backfillLegacySessionsProvider()`;表本身只讀不改)。
 
 ### 4.2 安全罩模組
 
@@ -165,13 +188,14 @@ token 可用;它落在獨立的加密檔案,**不會**進 `~/.deskmony/config.js
 | **hard-deny** | `permissions/hard-deny.ts` | 四類內建、config 不可關閉的硬性拒絕 |
 | **tool-input** | `permissions/tool-input.ts` | 從工具參數萃取指令 / 路徑 / host;realpath 防逃逸 |
 | **PermissionGateway** | `permissions/permission-gateway.ts` | 待決請求的登記簿 + 情境相依逾時(**不做政策判斷**) |
+| **MessageChainBudget** | `session/message-chain-budget.ts`(不在上面四個目錄裡) | 訊息斷路器:每條訊息鏈的 agent 對 agent 訊息數上限(`messageBudget.maxMessagesPerContext`),超過即熔斷(走 `enforcementTrip()`) |
 | **TurnLimiter** | `cost/turn-limiter.ts` | 回合硬上限(時間 / 工具呼叫次數),**不依賴 usage** |
-| **CostGovernor** | `cost/cost-governor.ts` | usage 權威聚合 + 任務預算 + 每日 kill-switch |
+| **CostGovernor** | `cost/cost-governor.ts` | usage 權威聚合 + 每日 kill-switch |
 | **WaitingWatchdog** | `cost/waiting-watchdog.ts` | 掛起 session 的 T1 提醒 / T2 資源回收 |
 | **AuditLog** | `enforcement/audit-log.ts` | append-only 稽核(`enforcement_audit` 表) |
 | **Notifier** | `enforcement/notifier.ts` | 桌面通知 + webhook,批次彙總,靜音時段 |
 | **enforcementTrip** | `enforcement/trip.ts` | 三斷路器共用的 trip 流程(interrupt → audit → notify) |
-| **RecoveryService** | `recovery/recovery-service.ts` | 崩潰復原的四種人工分流(純組合層,無自動觸發) |
+| **RecoveryService** | `recovery/recovery-service.ts` | 崩潰復原的三種人工分流:繼續 / 接手 / 放棄(純組合層,無自動觸發) |
 
 ### 4.3 支撐模組
 
@@ -181,7 +205,7 @@ token 可用;它落在獨立的加密檔案,**不會**進 `~/.deskmony/config.js
 | **static-server** | `http/static-server.ts` | 瀏覽器 UI 靜態檔案(與 WS 共用 port),三層目錄穿越防禦 |
 | **loadConfig** | `config/load-config.ts` | 分層合併設定(defaults → config.json → env) |
 | **config-file-writer** | `config/config-file-writer.ts` | 安全子集寫回 config.json;`appendPolicyRule()` |
-| **AgentDetector** | `detect/agent-detector.ts` | 偵測本機已裝的 agent CLI(固定 allowlist + `execFile` + 逾時) |
+| **AgentDetector** | `detect/agent-detector.ts` | 偵測本機已裝的 agent CLI(固定 allowlist + `execFile` + 逾時);結果由 `AgentCatalog` 快取與消費 |
 | **child-registry** | `packages/adapters/src/child-registry.ts` | 跨 core 重啟的孤兒**行程**回收(pid + 建立時間記錄,下次啟動比對後才殺)|
 | **SettingsStore** | `settings/settings-store.ts` | per-provider 偏好(啟用 / 排序 / env / model),env 對外一律遮罩 |
 
@@ -191,16 +215,20 @@ token 可用;它落在獨立的加密檔案,**不會**進 `~/.deskmony/config.js
 
 這是目前整個系統的設計主軸。三條線各自獨立,任一條都能單獨叫停失控。
 
+> ⚠️ **現況(2026-10-03)**:② 訊息斷路器在 `MessageBus` 隨 team 移除後空缺了一陣,
+> 現已以「每條訊息鏈」的預算重建(`session/message-chain-budget.ts`,沿用
+> `messageBudget` 設定鍵,見 §5.2 與 [`DECISIONS.md` §H](./DECISIONS.md))。
+
 ```mermaid
 flowchart TB
     subgraph AGENTS["agent 活動"]
         Tool["工具呼叫"]
-        Msg["agent 互傳訊息"]
+        Msg["agent 互傳訊息<br/>(create_session / send_to_session)"]
         Usage["token / 回合消耗"]
     end
 
     Tool --> P["① 權限斷路器<br/>PolicyEngine"]
-    Msg --> M["② 訊息斷路器<br/>MessageBus 預算"]
+    Msg --> M["② 訊息斷路器<br/>MessageChainBudget(訊息鏈預算)"]
     Usage --> C["③ 成本斷路器<br/>TurnLimiter / CostGovernor / WaitingWatchdog"]
 
     P --> BASE["共用底座 enforcement/<br/>interrupt → AuditLog → Notifier"]
@@ -215,7 +243,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    Req["權限請求<br/>(toolName, input, workingDir, profileId, role)"] --> TU{"⓪ trueUnrestricted?"}
+    Req["權限請求<br/>(toolName, input, workingDir, providerId)"] --> TU{"⓪ trueUnrestricted?"}
     TU -- 是 --> Allow0["allow(繞過一切,含 hard-deny)"]
     TU -- 否 --> HD{"① hard-deny 命中?"}
     HD -- 否 --> Rules{"②③ config 規則<br/>依序比對"}
@@ -231,8 +259,15 @@ flowchart TB
 
 - **hard-deny 四類**(`hard-deny.ts`,config 永遠不可關閉):worktree 外寫入/刪除、
   讀秘密路徑(`~/.ssh`、`~/.aws`、`~/.deskmony`、`**/.env*`、`**/id_rsa*`、
-  `**/credentials`)、危險 git(force-push / 刪遠端分支 / `branch -D`)、
-  非白名單外連。
+  `**/credentials`;2026-10-05 起還有桌面殼自己的 Electron userData 目錄樹,裡面有加密保存的遠端存取 token)、
+  危險 git(force-push / 刪遠端分支 / `branch -D`)、非白名單外連。
+- **agent 子行程的環境不含 Deskmony 憑證**(2026-10-05,[`DECISIONS.md` §J](./DECISIONS.md)):桌面殼一律把
+  `DESKMONY_AUTH_TOKEN` 設進 core 的環境,過去四個 adapter 又把整份 `process.env` 傳給 agent,agent 的 bash 讀得到主 token、
+  連上 gateway 就能自己核准權限 / 切 YOLO。現在四個 adapter 都經 `packages/adapters/src/agent-env.ts` 的
+  `buildAgentChildEnv()` 組環境,最後一步無條件刪除 `DESKMONY_AUTH_TOKEN`、`DESKMONY_MCP_BRIDGE_*` 與繼承來的
+  `OPENCODE_SERVER_PASSWORD/USERNAME`(不分大小寫;使用者在 provider env 自己填的也刪)。bridge 需要的值是另外明確
+  交給它的,不靠繼承。OpenCode 自己的 bash 工具另由 Deskmony 自帶的 opencode 外掛(`shell.env` hook)把伺服器密碼與設定內容
+  濾掉。**擋不住**:同一個 OS 使用者的程序讀其他程序的記憶體、或用 DPAPI 解密本機檔案(沙箱 / OS 隔離的範疇)。
 - **YOLO 與 auto 的唯一差別**:YOLO 額外跳過 config 的 `effect:"deny"` 規則。
   **hard-deny 兩者都絕不跳過**。YOLO 30 分鐘後惰性過期(不用計時器)。
 - **判不出來一律 escalate**,絕不 allow(`decide()` 最底部的 fallback)。
@@ -242,6 +277,16 @@ flowchart TB
   ②同時寫進 config.json 與 in-memory(`PolicyEngine.addRule()`),重啟前後行為
   一致 ③escalate-strong 的請求,Core 端**強制忽略** `rememberRule`,即使 client
   硬塞。
+- **規則範圍**(2026-10-02,P2):`PolicyRuleScopeSchema` 可帶 `providerId`(精確比對
+  `PermissionRequest.providerId` = `session.providerId`)。profile 移除後,舊的
+  `scope.profileId` / `scope.role` 欄位仍保留解析(schema 是 `.strict()`,拿掉會讓使用者
+  既有 `config.json` 解析失敗、core 起不來),但永遠對不到任何 session,所以
+  `PolicyEngine.ruleMatches()` 往安全側處理:帶舊範圍的 `allow` 規則**一律不匹配**
+  (原本放行的改成升級給人);帶舊範圍的 `deny` 規則**忽略舊範圍、對所有 session 匹配**
+  (否則 deny 靜默失效,在 auto 模式下那個操作會落入「未分類中間地帶」被自動放行,
+  等於 fail-open)。core 啟動時對每條這類規則 `console.warn`(規則 id + 處理方式);
+  `policy.addRule` 的輸入不再接受 `profileId` / `role`(否則能加一條擋全部 session
+  的 deny),只收 `providerId`。
 - ⚠️ **2026-08-25 新增第 ⓪ 步**(見 [`DECISIONS.md` §G](./DECISIONS.md)):
   `ctx.trueUnrestricted` 為真時,`decide()` 一開頭就直接 `allow`,連
   `checkHardDeny()` 都不呼叫——這是**唯一**能繞過 hard-deny 的路徑。只有該
@@ -249,34 +294,51 @@ flowchart TB
   顯式開啟時才會是真,本機與遠端皆可觸發,啟用當下強制 UI 打字確認 + 桌面
   通知 + 稽核記錄。
 
-### 5.2 訊息斷路器 — `MessageBus`
+### 5.2 訊息斷路器 — `MessageChainBudget`(2026-10-02 起以「訊息鏈」為單位)
 
-兩道閘,加在既有投遞策略之前:
+原本的 `MessageBus` 訊息預算(contextId 由 Core 推導、每 task context 的訊息數上限)已隨
+team / 任務 / 看板一併移除,見 [`DECISIONS.md` §H](./DECISIONS.md)(A5 改寫)。
+現在的實作是 `session/message-chain-budget.ts`,沿用 `config.messageBudget`
+(`maxMessagesPerContext` / `warnAtPercent`)設定鍵(鍵名保留以免破壞既有設定檔,
+意義改成「每條鏈」),規格見
+[`simplify-agents-sessions_detail.md`](./LAYER-4-detail-design/simplify-agents-sessions_detail.md) §P3.4:
 
-1. **contextId 由 Core 推導,agent 不可指定**(`deriveContextId()`)——依發送者
-   當下綁定的任務推導。讓被管制者自己申報管制欄位,等於讓它換個 id 就能重置
-   預算。
-   **2026-08-28 修正**:沒有進行中任務時原本一律拒收,使用者實測發現這連帶擋掉
-   了「沒有任務在身的成員回覆人類或隊友」這個正常情境。現在改成落在
-   `member:<memberId>`——同樣由 Core 推導、agent 一樣指定不了,每個成員各自
-   一桶、彼此隔離,並且照樣吃同一條訊息數上限(e2e `A2` 專門守這一點),
-   不是繞過斷路器的無限暢聊後門。
-2. **每 context 的 agent 訊息數上限**——超過即 trip + 拒收該 context 後續的
-   `send_message` / `broadcast` / `request_review`。
-
-**只斷橫向訊息,不斷縱向工作進度**:`report_status` / `list_teammates` 完全不受
-影響。`reportStatus()` / 人類插話產生的訊息 `contextId` 固定填哨兵值 `"legacy"`,
-不參與預算。
+- **鏈**:人類輸入的 prompt(gateway `session.sendPrompt`、復原的「接手」)在
+  `SessionManager.sendPrompt()` 開一條新鏈(新 `chainId`);agent 經 `create_session` /
+  `send_to_session` 送出的訊息沿用「呼叫者**這一輪**是被哪條鏈觸發的」那條鏈
+  (每個 session runtime 在 `sendPromptInner()` 記住 `currentChainId`,只存記憶體);
+  跨 session 投遞走 `deliverNetworkMessage()`,沿用訊息帶的 `chainId`;UI 轉傳
+  (`session.forwardMessage`)也開新鏈。兩條路徑共用同一個 per-session 序列化入口
+  `sendPromptSerialized()`。`session.sendPrompt` 的 schema 不收 `origin` / `chainId`
+  (client 想偽造會被 zod 丟掉)。
+- **計數與熔斷**:`admit(chainId, participants)` 在**送出之前**判斷——第 `max` 則放行、
+  第 `max+1` 則起被拒(工具回錯誤給 agent,講明「已熔斷、需要使用者介入」)。
+  第一次越線走既有的 `enforcementTrip()`(audit + 桌面通知,`interrupt: false`——
+  不打斷任何進行中的回合);同一條鏈之後再被拒只回錯誤、不重複通知。達
+  `warnAtPercent` 發一次軟警告(`reminder` / `message` / `message-chain-warning`)。
+  `create_session` 在鏈已熔斷時**不會 spawn 新 session**;agent 先驗證(`buildLaunch()`)
+  再佔預算。
+- **只擋 agent 對 agent**:人類輸入照常、輸入即開新鏈;UI 轉傳是人類操作,不計數、
+  不會被擋。
+- **不無限成長**:計數只存記憶體(core 重啟歸零),且只保留「還有 session 的
+  `currentChainId` 或待送佇列指向」的鏈(新建鏈時與 session 刪除 / 關閉 / 回收時修剪),
+  另有 10,000 條硬上限當最後防線。
+- **遠端不可停用**:`messageBudget` 不在 `config.setFile` 的安全子集裡。
+- 通知分類:`NotificationTripReasonSchema` 的 `"message-chain-budget"`(舊的
+  `"message-budget"` 只為相容舊 payload 保留)。
 
 ### 5.3 成本斷路器 — 三個獨立元件
 
 | 元件 | 訊號來源 | 觸發時 | halt 粒度 |
 |---|---|---|---|
 | **TurnLimiter** | `tool-call` 事件 + 時間(**不依賴 usage**) | 單回合超過 30 分鐘 或 200 次工具呼叫 | **立即 interrupt** |
-| **CostGovernor**(任務預算) | `usage` 事件 | 任務累計花費超標 | **只擋後續 prompt**,不打斷已結束的回合 |
-| **CostGovernor**(每日 kill-switch) | `usage` 事件 | 當日團隊總花費超標 | **全部 session interrupt** |
+| **CostGovernor**(每日 kill-switch) | `usage` 事件 | 當日總花費超標 | **全部 session interrupt**,且擋後續 prompt |
 | **WaitingWatchdog** T1 | `waiting` 狀態時長 | 掛起 > 6 小時 | 只發提醒,**不 halt** |
-| **WaitingWatchdog** T2 | 同上 | 掛起 > 72 小時 | `dispose()` 回收子程序;任務留 blocked、worktree 保留 |
+| **WaitingWatchdog** T2 | 同上 | 掛起 > 72 小時 | `dispose()` 回收子程序;對話紀錄保留 |
+
+> 2026-10-02:原本還有「CostGovernor(任務預算)」一列(任務累計花費超標 → 只擋後續
+> prompt),隨 task 移除;`budget.task` 設定鍵一併拿掉(既有 config.json 帶這個
+> 鍵時只會得到「未知欄位」警告並被忽略)。
 
 > **TurnLimiter 是最重要的那一個**:實測「Claude Code 經 ACP」**完全不回報
 > usage**(連 `used`/`size` 都沒有,是 bridge 的結構性缺口)。對那類後端,
@@ -298,30 +360,27 @@ DELETE,記錄權限決策、三斷路器 trip、啟動對帳。**這不是 event
 連線建立 → remoteAddress 正規化 → isLocal = 是否 loopback(終生不變)
               ↓
 handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS 檢查
-                                              ④欄位層級的 local-only 檢查
                                                     ↓
-    ③ config.setFile / profile.create / profile.delete
-      task.setAcceptance / task.runAcceptance / settings.setProviderPrefs
-    ④ task.create 的 acceptance 欄位
+    ③ config.setFile / settings.setProviderPrefs
                               → 遠端一律拒絕
 ```
 
-- ⚠️ **2026-09-04 新增(稽核修補)**:清單從三項變成六項,另加一道**欄位層級**
-  的檢查。新增的三個方法與原本那三個同類(都是「改變 core 自己或子程序怎麼被
-  啟動」的設定面操作),但更要緊的是它們**完全不經過工具呼叫,因此也完全不經過
-  政策引擎**——這與 §G 翻案開放給遠端的那些(切 auto/YOLO、編 allowlist)有本質
-  差別:那些操作再寬,每一次執行仍要過 `PolicyEngine.decide()`,仍留在稽核紀錄裡。
-  - `task.setAcceptance`/`task.runAcceptance`:驗收指令最終走
-    `acceptance-runner.ts` 的 `spawn(command, { shell: true })`,而
-    `TaskAcceptanceSchema.commands` 是不受限的 `z.array(z.string())`。
+- ⚠️ **2026-10-02(P2)**:原本同一張清單裡的 `profile.create` / `profile.delete` 隨
+  profile 一併移除,清單現在只剩 `config.setFile` 與 `settings.setProviderPrefs`
+  兩項。
+- ⚠️ **2026-09-04 新增(稽核修補)**:清單另加入 `settings.setProviderPrefs`。它與
+  `config.setFile` 同類(都是「改變 core 自己或子程序怎麼被啟動」的設定面操作),但更要
+  緊的是它**完全不經過工具呼叫,因此也完全不經過政策引擎**——這與 §G 翻案開放給
+  遠端的那些(切 auto/YOLO、編 allowlist)有本質差別:那些操作再寬,每一次執行仍要
+  過 `PolicyEngine.decide()`,仍留在稽核紀錄裡。
   - `settings.setProviderPrefs`:`ProviderPrefs.env` 無 key 白名單,會被併進
     **每一個** agent 子程序的環境變數(設一個 `NODE_OPTIONS` 就能在任何工具
     呼叫發生**之前**取得執行權)。
-  - `task.create` 刻意**不**整個設成 local-only(那會連「遠端建一則普通任務」
-    都擋掉),改用 `findRemoteForbiddenField()` 只擋它的 `acceptance` 欄位——
-    否則只擋 `setAcceptance` 等於沒擋。
-  回歸測試見 `scripts/e2e-auto-mode-yolo.mjs` 的 E-3b-1/2/3(每條都同時驗證
-  「遠端被拒」與「本機仍可用」)。
+  回歸測試見 `scripts/e2e-auto-mode-yolo.mjs` 的 E-3b-3(同時驗證「遠端被拒」
+  與「本機仍可用」)。
+  > 同一輪稽核還曾加入 `task.setAcceptance`/`task.runAcceptance`(驗收指令走
+  > `shell: true`)與一道**欄位層級**閘門(擋 `task.create` 挾帶 `acceptance`);
+  > 這兩者隨 task 於 2026-10-02 一併移除,見 [`DECISIONS.md` §H](./DECISIONS.md)。
 
 - **`isLocal` 只由 Core 依連線本身判定,絕不採信 client 自稱。**
 - **隧道連線(Tailscale/WireGuard)不是 loopback,一律視為遠端**——刻意的:
@@ -335,12 +394,20 @@ handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS �
   `policy.listRules` 四個方法**刻意不列入** `LOCAL_ONLY_METHODS`。
   `session.setTrueUnrestricted` 改用另一種把關:不看連線類型,而是伺服器端
   檢查該 session 是否已經處於 `"auto-accept-all"`(YOLO)——見 §5.1 第 ⓪ 步。
-- `gateway.capabilities` 握手回傳六個布林:`canToggleAuto`/`canEnableYolo`/
+- `gateway.capabilities` 握手回傳五個布林:`canToggleAuto`/`canEnableYolo`/
   `canEditPolicy`/`canEnableTrueUnrestricted` **恆為 `true`**(2026-08-25 起
-  不再等於 `isLocal`);`canManageProfiles` 仍等於 `isLocal`,未變動;新增
-  `isRemoteConnection`(`!isLocal`,純顯示用)。**這些欄位只讓 UI 顯示正確,
-  不是安全邊界本身**;真正的保證是每次呼叫時的 `LOCAL_ONLY_METHODS` 檢查
-  (與 `session.setTrueUnrestricted` 的 session-mode 前置條件檢查)。
+  不再等於 `isLocal`);`isRemoteConnection`(`!isLocal`,純顯示用)。原本唯一
+  還等於 `isLocal` 的 `canManageProfiles` 已隨 profile 於 2026-10-02 移除。**這些
+  欄位只讓 UI 顯示正確,不是安全邊界本身**;真正的保證是每次呼叫時的
+  `LOCAL_ONLY_METHODS` 檢查(與 `session.setTrueUnrestricted` 的 session-mode
+  前置條件檢查)。
+- **Session 網路的五個 gateway 方法**(`agent.listForAgent` / `session.listForAgent` /
+  `.readForAgent` / `.createFromAgent` / `.sendFromAgent`)是給 ACP 橋接子行程用的:
+  只有 scoped MCP-bridge token(`McpBridgeTokenScope` 現在只剩 `{ sessionId, network:
+  true }`)能呼叫,而且**呼叫者 session 從 token 取,方法參數不收**——agent 無法冒名。
+  一般連線(master token 或無認證模式)呼叫這五個方法回 `gateway.bridgeTokenRequired`
+  (fail-closed);scoped token 反過來只能呼叫這五個方法(呼叫 `session.setPermissionMode`
+  之類會被拒)。
 - 綁定安全檢查用**合併後**的 `config.daemon.bindHost`:非 loopback 綁定且未設
   `DESKMONY_AUTH_TOKEN` → **拒絕啟動**。改設定檔一樣擋得住。
 - token 用 `crypto.timingSafeEqual()` 常數時間比對;認證失敗 5 次 / 30 秒冷卻。
@@ -355,7 +422,7 @@ handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS �
 ```ts
 interface AgentAdapter {
   capabilities(): AdapterCapabilities;
-  spawn(profile, workspace, team?: TeamSpawnContext, resume?: ResumeOptions): Promise<AgentHandle>;
+  spawn(launch: AgentLaunchSpec, workspace, resume?: ResumeOptions): Promise<AgentHandle>;
   sendPrompt(handle, prompt: PromptInput): void;
   events(handle): AsyncIterable<AgentEvent>;
   interrupt(handle): Promise<void>;      // resolve = 確實停了(呼叫端必須 await)
@@ -385,18 +452,34 @@ ACP,見 `docs/DECISIONS.md` B2):
 | `opencode` | `opencode-adapter.ts` | OpenCode headless server 的 HTTP + SSE | OpenCode |
 | `pty` | `pty-adapter.ts` | `node-pty` 原始直通 | Claude Code CLI、Aider、任意互動式 CLI |
 
+`spawn()` 吃的是 `AgentLaunchSpec`(`packages/shared/src/agent-launch.ts`,取代已移除的
+`AgentProfile`):`software`、`providerId`、`model`、`effort`、`env`(provider 層級,
+每次 spawn 重新從設定讀)、`systemPrompt`(只放 `.deskmony/notes/` 指路段落),以及
+acp / pty / opencode 的 `command` / `args` 設定。它由 `AgentCatalog.buildLaunchSpec()`
+組出、只在記憶體傳遞,**不持久化、也不經 gateway 曝露**(session 存的是 `provider_id` +
+`launch_command` + `launch_args`,不存 env,見 §4.1、§8)。
+
 **Provider 目錄**(`packages/shared/src/provider-catalog.ts`)是使用者看到的那一層,
-七項,每項在型別上保證映射到上面四種之一:
+七項,每項在型別上保證映射到上面四種之一(2026-10-02 起它是「session 能以哪些 agent
+建立」的唯一來源,由 `AgentCatalog` 與偵測結果、使用者偏好合併):
 
 | provider | → software | 備註 |
 |---|---|---|
 | `claude-agent-sdk` | `claude-agent-sdk` | 內嵌,能力最完整 |
 | `claude-cli` | `pty` | 本機安裝的 `claude` CLI |
-| `gemini` | `acp` | |
-| `opencode` | `opencode` | |
+| `gemini` | `acp` | 固定帶 `--acp` |
+| `opencode` | `opencode` | HTTP + SSE;會掛 session 網路工具(bridge 寫進 `OPENCODE_CONFIG_CONTENT` 的 `mcp.deskmony`),能主動傳訊息 |
+| `opencode-acp` | `acp` | 同一個 opencode 執行檔,改走 `opencode acp`;會掛 session 網路工具,能主動傳訊息(subagent `task` 工具停用) |
 | `codex` | `acp` | 經 `@agentclientprotocol/codex-acp` 橋接套件(非本機 codex CLI 原生支援) |
 | `aider` | `pty` | |
-| `custom-pty` | `pty` | 手動輸入 command |
+
+2026-10-02(P2)移除了 `custom-pty`(手動輸入 command 的逃生閥):新模型的前提是
+「從電腦偵測到的 agent」,而且 gateway 不能有任何接受任意 command 的入口。
+e2e 要指定 fake agent 執行檔時,改用只吃 **core 環境變數**的測試掛鉤
+`DESKMONY_E2E_EXTRA_PROVIDERS`(JSON 陣列,把額外的 provider 併進 catalog 當成已安裝)——
+**不經 gateway**,所以遠端 client 沒有任何辦法讓 core 執行它指定的程式;能設定 core
+環境變數的人本來就能直接執行任意程式,這個掛鉤沒有擴大攻擊面(見
+`agents/agent-catalog.ts` 的說明)。
 
 ### 6.3 能力探測 — 兩個布林 + 三個三態
 
@@ -441,74 +524,81 @@ ACP,見 `docs/DECISIONS.md` B2):
 
 ## 7. Gateway 協議
 
-`ws://` 上的 request/response + server push。**68 個 RPC 方法**(連同 `auth` 一起
-算;2026-08-25 新增 4 個政策/真.無限制相關方法,見下方「政策」列與 Session
-列;2026-08-31 新增 `team.delete`),分組:
+`ws://` 上的 request/response + server push。**39 個 RPC 方法**(連同 `auth` 一起
+算;2026-08-25 新增 4 個政策/真.無限制相關方法;2026-10-02 移除 team / message /
+task / workspace 四組共 24 個方法與三個 `recovery.*` 任務專用方法(P1,合計 27 個)、
+`profile.*` 四個與 S12 子 agent 的 `session.spawnChild` / `.listChildren` /
+`.sendToChild` / `.spawnChildForSubagent` 四個(P2/P3,合計 8 個),並新增 session 網路的
+五個 bridge 方法與 `session.forwardMessage`(共 6 個),見
+[`DECISIONS.md` §H](./DECISIONS.md)),分組:
 
 | 分組 | 方法 |
 |---|---|
 | 連線 | `auth`、`gateway.capabilities` |
-| Profile | `profile.list` / `.create` / `.delete` 🔒 / `.listForSubagent`(S12,供子 agent 挑 profile) |
-| Session | `session.list` / `.create` / `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode`(2026-08-25 起遠端可用,已從 🔒 移除)/ `.setTrueUnrestricted`(2026-08-25 新增,遠端可用)/ `.spawnChild` / `.listChildren` / `.sendToChild` / `.spawnChildForSubagent`(S12 子 agent,見 §9.3)/ `.terminalInput` / `.resizeTerminal` |
+| Session | `session.list` / `.create`(`{providerId, model?, effort?, workingDir, title?, parentSessionId?}`,沒有 profile)/ `.sendPrompt` / `.interrupt` / `.history` / `.getSlashCommands` / `.delete` / `.setModel` / `.setEffort` / `.setPermissionMode`(2026-08-25 起遠端可用,已從 🔒 移除)/ `.setTrueUnrestricted`(2026-08-25 新增,遠端可用)/ `.forwardMessage`(UI 轉傳,見 §9.3)/ `.terminalInput` / `.resizeTerminal` |
+| Session 網路(bridge 專用,見 §5.5、§9.3) | `agent.listForAgent`、`session.listForAgent` / `.readForAgent` / `.createFromAgent` / `.sendFromAgent`——**只有 scoped MCP-bridge token 能呼叫**,呼叫者 session 從 token 取 |
 | 權限 | `permission.resolve`、`dialog.resolve` |
-| 政策 | `policy.addRule` / `.removeRule` / `.listRules`(2026-08-25 新增,遠端可用) |
-| Team | `team.create` / `.list` / `.addMember` / `.removeMember` / `.delete`(2026-08-31 新增,破壞性:連帶刪任務+worktree、dispose 成員 session,見 §9.4)/ `.messages` / `.teammates` |
-| 訊息 | `message.send` / `.sendMessage` / `.broadcast` / `.reportStatus` / `.requestReview` / `.getContextBudget` |
-| 任務 | `task.create` / `.list` / `.get` / `.assign` / `.updateStatus` / `.delete` / `.merge` / `.setAcceptance` / `.runAcceptance` / `.approveReview`、`workspace.get` |
+| 政策 | `policy.addRule` / `.removeRule` / `.listRules`(2026-08-25 新增,遠端可用;新規則的範圍只收 `providerId`) |
 | 成本 | `cost.getSummary` |
-| 復原 | `recovery.list` / `.continue` / `.takeover` / `.rerun` / `.gitStatus` / `.resolveDirtyWorktree` / `.abandon` |
-| 設定 | `settings.getEnabledModels` / `.setEnabledModels` / `.getProviderPrefs` / `.setProviderPrefs`、`config.getEffective` / `config.setFile` 🔒、`env.detectAgents`、`adapter.capabilities` |
+| 復原 | `recovery.list` / `.continue` / `.takeover` / `.abandon` |
+| 設定 | `settings.getEnabledModels` / `.setEnabledModels` / `.getProviderPrefs` / `.setProviderPrefs` 🔒、`config.getEffective` / `config.setFile` 🔒、`env.detectAgents`(重新偵測 + 更新 `AgentCatalog` 快取 + 回傳)、`adapter.capabilities` |
 
-🔒 = `LOCAL_ONLY_METHODS`,遠端一律拒絕——2026-08-25 起清單只剩
-`config.setFile`/`profile.create`/`profile.delete` 三項(見
-[`DECISIONS.md` §G](./DECISIONS.md))。`config.setFile` 本身仍**不含**
+🔒 = `LOCAL_ONLY_METHODS`,遠端一律拒絕——目前只有 `config.setFile` 與
+`settings.setProviderPrefs` 兩項(2026-08-25 起清單只剩 `config.setFile` /
+`profile.create` / `profile.delete`,2026-09-04 稽核修補加入 `settings.setProviderPrefs`,
+2026-10-02 profile 移除後 profile 那兩項隨之消失;見 §5.5、
+[`DECISIONS.md` §G](./DECISIONS.md))。
+`config.setFile` 本身仍**不含**
 `policy` 欄位(見 §12「設定系統」),新的 `policy.*` 三個方法是另一條獨立、
 較窄、有稽核的通道,不是把 `config.setFile` 的安全子集放寬。
 
-**11 個 push channel**:`session-event`、`session-updated`、`session-list-updated`、
-`permission-resolved`、`team-message`、`task-updated`、`task-deleted`、
-`enforcement-notification`、`child-result`、`user-dialog-resolved`、
-`policy-updated`(2026-08-25 新增)。
+**8 個 push channel**:`session-event`、`session-updated`、`session-list-updated`、
+`permission-resolved`、`enforcement-notification`、`session-message`、
+`user-dialog-resolved`、`policy-updated`(2026-08-25 新增)。
+(2026-10-02 移除 `team-message`、`task-updated`、`task-deleted`;`child-result` 隨
+「子完成 → 結果注入父」一併移除,由 `session-message` 取代——別的 session 送來的
+訊息〔`origin` 有值的 user 訊息〕寫進歷史時推播 `{sessionId, message}`,讓正在看
+那個 session 的 UI 即時顯示「來自 <title>」。)
 
 協議定義在 `packages/shared/src/gateway.ts`,zod discriminated union 是
 **單一事實來源**——core 與 desktop 兩端都從這裡取型別,不會漂移。錯誤回應除了
 `error` 純文字,額外帶 `errorCode`/`errorParams` 供前端 i18n(舊 core 不帶這兩個
 欄位時前端退回顯示純文字,不會壞)。
 
-**「多開一個 gateway 入口」的既有慣例**:`message.reportStatus`/`.requestReview`/
-`.sendMessage`/`.broadcast`、`team.teammates` 都是「本來只有 MCP 工具能呼叫的
-邏輯,多開一個非 agent 入口」——走的是**完全相同**的實作(含所有閘門),不是
-繞過閘門的後門,目的是讓 UI 與不依賴真實模型的決定性 e2e 測試能走同一條路徑。
-
 ---
 
-## 8. 資料模型(11 張表)
+## 8. 資料模型(5 張表)
 
 ```mermaid
 erDiagram
-    TEAMS ||--o{ TEAM_MEMBERS : "成員"
-    AGENT_PROFILES ||--o{ TEAM_MEMBERS : "引用"
-    AGENT_PROFILES ||--o{ SESSIONS : "執行"
     SESSIONS ||--o{ MESSAGES : "對話歷史"
-    SESSIONS ||--o{ SESSIONS : "parentSessionId 父子"
-    TEAMS ||--o{ TASKS : "包含"
-    TEAMS ||--o{ TEAM_MESSAGES : "群聊"
-    TASKS ||--o| WORKSPACES : "綁定 worktree"
-    TEAM_MEMBERS ||--o{ TASKS : "指派"
+    SESSIONS ||--o{ SESSIONS : "parentSessionId 父子(巢狀顯示與溯源)"
 ```
+
+> **2026-10-02(P1)**:`teams` / `team_members` / `team_messages` / `tasks` /
+> `workspaces` 五張表的 drizzle 定義、建表語句與 `ensure*` 遷移已移除。**這些表沒有
+> 被 DROP、也沒有任何刪資料的遷移**——使用者既有 SQLite 檔案裡的表與資料原封不動
+> 留著,只是不再有程式碼讀寫(`usage_rollup` 裡 scope = `task` 的舊列同理)。
+>
+> **2026-10-02(P2)**:`agent_profiles` 的 drizzle 定義、建表語句與補欄位遷移也移除了
+> (全新安裝不再建立這張表),同樣**不 DROP、不修改**既有資料庫裡的那張表。唯一還會讀它
+> 的是啟動時的 `backfillLegacySessionsProvider()`:對 `provider_id IS NULL` 的舊 session
+> 列,用 raw SQL 讀對應的 profile 回填 `provider_id` / `launch_command` /
+> `launch_args`(冪等;找不到對應 profile 就填 `legacy-unknown` 且不填 launch,續接時
+> 明確報錯)。回填多一個邊界:profile 的 software 與 session 的 `adapter_type` 對不上
+> (當初用 `agentOverride` 換過 agent)時,不採用 profile 的 provider / launch。
+>
+> `sessions.agent_profile_id` 在既有 DB 裡是 `NOT NULL`,SQLite 不能直接改約束,所以欄位
+> 保留、drizzle 欄位改名 `legacyAgentProfileId`:新 session 寫入 `providerId` 當值
+> (只為滿足約束,沒有任何程式碼讀它)。
 
 | 表 | 關鍵欄位 | 備註 |
 |---|---|---|
-| `sessions` | `status`、`model`、`effort`、`parentSessionId`、`interruptedAt`、`lastSeenAt`、`backendSessionId` | status 六態:`idle`/`busy`/`waiting`/`error`/`closed`/`interrupted` |
-| `messages` | `role`、`content`、`attachments` | `attachments` 是圖片附件的 JSON,獨立欄位而非塞進 `content` |
-| `agent_profiles` | `software`、`providerId`、`model`、`effort`、`env`、`acpConfig`/`ptyConfig`/`opencodeConfig` | 巢狀物件以 JSON 字串存 |
-| `teams` / `team_members` | `lifecycle`(`persistent`/`ephemeral`)、`canInterrupt` | |
-| `team_messages` | `deliveredAt`(null = 仍在 Mailbox)、`contextId`、`isBroadcast` | **DB 是 Mailbox 的權威來源**,不是記憶體 Map;`isBroadcast` 見 §9.2「廣播在投遞後仍看得出是廣播」 |
-| `tasks` | `status`、`assigneeMemberId`、`workspaceId`、`blockedFrom`、`acceptance`、`awaitingHumanReview` | |
-| `workspaces` | `baseDir`、`worktreePath`、`branch` | |
+| `sessions` | `providerId`、`launchCommand`、`launchArgs`、`adapterType`、`status`、`model`、`effort`、`parentSessionId`、`interruptedAt`、`lastSeenAt`、`backendSessionId` | status 六態:`idle`/`busy`/`waiting`/`error`/`closed`/`interrupted`;`provider_id` / `launch_command` / `launch_args`(JSON)是 session 自帶的啟動資訊,**不存 env** |
+| `messages` | `role`、`content`、`attachments`、`origin` | `attachments` 是圖片附件的 JSON,獨立欄位而非塞進 `content`;`origin` 是跨 session 訊息來源(`{kind: "session" \| "forward", sessionId, title, chainId}`)的 JSON,`content` 存原始訊息本體、信封不落地 |
 | `settings` | `key` / `value`(JSON) | 通用 k/v,新增偏好不需要 schema 遷移 |
 | `enforcement_audit` | `kind`、`effect`、`reason`、`payload` | **append-only**,唯一 |
-| `usage_rollup` | 複合主鍵 `(scope, scopeId)`,scope ∈ session/task/day | 成本治理的權威持久層 |
+| `usage_rollup` | 複合主鍵 `(scope, scopeId)`,scope ∈ session/day | 成本治理的權威持久層 |
 
 **遷移策略**:`CREATE TABLE IF NOT EXISTS` + 逐欄位的冪等 `ensureXxxColumn()`
 `ALTER TABLE`(`packages/db/src/client.ts`)——`CREATE TABLE IF NOT EXISTS` 對已
@@ -518,177 +608,112 @@ erDiagram
 
 ## 9. Agent 協作機制
 
-### 9.1 兩個內建 MCP server
+> 2026-10-02:原本的 team-bus 工具(`send_message` / `broadcast` /
+> `list_teammates` / `report_status` / `request_review`)與 `MessageBus` 投遞策略、
+> 團隊群聊(P1),以及 S12 的子 agent 工具組(`spawn_subagent` / `send_to_subagent` /
+> `list_subagents` / `list_profiles`,MCP server 名稱 `subagent`)與「子完成 → 結果注入
+> 父」(P3)都已移除,見 [`DECISIONS.md` §H](./DECISIONS.md)。現在的 agent 協作只有
+> 一條:**session 網路**(§9.1、§9.3)。
 
-掛在 **`claude-agent-sdk`** 與 **`acp`** 兩種傳輸上(見
-`packages/shared/src/team-bus.ts` 的 `SOFTWARE_WITH_TEAM_BUS`——那是這件事的
-單一事實來源):前者由 `ClaudeAgentSdkAdapter` 直接把 SDK MCP server 放進
-`mcpServers`;後者由 `AcpAdapter` 透過 `mcp-bridge-server.ts`(stdio 型 MCP,
-以 scoped token 綁定該 session)掛進 `session/new`。
+### 9.1 內建 MCP server(目前只有 `deskmony`)
 
-**`opencode`(HTTP server API)與 `pty`(純終端位元組直通)沒有掛。** `pty`
-是架構上不可能——它沒有任何工具通道;`opencode` 則有一條現成的替代路:
-provider 目錄的「OpenCode(ACP,支援團隊訊息)」改用 `opencode acp` 走
-`software: "acp"`,即可沿用上面那條已經掛好的橋(2026-08-28 對 opencode
-1.18.7 實測:它以 stdio 說 ACP,且確實會啟動 stdio 型 MCP server)。
+掛在 **`claude-agent-sdk`** 與 **`acp`** 兩種傳輸上:前者由 `ClaudeAgentSdkAdapter`
+直接把 in-process 的 SDK MCP server(`session-network-mcp.ts`)放進 `mcpServers`;後者由
+`AcpAdapter` 透過 `mcp-bridge-server.ts`(stdio 型 MCP 子行程,以 scoped token 綁定該
+session,經 gateway 打回 core)掛進 `session/new`。**兩邊的 MCP server 名稱都是
+`deskmony`**(Claude 裡的工具全名是 `mcp__deskmony__<name>`),工具名稱、參數 schema、描述文字與
+`instructions` **逐字一致**(刻意複製文字而非抽共用常數;`scripts/e2e-session-network.mjs`
+用 MCP client 分別連 in-process server 與真的 spawn 出來的 bridge 子行程,比對 `tools/list`
+與 `instructions`,漂移會被抓到)。
 
-因此 `MessageBus` 注入訊息時會**依收訊者的 software 決定回覆指引**:沒有工具
-的成員收到的是「你的回覆只會留在自己的 session」的如實告知,絕不會被叫去呼叫
-不存在的工具(e2e 步驟 12b/12f 分別守住正反兩面;完整的指引規則見 §9.2)。
+**`pty`(純終端位元組直通)沒有掛**——架構上不可能,它沒有任何工具通道;這類 session 只能**收**訊息,
+`list_agents` / `list_sessions` 的 `canUseTools`(`softwareCanUseTools()`:`claude-agent-sdk`、`acp`、`opencode`
+為 true)讓寄件者知道對方回不了話。
+
+**`opencode`(HTTP server API)2026-10-03 起也掛了**(原本是「只能收」,要主動傳得改用 `opencode-acp`)。
+掛法與 ACP 共用 `packages/adapters/src/mcp-bridge-launch.ts` 的 `mintMcpBridgeLaunch()`(同一個 bridge 子行程、
+同樣的 scoped token 與環境變數,token 由 `OpenCodeAdapter.dispose()` 撤銷),差別只在怎麼告訴 opencode:ACP 經
+`session/new` 的 `mcpServers`,HTTP 則寫進啟動 `opencode serve` 時注入的 `OPENCODE_CONFIG_CONTENT`
+(`mcp.deskmony`,`type: "local"`,token 只放 `environment`、不放 `command`)。同一份設定也把**所有工具權限改成 ask**
+(opencode 預設全 allow,見 `packages/adapters/src/opencode-config.ts` 檔頭的實測與理由),所以 `create_session` /
+`send_to_session` 自然走 Deskmony 的權限流程;三個查詢工具(`deskmony_list_agents` / `deskmony_list_sessions` /
+`deskmony_read_session`)在同一份設定裡預先 `allow`,語意等同 Claude SDK 的 `allowedTools`。provider 目錄的
+「OpenCode(ACP)」(`opencode-acp`)走 `opencode acp`、經 `software: "acp"` 沿用 ACP 那條橋(2026-08-28 對
+opencode 1.18.7 實測:它以 stdio 說 ACP,且確實會啟動 stdio 型 MCP server),兩者差別只剩對接方式。
+
+**opencode 的本機 HTTP 伺服器有 basic auth(2026-10-03,DECISIONS §I-3)**:`opencode serve` 與 `opencode acp`(實測)
+都會在 loopback 開 HTTP 伺服器、預設無認證——本機任何程序能替它核准權限請求(繞過政策引擎)、`GET /config` 讀到上面那個
+`mcp.deskmony.environment` 的 scoped token。所以兩個 adapter 啟動 opencode 家族子行程時都以環境變數
+`OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` 給一組**每次 spawn 都重新隨機**產生的密碼
+(`packages/adapters/src/opencode-server-auth.ts`;覆蓋使用者設的同名變數);`OpenCodeAdapter` 對該伺服器的每個請求(含
+SSE `/event`、權限與提問回覆、`dispose()` 的清理)都帶 `Authorization: Basic`,密碼只在 adapter 記憶體裡(不寫 log / DB /
+事件);`opencode acp` 不打它的 HTTP API,只設密碼。密碼本來會被 opencode 的 bash 工具繼承(擋得住 agent 以外的程序,
+擋不住 agent 本身);2026-10-05 起由 Deskmony 自帶的 opencode 外掛(`packages/adapters/src/opencode-shell-env-plugin.ts`)在
+opencode 的 `shell.env` hook 把 `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` / `OPENCODE_CONFIG_CONTENT` 從 agent 的
+bash 環境移除(經注入的 `OPENCODE_CONFIG_CONTENT` 的 `plugin` 陣列載入,`opencode` 與 `opencode-acp` 都掛;外掛沒載入時
+adapter 警告、session 照常,見 DECISIONS §J)。
 
 | MCP server | 工具 | 進 `allowedTools`(自動放行)? |
 |---|---|---|
-| **`team-bus`** | `send_message`、`broadcast`、`list_teammates`、`report_status`、`request_review` | ✅ 全部(只是傳訊/查詢,不碰檔案或指令) |
-| **`subagent`** | `list_profiles`、`list_subagents` | ✅ 純查詢 |
-| | `spawn_subagent`、`send_to_subagent` | ❌ **刻意不放**——會讓某個 session 多跑一輪,走 PolicyEngine 的 default-deny 升級給人 |
+| **`deskmony`** | `list_agents`、`list_sessions`、`read_session` | ✅ 純查詢(`read_session` 只回 user / assistant 訊息、每則 content 截斷到 4000 字元、附件只標示 `hasAttachments`;預設 20 則、上限 100) |
+| | `create_session`、`send_to_session` | ❌ **刻意不放**——會讓某個 session 多跑一輪(新起 session 或讓既有 session 多花一輪 token),走 PolicyEngine 的權限階梯(always-ask 下升級給人) |
 
-> 舊文件列過的 `read_inbox` **不存在也不需要**:投遞策略是「idle 立即注入 /
-> busy 排隊後自動批次注入」,Mailbox 對 agent 是被動送達,不是拉取式的。
+### 9.2 投遞策略 — 已於 2026-10-02 移除
 
-這組工具的 MCP `instructions` 除了說明「怎麼發」,也明講**什麼時候不該發**
-(2026-08-31):單純的狀態告知、或已有他人接手的廣播通常不需要回覆;每則訊息都
-消耗該任務的訊息額度,廣播更是一次消耗 N 則(每個收件者各一則);回報進度請優先
-用不佔額度的 `report_status`,不要用 `broadcast`。加這段的理由與 §9.2 的中性化
-措辭相同——工具描述原本只教怎麼發、不教何時該閉嘴,與「每則收到的訊息都附回覆
-指引」相加,會把 agent 推向 §5.2 訊息斷路器正要防的你來我往。
+原本的 `MessageBus` 投遞策略(idle 立即注入 / busy 進 Mailbox 批次注入 /
+`priority=interrupt` 先 `await interrupt()` 再注入 / 長命成員自動上線 / 依收訊者
+software 與訊息性質調整的回覆指引 / 廣播旗標持久化)與 `team_messages` Mailbox
+隨 team 一併移除。取而代之的是 `SessionManager.deliverNetworkMessage()`(取代更早的
+`deliverPromptWhenIdle()`):目標 idle 就立刻送(此刻才組信封)、busy / waiting 就排進
+記憶體裡的 `pendingIdleInjection` 佇列(元素是 `{text, origin, chainId}`),等它下一次
+`completed` 空檔才送(pty 沒有 `completed` 事件,靜止計時器把它轉回 idle 時也 flush)。
+**佇列不持久化**,core 重啟即遺失(不再有 Mailbox)。與舊版的差異:目標 runtime 不在
+就**丟錯誤**,不再靜默丟棄。
 
-### 9.2 投遞策略(`MessageBus.deliverToMember()`)
+### 9.3 Session 網路
 
-```mermaid
-sequenceDiagram
-    participant A as Coder agent
-    participant MCP as team-bus MCP
-    participant BUS as MessageBus
-    participant DB as team_messages
-    participant UI as 團隊群聊視圖
-    participant B as Reviewer agent
+**所有 session 互相可見、可互傳**,不限父子、不限工作目錄;`sessions.parentSessionId`
+只剩 UI 巢狀顯示與溯源的意義(`create_session` 與 UI 的「在這個 session 底下開新
+session」都會設它,後者走一般的 `session.create`)。
 
-    A->>MCP: send_message(to, content)
-    MCP->>BUS: 路由
-    BUS->>BUS: ①deriveContextId(agent 不可指定)
-    BUS->>BUS: ②檢查 context 訊息預算
-    alt 預算已 trip
-        BUS-->>A: 拒收 + enforcementTrip
-    else 通過
-        BUS->>DB: 持久化(deliveredAt=null)
-        BUS-->>UI: 推播 team-message
-        alt 目標 idle
-            BUS->>B: 立即注入 prompt
-        else 目標 busy
-            BUS->>BUS: 留在 Mailbox,回合結束後批次注入
-        else priority=interrupt 且 canInterrupt
-            BUS->>B: await interrupt() 確實生效,才注入
-        else 無活躍 session 且 lifecycle=persistent
-            BUS->>BUS: 自動建立 session(雙重檢查鎖)後注入
-        else 無活躍 session 且 lifecycle=ephemeral
-            BUS->>BUS: 留在 Mailbox,session 建立後補投
-        end
-        BUS->>DB: 標記 deliveredAt
-    end
-```
-
-**interrupt 必須先 `await` 確實生效才注入** —— `AgentAdapter.interrupt()` 回傳
-Promise 的語意就是「resolve 才代表真的停了」,不 await 會與尚未停下的回合競爭。
-
-**長命成員沒有 session 時自動上線**(2026-08-25,`resolveSessionForDelivery()`)
-——`lifecycle: "persistent"` 的成員本來就以「在線可達」為存在理由
-([agent-lifecycle_hld.md §2.0](./LAYER-3-hld/agent-lifecycle_hld.md)),但過去
-只有團隊啟動或人工點擊才會給它 session,使用者實測回報訊息因此石沉大海。現在
-投遞前查不到 session 就依 team(其次 profile)的 `workingDir` 自動建一條,同一
-member 用雙重檢查鎖,避免兩則幾乎同時抵達的訊息各建一個 session。短命
-(ephemeral)成員維持原設計**不**自動建——不在線是刻意允許的狀態(同文件 §3)。
-
-**注入的訊息會附一句回覆指引,而且依收訊者與訊息性質而變**(2026-08-28/31,
-`formatSingle()` / `replyHint()`)。三個維度:
-
-| 維度 | 行為 |
-|---|---|
-| 收訊者的 software | 有掛 team-bus 工具(`claude-agent-sdk`/`acp`,見 `SOFTWARE_WITH_TEAM_BUS`)才給工具指引;`opencode`/`pty` 改為如實告知「你的回覆只會留在自己的 session」——**絕不叫它呼叫不存在的工具** |
-| 發送者是人還是 agent | 人類插話沒有對應的 TeamMember,無法被 `send_message` 指名,因此指引用 `broadcast`;隊友訊息則指名 `send_message(to: <發送者>)` |
-| 一對一還是廣播 | 廣播額外標示「所有成員都收到了同一則,通常不需要每個人都回應」 |
-
-措辭刻意中性:先講「這則是不是專門給你的」,再講「需要回應時怎麼回」,並明講
-**不回覆是正常選項**。修正前是無條件的「回覆請呼叫 X 工具」附在每一則後面,讀起來
-像每則都在等回應,會推高 §5.2 訊息預算正要防的那種你來我往。
-
-**廣播在投遞後仍看得出是廣播**(2026-08-31,`team_messages.isBroadcast`)。
-`deliverBroadcast()` 投遞時把一則廣播**展開成 N 筆、每筆 `to` 改寫成個別收件者**
-(S2 L4 §5.1,這樣每人的送達狀態才能各自獨立)——展開之後 `to === "broadcast"`
-再也不成立,廣播這個事實在投遞路徑上被抹掉,agent 收到廣播時看起來就像有人專程
-找它。而「這是不是專門找我」正是它判斷該不該回覆的主要依據。改用獨立的持久化
-旗標修正:**必須持久化**而非記憶體傳遞,因為忙碌成員的訊息會先留在 Mailbox、
-稍後才從 DB 撈出來批次注入。冪等遷移、舊資料一律 false。
-`workingDir` 取不到或 `createSession()` 失敗時靜默降級回 `"no-session"`,訊息
-安全留在 Mailbox,前端 `TeamChatView` 顯示一則非阻斷提示,不讓自動上線的失敗
-變成整個 `sendMessage` 的硬錯誤。
-
-**注入的 prompt 會附上「該怎麼回」**(2026-08-27,`replyHint()`)——agent 無從
-得知「直接用文字回答」只會留在自己的 session、發送者永遠看不到,所以注入內容
-後面直接點名該呼叫哪個工具:人類插話沒有對應的 `TeamMember` 可以指名,提示用
-`broadcast`;隊友來的訊息則提示 `send_message(to: <發送者>)`。
-
-### 9.3 Session 子 agent(獨立於 team/看板的另一條路)
-
-`sessions.parentSessionId` + `session.spawnChild` RPC + `subagent` MCP server。
-子完成時:結果**當 prompt 注入父 session**(父忙就排隊 `pendingIdleInjection`、
-父不在就丟棄),同時 push `child-result` 給 UI。子完成後維持 idle,不自動 dispose。
-
-`spawn_subagent` 的 `parentSessionId` 由閉包捕捉 `handle.id`,**agent 不可冒名**;
-`send_to_subagent` 有三層檢查(存在 → 是自己的子 → runtime 還活著),任何一層
-沒過都明確報錯,不讓 agent 誤以為送成功了。
+- **不做任何自動回送**:收到訊息的 agent 自己決定要不要回、回給誰;舊的「子完成 → 結果
+  注入父」與 `child-result` push 已整個移除。工具描述與信封都明講這一點。
+- **信封與來源**:跨 session 訊息送進 adapter 的 prompt 是
+  `session-envelope.ts` 組的信封(`[來自 session「<title>」(id、agent)的訊息]` + 本體 +
+  「這則訊息不會自動得到回覆…」提示;UI 轉傳的信封標明「使用者從 session X 轉來」)。
+  持久化的 `messages.content` 存**原始本體**,另有 `messages.origin`
+  (`{kind: "session" | "forward", sessionId, title, chainId}`);信封只在送進 adapter 那一刻
+  組裝。UI 對有 `origin` 的訊息顯示「來自 / 轉傳自 <title>」標籤,並經 push channel
+  `session-message` 即時推送。
+- **呼叫者身分不可冒名**:in-process 版由 adapter 以自己的 `handle.id` 閉包捕捉;
+  ACP 版由 bridge token 綁定(gateway 從 token 取,方法參數不收);**絕不是工具參數**。
+  Claude SDK session 續接(`continueSession()`)時沿用既有的 DB session id,所以
+  `ResumeOptions` 帶 `sessionId` 讓 `handle.id` 等於它(否則續接後 `isYou`、「不能送給
+  自己」與鏈追蹤全部對不上)。
+- **`send_to_session` 的驗證順序**:目標是自己 → 找不到 → `closed` / `error` /
+  `interrupted` / runtime 不在 → 鏈預算(§5.2),任何一層沒過都明確報錯,不讓 agent 誤以為
+  送成功了;全過才投遞(§9.2)。**`create_session`** 先驗 agent(`buildLaunch()`:找不到 /
+  未安裝 / 已停用就報錯,不佔預算、不 spawn)→ 鏈預算 → spawn(`parentSessionId` =
+  呼叫者,workingDir 預設沿用呼叫者的,一律從 `always-ask` 開始)→ 以信封送出第一則訊息。
+- **UI 轉傳**(`session.forwardMessage({sourceSessionId, targetSessionId, text, note?})`):
+  使用者把某 session 畫面上一個氣泡的文字(`text`)轉給任一其他 session(附註併進本體);人類操作,
+  開新鏈、不計預算。`text` 等同使用者自己貼上,core 只驗證來源/目標存在、目標可送達、不是轉給自己,
+  不回頭查原訊息(桌面端的串流訊息 id 對不上 DB 那一筆,過去靠內容比對去猜,ACP 一輪有多個氣泡時會
+  轉錯);`text` 上限 100,000 字元,超過由 schema 直接拒絕。
+- **權限**:`create_session` / `send_to_session` 不在自動放行清單,走 PolicyEngine 的權限
+  階梯(見 §9.1);開了 Auto / YOLO 的 session 它們和其他「未分類」操作一樣會被自動放行,
+  那時由 §5.2 的訊息鏈預算兜底。
 
 ---
 
-## 10. 任務生命週期
+## 10. 任務生命週期 — 已於 2026-10-02 移除
 
-```mermaid
-stateDiagram-v2
-    [*] --> backlog
-    backlog --> assigned: 指派(ephemeral 成員自動 spawn session + 建 worktree)
-    assigned --> in_progress
-    in_progress --> review: 過驗收閘 或 人類 approveReview
-    review --> in_progress: 退回
-    review --> merging
-    merging --> done: task.merge(唯一真正跑 git merge 的入口)
-    done --> [*]
-    backlog --> blocked
-    assigned --> blocked
-    in_progress --> blocked
-    review --> blocked
-    merging --> blocked
-    blocked --> backlog: 回到 blockedFrom 記錄的原狀態
-```
-
-`isValidTransition()` 是**唯一**允許改變 `status` 的判斷式。任意非終態都能進
-`blocked`,離開時回到 `blockedFrom` 記錄的那個狀態(不是寫死回 `in-progress`)。
-
-**三道人類把關**:
-
-1. **機器驗收閘(S4)**——任務可帶 `acceptance`(test/build/typecheck/自訂指令)。
-   `report_status(done)` 必須先過驗收才進得了 review。
-2. **人類 review 閘(S5)**——沒有機器驗收條件、或連續驗收失敗達上限時,任務維持
-   `in-progress` 並設 `awaitingHumanReview`,等人類呼叫 `task.approveReview`。
-3. **人類批准合併**——`TaskService.mergeAndComplete()`(只被 `task.merge` 呼叫,
-   而 `task.merge` 只從任務看板的按鈕觸發)是**整個系統唯一真正執行 `git merge`
-   的入口**。`report_status`/`request_review` 對映到 `"done"` 時會被明確擋下
-   (`updated: false` + `skippedReason`)。
-
-**agent 沒有任何工具能讓任務自己變成 `done`。**
-
-**合併衝突不留半完成狀態**:`git merge --no-ff` 失敗 → 蒐集衝突檔案清單 →
-`git merge --abort` 還原 → 包成 `MergeConflictError` 丟出;任務維持 `merging`,
-不 emit 任何 `task-updated`。合併前先確認 `baseDir` 乾淨(`git status --porcelain`
-無輸出),髒的話直接拒絕,**不嘗試 stash 等會犧牲使用者資料的自動化**。
-
-**主幹分支動態偵測**:優先 `git symbolic-ref refs/remotes/origin/HEAD` → 檢查本機
-`main` → `master` → 都找不到就明確報錯。**不寫死、不猜測。**
-
-**worktree 不在 `done` 時自動清理**——刻意的,讓人事後還能檢視這個任務改了什麼;
-只有 `task.delete` 才會 `git worktree remove --force`,並回傳
-`hadUncommittedChanges` 旗標讓 UI 事後警告。
-
-**ephemeral 成員生命週期(S8)**:指派任務時自動 spawn session,任務進 `done`
-(或被刪除)時自動 dispose。`persistent` 成員不受影響。
+任務狀態機(`backlog → assigned → in-progress → review → merging → done` + `blocked`)、
+三道人類把關(機器驗收閘、人類 review 閘、人類批准合併)、任務級 git worktree
+隔離(建立 / 合併 / 衝突 abort / 清理)、主幹分支偵測與 ephemeral 成員生命週期,
+**全部隨 `TaskService` / `WorkspaceManager` / `AcceptanceRunner` 一併移除**,見
+[`DECISIONS.md` §H](./DECISIONS.md)(撤銷 A3 / A4、D3 的任務部分、E2)。收斂決策回到
+人類直接在各 session 裡下指示。`tasks` / `workspaces` 兩張表沒有 DROP,見 §8。
 
 ---
 
@@ -705,19 +730,55 @@ core 啟動
   → 人類打開復原視圖,逐一決定
 ```
 
-四種分流,**全部要人主動點,RecoveryService 沒有任何背景計時器**:
+三種分流,**全部要人主動點,RecoveryService 沒有任何背景計時器**:
 
 | 動作 | 語意 | 前提 |
 |---|---|---|
-| **繼續** | 保有記憶重啟 | 後端真的支援磁碟持久化 session(目前只有 Claude SDK 的 `resume`);Core 端會重新驗證,不採信 client 舊快照 |
-| **接手** | 讀摘要重啟 | 一律可用 |
-| **重跑** | 從頭來 | **要求 worktree 乾淨**,髒的話明確拋錯,絕不默默在髒 worktree 上重跑 |
-| **放棄** | session 標 `closed` | worktree 與任務一律保留(回收 ≠ 丟棄) |
+| **繼續** | 保有記憶重啟 | 後端有持久化對話可接(`softwareCanResumeBackend()`:Claude SDK `resume`、ACP `session/resume`/`session/load`、OpenCode 沿用 session;PTY 沒有)且已捕捉後端 session id;Core 端會重新驗證,不採信 client 舊快照。接不回時退回對話紀錄,見下方「自動復活」 |
+| **接手** | 讀摘要重啟 | 一律可用;摘要只讀 DB(最後幾輪對話),不呼叫 LLM |
+| **放棄** | session 標 `closed` | 對話紀錄保留(回收 ≠ 丟棄) |
 
-髒 worktree 有強制前置流程:`keep`(建 wip 分支 + commit)或 `discard`
-(`reset --hard` + `clean -fd`,**必須帶 `confirmDiscard: true` 二次確認**)。
+> 2026-10-02:原本的第四種「重跑」與髒 worktree 強制前置流程(`keep` 建 wip 分支 /
+> `discard` 需 `confirmDiscard`)、`recovery.gitStatus` 查 worktree/baseDir 都是任務
+> worktree 專用,隨 task 移除,見 [`DECISIONS.md` §H](./DECISIONS.md)。
+>
+> 「繼續」與「接手」重新 spawn 既有 session 時,啟動規格一律從 **session 自己的資料**重建
+> (`providerId` → `AgentCatalog`,退路是 session 存的 `launch_command` / `launch_args`),
+> 不再讀 profile,見 §4.1。復原視圖顯示的 agent 名稱來自 `AgentCatalog.labelsById()`
+> (不等偵測結果)。
 
 優雅關閉 5 秒逾時保護:寧可留下孤兒讓下次啟動對帳抓到,也不卡住不關。
+
+**自動復活(2026-10-15)**:重開後 `SessionManager.runtime` 是空的,過去人類對 `closed`/`interrupted` 的 session
+送訊息只會得到 `SESSION_NOT_RUNNING`(桌面端還把 rejection 吞掉)。現在 `sendPromptInner()` 遇到沒有 runtime 的
+session、且是**人類輸入**(`delivery.origin` 為空)時,在 per-session 鎖(`withSessionLock()`,和「繼續」共用)裡走
+`respawnRuntime()`——這也是 `continueSession()` 用的同一份流程:從 session 自己的資料重建啟動規格、沿用 DB session id 當
+`handle.id`、有後端識別碼就交給 adapter 嘗試接回、權限模式重設為 `always-ask`。agent 對 `send_to_session` 的請求**不會**
+喚醒目標 session(`assertDeliverable()` 與 `requireReviveTarget()` 兩道)。
+
+各 adapter 的接回(`spawn(launch, workspace, { sessionId, backendSessionId? })`,結果在 `AgentHandle.resumed`):
+
+| 後端 | 接回方式 | 接不回時 |
+|---|---|---|
+| Claude SDK | `getSessionInfo()` 確認對話檔還在才帶 `resume` | 開全新對話 |
+| ACP | `initialize` 宣告 `sessionCapabilities.resume` → `session/resume`;否則 `loadSession` → `session/load`(agent 會用 `session/update` 重播歷史,**重播絕不當成新事件**:`ActiveSession` 在回應回來之後才掛上(再多等一個 macrotask 當防禦),見 `attachResumedSession()`);都帶同一個 session 網路 MCP server | `session/new` |
+| OpenCode(HTTP) | `GET /session/{id}` 確認還在,沿用同一個 opencode session | `POST /session` |
+| PTY | 無從接回,全新的終端程序 | — |
+
+接不回(`resumed !== true`、非 PTY)時,`planReviveOutcome()` 用 DB 的 user/assistant 文字組一段對話紀錄
+(`session-transcript.ts`,上限 12000 字元、從最舊的開始截並註明),存在 `runtime.pendingTranscript`,**附在下一則一般 prompt 前面**
+(slash command 不附,紀錄留給下一則)。DB 存的使用者訊息一律是原文。對話裡留的系統說明(`session.revivedResumed` /
+`revivedFromTranscript` / `revivedWithoutMemory` …)用 `session-message` push 即時送到所有 client。後端識別碼在 spawn 完
+(ACP/OpenCode)就寫進 DB;接不回而開了新對話時會更新成新的識別碼。
+
+**agent 自己結束時(core 沒重啟)**:adapter 在子行程 exit、或事件串流因錯誤中斷時一律關掉事件佇列(Claude SDK 的
+`Claude Code process exited with code N`、ACP 更新迴圈中斷、OpenCode `/event` 中斷都算;修正前這幾條錯誤路徑只推 error 不關,
+core 的事件迴圈永遠等下去)。`consumeEvents()` 的迴圈一結束,`detachEndedRuntime()` 就**同步**把 runtime 從 `SessionManager.runtime`
+拿掉並收掉 adapter 殘留的 handle(撤銷 bridge token、殺掉沒死透的行程樹),除非是 core 自己在收(`RuntimeState.retired`:刪除、
+閒置回收、關閉 core)。接著在 per-session 鎖裡留 `session.agentStopped` 說明、把狀態標成 `error`(adapter 自己的錯誤已經標過就保留
+它的 lastError)——ACP 的連線關閉常比子行程的 exit 事件先到,那則 exit 錯誤會被丟掉,沒有這一步 session 會停在 idle/busy。
+之後就是上面「沒有 runtime」的情況:人類訊息走 `respawnRuntime()`,`send_to_session` 照舊被擋。adapter 以 session id 當 handle id,
+所以各 adapter 的 `dispose()` 結尾只刪除仍是同一份的登記(舊 handle 的 dispose 可能晚於新 agent 的登記)。
 
 **孤兒有兩種,處理方式不同**(2026-09-04 釐清):
 
@@ -745,8 +806,11 @@ defaults(packages/shared/src/core-config.ts 的 CoreConfigSchema)
 ```
 
 區塊:`daemon`(port / bindHost / permissionTimeoutMs / authRateLimit)、
-`workspace`、`data`、`features`、`log`、`policy`(rules / allowedHosts)、
-`notification`、`budget`(task / daily / turn / modelPricing)、`messageBudget`。
+`workspace`、`data`、`features`、`log`、`policy`(rules / allowedHosts;規則範圍可帶
+`providerId`,舊的 `profileId` / `role` 仍可解析但已失效,見 §5.1)、
+`notification`、`budget`(daily / turn / modelPricing)、`messageBudget`(2026-10-02
+起是「每條訊息鏈」的預算,見 §5.2)。(原本的 `budget.task` 與
+`workspace.worktreesRoot` 已隨 task / worktree 移除。)
 
 **三條安全線**:
 
@@ -779,20 +843,27 @@ defaults(packages/shared/src/core-config.ts 的 CoreConfigSchema)
 
 ```
 apps/desktop/src/
-├─ App.tsx              # ViewMode = "session" | "team-chat" | "task-board" 三分頁
+├─ App.tsx              # 單一 session 視圖(2026-10-02 移除團隊群聊 / 任務看板與 ViewMode)
 ├─ i18n.ts              # i18next,4 語系
-├─ locales/{en,zh-Hant,ja,es}/   # 每語系約 20 個 namespace
-├─ stores/              # zustand × 4:session / team / task / recovery
-├─ lib/                 # gateway-client、connection-config、error-i18n、agent-override…
+├─ locales/{en,zh-Hant,ja,es}/   # 每語系約 22 個 namespace
+├─ stores/              # zustand × 2:session / recovery
+├─ lib/                 # gateway-client、connection-config、error-i18n、new-session-selection…
 ├─ ui/                  # 設計系統:Button / Dialog / Field / Badge / Feedback / icons / theme / hotkeys
 └─ views/
    ├─ SessionView + ChatView + chat/{MarkdownMessage,DiffHunkView,CodeBlock,
-   │                                 TodoListView,ToolImage,AskUserQuestionWidget}
-   ├─ TeamChatView / TaskBoardView / RecoveryView / TerminalView
-   ├─ SessionList / CommandPalette(Ctrl+K)/ AutoModeControl
-   └─ PermissionModal / ProfileCreateDialog / SettingsDialog / TeamManagementDialog
+   │                                 TodoListView,ToolImage,AskUserQuestionWidget,
+   │                                 ForwardMessageDialog}
+   ├─ RecoveryView / TerminalView
+   ├─ SessionList(含「在這個 session 底下開新 session」對話框)/ AgentPicker /
+   │  CommandPalette(Ctrl+K)/ AutoModeControl
+   └─ PermissionModal / SettingsDialog(含 PermissionsSection)
       └─ 全部經 ModalPortal(createPortal 到 document.body)
 ```
+
+- **新對話的 agent / model / effort / 工作資料夾**由 `AgentPicker`(側欄頂部)選,選擇狀態
+  (`lib/new-session-selection.ts`)由 `App.tsx` 持有,側欄下拉、`Ctrl/⌘+N`、命令面板的
+  「新對話」三個入口共用,上次的組合存 `localStorage`(讀寫一律包 try/catch)。偵測不到
+  任何可用 agent 時顯示說明與「重新偵測」(`env.detectAgents`)。
 
 - **所有全螢幕遮罩彈窗必須經 `ModalPortal`**:CSS 規範下,帶 `transform` 的祖先
   會成為 `position: fixed` 子孫的定位基準——側欄的 `transition-transform` 曾讓
@@ -816,15 +887,35 @@ apps/desktop/src/
 | `pnpm start:core` | headless 正式啟動 |
 | `pnpm package` / `package:dir` | `bundle-core.mjs`(含 `@electron/rebuild`)→ vite build → electron-builder NSIS |
 
-**11 支 e2e 腳本**(`scripts/e2e-*.mjs`),全部直接對獨立的 core process 打 WS
-RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
-`policy-engine`、`auto-mode-yolo`、`message-budget`、`cost-governor`、
-`crash-recovery`(+ `graceful-bootstrap`)、`notification`、`agent-lifecycle`、
-`lead-gate`、`session-subagents`。
+**18 支 e2e 腳本**(`scripts/e2e-*.mjs`;`pnpm test` 的 `run-e2e.mjs` 跑其中 17 支
+決定性的,`gateway` 需要真實憑證、只留給人工執行),全部直接對獨立的 core process
+打 WS RPC,**從不經過 Electron**:`gateway`(主套件,決定性測試加上少數
+model-behavior 檢查點)、`hard-deny`、`policy-engine`(含 `providerId` 範圍與舊
+profile 範圍規則的處理)、`auto-mode-yolo`、
+`cost-governor`、`crash-recovery`(+ `graceful-bootstrap`)、`notification`、
+`agent-lifecycle`(2026-10-02 起只剩 `.deskmony/notes/` 一塊)、
+`agent-catalog`(session 以 `providerId` 建立、錯誤碼、重啟後續接 / 接手仍是原本的
+adapter、舊 schema 的 `agent_profiles` 遷移)、
+`session-network`(五個工具、信封與來源標記、佇列、訊息鏈預算熔斷、UI 轉傳、
+bridge token 方法白名單、in-process 與 bridge 的工具描述逐字比對)、
+`opencode-question`、`opencode-tool-input`、`opencode-long-turn`(2026-10-05:OpenCode 一輪超過約 5 分鐘不得跳出假的「送出失敗」——
+prompt 改走立即回 204 的 `prompt_async`;fake 伺服器的 `/message`、`/command` 永遠不回應來模擬長回合,不用真的等 300 秒;
+舊版 opencode(`prompt_async` 404)退回 `/message`、undici 等待逾時的分類、`session.error` 只走 SSE 時仍回報恰好一個 `error`)、`opencode-permissions`(OpenCode 的工具呼叫一律進政策引擎:
+啟動時注入的 `OPENCODE_CONFIG_CONTENT`、與使用者設定的合併、session 網路 MCP 與 token 撤銷、
+subagent 子 session 的權限、hard-deny 端到端、opencode 本機伺服器的 basic auth:fake 伺服器真的檢查認證,
+斷言每次 spawn 的隨機密碼、無認證/錯認證一律 401、密碼不外洩、使用者設的同名變數被覆蓋、adapter 的每個請求都帶認證;
+以及 Deskmony 自帶的 opencode `shell.env` 外掛:`plugin` 陣列的合併、外掛檔只匯出一個函式、fake 後端的外掛宿主模擬驗證 shell
+環境被濾、載入標記檔偵測與「外掛沒載入」警告)、`agent-env`(2026-10-05:core 以設了 `DESKMONY_AUTH_TOKEN` 的環境啟動,fake ACP /
+OpenCode / PTY 後端回報環境裡「有沒有」主 token、bridge 憑證與 opencode 伺服器密碼,另有攔截 Claude SDK adapter 實際 spawn 的探針;
+bridge 仍拿得到自己的 scoped token)、`child-registry`、
+`cli`、`cli-tui`。(2026-10-02 移除 `message-budget` 與 `lead-gate` 兩支;
+`session-subagents` 改寫成 `session-network`。)
 
 **三個 fake 後端**讓測試不依賴真實模型也不依賴外部 CLI:`fake-acp-agent.mjs`、
-`fake-opencode-server.mjs`、`fake-pty-echo.mjs`。e2e 套件切分成
-`deterministic` / `model-behavior` 兩組,前者可無條件在 CI 跑。
+`fake-opencode-server.mjs`、`fake-pty-echo.mjs`。e2e 要指定這些 fake 執行檔時,經只吃
+core 環境變數的 `DESKMONY_E2E_EXTRA_PROVIDERS` 掛鉤(見 §6.2);`fake-acp-agent.mjs` 也能依
+prompt 內的標記自己呼叫指定的 bridge 工具,用來模擬「agent 收到訊息後自己決定回覆」。
+e2e 套件切分成 `deterministic` / `model-behavior` 兩組,前者可無條件在 CI 跑。
 
 `package-smoke.mjs` 是打包迴歸測試(驗證 packaged exe 能解析所有依賴)。
 
@@ -835,12 +926,11 @@ RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
 | 缺口 | 現況 | 影響 |
 |---|---|---|
 | **PTY 執行沙箱** | 未實作 | PTY tier 結構上無法執行權限政策,因此一律唯讀、不給無人值守自主權(DECISIONS C7) |
-| **LLM lead / orchestrator** | 未實作 | 任務拆解目前純人工;`TaskService` 是確定性的,沒有會提議拆解的 LLM |
 | **mid-turn 成本熔斷** | 未實作 | 目前唯一會發 `usage` 的 adapter 在回合結束前才發一次,沒有可觀測的「回合進行中收到 usage」情境可驗證,強行分岔只是憑空編造行為 |
-| **OpenCode / PTY 掛載 MCP** | 未實作 | 只有 Claude SDK 成員與 ACP 成員(codex/gemini,經 `packages/adapters/src/mcp-bridge-server.ts` 橋接子行程 + scoped token,見 `AcpAdapter.spawn()`)能**主動**呼叫傳訊/子 agent 工具;但**接收端是跨 software 的**(注入 prompt 對任何 session 都有效) |
-| **`session ↔ team member` 持久化** | 只在記憶體 | `sessions` 表沒有欄位記錄這條 session 屬於哪個 team member,崩潰重啟後 `RecoveryService` 只能用 `agentProfileId` 盡力反查(假設一個 profile 只被一個 member 引用) |
-| **遠端能力矩陣的細粒度版本** | 部分 | `LOCAL_ONLY_METHODS` 現在只擋 profile 管理(`profile.create`/`.delete`)與一般設定(`config.setFile`);2026-08-25 起 auto/YOLO 切換與 policy allowlist 編輯已開放遠端,另加一層本機遠端皆可用、但需先處於 YOLO 才能開的「真.無限制」層(見 [`DECISIONS.md` §G](./DECISIONS.md))。DECISIONS F3 列的其餘項目(改預算上限、改綁定介面)尚未有對應的可遠端呼叫方法,因此暫時無需額外閘門 |
-| **`profile.update`** | 未實作 | 只能建立/刪除;實作後必須同步加進 `LOCAL_ONLY_METHODS` |
+| **PTY 掛載 MCP** | 未實作 | 只有 Claude SDK session、ACP session(Codex / Gemini / `opencode-acp`)與 OpenCode(HTTP)session(後兩者經 `packages/adapters/src/mcp-bridge-server.ts` 橋接子行程 + scoped token,見 `AcpAdapter.spawn()`/`OpenCodeAdapter.spawn()`)能**主動**呼叫 session 網路工具;但**接收端是跨 software 的**(`send_to_session` 對任何 session 都能送達,只是 HTTP OpenCode 與 PTY 回不了話,`canUseTools: false`)。規格「不做」清單的後續項目:讓 OpenCode HTTP adapter 也掛 MCP |
+| **遠端能力矩陣的細粒度版本** | 部分 | `LOCAL_ONLY_METHODS` 現在只擋一般設定(`config.setFile`)與 provider env(`settings.setProviderPrefs`)兩項(profile 管理已隨 profile 移除);2026-08-25 起 auto/YOLO 切換與 policy allowlist 編輯已開放遠端,另加一層本機遠端皆可用、但需先處於 YOLO 才能開的「真.無限制」層(見 [`DECISIONS.md` §G](./DECISIONS.md))。DECISIONS F3 列的其餘項目(改預算上限、改綁定介面)尚未有對應的可遠端呼叫方法,因此暫時無需額外閘門 |
+| **跨 session 待送佇列與訊息鏈計數不持久** | 刻意(DECISIONS §H) | 排給忙碌 session 的訊息只在記憶體(core 重啟即遺失,不再有 Mailbox);每條鏈的計數也只在記憶體(重啟歸零,舊鏈本來就該結束) |
+| **偵測清單是固定的** | 刻意 | 只偵測 Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider;手動輸入 command 的入口(`custom-pty`)已移除。支援其他原生 ACP CLI(qwen-code、goose、kimi、copilot 等)只要在 `BUILTIN_PROVIDERS` 與偵測 allowlist 各加一筆,但需要先在實機驗證啟動旗標(本機沒裝,無法依「以實際觀察為準」紀律實測) |
 | **provider env 的靜態加密** | 未做 | 對外(gateway)一律遮罩成 `"***"`,但本機 SQLite 檔案本身是明文(與 Paseo 把金鑰寫進 `~/.paseo/config.json` 同一類取捨) |
 | **非 Windows 打包** | 未做 | core 與 adapters 是純 Node/TypeScript,主要是打包工程而非程式碼問題 |
 
@@ -859,14 +949,14 @@ RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
 | 「殼:建議 Tauri 2…或 Electron」 | ✅ 已定案 **Electron 44**(2026-09-04 從 33 升級,見 SECURITY 相關說明),沒有 Tauri 程式碼 |
 | 「Monaco Editor — diff 檢視與檔案預覽」 | ❌ 無 Monaco。自製 `DiffHunkView` + `react-syntax-highlighter` |
 | 「虛擬列表(聊天串流訊息量大)」 | ❌ 未實作 |
-| `read_inbox` MCP 工具 | ❌ 不存在也不需要(投遞是推播式,不是拉取式) |
+| `read_inbox` MCP 工具 | ❌ 不存在也不需要(投遞是推播式,不是拉取式;而整個團隊訊息機制已於 2026-10-02 移除) |
 | 「ACP 優先,一個協議吃多家,省下逐家客製」 | ⚠️ DECISIONS B3 明確推翻:最肥的 adapter(OpenCode)是全客製;ACP 只是剛好覆蓋兩家的其中一個 adapter |
 | adapter set 含 Gemini CLI / Antigravity 為核心 | ⚠️ 核心 set 收斂為 {Claude Code, Codex, OpenCode},**放棄 Antigravity**(DECISIONS B1) |
 | 「PermissionGateway:UI 彈窗或依 policy 自動核可」 | ⚠️ 職責已拆:`PermissionGateway` 只是待決登記簿 + 逾時(96 行);政策判斷在 `PolicyEngine` |
-| SQLite「teams、agent_profiles、sessions、tasks、messages、settings」 | ⚠️ 實際 **11 張表**,另有 `team_members`、`team_messages`、`workspaces`、`enforcement_audit`、`usage_rollup` |
+| SQLite「teams、agent_profiles、sessions、tasks、messages、settings」 | ⚠️ 當時實際 **11 張表**,另有 `team_members`、`team_messages`、`workspaces`、`enforcement_audit`、`usage_rollup`;2026-10-02 起 team / 任務相關五張表與 `agent_profiles` 的程式碼定義已移除(表本身留在既有 DB 檔案裡),現在是 5 張,見 §8 |
 | SESSION status「idle/busy/waiting/error」 | ⚠️ 實際六態,另有 `closed`、`interrupted`(S6 崩潰對帳需要) |
 | 路線圖只到 M5 | ⚠️ M6 與 S1–S12 系列(安全罩全部)皆已完成 |
-| §1「核心能力」表完全沒提安全罩 | ⚠️ 安全罩現在是**主軸**,佔 `apps/core` 一半以上程式碼 |
+| §1「核心能力」表完全沒提安全罩 | ⚠️ 安全罩現在是**主軸**,專屬四個目錄佔 `apps/core` 實際程式碼約 26%(見 §1),再算上散在 session manager 裡的決策編排比重更高 |
 
 ---
 
@@ -882,12 +972,12 @@ RPC,**從不經過 Electron**:`gateway`(主套件,140+ 項決定性測試)、
 | 3.2 節 | Gateway | [§7 Gateway 協議](#7-gateway-協議) | 9 |
 | 3.3 節 | Orchestration Core | [§4 模組地圖](#4-appscore-模組地圖) | 49 |
 | 3.4 節 | Agent Adapter Layer | [§6 Adapter 層](#6-adapter-層) | 37 |
-| 3.5 節 | Infrastructure | [§8 資料模型](#8-資料模型11-張表) + [§9.1 MCP server](#91-兩個內建-mcp-server) | 6 |
-| 4.1 節 | team-bus MCP 工具清單 | [§9.1 兩個內建 MCP server](#91-兩個內建-mcp-server) | 28 |
-| 4.2 節 | 訊息投遞策略 | [§9.2 投遞策略](#92-投遞策略messagebusdelivertomember) | 21 |
-| 4.3 節 | 訊息流時序圖 / `AgentAdapter` 介面 / `AgentEvent` | [§6.1 真實介面](#61-真實介面packagesadapterssrctypests) + [§6.4 AgentEvent](#64-agentevent10-種) + [§9.2](#92-投遞策略messagebusdelivertomember) | 24 |
-| 第 5 節 | 任務協作流程 | [§10 任務生命週期](#10-任務生命週期) | 6 |
-| 第 6 節 | 資料模型 ERD | [§8 資料模型](#8-資料模型11-張表) | — |
+| 3.5 節 | Infrastructure | [§8 資料模型](#8-資料模型5-張表) + [§9.1 MCP server](#91-內建-mcp-server目前只有-deskmony) | 6 |
+| 4.1 節 | 團隊訊息 MCP 工具清單 | [§9.1 內建 MCP server](#91-內建-mcp-server目前只有-deskmony)(團隊訊息那組已於 2026-10-02 移除,現在只有 `deskmony` session 網路那組) | 28 |
+| 4.2 節 | 訊息投遞策略 | [§9.2 投遞策略](#92-投遞策略--已於-2026-10-02-移除)(已移除,只留說明) | 21 |
+| 4.3 節 | 訊息流時序圖 / `AgentAdapter` 介面 / `AgentEvent` | [§6.1 真實介面](#61-真實介面packagesadapterssrctypests) + [§6.4 AgentEvent](#64-agentevent10-種) + [§9.2](#92-投遞策略--已於-2026-10-02-移除) | 24 |
+| 第 5 節 | 任務協作流程 | [§10 任務生命週期](#10-任務生命週期--已於-2026-10-02-移除)(已移除,只留說明) | 6 |
+| 第 6 節 | 資料模型 ERD | [§8 資料模型](#8-資料模型5-張表) | — |
 | 第 8 節 | 專案目錄結構 | [§4 模組地圖](#4-appscore-模組地圖) + [§13 桌面前端](#13-桌面前端) | — |
 | 第 9 節 | 開發路線圖 | **已移除** —— 路線圖不屬於架構文件,歷史見 [`DEVLOG.md`](./DEVLOG.md) | — |
 | 第 10 節 | 關鍵設計決策摘要 | **已移除** —— 設計決策的權威是 [`DECISIONS.md`](./DECISIONS.md),不再在兩處各自表述 | — |

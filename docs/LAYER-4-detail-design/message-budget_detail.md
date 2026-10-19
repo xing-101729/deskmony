@@ -1,5 +1,7 @@
 # S2 Detail Design:訊息預算 + Mailbox 持久化(第三條斷路器)
 
+> ⚠️ 2026-10-02 已移除,見 [DECISIONS §H](../DECISIONS.md)
+
 > 上層:[S2 HLD](../LAYER-3-hld/message-budget_hld.md)｜階段:**Phase 2 第一份**
 > 前置:[S1 L4 §5](./policy-engine_detail.md)(底座 `trip`/`AuditLog`)、[S11 L4](./notification_detail.md)(trip 必送不節流)、[S3b L4 §5](./cost-governor_detail.md)(`trip` 的實作先例)
 > L4 完成度標準:**另一個工程師照著寫,不用問你**。

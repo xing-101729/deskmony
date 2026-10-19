@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentProfile, DialogAnswer, EffortLevel, PromptInput, TeamBusPort } from "@deskmony/shared";
+import type { AgentEvent, AgentLaunchSpec, DialogAnswer, PromptInput } from "@deskmony/shared";
 import type { AdapterCapabilities } from "@deskmony/shared";
 
 /**
@@ -17,59 +17,95 @@ export interface Workspace {
 }
 
 /**
- * M3 Round A:session 建立時若屬於某個 team 成員,`SessionManager` 會把這個
- * context 傳給 `AgentAdapter.spawn()`。`ClaudeAgentSdkAdapter` 用它掛載
- * team-bus MCP 工具(見 packages/adapters/src/team-bus-mcp.ts);其餘 adapter
- * (ACP/PTY)這輪不掛 MCP,可以忽略這個參數。
- *
- * `bus` 是 `TeamBusPort`(定義在 packages/shared,而非 apps/core 的
- * MessageBus 具體類別)—— 依賴方向規則:packages/* 不得 import apps/*,
- * 這裡只依賴介面,實例由 apps/core 在建立 session 時注入(見
- * apps/core/src/session/session-manager.ts 的 setTeamBus()/teamBus 欄位)。
- */
-export interface TeamSpawnContext {
-  teamId: string;
-  memberId: string;
-  memberName: string;
-  memberRole: string;
-  bus: TeamBusPort;
-}
-
-/**
  * spawn() 回傳的輕量控制代碼。實際的 process/連線狀態由各 adapter 內部管理,
  * 呼叫端(SessionManager)只需要拿著這個 handle 呼叫其餘介面方法。
  */
 export interface AgentHandle {
   id: string;
-  profile: AgentProfile;
+  /** 2026-10-02(P2:移除 profile):原本的 `profile: AgentProfile`。只在記憶體裡傳遞,不持久化。 */
+  launch: AgentLaunchSpec;
   workspace: Workspace;
+  /**
+   * 2026-10-15(session 自動復活):`spawn()` 帶了 `ResumeOptions.backendSessionId` 時才有意義——
+   * `true` = 後端真的接回了先前的對話(agent 記得上下文);`false`/`undefined` = 沒接回(後端不支援 resume、
+   * 那邊的歷史已不存在、接回時失敗),adapter 已改開一個全新的後端對話。呼叫端(SessionManager)據此決定要不要
+   * 用 Deskmony 自己存的對話紀錄補上先前的脈絡,以及要給使用者看哪一種系統說明。adapter 一律在 `spawn()` 回傳
+   * 之前就設好,事後不再變動。
+   */
+  resumed?: boolean;
 }
 
 /**
  * S6(crash-recovery)新增:「繼續(保有記憶)」用的 resume 提示,見
- * crash-recovery_detail.md §4.1——只有查證過確實支援磁碟持久化 session 的
- * adapter 才會使用這個參數(目前只有 `ClaudeAgentSdkAdapter`,見該檔案頂端
- * 對 `@anthropic-ai/claude-agent-sdk` 的 `resume` 選項查證)。其餘 adapter
- * 的 `spawn()` 簽章不需要加這個參數(TS 允許實作端接受比介面宣告更少的參數,
- * 呼叫端永遠不會對不支援的 adapter 傳這個值,見 apps/core/src/session/
- * session-manager.ts 的 `continueSession()`)。
+ * crash-recovery_detail.md §4.1。2026-10-15(session 自動復活)起,所有「重新啟動既有 session」的路徑
+ * (復原視圖的「繼續」、使用者對 closed/interrupted/error session 送訊息的自動復活)都帶這個參數呼叫 `spawn()`,
+ * 各 adapter 的接回方式:
+ *   - `ClaudeAgentSdkAdapter`:SDK 的 `resume`(對話歷史存在 SDK 自己的磁碟檔,先確認檔案還在)。
+ *   - `AcpAdapter`:agent 宣告 `sessionCapabilities.resume` 用 `session/resume`,否則宣告 `loadSession` 用
+ *     `session/load`(會重播歷史,重播的 `session/update` 一律丟棄),都不行或失敗就退回 `session/new`。
+ *   - `OpenCodeAdapter`:opencode 把 session 存在磁碟,沿用同一個 opencode session id(先 `GET /session/{id}` 確認還在)。
+ *   - `GenericPtyAdapter`:無從接回,只沿用 `sessionId`。
+ * 接回失敗**不能讓 `spawn()` 失敗**:adapter 退回開全新的後端對話,並在回傳的 `AgentHandle.resumed` 標 `false`。
  */
 export interface ResumeOptions {
-  /** `getBackendSessionId()` 先前回傳的值。 */
-  backendSessionId: string;
+  /**
+   * `getBackendSessionId()` 先前回傳的值。省略 = 不嘗試接回後端的對話,只沿用 `sessionId`(例如這條 session 崩潰
+   * 前還沒捕捉到後端識別碼)。
+   */
+  backendSessionId?: string;
+  /**
+   * 2026-10-02(P3:session 網路):這個 handle 對應的 **Deskmony session id**。續接時 `SessionManager` 沿用
+   * 既有的 DB session id(不是新 handle 的 id),而 session 網路工具的**呼叫者身分**是 adapter 以 `handle.id`
+   * 閉包捕捉的——若續接後 `handle.id` 仍是新產生的 uuid,工具認出的「我是誰」就不是任何一個 session
+   * (`list_sessions` 的 `isYou`、`send_to_session` 的「不能送給自己」、鏈追蹤全部對不上)。
+   * 提供時 adapter 必須用它當 `handle.id`。
+   */
+  sessionId?: string;
+}
+
+/**
+ * 2026-10-06(AI 自動命名):`AgentAdapter.generateTitle()` 的輸入。`prompt` 是 core 組好的完整命名指示
+ * (`buildTitleRequestPrompt()`,含引用的使用者訊息);`signal` 在逾時(或 session 被刪)時觸發,adapter 必須據此
+ * 中止並清掉臨時對話。
+ */
+export interface TitleGenerationRequest {
+  prompt: string;
+  signal: AbortSignal;
+}
+
+/**
+ * `generateTitle()` 的結果。`text` 是 agent 的原始回覆(core 會再清理、截斷);`usage` 是**這一次臨時對話自己的**
+ * 用量(一次性的值,不是主 session 連線的累計),拿得到才填——core 把它直接加進該 session 與當日的成本 rollup。
+ */
+export interface TitleGenerationResult {
+  text: string;
+  usage?: { costAmount?: number; costCurrency?: string; inputTokens?: number; outputTokens?: number; model?: string };
 }
 
 export interface AgentAdapter {
   capabilities(): AdapterCapabilities;
-  spawn(profile: AgentProfile, workspace: Workspace, team?: TeamSpawnContext, resume?: ResumeOptions): Promise<AgentHandle>;
+  /**
+   * 2026-10-06(AI 自動命名):用**同一個 agent** 另開一個**臨時對話**產生 session 標題,完成後丟棄——**絕不能**在主對話裡
+   * 多插一輪(那會污染這個 agent 的上下文,也會讓使用者在對話串看到一則莫名其妙的「幫我取標題」)。
+   *
+   * 各 adapter 的共同紀律(安全):
+   *   - 臨時對話**不得取得任何工具或權限**:它發出的權限請求一律拒絕(不經過政策引擎、不進 UI、不轉給主 session),
+   *     agent 一嘗試呼叫工具就中止這次命名(丟錯,core 退回截取首句)。
+   *   - 臨時對話的任何事件(文字、工具、權限、錯誤)都不得混進主 session 的事件串流。
+   *   - `request.signal` 觸發時中止並清理(取消/關閉/刪除臨時對話、收掉子程序),然後丟錯。
+   *   - 失敗一律丟錯,不得影響主 session;core 只記 log 並退回截取首句。
+   *
+   * **可選**:做不到的 adapter(pty 沒有「另開一個對話」的概念)不實作,core 直接退回截取首句。
+   */
+  generateTitle?(handle: AgentHandle, request: TitleGenerationRequest): Promise<TitleGenerationResult>;
+  spawn(launch: AgentLaunchSpec, workspace: Workspace, resume?: ResumeOptions): Promise<AgentHandle>;
   sendPrompt(handle: AgentHandle, prompt: PromptInput): void;
   /** AgentEvent = 訊息增量 | 工具呼叫 | 權限請求 | 完成 | 錯誤 */
   events(handle: AgentHandle): AsyncIterable<AgentEvent>;
   /**
    * 中斷目前回合。回傳的 Promise 在「中斷確實生效、控制權已交還呼叫端」時才
-   * resolve(M3 Round B 修正,見 apps/core/src/bus/message-bus.ts 頂端註解的
-   * 「interrupt 時序」設計決策)——呼叫端(尤其是 MessageBus 的 interrupt
-   * 投遞路徑)必須先 await 這個 Promise 完成,才能安全地注入下一個 prompt,
+   * resolve(M3 Round B 修正的「interrupt 時序」設計決策)——呼叫端必須先
+   * await 這個 Promise 完成,才能安全地注入下一個 prompt,
    * 否則會與尚未真正停下的回合競爭(race)。各 adapter 對「生效」的定義依其
    * 協議能力而異(ClaudeAgentSdkAdapter 用 SDK 官方文件明載語意的
    * `Query.interrupt()` Promise;AcpAdapter/GenericPtyAdapter 沒有對應的
@@ -113,12 +149,11 @@ export interface AgentAdapter {
    * 覆寫已記錄,並不保證 opencode 真的認得這個 model,不合法的值會在下一輪
    * 對話透過既有的錯誤事件路徑浮現。
    *
-   * ACP/PTY 協議本身沒有對應的「呼叫端指定 model」機制(ACP 的
-   * `session/new`/`session/prompt` 沒有 model 參數,model 完全由被 spawn
-   * 出來的那個外部 agent/CLI 自行決定與管理;PTY 更只是無結構化的終端
-   * 直通,連「model」這個概念本身都不存在)——`AcpAdapter`/`GenericPtyAdapter`
-   * 一律丟出明確錯誤,不可靜默忽略成功(呼叫端 `SessionManager.
-   * setSessionModel()` 會讓這個錯誤原樣傳給 gateway 呼叫端)。
+   * 2026-10-06:`AcpAdapter` 改成向 agent 查——agent 在 `session/new` 回報的 `configOptions` 有
+   * `category: "model"` 的選項時,用 `session/set_config_option` 切換(值必須在 agent 給的清單裡);
+   * 沒宣告就丟明確錯誤。`GenericPtyAdapter` 是無結構化的終端直通,只能在建立時把 `--model` 烤進啟動
+   * 參數,一律丟明確錯誤。不可靜默忽略成功(呼叫端 `SessionManager.setSessionModel()` 會讓這個錯誤
+   * 原樣傳給 gateway 呼叫端)。可選清單有變動時,adapter 送 `session-options` 事件(見 session-options.ts)。
    */
   setModel(handle: AgentHandle, model: string): Promise<void>;
   /**
@@ -132,12 +167,15 @@ export interface AgentAdapter {
    * `'max'` 是 session-scoped(只在這個 session 生效,不會持久化到 settings
    * 檔案,見 sdk.d.ts 對 `applyFlagSettings()` 的說明)。
    *
-   * `OpenCodeAdapter`/`AcpAdapter`/`GenericPtyAdapter` 都沒有查到對應的
-   * reasoning-effort 機制(不像 model 那樣 opencode 至少有 per-message 欄位
-   * 可以模擬覆寫)——三者一律丟出明確錯誤,不可靜默忽略成功(呼叫端
-   * `SessionManager.setSessionEffort()` 會讓這個錯誤原樣傳給 gateway 呼叫端)。
+   * 2026-10-06:`effort` 的值由各 agent 定義(見 session-options.ts),各 adapter 自己驗證:
+   *   - `ClaudeAgentSdkAdapter`:只接受 Claude 的 5 級(`EffortLevelSchema`)。
+   *   - `AcpAdapter`:agent 宣告了 `category: "thought_level"` 的選項才支援,走 `session/set_config_option`。
+   *   - `OpenCodeAdapter`:目前 model 的 variants 之一,記在 session 裡、隨下一則訊息的 `variant` 欄位送出。
+   *   - `GenericPtyAdapter`:只能建立時決定(claude-cli 的 `--effort`),一律丟明確錯誤。
+   * 不支援或值不合法一律丟明確錯誤,不可靜默忽略成功(呼叫端 `SessionManager.setSessionEffort()` 會讓
+   * 這個錯誤原樣傳給 gateway 呼叫端)。
    */
-  setEffort(handle: AgentHandle, effort: EffortLevel): Promise<void>;
+  setEffort(handle: AgentHandle, effort: string): Promise<void>;
   /**
    * 原始 byte/字元級輸入直通(對應 Bug A 修正:xterm.js 的 `term.onData()`)。
    * 與 `sendPrompt()` 的差異——`sendPrompt()` 是「送一整行文字,語意上等同
@@ -158,13 +196,12 @@ export interface AgentAdapter {
   resize?(handle: AgentHandle, cols: number, rows: number): void;
   /**
    * S6(crash-recovery)新增:回傳這個 handle 對應的後端持久化 session 識別碼
-   * ——只有查證過真的有磁碟持久化能力的 adapter 才實作(目前只有
-   * `ClaudeAgentSdkAdapter`,見該檔案內對 SDK `resume` 選項的查證說明)。
+   * ——有後端持久化能力的 adapter 才實作(`ClaudeAgentSdkAdapter`:SDK 的 session id;2026-10-15 起 `AcpAdapter`:
+   * ACP sessionId、`OpenCodeAdapter`:opencode session id)。
    * 回傳 `undefined` 代表「這個 adapter 不支援,或這個 session 還沒捕捉到值」
    * ——兩種情況呼叫端(SessionManager)都一律視為「這條 session 目前無法
    * 『繼續』,只能『接手』」,不強行區分(crash-recovery_detail.md §4.1「查不到
-   * 就標不支援」的同一種保守原則)。其餘 adapter(ACP/OpenCode/PTY)保持
-   * `undefined`(不實作這個方法)。
+   * 就標不支援」的同一種保守原則)。PTY 保持 `undefined`(不實作這個方法)。
    */
   getBackendSessionId?(handle: AgentHandle): string | undefined;
 }

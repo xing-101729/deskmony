@@ -103,7 +103,7 @@ export async function connectGateway(params: ConnectParams): Promise<GatewayClie
 }
 
 /**
- * 一次性指令(run/session/profile/doctor/config)共用的收尾動作。
+ * 一次性指令(run/session/doctor/config)共用的收尾動作。
  *
  * **這一步不可省略**:`GatewayClient` 是為桌面殼「長駐」設計的,斷線後
  * 預設會 `setTimeout(reconnect, 2000)` 自動重連(見

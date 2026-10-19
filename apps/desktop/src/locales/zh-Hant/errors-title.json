@@ -1,0 +1,7 @@
+{
+  "session": {
+    "titleEmpty": "標題不能是空白",
+    "titleTooLong": "標題最多 {{max}} 個字(目前 {{length}} 個字)",
+    "autoTitleNoContent": "這個對話還沒有任何文字訊息,無法自動命名"
+  }
+}
