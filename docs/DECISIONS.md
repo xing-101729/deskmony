@@ -355,3 +355,50 @@ gateway 方法 `session.rewind` / `session.fork`,參數 `{ sessionId, messageId 
 
 **驗證**:`scripts/e2e-session-rewind.mjs`(假 ACP agent 的 `--resume` / `--config-options`、假 OpenCode、假 PTY;一個 core 開關三次:活著 / 重啟後沒有 runtime / 崩潰後 interrupted,約 1.5 分鐘)與
 `e2e-session-network` P3.7-8;桌面端用隔離 core 搭配瀏覽器實測(hover 三種訊息、版面不跳、時間戳、複製、倒回與分支全流程)。
+
+---
+
+## L. 2026-10-20 修訂:右側面板(Terminal / Browser / Changes / Files)與 agent 瀏覽器
+
+規格:[`LAYER-4-detail-design/side-panel_detail.md`](./LAYER-4-detail-design/side-panel_detail.md)。以下是使用者在被攤開取捨後親自選的、會動到安全罩的部分。
+
+**1. 終端遠端也可用(與 `config.setFile`/`settings.setProviderPrefs` 的 local-only 慣例不同)**
+
+`terminal.*` 不列入 `LOCAL_ONLY_METHODS`。終端是**完全不經政策引擎**的執行路徑——這與 2026-09-04 把 `settings.setProviderPrefs` 改成 local-only 的理由同類,
+但使用者明確選擇「遠端也可用」:用 Tailscale/手機連進來的人(已持有主 token)可以直接開 shell。代價:主 token 外洩 = shell 外洩。緩解:
+
+- 每次開/關終端寫稽核(`kind: "terminal-session"`,含是否遠端與來源位址)。
+- 終端的環境變數經 `buildAgentChildEnv()`,不含 `DESKMONY_AUTH_TOKEN` 等內部憑證(§J)。
+- agent 永遠開不了終端:`terminal.*` 不在任何 scoped bridge token 的方法白名單裡。
+- Changes/Files 的唯讀查詢同理不列 local-only(比開 shell 弱),路徑一律限制在 session 工作資料夾內(realpath 比對,擋 symlink/junction)。
+
+**2. agent 可以操作面板瀏覽器**
+
+工具走既有的 session 網路 MCP(`mcp__deskmony__browser_*`)。截圖/讀頁面/捲動自動放行;導覽/點擊/輸入/按鍵走一般政策。
+**導覽目標由 core 強制檢查**(不依賴 adapter 有沒有問權限——三種後端對 MCP 工具的權限請求行為不一致):只允許 http/https,host 必須是 loopback 或在
+`policy.allowedHosts` 裡(或該 session 開著「真.無限制」)。
+
+- **C5 第 4 類的調整範圍**:只有 Deskmony 自己的 `browser_navigate` 跳過 hard-deny 的 host 檢查——loopback 依使用者決定不算外連;外部 host 改由上面的 core 規則擋,
+  而且比 hard-deny **更嚴**(不給本機 attended 的逐次強確認放行,只能進 allowedHosts)。WebFetch 等其他工具的第 4 類判斷不變。
+- `file://` 等非 http(s) scheme 在 core 與 Electron main 兩層都擋——否則 agent 導覽到 `file:///~/.ssh/id_rsa` 再讀頁面,等於繞過「讀秘密路徑」hard-deny。
+- 瀏覽器指令只送給**一條**本機的桌面 app 連線(`browser.registerHost` 只收 `isLocal` 的非 scoped 連線),不 broadcast。
+- agent 只能操作**自己 session** 的瀏覽器(方法參數沒有 sessionId,由 token 決定)。
+- 下載一律取消、網頁的裝置權限(相機/麥克風/定位/通知…)一律拒絕、彈出視窗改在同一頁開。
+- 第一版不提供執行任意 JavaScript 的工具。
+- 設定開關 `features.agentBrowserTools`(預設開)可整個關掉。
+
+**3. 瀏覽器登入狀態:每個 session 獨立、不落地**
+
+每個 session 一個記憶體 partition(`deskmony-browser-<sessionId>`,不帶 `persist:`),session 刪除時清空,app 重開就沒了。agent 只碰得到使用者在
+**該 session 活著期間**於該 session 瀏覽器裡登入的東西。
+
+**4. 順帶修掉的既有漏洞:scoped bridge 連線收得到所有推播**
+
+`WsGateway.broadcast()` 原本把 push 送給所有已認證連線,包含 scoped MCP bridge token 的連線——拿到 bridge token 的人能看到所有 session 的事件與權限請求。
+bridge 本身不讀 push,改成 scoped 連線一律不收 push。
+
+**5. 已知限制**
+
+- core 只擋 agent **明確要求**的導覽;到了頁面上之後的連結、表單、重新導向可以走到 allowedHosts 以外——瀏覽器本質上能對外連線。要嚴格隔離就關 `features.agentBrowserTools`。
+- `policy.allowedHosts` 沒有 UI、也沒有 RPC(安全罩地基,刻意如此),只能手改 `~/.deskmony/config.json`。
+- 瀏覽器工具需要桌面 app 開著;純 headless core 或只有遠端瀏覽器 client 時,工具回 `browser.noHost`。
