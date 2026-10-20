@@ -10,6 +10,7 @@ import {
   type TerminalOutputPush,
 } from "@deskmony/shared";
 import { client } from "./session-store.js";
+import { splitTerminalInput } from "../lib/terminal-input.js";
 
 /**
  * 右側面板 Terminal 分頁的狀態(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P1.4)。
@@ -221,10 +222,10 @@ export async function attachTerminal(terminalId: string): Promise<TerminalAttach
   return TerminalAttachResultSchema.parse(raw);
 }
 
-/** 一個 xterm 實例用:送鍵盤輸入(超過 core 單次上限的貼上分段送)。 */
+/** 一個 xterm 實例用:送鍵盤輸入(超過 core 單次上限的貼上分段送,切點不落在 surrogate pair 中間,見 `splitTerminalInput()`)。 */
 export async function sendTerminalInput(terminalId: string, data: string, chunkChars = 60_000): Promise<void> {
-  for (let offset = 0; offset < data.length; offset += chunkChars) {
-    await client.call("terminal.input", { terminalId, data: data.slice(offset, offset + chunkChars) });
+  for (const chunk of splitTerminalInput(data, chunkChars)) {
+    await client.call("terminal.input", { terminalId, data: chunk });
   }
 }
 
