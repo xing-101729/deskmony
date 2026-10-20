@@ -990,7 +990,9 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
             <span className="text-fg-subtle">{agentLabel}</span> · {shortenPath(session.workingDir)}
           </p>
         </div>
-        <div className="flex flex-shrink-0 flex-wrap items-center gap-1.5">
+        {/* 2026-10-20:不再 flex-shrink-0——右側面板開著時聊天區可能只剩 22rem,這組控制項要能在容器內換行(面板切換鈕
+            本身仍是 flex-shrink-0,不會被裁掉),而不是撐出標頭被截斷。 */}
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
           <UsageBadge session={session} />
           <CostBudgetBadge session={session} />
           <AutoModeControl session={session} />

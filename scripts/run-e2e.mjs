@@ -53,6 +53,9 @@ const SUITES = [
   // 2026-10-16:對話串「連續工具呼叫收成一組」的純函式(apps/desktop/src/lib/chat-groups.ts)——不啟動 core、
   // 不需要 build(直接用 Node 載入 .ts,需 Node >= 22.18),毫秒級。
   "e2e-chat-groups",
+  // 2026-10-20:右側面板的兩個純函式(面板寬度/聊天視圖最小寬度/覆蓋層切換、大段貼上分段不拆 surrogate pair)——
+  // 同上,不啟動 core、不需要 build,毫秒級。
+  "e2e-side-panel-pure",
   // 2026-10-02(P3:session 網路):五個工具(list_agents/list_sessions/read_session/create_session/send_to_session)
   // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
   // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。

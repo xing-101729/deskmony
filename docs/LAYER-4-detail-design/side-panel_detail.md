@@ -153,6 +153,15 @@ P0 很小,與 P1 由同一個實作者做,但**各自一個 commit**。
   `terminal.limitReached` 的 params 帶 `scope`(`session`/`global`)、`limit`、`perSession`、`global`,翻譯文字不依賴 scope。
 - **`terminal.input` 的 64 KB 上限以字元數計**(`TERMINAL_INPUT_MAX_CHARS` = 65536),由 schema 驗證拒絕(`gateway.invalidRequest`),不是 manager 內的專屬錯誤碼。
 - **全域 32 個上限沒有 e2e**(需要 4 個 session × 8 個真 shell,負載過重);每個 session 8 個有測。
+- **面板寬度上限(review 後修正,取代上文「最大視窗寬度 70%」)**:`lib/panel-layout.ts` 的 `computePanelLayout()`——
+  面板寬度 = 偏好寬度夾在 [320, min(視窗 70%, 實際量到的可用寬度 − 22rem)];可用寬度是 App.tsx 裡「聊天視圖 + 面板」共用容器的
+  實測寬度(側欄展開/收合、字級縮放都已反映,不寫死側欄寬度)。連 22rem + 320 都放不下、或視窗在 `sm` 以下 → 改成全螢幕覆蓋層。
+  拖拉同樣受上限限制;**存下來的偏好**在被版面限制時不改寫(拖到上限時存的是上限),空間變大(展開↔收合側欄、放大視窗)就恢復。
+- **shell 自己結束後的終端被關閉時不碰它的 pid**(pid 可能已被別的行程重用,taskkill /T /F 會殺到無關的程序樹),
+  `ShellPty.kill()` 與 `TerminalManager.closeRecord()` 兩層都擋。
+- **面板終端的環境刪掉 `ELECTRON_RUN_AS_NODE`**(打包版 core 帶著它,shell 繼承會讓使用者在終端裡啟動的 Electron 程式變成純 Node);
+  只動面板終端(`buildTerminalEnv()`),`buildAgentChildEnv()` 與 agent 的環境不動。`spawnShellPty()` 另外濾掉值是 `undefined` 的鍵
+  (node-pty 會把它變成字面的 `"undefined"` 字串)。
 - **重新啟動的新終端「在同一位置」**是 client 端的分頁順序(core 的清單依建立順序);重新載入清單後回到建立順序。
 - **面板關著時整個不渲染**(xterm 一併 dispose),重新打開時 attach——不是隱藏保留;P3 的 webview 才需要「不能卸載」,到時在分頁註冊陣列加 `keepMounted`。
 - 快捷鍵:`hotkeys.ts` 新增 `ctrl` 記號(字面 Ctrl,不隨平台變成 ⌘),`ctrl+\`` 用它;`mod+j` 在 Windows 上就是 Ctrl+J(終端裡的 LF,`allowInTerminal` 照規格攔截)。

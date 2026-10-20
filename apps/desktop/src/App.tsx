@@ -458,13 +458,19 @@ export default function App(): JSX.Element {
           仍然可用。`resetKey` 綁 currentSessionId:切到別的 session 會自動清掉
           錯誤狀態,不會一路卡著同一張錯誤畫面。
         */}
-        <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
-          <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
-        </ErrorBoundary>
-        {/* 2026-10-20:右側面板(Terminal 等分頁)——自己一層 ErrorBoundary,面板內容(終端、之後的瀏覽器/檔案預覽)壞掉不拖垮聊天視圖。 */}
-        <ErrorBoundary label="側邊面板" resetKey={currentSessionId ?? ""}>
-          <SidePanel />
-        </ErrorBoundary>
+        {/*
+          2026-10-20:聊天視圖與右側面板放進**同一個容器**——容器的寬度就是側欄佔掉之後實際剩下的寬度(側欄展開/收合都會
+          反映在這裡),SidePanel 量它來決定面板寬度與是否改成覆蓋層,不必寫死側欄寬度(見 lib/panel-layout.ts)。
+        */}
+        <div className="flex min-h-0 min-w-0 flex-1">
+          <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
+            <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
+          </ErrorBoundary>
+          {/* 右側面板(Terminal 等分頁)——自己一層 ErrorBoundary,面板內容(終端、之後的瀏覽器/檔案預覽)壞掉不拖垮聊天視圖。 */}
+          <ErrorBoundary label="側邊面板" resetKey={currentSessionId ?? ""}>
+            <SidePanel />
+          </ErrorBoundary>
+        </div>
       </div>
 
       {/* 對話框各自也包一層:一個對話框壞掉不該把底下的主畫面一起帶走。 */}

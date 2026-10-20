@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { PANEL_DEFAULT_WIDTH, PANEL_MAX_WIDTH_RATIO, PANEL_MIN_WIDTH } from "../lib/panel-layout.js";
 
 /**
  * 右側面板的外殼狀態(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P1.3):開/關、寬度、目前分頁。
@@ -11,20 +12,15 @@ import { create } from "zustand";
 
 const STORAGE_KEY = "deskmony.sidePanel.v1";
 
-export const PANEL_MIN_WIDTH = 320;
-export const PANEL_DEFAULT_WIDTH = 480;
-/** 面板寬度不超過視窗寬度的這個比例(聊天視圖至少要留 30%)。 */
-export const PANEL_MAX_WIDTH_RATIO = 0.7;
-
-/** 目前視窗下面板寬度的上限(視窗太窄時以最小寬度為準,不讓上限小於下限)。 */
-export function panelMaxWidth(): number {
-  const viewport = typeof window !== "undefined" ? window.innerWidth : 1280;
-  return Math.max(PANEL_MIN_WIDTH, Math.floor(viewport * PANEL_MAX_WIDTH_RATIO));
-}
-
+/**
+ * 存下來的**偏好**寬度夾在 [320, 視窗 70%]。實際顯示的寬度還要再受「聊天視圖至少保留 22rem」限制(`lib/panel-layout.ts`
+ * 的 `computePanelLayout()`,依實際量到的版面算)——偏好不被那個限制改寫,空間變大時會恢復。
+ */
 export function clampPanelWidth(width: number): number {
   if (!Number.isFinite(width)) return PANEL_DEFAULT_WIDTH;
-  return Math.min(panelMaxWidth(), Math.max(PANEL_MIN_WIDTH, Math.round(width)));
+  const viewport = typeof window !== "undefined" ? window.innerWidth : 1280;
+  const max = Math.max(PANEL_MIN_WIDTH, Math.floor(viewport * PANEL_MAX_WIDTH_RATIO));
+  return Math.min(max, Math.max(PANEL_MIN_WIDTH, Math.round(width)));
 }
 
 interface PersistedPanelState {
