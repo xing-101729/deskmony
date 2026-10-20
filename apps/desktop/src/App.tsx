@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { client, providerLabelOf, selectAvailableProviders, useSessionStore } from "./stores/session-store.js";
 import { useRecoveryStore } from "./stores/recovery-store.js";
+import { usePanelStore } from "./stores/panel-store.js";
 import { SessionList } from "./views/SessionList.js";
 import { SessionView } from "./views/SessionView.js";
+import { SidePanel } from "./views/panel/SidePanel.js";
+import { openNewTerminal, openTerminalPanel, togglePanel } from "./views/panel/panel-actions.js";
 import { PermissionModal } from "./views/PermissionModal.js";
 import { ConnectScreen } from "./views/ConnectScreen.js";
 import { SettingsDialog } from "./views/SettingsDialog.js";
@@ -77,6 +80,7 @@ export default function App(): JSX.Element {
   const increaseFontScale = useFontScale((s) => s.increase);
   const decreaseFontScale = useFontScale((s) => s.decrease);
   const resetFontScale = useFontScale((s) => s.reset);
+  const panelOpen = usePanelStore((s) => s.open);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -198,6 +202,10 @@ export default function App(): JSX.Element {
         { combo: "mod+,", handler: () => setSettingsOpen(true) },
         { combo: "alt+arrowdown", handler: () => cycleSession(1), allowInTerminal: true },
         { combo: "alt+arrowup", handler: () => cycleSession(-1), allowInTerminal: true },
+        // 2026-10-20(右側面板):`mod+j` 開/關面板;`ctrl+``(Ctrl + 反引號)開面板並切到 Terminal(沒有終端就自動建一個)。
+        // 兩者在終端裡也要生效——面板的終端聚焦時最常需要的就是「收起面板」與「回到終端」。
+        { combo: "mod+j", handler: () => togglePanel(), allowInTerminal: true },
+        { combo: "ctrl+`", handler: () => openTerminalPanel(), allowInTerminal: true },
         // 字級調整:這三組組合鍵在終端裡沒有 readline/既定終端語意(不像
         // ui/hotkeys.ts 檔頭註解警告的 Ctrl+K/B/N 那樣被終端本身佔用),而
         // 「正在看終端輸出時調整字級」恰好是最常見的使用情境之一,所以明確
@@ -250,6 +258,15 @@ export default function App(): JSX.Element {
         run: () => setSidebarCollapsed((collapsed) => !collapsed),
       },
       {
+        id: "action:toggle-panel",
+        group: t("app:commands.groupActions"),
+        title: panelOpen ? t("app:commands.togglePanel.hide") : t("app:commands.togglePanel.show"),
+        icon: "panel-right",
+        hint: `${MOD_LABEL}J`,
+        keywords: t("app:commands.togglePanel.keywords"),
+        run: () => togglePanel(),
+      },
+      {
         id: "action:toggle-theme",
         group: t("app:commands.groupActions"),
         title: resolvedTheme === "dark" ? t("app:commands.toggleTheme.toLight") : t("app:commands.toggleTheme.toDark"),
@@ -285,6 +302,19 @@ export default function App(): JSX.Element {
         run: () => resetFontScale(),
       },
     ];
+
+    if (currentSessionId) {
+      list.push({
+        id: "action:new-terminal",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.newTerminal.title"),
+        subtitle: t("app:commands.newTerminal.subtitle"),
+        icon: "terminal",
+        hint: "Ctrl+`",
+        keywords: t("app:commands.newTerminal.keywords"),
+        run: () => openNewTerminal(),
+      });
+    }
 
     if (interruptedSessions.length > 0) {
       list.push({
@@ -330,6 +360,8 @@ export default function App(): JSX.Element {
     handleCreateSession,
     increaseFontScale,
     interruptedSessions.length,
+    panelOpen,
+    currentSessionId,
     resetFontScale,
     resolvedTheme,
     selectSession,
@@ -428,6 +460,10 @@ export default function App(): JSX.Element {
         */}
         <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
           <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
+        </ErrorBoundary>
+        {/* 2026-10-20:右側面板(Terminal 等分頁)——自己一層 ErrorBoundary,面板內容(終端、之後的瀏覽器/檔案預覽)壞掉不拖垮聊天視圖。 */}
+        <ErrorBoundary label="側邊面板" resetKey={currentSessionId ?? ""}>
+          <SidePanel />
         </ErrorBoundary>
       </div>
 

@@ -140,6 +140,23 @@ P0 很小,與 P1 由同一個實作者做,但**各自一個 commit**。
 
 最後全套 `pnpm test` 綠。
 
+### P0/P1 實作備註(與上文不同或規格沒寫死的地方)
+
+- **node-pty 放在 adapters**:`packages/adapters/src/shell-pty.ts` 的 `spawnShellPty()`,core 的 `TerminalManager` 只認它回傳的最小介面(`ShellPty`)。
+  node-pty 是 adapters 的相依(原生模組、打包路徑只有一處),core 不另外宣告一份。終止是**非同步**的(`taskkill /T /F` 用 `spawn`、不是 `spawnSync`),
+  理由見該檔案頂端:同步 taskkill 在 WMI 變慢時會卡住整個 core 的事件迴圈。
+- **`hasConnectedClient()` 也排除 scoped 連線**(P0 的連帶修正):它的文件寫明判定與 `broadcast()` 一致,scoped 連線不再收 push 之後,
+  把它算成「有人看得到彈窗」會讓只剩 bridge 連線的 core(桌面 app 沒開)把 escalate 當成有人在、永遠掛起而不是逾時 deny。
+- **稽核只記使用者要求的開/關**:`terminal.create`/`terminal.close` 由 gateway 帶 `{remote, remoteAddress}` 進 `TerminalManager`;
+  session 刪除/core 關閉連帶關閉、shell 自己結束都不記(沒有「發出請求的連線」可言)。
+- **`terminal.list` 對不存在的 session 回 `terminal.sessionNotFound`**(與 `create` 一致);另加 `terminal.spawnFailed`(shell 啟不起來)。
+  `terminal.limitReached` 的 params 帶 `scope`(`session`/`global`)、`limit`、`perSession`、`global`,翻譯文字不依賴 scope。
+- **`terminal.input` 的 64 KB 上限以字元數計**(`TERMINAL_INPUT_MAX_CHARS` = 65536),由 schema 驗證拒絕(`gateway.invalidRequest`),不是 manager 內的專屬錯誤碼。
+- **全域 32 個上限沒有 e2e**(需要 4 個 session × 8 個真 shell,負載過重);每個 session 8 個有測。
+- **重新啟動的新終端「在同一位置」**是 client 端的分頁順序(core 的清單依建立順序);重新載入清單後回到建立順序。
+- **面板關著時整個不渲染**(xterm 一併 dispose),重新打開時 attach——不是隱藏保留;P3 的 webview 才需要「不能卸載」,到時在分頁註冊陣列加 `keepMounted`。
+- 快捷鍵:`hotkeys.ts` 新增 `ctrl` 記號(字面 Ctrl,不隨平台變成 ⌘),`ctrl+\`` 用它;`mod+j` 在 Windows 上就是 Ctrl+J(終端裡的 LF,`allowInTerminal` 照規格攔截)。
+
 ---
 
 ## P2. Changes + Files

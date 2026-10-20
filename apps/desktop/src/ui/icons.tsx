@@ -34,6 +34,7 @@ export type IconName =
   | "message"
   | "moon"
   | "more"
+  | "panel-right"
   | "pause"
   | "pencil"
   | "play"
@@ -165,6 +166,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="6" cy="12" r="1.2" />
       <circle cx="12" cy="12" r="1.2" />
       <circle cx="18" cy="12" r="1.2" />
+    </>
+  ),
+  // 2026-10-20(右側面板):視窗右側有一欄的版面示意(對照左側的 sidebar 圖示)。
+  "panel-right": (
+    <>
+      <rect x="3" y="4.5" width="18" height="15" rx="2" />
+      <path d="M15 4.5v15" />
     </>
   ),
   pause: (

@@ -23,7 +23,11 @@ export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(
 export const MOD_LABEL = isMac ? "⌘" : "Ctrl";
 
 export interface Hotkey {
-  /** 例如 "mod+k"、"mod+shift+p"、"mod+1"、"alt+ArrowDown" */
+  /**
+   * 例如 "mod+k"、"mod+shift+p"、"mod+1"、"alt+ArrowDown"。
+   * `mod` 在 macOS 是 ⌘、其他平台是 Ctrl;要**字面**的 Ctrl(不隨平台變成 ⌘)用 `ctrl`,例如 "ctrl+`"
+   * (VS Code 的「開終端」慣例;macOS 的 ⌘+` 是系統的視窗切換,攔不到)。
+   */
   combo: string;
   handler: (event: KeyboardEvent) => void;
   /** 終端聚焦時也要生效(預設 false:Ctrl 系讓給終端) */
@@ -36,11 +40,17 @@ function matches(event: KeyboardEvent, combo: string): boolean {
   const parts = combo.toLowerCase().split("+");
   const key = parts[parts.length - 1];
   const needMod = parts.includes("mod");
+  const needCtrl = parts.includes("ctrl");
   const needShift = parts.includes("shift");
   const needAlt = parts.includes("alt");
 
   const modActive = isMac ? event.metaKey : event.ctrlKey;
-  if (needMod !== modActive) return false;
+  if (needCtrl) {
+    // 字面 Ctrl:必須按著 Ctrl、且沒有 ⌘(mac)——不走上面隨平台變動的 mod。
+    if (!event.ctrlKey || event.metaKey) return false;
+  } else if (needMod !== modActive) {
+    return false;
+  }
   if (needShift !== event.shiftKey) return false;
   if (needAlt !== event.altKey) return false;
   // 非 mac 上避免 AltGr(Ctrl+Alt)誤觸

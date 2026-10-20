@@ -26,6 +26,16 @@
       "hide": "Collapse sidebar",
       "keywords": "sidebar collapse toggle panel"
     },
+    "togglePanel": {
+      "show": "Show side panel",
+      "hide": "Hide side panel",
+      "keywords": "side panel terminal toggle show hide right"
+    },
+    "newTerminal": {
+      "title": "New terminal",
+      "subtitle": "Open a shell in this conversation's working folder",
+      "keywords": "terminal shell console new powershell bash"
+    },
     "toggleTheme": {
       "toLight": "Switch to light theme",
       "toDark": "Switch to dark theme",

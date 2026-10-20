@@ -8,31 +8,9 @@ import { IconButton } from "../ui/Button.js";
 import { Badge } from "../ui/Badge.js";
 import { useTheme } from "../ui/theme.js";
 import { useFontScale } from "../ui/font-scale.js";
+import { TERMINAL_FONT_FAMILY, resolveTerminalTheme, terminalFontSizeFor } from "../ui/xterm-theme.js";
 import { SessionTitleHeading } from "./SessionTitle.js";
-
-/** 把 index.css 定義的 CSS 變數(RGB 通道值)解析成 xterm.js 能吃的 `rgb()`
- *  字串——xterm 用 canvas/webgl 繪製,`fillStyle` 不會像一般 DOM 那樣解析
- *  `var(--x)`,必須在這裡讀出目前生效的實際色值。深/淺主題切換時重新讀取一次
- *  即可(見下方訂閱 `useTheme` 的 effect)。 */
-function resolveTerminalTheme(): NonNullable<ConstructorParameters<typeof Terminal>[0]>["theme"] {
-  const style = getComputedStyle(document.documentElement);
-  const channel = (name: string): string => `rgb(${style.getPropertyValue(name).trim().split(/\s+/).join(" ")})`;
-  return {
-    background: channel("--c-canvas"),
-    foreground: channel("--c-fg"),
-    cursor: channel("--c-accent"),
-    cursorAccent: channel("--c-canvas"),
-    selectionBackground: channel("--c-line-strong"),
-  };
-}
-
-/** xterm 用 canvas 繪製終端內容,字級是建構 `Terminal` 時給的 px 數字,不吃
- *  CSS rem——調整 ui/font-scale.ts 的 root font-size 不會讓它自動變大/變小
- *  (同一類問題見上方 resolveTerminalTheme() 的說明,那是顏色版本,這裡是
- *  字級版本)。這裡手動依目前的 root font-size 等比換算,維持「終端字級
- *  跟著 UI 其餘部分一起縮放」的目標。13 是原本寫死的字級,也就是 16px root
- *  (= font-scale 的 `md` 檔)時的基準值。 */
-const TERMINAL_BASE_FONT_PX = 13;
+import { PanelToggleButton } from "./panel/PanelToggleButton.js";
 
 /**
  * TerminalView — GenericPtyAdapter(`capabilities().terminal === true`)的
@@ -99,7 +77,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
     // exhaustive-deps 規則就得把它加進 deps,結果會變成字級一變 xterm 就被
     // 整個銷毀重建、緩衝內容閃一下清空。「字級改變後即時套用」交給下面另一個
     // 訂閱 rootFontPx 的 effect 負責(比照下面主題切換 effect 的既有寫法)。
-    const initialFontSize = Math.round(TERMINAL_BASE_FONT_PX * (useFontScale.getState().rootFontPx / 16));
+    const initialFontSize = terminalFontSizeFor(useFontScale.getState().rootFontPx);
     const term = new Terminal({
       // Issue 1 修正之二:移除 convertEol(預設值就是 false,見 xterm.js
       // ITerminalOptions 型別定義)。真正的 pty 已經會送出正確的 "\r\n" 換行
@@ -107,7 +85,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
       // "\r\n" 的輸出沒差,但會破壞仰賴「裸 \n 不移動游標水平位置」語意的
       // TUI 程式(游標定位類 escape sequence 因此跑位,對應「格式跑掉」的
       // 使用者回報)。
-      fontFamily: "Cascadia Code, JetBrains Mono, Consolas, monospace",
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: initialFontSize,
       cursorBlink: true,
       theme: resolveTerminalTheme(),
@@ -190,7 +168,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.fontSize = Math.round(TERMINAL_BASE_FONT_PX * (rootFontPx / 16));
+    term.options.fontSize = terminalFontSizeFor(rootFontPx);
     fitRef.current?.fit();
     reportResize();
   }, [rootFontPx]);
@@ -203,7 +181,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
 
   if (!currentSessionId || !session) {
     return (
-      <main className="flex h-full flex-1 flex-col bg-canvas">
+      <main className="flex h-full min-w-0 flex-1 flex-col bg-canvas">
         <div className="flex flex-shrink-0 items-center border-b border-line-subtle px-2 py-1.5 sm:hidden">
           <IconButton icon="menu" aria-label={t("terminal:openSidebar")} onClick={onOpenSidebar} />
         </div>
@@ -217,7 +195,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
   const busy = session.status === "busy";
 
   return (
-    <main className="flex h-full flex-1 flex-col bg-canvas">
+    <main className="flex h-full min-w-0 flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("terminal:openSidebar")} onClick={onOpenSidebar} className="sm:hidden" />
         <div className="min-w-0 flex-1">
@@ -236,6 +214,7 @@ export function TerminalView({ onOpenSidebar }: { onOpenSidebar: () => void }): 
           onClick={interrupt}
           className="flex-shrink-0 hover:!border-danger hover:!text-danger"
         />
+        <PanelToggleButton />
       </header>
 
       {/* M5 Round B(任務2,響應式):overflow-auto(而非 overflow-hidden)——

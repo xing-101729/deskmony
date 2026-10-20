@@ -14,6 +14,7 @@ import {
 import { AutoModeControl } from "./AutoModeControl.js";
 import { fuzzyScore } from "./CommandPalette.js";
 import { IconButton } from "../ui/Button.js";
+import { PanelToggleButton } from "./panel/PanelToggleButton.js";
 import { Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
@@ -938,7 +939,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
 
   if (!currentSessionId || !session) {
     return (
-      <main className="flex h-full flex-1 flex-col bg-canvas">
+      <main className="flex h-full min-w-0 flex-1 flex-col bg-canvas">
         <MobileHeaderBar onOpenSidebar={onOpenSidebar} />
         <div className="flex flex-1 items-center justify-center text-fg-subtle">
           <p className="text-sm">{t("chat:empty.selectOrCreateSession")}</p>
@@ -979,7 +980,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   };
 
   return (
-    <main className="flex h-full flex-1 flex-col bg-canvas">
+    <main className="flex h-full min-w-0 flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
         {/* 2026-10-06:標題是可點擊的改名入口,給它最小寬度——控制項多時讓右側那組換行,而不是把標題擠到剩一個字。 */}
@@ -1005,6 +1006,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
               className="hover:!border-danger hover:!text-danger"
             />
           )}
+          <PanelToggleButton />
         </div>
       </header>
 

@@ -1,0 +1,22 @@
+{
+  "title": "Side panel",
+  "show": "Show side panel",
+  "hide": "Hide side panel",
+  "close": "Close panel",
+  "resize": "Resize side panel",
+  "noSession": "Select a conversation to use the side panel",
+  "retry": "Retry",
+  "dismiss": "Dismiss",
+  "tabs": {
+    "terminal": "Terminal"
+  },
+  "terminal": {
+    "tabsLabel": "Terminals",
+    "new": "New terminal",
+    "close": "Close {{title}}",
+    "empty": "No terminals in this conversation yet",
+    "exited": "Process exited (code {{code}})",
+    "exitedUnknown": "Process exited",
+    "restart": "Restart"
+  }
+}

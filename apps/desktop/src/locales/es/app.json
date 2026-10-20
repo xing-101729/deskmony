@@ -26,6 +26,16 @@
       "hide": "Contraer barra lateral",
       "keywords": "sidebar collapse barra lateral"
     },
+    "togglePanel": {
+      "show": "Mostrar panel lateral",
+      "hide": "Ocultar panel lateral",
+      "keywords": "side panel terminal panel lateral alternar derecha"
+    },
+    "newTerminal": {
+      "title": "Nueva terminal",
+      "subtitle": "Abrir un shell en la carpeta de trabajo de esta conversación",
+      "keywords": "terminal shell console nueva powershell bash"
+    },
     "toggleTheme": {
       "toLight": "Cambiar a tema claro",
       "toDark": "Cambiar a tema oscuro",

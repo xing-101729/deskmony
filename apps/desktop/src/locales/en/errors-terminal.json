@@ -1,0 +1,9 @@
+{
+  "terminal": {
+    "notFound": "Terminal {{terminalId}} no longer exists",
+    "sessionNotFound": "Conversation {{sessionId}} no longer exists",
+    "cwdMissing": "The conversation's working folder does not exist: {{cwd}}",
+    "limitReached": "Terminal limit reached (at most {{perSession}} per conversation, {{global}} in total) — close one first",
+    "spawnFailed": "Could not start {{shell}}: {{detail}}"
+  }
+}

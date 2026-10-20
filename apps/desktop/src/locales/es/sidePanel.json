@@ -1,0 +1,22 @@
+{
+  "title": "Panel lateral",
+  "show": "Mostrar panel lateral",
+  "hide": "Ocultar panel lateral",
+  "close": "Cerrar panel",
+  "resize": "Cambiar el ancho del panel lateral",
+  "noSession": "Selecciona una conversación para usar el panel lateral",
+  "retry": "Reintentar",
+  "dismiss": "Descartar",
+  "tabs": {
+    "terminal": "Terminal"
+  },
+  "terminal": {
+    "tabsLabel": "Terminales",
+    "new": "Nueva terminal",
+    "close": "Cerrar {{title}}",
+    "empty": "Esta conversación aún no tiene terminales",
+    "exited": "El proceso terminó (código {{code}})",
+    "exitedUnknown": "El proceso terminó",
+    "restart": "Reiniciar"
+  }
+}

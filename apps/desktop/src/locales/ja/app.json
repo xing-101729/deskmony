@@ -26,6 +26,16 @@
       "hide": "サイドバーを折りたたむ",
       "keywords": "sidebar collapse サイドバー"
     },
+    "togglePanel": {
+      "show": "サイドパネルを表示",
+      "hide": "サイドパネルを非表示",
+      "keywords": "side panel terminal サイドパネル ターミナル 切り替え 右"
+    },
+    "newTerminal": {
+      "title": "新規ターミナル",
+      "subtitle": "この会話の作業フォルダーで shell を開く",
+      "keywords": "terminal shell console ターミナル 新規 powershell bash"
+    },
     "toggleTheme": {
       "toLight": "ライトテーマに切り替え",
       "toDark": "ダークテーマに切り替え",

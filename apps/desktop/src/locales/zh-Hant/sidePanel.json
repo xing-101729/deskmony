@@ -1,0 +1,22 @@
+{
+  "title": "側邊面板",
+  "show": "顯示側邊面板",
+  "hide": "隱藏側邊面板",
+  "close": "關閉面板",
+  "resize": "調整側邊面板寬度",
+  "noSession": "選擇一個對話才能使用側邊面板",
+  "retry": "重試",
+  "dismiss": "關閉訊息",
+  "tabs": {
+    "terminal": "終端"
+  },
+  "terminal": {
+    "tabsLabel": "終端清單",
+    "new": "新增終端",
+    "close": "關閉 {{title}}",
+    "empty": "這個對話還沒有終端",
+    "exited": "程序已結束(代碼 {{code}})",
+    "exitedUnknown": "程序已結束",
+    "restart": "重新啟動"
+  }
+}

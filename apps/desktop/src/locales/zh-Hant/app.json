@@ -26,6 +26,16 @@
       "hide": "收合側欄",
       "keywords": "sidebar 側欄 collapse"
     },
+    "togglePanel": {
+      "show": "顯示側邊面板",
+      "hide": "隱藏側邊面板",
+      "keywords": "side panel terminal 側邊面板 終端 切換 右側"
+    },
+    "newTerminal": {
+      "title": "新終端",
+      "subtitle": "在這個對話的工作資料夾開一個 shell",
+      "keywords": "terminal shell console 終端 新增 powershell bash"
+    },
     "toggleTheme": {
       "toLight": "切換為淺色主題",
       "toDark": "切換為深色主題",
