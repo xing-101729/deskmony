@@ -281,6 +281,23 @@ P4 要讓 agent 操作「使用者現在沒在看」的 session 瀏覽器,所以
 寫成 `scripts/spike-webview-offscreen.mjs`(或一個可以用 `electron <檔案>` 直接跑的最小 Electron 程式,放 `scripts/spike/`),輸出每一項 PASS/FAIL。
 若「畫面外」不行,依序試:`opacity: 0` 疊在面板內容區後面、1×1 可見容器裁切;把每種方式的結果都輸出。
 
+> ### P3 實作備註(與上文不同或規格沒寫死的地方)
+>
+> - **共用規則模組**:`apps/desktop/electron/browser-rules.ts`(無任何 import;main 以 `./browser-rules.js`、renderer 以 `../../electron/browser-rules.js` 引用,`e2e-side-panel-pure` 直接載入 .ts 測)。
+>   scheme 判斷、partition 名稱、網址列正規化、要從 webview 轉回 app 的組合鍵都只有這一份。判斷一律以 WHATWG `URL` 解析結果為準(會去掉 tab/換行、scheme 轉小寫,不自己拆字串)。
+> - **網址列**:輸入含空白一律拒絕(`notUrl`),**不接搜尋引擎**(沒有人要求,而且會把輸入送去第三方);`localhost:3000` 這種 `host:port` 不當成 scheme;
+>   `javascript:`/`file:`/`data:` 等回 `unsupportedScheme`。沒寫 scheme 時 `localhost`、`*.localhost`、IPv4、`[IPv6]`、明確帶 port 的補 `http://`,其餘補 `https://`。
+> - **偏離規格:子框架多放行 `about:srcdoc`、`blob:`、`data:`**(只限子框架,主框架仍只有 http(s) 與 `about:blank`)。不放行的話許多網站內嵌的 iframe 會壞;
+>   這三種都是頁面自己產生的內容,讀不到本機檔案。`file:`、`chrome:`、`devtools:`、`javascript:` 在任何框架都擋。
+> - **偏離規格:slot 位置用每個畫面影格比對(`requestAnimationFrame`,變了才寫進 store),不用 ResizeObserver**。ResizeObserver 抓不到「大小不變、只有位置變」(側欄展開/收合),
+>   要追蹤的事件太多。代價:Browser 分頁開著時每個影格讀一次 `getBoundingClientRect()`(沒變就不 setState)。
+> - **層級**:webview 外框 `z-45`——面板(含覆蓋層模式)是 `z-40`,所有對話框(`ui/Dialog.tsx` 的 PermissionModal/ConfirmDialog/SettingsDialog…是 `z-50`、命令面板 `z-[60]`)都在它之上。
+> - **拖拉面板寬度時**,webview 暫時不吃滑鼠事件(`pointerLock`):游標一移到 guest 上,pointer capture 跨行程抓不住;面板被快捷鍵關掉或變成覆蓋層時會自動放開。
+> - **快捷鍵**:焦點在 webview 裡時只攔 Ctrl/Cmd+J(開關面板)、Ctrl+\`(開 Terminal)、Ctrl/Cmd+K(命令面板)這三個,`preventDefault()` 後經 IPC 轉給 renderer,main 再把鍵盤焦點還給 app 的 renderer;其餘按鍵一律給網頁。
+>   **取捨**:Ctrl/Cmd+K 在網頁內失效(不少網站拿它當搜尋快捷鍵)——命令面板是 app 的全域入口,在 Browser 分頁裡也要能叫出來。有 Alt/Shift 修飾的組合都不攔。
+> - **CSP**:`apps/desktop/index.html` 沒有 CSP(`<meta>` 或 main 的 `onHeadersReceived` 都沒有),所以沒有東西擋 `<webview>`。日後加 CSP 時要實測 webview 還能不能附掛。
+> - **P3.3 實驗腳本**:`scripts/spike/webview-offscreen.cjs`(CommonJS:`electron <檔案>` 對 .cjs 一定走得通)。執行方式與預期時間見檔頭;**尚未實際執行**,只做過語法檢查與內嵌頁面的 script 解析。
+
 ---
 
 ## P4a. agent 瀏覽器工具:MCP 工具 + core 轉送 + 政策

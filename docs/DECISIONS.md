@@ -386,6 +386,7 @@ gateway 方法 `session.rewind` / `session.fork`,參數 `{ sessionId, messageId 
 - **C5 第 4 類的調整範圍**:只有 Deskmony 自己的 `browser_navigate` 跳過 hard-deny 的 host 檢查——loopback 依使用者決定不算外連;外部 host 改由上面的 core 規則擋,
   而且比 hard-deny **更嚴**(不給本機 attended 的逐次強確認放行,只能進 allowedHosts)。WebFetch 等其他工具的第 4 類判斷不變。
 - `file://` 等非 http(s) scheme 在 core 與 Electron main 兩層都擋——否則 agent 導覽到 `file:///~/.ssh/id_rsa` 再讀頁面,等於繞過「讀秘密路徑」hard-deny。
+  (Electron main 的主框架只放行 http(s) 與 `about:blank`;**子框架**另放行 `about:srcdoc`、`blob:`、`data:`——頁面自己產生的內容,讀不到本機檔案,擋掉會讓許多網站的內嵌 iframe 壞掉。)
 - 瀏覽器指令只送給**一條**本機的桌面 app 連線(`browser.registerHost` 只收 `isLocal` 的非 scoped 連線),不 broadcast。
 - agent 只能操作**自己 session** 的瀏覽器(方法參數沒有 sessionId,由 token 決定)。
 - 下載一律取消、網頁的裝置權限(相機/麥克風/定位/通知…)一律拒絕、彈出視窗改在同一頁開。
