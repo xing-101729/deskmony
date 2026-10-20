@@ -374,6 +374,8 @@ gateway 方法 `session.rewind` / `session.fork`,參數 `{ sessionId, messageId 
 - **git 設定也是攻擊面**:工作資料夾是 agent 能寫的,使用者打開 Changes 就會跑 `git status`/`git diff`——repo 的 `core.fsmonitor`、
   `filter.<n>.clean`、`diff.<n>.textconv`、`diff.external` 都會執行指令(實測),等於讓 agent 在政策引擎之外以使用者身分執行程式。
   所以這幾個鉤子在 core 執行 git 時一律關閉/中和(細節見 `apps/core/src/workspace/workspace-git.ts`),並有 e2e 對照(直接跑 git 會執行、經 gateway 不會)。
+  filter 的列舉**不限 scope**:agent 寫得到的不只 `.git/config`,`extensions.worktreeConfig` 開啟時的 `.git/config.worktree`(worktree scope)與 `include.path` 引進的檔案也算;
+  規則是 fail-closed——scope 不是使用者自己的 `system`/`global` 就一律中和(全域安裝的 LFS 保留,repo 本地/worktree 層級的 filter 被停用)。
 
 **2. agent 可以操作面板瀏覽器**
 

@@ -19,11 +19,16 @@ import {
  *  - 一律 `-c core.fsmonitor=false`;diff 加 `--no-ext-diff --no-textconv`(`diff.external`/`diff.<n>.command`/`textconv`);
  *    `--ignore-submodules=all`(子模組的 status 會在子模組裡再起一個 git,吃它自己的設定);
  *  - **`filter.<n>.clean|smudge|process`**:`diff`/`status` 讀工作樹檔案時會經過 clean filter,沒有「全部關掉」的開關,
- *    只能對 repo 本地設定裡**出現的每一個** filter 名稱用 `-c filter.<n>.clean=` 覆寫成空(實測不會報錯、不會執行)。
- *    列舉用 `git config --local --includes --name-only --get-regexp`(只讀設定、不執行任何東西)。名稱若含 `=` 或控制字元
- *    (`-c key=value` 會在第一個 `=` 切開,蓋不到真正的 key)就拒絕執行——那一定是惡意設定。
- *    代價:repo **本地**設定的 filter(例如 `git lfs install --local`)在這裡被停用,LFS 檔案可能顯示成「已修改」;
- *    使用者全域/系統層級設定的 filter 不受影響。
+ *    只能對**出現的每一個** filter 名稱用 `-c filter.<n>.clean=` 覆寫成空(實測不會報錯、不會執行)。
+ *    列舉**不限 scope**(`git config --includes --show-scope --name-only --get-regexp`,只讀設定、不執行任何東西):
+ *    agent 寫得到的不只 `.git/config`(`local`)——`extensions.worktreeConfig=true` 時 git 還會讀 `.git/config.worktree`
+ *    (`worktree`,`--local` 看不到,實測那裡的 clean filter 真的會執行),`include.path` 引進的檔案則沿用引入它的那個檔案的 scope。
+ *    所以規則是 **fail-closed**:scope 不是 `system`/`global`(使用者自己的設定)的**一律中和**——`local`、`worktree`、`command`,
+ *    以及 git 未來新增的任何 scope。`--show-scope`(git 2.26+)不被支援時退回:**所有 scope 的 filter 全部中和**(寧可多擋)。
+ *    名稱若含 `=` 或控制字元(`-c key=value` 會在第一個 `=` 切開,蓋不到真正的 key)就拒絕執行——那一定是惡意設定;
+ *    列舉本身失敗(結束碼不是 0/1)同樣拒絕執行,不能在不知道有哪些 filter 的情況下照跑。
+ *    代價:repo **本地/worktree 層級**設定的 filter(例如 `git lfs install --local`)在這裡被停用,LFS 檔案可能顯示成「已修改」;
+ *    使用者全域/系統層級設定的 filter(全域安裝的 LFS)不受影響。
  *  - 不經 shell(`spawn` + 參數陣列)、`windowsHide: true`、`--literal-pathspecs`(`:(top)`、`:!` 這類 pathspec 魔法不生效)、
  *    `--no-optional-locks`(唯讀:不為了重整 index 而寫 `index.lock`)、逾時、輸出大小上限;環境濾掉 Deskmony 內部憑證
  *    (`buildAgentChildEnv()`)與繼承來的 `GIT_*`(`GIT_DIR`、`GIT_WORK_TREE`…不能讓它們改變 git 看的 repo)。
@@ -127,26 +132,49 @@ export function firstLine(text: string): string {
   return text.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() ?? "";
 }
 
+const FILTER_KEY_REGEXP = "^filter\\..+\\.(clean|smudge|process)$";
+/** 使用者自己的設定層級:這些 scope 的 filter 保留(全域安裝的 LFS 要能照常運作);**其餘一律中和**(fail-closed)。 */
+const TRUSTED_CONFIG_SCOPES = new Set(["system", "global"]);
+
+function unsafeFilterConfig(): DeskmonyError {
+  return new DeskmonyError("workspace.gitFailed", { detail: "unsafe repository config" }, "這個 repo 的 git 設定含有不安全的 filter 名稱,拒絕執行 git");
+}
+
 /**
- * 列舉 repo 本地設定裡會執行指令的 filter,產生把它們中和的 `-c` 覆寫。見檔頭。
- * 含 `=`/控制字元的名稱 → 拒絕(`workspace.gitFailed`,明講是不安全的 repo 設定)。
+ * 列舉會執行指令的 filter,產生把它們中和的 `-c` 覆寫。**不限 scope**、scope 不是 `system`/`global` 的一律中和,見檔頭。
+ * 含 `=`/控制字元的名稱、列舉失敗 → 拒絕(`workspace.gitFailed`)。
  */
 export async function neutralizingFilterOverrides(cwd: string): Promise<string[]> {
-  const result = await runGit(
-    ["config", "--local", "--includes", "--name-only", "--get-regexp", "^filter\\..+\\.(clean|smudge|process)$"],
-    { cwd, maxBytes: 64 * 1024 },
-  );
-  // 結束碼 1 = 沒有符合的設定(正常);128 通常是「不是 git repo」,由呼叫端(isRepo 判斷)處理,這裡不重複報錯。
-  if (result.code !== 0) return [];
-  const overrides: string[] = [];
-  for (const key of result.stdout.toString("utf8").split(/\r?\n/)) {
-    if (!key) continue;
-    // eslint-disable-next-line no-control-regex
-    if (key.includes("=") || /[\u0000-\u001f]/.test(key)) {
-      throw new DeskmonyError("workspace.gitFailed", { detail: "unsafe repository config" }, "這個 repo 的 git 設定含有不安全的 filter 名稱,拒絕執行 git");
+  const options = { cwd, maxBytes: 64 * 1024 };
+  let scoped = true;
+  let result = await runGit(["config", "--includes", "--show-scope", "--name-only", "--get-regexp", FILTER_KEY_REGEXP], options);
+  // 結束碼 1 = 沒有符合的設定(正常)。其他非 0:最常見是 git 不認得 `--show-scope`(2.26 以前,用法錯誤)——退回「所有 scope 全部中和」。
+  if (result.code !== 0 && result.code !== 1) {
+    scoped = false;
+    result = await runGit(["config", "--includes", "--name-only", "--get-regexp", FILTER_KEY_REGEXP], options);
+    if (result.code !== 0 && result.code !== 1) {
+      // 連列舉都做不到:不能在不知道有哪些 filter 的情況下照跑(fail-closed)。
+      throw new DeskmonyError("workspace.gitFailed", { detail: firstLine(result.stderr) }, `git config 失敗:${firstLine(result.stderr)}`);
     }
-    overrides.push("-c", `${key}=`);
   }
+  const keys = new Set<string>();
+  for (const line of result.stdout.toString("utf8").split(/\r?\n/)) {
+    if (!line) continue;
+    let key = line;
+    if (scoped) {
+      // `--show-scope` 的輸出是 `scope<TAB>key`;scope 名稱不含 tab,第一個 tab 就是分隔。
+      const tab = line.indexOf("\t");
+      if (tab < 0) throw unsafeFilterConfig();
+      const scope = line.slice(0, tab);
+      key = line.slice(tab + 1);
+      if (TRUSTED_CONFIG_SCOPES.has(scope)) continue;
+    }
+    // eslint-disable-next-line no-control-regex
+    if (key.includes("=") || /[\u0000-\u001f]/.test(key)) throw unsafeFilterConfig();
+    keys.add(key);
+  }
+  const overrides: string[] = [];
+  for (const key of keys) overrides.push("-c", `${key}=`);
   return overrides;
 }
 

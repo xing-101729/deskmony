@@ -19,6 +19,8 @@
  *   WS-6   scoped bridge token 呼叫這四個方法都被拒(gateway.scopedTokenForbidden)。
  *   WS-7   **git 不會執行 repo 設定裡的任意指令**:repo 的 `.git/config` 埋了 core.fsmonitor、filter clean、textconv、
  *          diff.external 四個會執行指令的鉤子(對照組:直接跑 git 它們會留下標記檔),透過 gitStatus/gitDiff 一個都不能執行。
+ *   WS-7b  同上,但 filter 藏在 **worktree 層級**(`.git/config.worktree`,`git config --local` 看不到)與 `include.path` 引進的檔案;
+ *          另外確認**使用者全域設定的 filter 被保留**(全域安裝的 LFS 不受影響)。
  *
  * 用法:node scripts/e2e-side-panel-workspace.mjs
  * 前置需求:pnpm build 已跑過(dist 是最新的),本機有 git。
@@ -81,9 +83,12 @@ async function killProcessTree(proc, label) {
   await sleep(700);
 }
 
-function startCore({ dataDir, homeDir, workspaceDir }) {
+function startCore({ dataDir, homeDir, workspaceDir, gitHome }) {
   const env = {
     ...process.env,
+    // git 的「使用者全域設定」指到這支測試自己的 .gitconfig(WS-7b:全域的 filter 必須保留、不被中和)。
+    HOME: gitHome,
+    USERPROFILE: gitHome,
     DESKMONY_CORE_PORT: String(PORT),
     DESKMONY_DATA_DIR: dataDir,
     DESKMONY_HOME: homeDir,
@@ -279,6 +284,8 @@ async function main() {
   const emptyRepo = tmp("empty");
   const plainDir = tmp("plain");
   const hostile = tmp("hostile");
+  const hostile2 = tmp("hostile2");
+  const gitHome = tmp("githome");
   const markDir = tmp("marks");
   const outside = tmp("outside");
   const links = [];
@@ -365,8 +372,27 @@ async function main() {
     git(hostile, "config", "diff.external", `node "${markScript}" external`);
     write(hostile, "t.txt", "bbb\n"); // 同樣大小的修改:git 必須讀內容(經過 clean filter)才知道有變
 
+    // ---- WS-7b:filter 藏在 repo 本地 `.git/config` 以外的 scope ----
+    //   - worktree 層級:`extensions.worktreeConfig=true` 時 git 另外讀 `.git/config.worktree`(`git config --local` 看不到它);
+    //   - include:`.git/config` 的 `include.path` 引進的檔案(scope 沿用引入它的檔案的 scope);
+    //   - 使用者的全域設定:**要保留**(全域安裝的 LFS 不能被誤傷)——標記檔應該出現。
+    const extraCfg = path.join(markDir, "extra.cfg").replace(/\\/g, "/");
+    writeFileSync(extraCfg, `[filter "inc"]\n\tclean = node "${markScript}" incclean\n`);
+    writeFileSync(path.join(gitHome, ".gitconfig"), `[filter "gl"]\n\tclean = node "${markScript}" globalclean\n`);
+    git(hostile2, "init", "-q", "-b", "main");
+    write(hostile2, "t.txt", "aaa\n");
+    write(hostile2, "n.md", "aaa\n");
+    write(hostile2, "g.dat", "aaa\n");
+    git(hostile2, "add", "-A");
+    git(hostile2, "commit", "-q", "-m", "init");
+    write(hostile2, ".gitattributes", "*.txt filter=wt\n*.md filter=inc\n*.dat filter=gl\n");
+    git(hostile2, "config", "extensions.worktreeConfig", "true");
+    git(hostile2, "config", "--worktree", "filter.wt.clean", `node "${markScript}" wtclean`);
+    git(hostile2, "config", "include.path", extraCfg);
+    for (const f of ["t.txt", "n.md", "g.dat"]) write(hostile2, f, "bbb\n");
+
     console.log(`[setup] repo=${repo}`);
-    core = startCore({ dataDir, homeDir, workspaceDir: coreWs });
+    core = startCore({ dataDir, homeDir, workspaceDir: coreWs, gitHome });
     const url = `ws://127.0.0.1:${PORT}`;
     await waitForPort(url, 20_000);
     client = new GatewayClient(url);
@@ -378,6 +404,7 @@ async function main() {
     const SEmpty = await mkSession(emptyRepo, "ws-empty");
     const SPlain = await mkSession(plainDir, "ws-plain");
     const SHostile = await mkSession(hostile, "ws-hostile");
+    const SHostile2 = await mkSession(hostile2, "ws-hostile2");
     const call = (method, params) => client.rpc(method, params);
     const byPath = (files) => Object.fromEntries(files.map((f) => [f.path, f]));
 
@@ -758,6 +785,49 @@ async function main() {
     } catch (err) {
       record("WS-7 git 不執行 repo 設定的指令", false, String(err?.stack ?? err));
     }
+
+    // ===================================================================================
+    // WS-7b filter 藏在 worktree 層級 / include 進來的設定:同樣不能執行;使用者全域的 filter 要保留
+    // ===================================================================================
+    try {
+      const marks = () => readdirSync(markDir).filter((n) => n.startsWith("MARK_")).sort();
+      const clearMarks = () => {
+        for (const n of marks()) rmSync(path.join(markDir, n), { force: true });
+      };
+      clearMarks();
+      // 對照組:直接跑 git(同樣把使用者全域設定指到 gitHome)——三個 filter 都會執行,證明測試設定有效。
+      spawnSync("git", ["diff", "HEAD"], {
+        cwd: hostile2,
+        windowsHide: true,
+        stdio: "ignore",
+        env: { ...process.env, HOME: gitHome, USERPROFILE: gitHome },
+      });
+      const control = marks();
+      clearMarks();
+      // 受測:透過 gateway(status 與每個檔案的 diff)。
+      const st = await call("workspace.gitStatus", { sessionId: SHostile2.id });
+      const diffs = {};
+      for (const f of ["t.txt", "n.md", "g.dat"]) diffs[f] = await call("workspace.gitDiff", { sessionId: SHostile2.id, path: f });
+      await sleep(500);
+      const viaGateway = marks();
+      const changed = byPath(st.files);
+      record(
+        "WS-7b filter 藏在 worktree 層級(extensions.worktreeConfig + .git/config.worktree)與 include.path 引進的檔案:直接跑 git 會執行它們(對照組),透過 gitStatus/gitDiff 不會(MARK_wtclean/MARK_incclean 不出現);使用者全域設定的 filter 則保留(MARK_globalclean 照常出現,全域安裝的 LFS 不受影響);結果仍然正確",
+        control.includes("MARK_wtclean") &&
+          control.includes("MARK_incclean") &&
+          control.includes("MARK_globalclean") &&
+          !viaGateway.includes("MARK_wtclean") &&
+          !viaGateway.includes("MARK_incclean") &&
+          viaGateway.includes("MARK_globalclean") &&
+          st.isRepo === true &&
+          ["t.txt", "n.md", "g.dat"].every((f) => changed[f]?.worktree === "M") &&
+          // 被中和的兩個:diff 是真實內容。保留的全域 filter(g.dat)標記檔的指令不回傳內容,所以它的 diff 內容不是重點。
+          ["t.txt", "n.md"].every((f) => diffs[f].hunks.flatMap((x) => x.lines).join("|") === "-aaa|+bbb"),
+        `對照組標記=${JSON.stringify(control)}, 受測標記=${JSON.stringify(viaGateway)}, status=${JSON.stringify(st.files.map((x) => `${x.index}${x.worktree} ${x.path}`))}`,
+      );
+    } catch (err) {
+      record("WS-7b worktree/include 層級的 filter", false, String(err?.stack ?? err));
+    }
   } catch (err) {
     console.error(`\n[FATAL] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
     record("e2e 整體設置", false, String(err?.stack ?? err));
@@ -766,7 +836,7 @@ async function main() {
     scoped?.close();
     await killProcessTree(core, "core");
     for (const link of links) removeLink(link); // 先拆 junction/symlink,避免遞迴刪除碰到它們指向的東西
-    for (const dir of [dataDir, homeDir, coreWs, repo, emptyRepo, plainDir, hostile, markDir, outside]) {
+    for (const dir of [dataDir, homeDir, coreWs, repo, emptyRepo, plainDir, hostile, hostile2, gitHome, markDir, outside]) {
       try {
         rmSync(dir, { recursive: true, force: true });
       } catch {

@@ -185,8 +185,12 @@ P0 很小,與 P1 由同一個實作者做,但**各自一個 commit**。
 >   輸出形狀就是 `structuredPatch` 的 hunk,`DiffHunkView.tsx` 拆出 `DiffHunks` 共用同一份渲染,沒有另寫 diff 元件。
 > - **git 執行的防護**(`workspace-git.ts` 檔頭有完整理由):工作資料夾內容是 agent 能寫的(含 `.git/config`、`.gitattributes`),而 Changes 是使用者一打開就跑
 >   `git status`/`git diff` 的地方——實測 `core.fsmonitor` 在 status 時執行、`filter.<n>.clean` 在 diff 時執行。所以一律 `-c core.fsmonitor=false`、diff 加
->   `--no-ext-diff --no-textconv`、`--ignore-submodules=all`、repo 本地設定裡的每個 filter 用 `-c filter.<n>.clean=` 覆寫成空(名稱含 `=` 就拒絕執行)、
->   `--literal-pathspecs`、`--no-optional-locks`、濾掉繼承來的 `GIT_*` 環境。代價:repo **本地**設定的 filter(例如 `git lfs install --local`)在這裡被停用,LFS 檔案可能顯示成已修改。
+>   `--no-ext-diff --no-textconv`、`--ignore-submodules=all`、**不限 scope** 列舉出來的 filter(`git config --includes --show-scope --name-only --get-regexp`)中,scope 不是
+>   `system`/`global` 的**一律**用 `-c filter.<n>.clean=` 覆寫成空(fail-closed:`local`、`worktree`——`extensions.worktreeConfig=true` 時 agent 也寫得到的
+>   `.git/config.worktree`,`--local` 看不到——`command`,以及未來新增的任何 scope;`include.path` 引進的檔案沿用引入它的檔案的 scope;`--show-scope` 不被支援時退回「所有 scope 全部中和」;
+>   列舉失敗或名稱含 `=`/控制字元就拒絕執行)、
+>   `--literal-pathspecs`、`--no-optional-locks`、濾掉繼承來的 `GIT_*` 環境。代價:repo **本地/worktree 層級**設定的 filter(例如 `git lfs install --local`)在這裡被停用,
+>   LFS 檔案可能顯示成已修改;使用者全域/系統設定的 filter(全域安裝的 LFS)保留。
 > - `status` 多帶 `-b`(取分支名)與 `-- .`:工作資料夾是 repo 子資料夾時只列該資料夾、路徑去掉 repo 前綴;`core.worktree` 指到別處的 repo 視為不是 repo。
 >   檔案數上限 5000(`truncated`)。沒有 commit 的 repo 的 diff 對空樹(`git hash-object -t tree --stdin` 取得,SHA-1/SHA-256 repo 都對)。
 > - **檔案 symlink 沒測**(這台機器沒權限建立;e2e 會在能建立時加測 `link-file`),junction 有測。
