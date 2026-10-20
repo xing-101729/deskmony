@@ -12,7 +12,9 @@
  *   ST-1   terminal.create:回傳 TerminalInfo、收到 terminal-updated、cwd 是 session 的工作資料夾(shell 自己印的 cwd 也是)、
  *          尺寸照給、第二個終端標題序號遞增。
  *   ST-2   送 echo 標記 → terminal-output 收到;attach 的 buffer 與「seq <= 回傳 seq 的 push 串起來」逐字相同、seq 連續從 1 起算。
- *   ST-3   終端環境:DESKMONY_AUTH_TOKEN 與環境裡殘留的 DESKMONY_MCP_BRIDGE_* 都是空的(主 token 沒有出現在任何輸出),TERM 正確。
+ *   ST-3   終端環境:DESKMONY_AUTH_TOKEN 與環境裡殘留的 DESKMONY_MCP_BRIDGE_* 都是空的(主 token 沒有出現在任何輸出),
+ *          打包版 core 帶的 ELECTRON_RUN_AS_NODE(以混合大小寫設進 core 環境)也被刪掉,TERM 正確;
+ *          ST-3b:spawnShellPty 把值是 undefined 的環境變數濾掉(node-pty 否則會把它變成字面的 "undefined")。
  *   ST-4   resize 成功並夾在範圍內;input 超過 64 KB 被拒(gateway.invalidRequest)。
  *   ST-5   shell 自己結束(exit 3):留在清單、exitCode=3、收到 terminal-updated(非 closed)。
  *   ST-6   close:收到 closed:true、shell 的 pid 已不存在、清單移除、再 attach → terminal.notFound。
@@ -23,6 +25,7 @@
  *          同一批事件一般連線收得到。
  *   ST-11  稽核表有 terminal-session 的 create/close(remote=false、來源位址、session id);session 刪除連帶關閉與 shell 自己結束不記。
  *   ST-12  core 重啟後終端清單是空的(不持久化);工作資料夾不存在 → terminal.cwdMissing。
+ *   ST-13  已經自己結束的 shell 被 close 時,完全不對它的 pid 動手(不 taskkill、不送訊號)——模擬「pid 已被別的行程重用」。
  *
  * 用法:node scripts/e2e-side-panel-terminal.mjs
  * 前置需求:pnpm build 已跑過(dist 是最新的)
@@ -33,6 +36,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
@@ -106,6 +110,10 @@ function startCore({ port, dataDir, homeDir, workspaceDir }) {
     // 前提:真實桌面 app 裡 core 就是帶著主認證 token 啟動的;另外環境裡有一個殘留的 bridge 憑證。
     DESKMONY_AUTH_TOKEN: MASTER_TOKEN,
     DESKMONY_MCP_BRIDGE_TOKEN: AMBIENT_BRIDGE_TOKEN,
+    // 打包版 core 是 Deskmony.exe + ELECTRON_RUN_AS_NODE=1 跑的,面板終端的 shell 不能繼承它(使用者在裡面啟動 Electron 程式會壞掉)。
+    // 這裡的 core 是系統 node,會忽略這個變數;刻意用**混合大小寫**——Windows 的環境變數不分大小寫,終端裡
+    // `$env:ELECTRON_RUN_AS_NODE` 仍讀得到它,所以能證明刪除是不分大小寫比對的(POSIX 上變數名分大小寫,這條退化成「該變數不存在」)。
+    Electron_Run_As_Node: "1",
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
@@ -435,19 +443,54 @@ async function main() {
     try {
       const token = await runInTerminal(client, t1.id, cmd.envProbe("DESKMONY_AUTH_TOKEN", "A"), /(LEAKED_A|EMPTY_A)/);
       const bridge = await runInTerminal(client, t1.id, cmd.envProbe("DESKMONY_MCP_BRIDGE_TOKEN", "B"), /(LEAKED_B|EMPTY_B)/);
+      const electron = await runInTerminal(client, t1.id, cmd.envProbe("ELECTRON_RUN_AS_NODE", "E"), /(LEAKED_E|EMPTY_E)/);
       const term = await runInTerminal(client, t1.id, cmd.term(), /TERM_IS=([^\r\n]*)/);
       const everything = client.outputOf(t1.id);
       record(
-        "ST-3 終端環境變數:DESKMONY_AUTH_TOKEN 與環境裡殘留的 DESKMONY_MCP_BRIDGE_TOKEN 在終端裡都是空的(經 buildAgentChildEnv()),主 token/殘留 bridge token 沒有出現在任何輸出;TERM=xterm-256color",
+        "ST-3 終端環境變數:DESKMONY_AUTH_TOKEN 與環境裡殘留的 DESKMONY_MCP_BRIDGE_TOKEN 在終端裡都是空的(經 buildAgentChildEnv()),主 token/殘留 bridge token 沒有出現在任何輸出;core 環境裡的 ELECTRON_RUN_AS_NODE(混合大小寫)被刪掉、終端裡讀不到;TERM=xterm-256color",
         token[1] === "EMPTY_A" &&
           bridge[1] === "EMPTY_B" &&
+          electron[1] === "EMPTY_E" &&
           !everything.includes(MASTER_TOKEN) &&
           !everything.includes(AMBIENT_BRIDGE_TOKEN) &&
           term[1].trim() === "xterm-256color",
-        `token=${token[1]}, bridge=${bridge[1]}, TERM=${JSON.stringify(term[1])}`,
+        `token=${token[1]}, bridge=${bridge[1]}, ELECTRON_RUN_AS_NODE=${electron[1]}, TERM=${JSON.stringify(term[1])}`,
       );
     } catch (err) {
       record("ST-3 終端環境變數", false, String(err?.stack ?? err));
+    }
+
+    // ST-3b:spawnShellPty 的縱深防禦——值是 undefined 的鍵不能傳給 node-pty(它會把 undefined 變成字面 "undefined")。
+    try {
+      const { spawnShellPty } = await import(pathToFileURL(path.join(REPO_ROOT, "packages", "adapters", "dist", "index.js")).href);
+      const { resolveShell } = await import(pathToFileURL(path.join(REPO_ROOT, "apps", "core", "dist", "terminal", "terminal-manager.js")).href);
+      const shell = resolveShell();
+      const shellPty = spawnShellPty({
+        file: shell.file,
+        args: shell.args,
+        cwd: ws1,
+        env: { ...process.env, DESKMONY_E2E_UNDEF: undefined, DESKMONY_E2E_DEFINED: "1" },
+        cols: 80,
+        rows: 24,
+      });
+      let out = "";
+      shellPty.onData((d) => (out += d));
+      try {
+        shellPty.write(`${cmd.envProbe("DESKMONY_E2E_UNDEF", "V")}\r`);
+        shellPty.write(`${cmd.envProbe("DESKMONY_E2E_DEFINED", "W")}\r`);
+        await waitUntil(() => /(LEAKED_V|EMPTY_V)/.test(out) && /(LEAKED_W|EMPTY_W)/.test(out), 30_000, "undefined 環境變數探測輸出");
+      } finally {
+        await shellPty.kill();
+      }
+      const undef = out.match(/(LEAKED_V|EMPTY_V)/)[1];
+      const defined = out.match(/(LEAKED_W|EMPTY_W)/)[1];
+      record(
+        "ST-3b spawnShellPty 把值是 undefined 的環境變數濾掉(shell 裡不存在,而不是變成字面的 undefined 字串);有值的對照變數照常傳入",
+        undef === "EMPTY_V" && defined === "LEAKED_W",
+        `undefined 的鍵 → ${undef}, 有值的對照鍵 → ${defined}`,
+      );
+    } catch (err) {
+      record("ST-3b spawnShellPty 濾掉 undefined", false, String(err?.stack ?? err));
     }
 
     // ===================================================================================
@@ -674,6 +717,98 @@ async function main() {
       );
     } catch (err) {
       record("ST-11 稽核", false, String(err?.stack ?? err));
+    }
+
+    // ===================================================================================
+    // ST-13 已結束的 shell 被 close:不碰它的 pid(pid 可能已被別的行程重用,taskkill /T /F 會殺到無關的程序樹)
+    // ===================================================================================
+    try {
+      const require = createRequire(import.meta.url);
+      const childProcess = require("node:child_process");
+      const { TerminalManager } = await import(pathToFileURL(path.join(REPO_ROOT, "apps", "core", "dist", "terminal", "terminal-manager.js")).href);
+      const manager = new TerminalManager(
+        { getSession: async (id) => ({ id, workingDir: ws1 }) },
+        { appendTerminalSession: () => undefined },
+      );
+      const chunks = new Map();
+      manager.on("terminal-output", (p) => chunks.set(p.terminalId, (chunks.get(p.terminalId) ?? "") + p.data));
+      const updates = [];
+      manager.on("terminal-updated", (p) => updates.push(p.terminal));
+      const origin = { remote: false, remoteAddress: "127.0.0.1" };
+      const newShell = async () => {
+        const t = await manager.create({ sessionId: S1.id, cols: 80, rows: 24 }, origin);
+        manager.input(t.id, `${cmd.pid()}\r`);
+        const m = await waitUntil(() => (chunks.get(t.id) ?? "").match(/SHELLPID=(\d+)/), 30_000, "in-process 終端回報 pid");
+        return { id: t.id, pid: Number(m[1]) };
+      };
+
+      // 儀器:記錄所有 taskkill 與對 pid 的 process.kill。對「已結束那一個」的 pid 假裝它還活著(= pid 被別的行程重用的情境),
+      // 而且不真的執行 taskkill(換成一個什麼都不做的 node 行程)——就算守衛被拿掉,測試本身也不會真的殺到任何東西。
+      const origSpawn = childProcess.spawn;
+      const origKill = process.kill;
+      let fakeAlivePid;
+      const taskkills = [];
+      const signals = [];
+      childProcess.spawn = (command, args, ...rest) => {
+        if (/taskkill/i.test(String(command))) {
+          taskkills.push(args);
+          if (fakeAlivePid !== undefined && args.includes(String(fakeAlivePid))) {
+            return origSpawn.call(childProcess, process.execPath, ["-e", ""], { stdio: "ignore", windowsHide: true });
+          }
+        }
+        return origSpawn.call(childProcess, command, args, ...rest);
+      };
+      process.kill = (pid, signal) => {
+        signals.push([pid, signal]);
+        if (fakeAlivePid !== undefined && pid === fakeAlivePid) return true;
+        return origKill.call(process, pid, signal);
+      };
+      syncBuiltinESMExports();
+      let control;
+      let exited;
+      try {
+        // 對照組:還活著的 shell 被 close → 一定會對它的 pid 動手(證明儀器抓得到,不是「沒呼叫」造成的假陽性)。
+        const alive = await newShell();
+        taskkills.length = 0;
+        signals.length = 0;
+        await manager.close(alive.id);
+        control = {
+          pid: alive.pid,
+          taskkillCalls: taskkills.filter((a) => a.includes(String(alive.pid))).length,
+          signalCalls: signals.filter(([pid]) => pid === alive.pid || pid === -alive.pid).length,
+        };
+
+        // 受測:shell 自己結束 → 等 onExit 回報 → 之後 pid「被別人重用」(假裝還活著)→ close 不得碰它。
+        const dead = await newShell();
+        manager.input(dead.id, `${cmd.exit(0)}\r`);
+        await waitUntil(() => updates.some((t) => t.id === dead.id && t.exitCode !== undefined), 20_000, "in-process shell 結束");
+        await waitUntil(() => !pidAlive(dead.pid), 10_000, "in-process shell pid 消失");
+        fakeAlivePid = dead.pid;
+        taskkills.length = 0;
+        signals.length = 0;
+        const started = Date.now();
+        await manager.close(dead.id);
+        exited = {
+          pid: dead.pid,
+          elapsedMs: Date.now() - started,
+          taskkillCalls: taskkills.filter((a) => a.includes(String(dead.pid))).length,
+          signalCalls: signals.filter(([pid]) => pid === dead.pid || pid === -dead.pid).length,
+        };
+      } finally {
+        fakeAlivePid = undefined;
+        childProcess.spawn = origSpawn;
+        process.kill = origKill;
+        syncBuiltinESMExports();
+        await manager.closeAll();
+      }
+      const controlTouched = IS_WIN ? control.taskkillCalls > 0 : control.signalCalls > 0;
+      record(
+        "ST-13 已自己結束的 shell 被 close 時,完全不對它的 pid 動手(0 次 taskkill、0 次 process.kill;模擬 pid 已被別的行程重用),且立即完成;對照組(活著的 shell)會被終止",
+        controlTouched && exited.taskkillCalls === 0 && exited.signalCalls === 0 && exited.elapsedMs < 1_000,
+        `對照組 taskkill=${control.taskkillCalls}/signal=${control.signalCalls}(pid ${control.pid}); 已結束 taskkill=${exited.taskkillCalls}/signal=${exited.signalCalls}(pid ${exited.pid}),close 耗時 ${exited.elapsedMs} ms`,
+      );
+    } catch (err) {
+      record("ST-13 已結束的 shell 被 close", false, String(err?.stack ?? err));
     }
 
     // ===================================================================================

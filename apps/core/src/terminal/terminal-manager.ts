@@ -115,6 +115,25 @@ export function resolveShell(): ResolvedShell {
   return { file, args: [], name: path.basename(file) };
 }
 
+/**
+ * 面板終端 shell 的環境變數:
+ *  1. 一律經 `buildAgentChildEnv()`——濾掉 Deskmony 內部憑證(見檔頭「安全」)。
+ *  2. 再**刪掉** `ELECTRON_RUN_AS_NODE`。打包版的 core 是 `Deskmony.exe` 加 `ELECTRON_RUN_AS_NODE=1` 跑的
+ *     (apps/desktop/electron/main.ts 的 `startCore()`),`process.env` 帶著它;若 shell 也繼承,使用者在面板終端裡
+ *     啟動任何 Electron 程式(`pnpm dev:electron`、`npx electron .`)都會被當成純 Node 執行而壞掉。
+ *     這是**只對面板終端**的處理——`buildAgentChildEnv()` 本身與 agent 的環境不動(agent 那邊有些路徑可能依賴它)。
+ *     必須是**刪鍵**,不能設成 `undefined`:node-pty 組環境字串時會把 undefined 變成字面 "undefined",
+ *     Electron 只看這個變數存不存在,照樣以 Node 模式執行。鍵名不分大小寫比對(Windows 的環境變數不分大小寫,
+ *     `{ ...process.env }` 展開出來的卻保留原本的大小寫)。
+ */
+export function buildTerminalEnv(): NodeJS.ProcessEnv {
+  const env = buildAgentChildEnv({ TERM: "xterm-256color", COLORTERM: "truecolor" });
+  for (const name of Object.keys(env)) {
+    if (name.toUpperCase() === "ELECTRON_RUN_AS_NODE") delete env[name];
+  }
+  return env;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)));
 }
@@ -177,8 +196,7 @@ export class TerminalManager extends EventEmitter {
         file: shell.file,
         args: shell.args,
         cwd,
-        // 見檔頭「安全」:濾掉 Deskmony 內部憑證。
-        env: buildAgentChildEnv({ TERM: "xterm-256color", COLORTERM: "truecolor" }),
+        env: buildTerminalEnv(),
         cols,
         rows,
       });
@@ -305,6 +323,11 @@ export class TerminalManager extends EventEmitter {
       });
     }
     this.emit("terminal-updated", { terminal: { ...this.snapshot(record), closed: true } } satisfies TerminalUpdatedPush);
+    // shell 已經自己結束(`exit`)的終端:**不碰那個 pid**——它可能早就被作業系統配給別的行程,此時 `kill()`
+    // 的 taskkill /T /F 會殺到無關的程序樹(`shell-pty.ts` 的 `kill()` 也有同一層保護,這裡是第二層)。
+    // child-registry 的登記在 `handleExit()` 就已經撤銷了(那時 pid 還確定是我們的),同樣不要再用這個 pid 撤銷一次:
+    // pid 若已被別的 adapter 重用並登記,會誤刪它的登記。
+    if (record.exited) return;
     await record.pty.kill();
     unregisterChild(record.pty.pid);
   }

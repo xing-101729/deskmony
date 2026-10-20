@@ -39,6 +39,11 @@ export interface ShellPty {
   /**
    * 終止 shell **連同它的子程序樹**。resolve 時行程已確認消失(或 `timeoutMs` 到了仍放棄等待——不丟錯,
    * fail-safe 方向同 `child-process.ts` 的 `waitForChildExit()`)。重複呼叫是安全的。
+   *
+   * ⚠️ **shell 已經結束(`onExit` 觸發過)就完全不碰那個 pid**:不 `ptyProcess.kill()`、不 `taskkill`、不 `process.kill`。
+   * 使用者在 shell 裡打 `exit` 之後終端會留在清單裡,可能隔很久才按關閉——那時作業系統早就可能把同一個 pid
+   * 配給別的程式(Windows 的 pid 回收很快),此時 `isPidAlive(pid)` 回 true,但活著的是**無關的行程**,
+   * `taskkill /pid X /T /F` 會把它連同整棵子程序樹殺掉。
    */
   kill(timeoutMs?: number): Promise<void>;
 }
@@ -93,9 +98,15 @@ function taskkillTree(pid: number, timeoutMs: number): Promise<void> {
 }
 
 export function spawnShellPty(options: ShellPtySpawnOptions): ShellPty {
+  // 縱深防禦:node-pty 組環境字串時會把值是 undefined 的鍵變成字面的 "undefined"(變數「存在」且值是 "undefined"),
+  // 對只看「變數存不存在」的程式(例如 Electron 的 ELECTRON_RUN_AS_NODE)與刪掉它完全不是同一件事——這裡一律濾掉。
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(options.env)) {
+    if (typeof value === "string") env[name] = value;
+  }
   const ptyProcess: IPty = pty.spawn(options.file, options.args, {
     cwd: options.cwd,
-    env: options.env as Record<string, string>,
+    env,
     cols: options.cols,
     rows: options.rows,
     name: "xterm-256color",
@@ -108,7 +119,8 @@ export function spawnShellPty(options: ShellPtySpawnOptions): ShellPty {
 
   let killing: Promise<void> | undefined;
   const doKill = async (timeoutMs: number): Promise<void> => {
-    if (!isPidAlive(pid)) return;
+    // 已經結束的 shell:pid 可能已被別的行程重用,絕不能動(見 `ShellPty.kill()` 的說明)。
+    if (exited || !isPidAlive(pid)) return;
     try {
       ptyProcess.kill();
     } catch {
@@ -119,7 +131,8 @@ export function spawnShellPty(options: ShellPtySpawnOptions): ShellPty {
     }
     const deadline = Date.now() + timeoutMs;
     let escalated = false;
-    while (isPidAlive(pid) && Date.now() < deadline) {
+    // 迴圈途中 shell 結束(`onExit` 到了)就停:之後 pid 活著不代表還是我們的 shell,也不能再對它送訊號。
+    while (!exited && isPidAlive(pid) && Date.now() < deadline) {
       // POSIX:shell 是它那個 session/行程群組的首領(node-pty 用 setsid 開的),SIGHUP 沒收乾淨的話,
       // 約一秒後改對整個行程群組送 SIGKILL。Windows 的 taskkill /T /F 本來就是強制的。
       if (process.platform !== "win32" && !escalated && deadline - Date.now() < timeoutMs - 1_000) {
