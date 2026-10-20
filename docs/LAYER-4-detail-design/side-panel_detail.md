@@ -170,6 +170,30 @@ P0 很小,與 P1 由同一個實作者做,但**各自一個 commit**。
 
 ## P2. Changes + Files
 
+> **實作備註(與下文不同或規格沒寫死的地方,P2 實作時補)**
+>
+> - **路徑安全**(`apps/core/src/workspace/workspace-paths.ts`):三道關——字面檢查、`fs.realpathSync.native`(目標必須存在;不存在是
+>   `workspace.notFound`,**不用** `resolveRealpathBestEffort()`)、`isPathUnder()` 前綴比對(Windows 大小寫不敏感,`normalizeForCompare()` 轉小寫)。
+>   用 `.native` 而不是 JS 版 `realpathSync`:Windows 走 `GetFinalPathNameByHandle`,junction、掛載點、8.3 短檔名都由系統解開。
+>   字面檢查不分平台拒絕所有絕對路徑寫法(`/x`、`C:\x`、`C:x`、`\\server\share`、`//server/share`、`\x`),Windows 另外拒絕反斜線、冒號(磁碟機/NTFS 資料流)、
+>   保留裝置名(`CON`、`NUL.txt`…)、結尾是點或空白的片段(Win32 會把 `.. ` 正規化成 `..`)。
+> - **`.git` 不只隱藏,也不可讀**(`listDir`/`readFile` 一律 `workspace.notFound`,不分大小寫):裡面有 remote URL 等設定,隱藏列表卻允許直接讀 `.git/config` 沒有意義。
+> - **`gitDiff` 多一個選填的 `oldPath`**(rename/copy 的舊路徑,同樣過路徑檢查):改名後又改的檔案只顯示真正的差異,而不是整個檔案新增。
+>   `gitDiff` 的路徑可以不存在(已刪除的追蹤檔)、不跟進最後一段 symlink,所以改檢查「上層資料夾鏈中第一個存在的祖先」的 realpath(`resolveForGit()`);
+>   未追蹤檔案才走 `resolveExisting()` + `readFile` 同一套檢查。
+> - **hunk 用自己寫的寬鬆解析**(`parseUnifiedDiff()`),不加 `diff` 套件相依:diff 文字會被 512 KB 上限截在 hunk 中間,`parsePatch` 會因行數對不上而丟例外。
+>   輸出形狀就是 `structuredPatch` 的 hunk,`DiffHunkView.tsx` 拆出 `DiffHunks` 共用同一份渲染,沒有另寫 diff 元件。
+> - **git 執行的防護**(`workspace-git.ts` 檔頭有完整理由):工作資料夾內容是 agent 能寫的(含 `.git/config`、`.gitattributes`),而 Changes 是使用者一打開就跑
+>   `git status`/`git diff` 的地方——實測 `core.fsmonitor` 在 status 時執行、`filter.<n>.clean` 在 diff 時執行。所以一律 `-c core.fsmonitor=false`、diff 加
+>   `--no-ext-diff --no-textconv`、`--ignore-submodules=all`、repo 本地設定裡的每個 filter 用 `-c filter.<n>.clean=` 覆寫成空(名稱含 `=` 就拒絕執行)、
+>   `--literal-pathspecs`、`--no-optional-locks`、濾掉繼承來的 `GIT_*` 環境。代價:repo **本地**設定的 filter(例如 `git lfs install --local`)在這裡被停用,LFS 檔案可能顯示成已修改。
+> - `status` 多帶 `-b`(取分支名)與 `-- .`:工作資料夾是 repo 子資料夾時只列該資料夾、路徑去掉 repo 前綴;`core.worktree` 指到別處的 repo 視為不是 repo。
+>   檔案數上限 5000(`truncated`)。沒有 commit 的 repo 的 diff 對空樹(`git hash-object -t tree --stdin` 取得,SHA-1/SHA-256 repo 都對)。
+> - **檔案 symlink 沒測**(這台機器沒權限建立;e2e 會在能建立時加測 `link-file`),junction 有測。
+> - 點到 symlink/junction 時 UI 先當檔案讀,`workspace.notAFile` 才改當資料夾展開;指向工作資料夾外的顯示 core 的 `workspace.pathOutsideRoot` 錯誤。
+
+### 原規格
+
 ### P2.1 core:`apps/core/src/workspace/workspace-inspector.ts`(新檔,全部唯讀)
 
 **路徑安全(整個 P2 最重要的一段)**:root = `realpath(session.workingDir)`。所有 `path` 參數都是相對 root、以 `/` 分隔的字串:
