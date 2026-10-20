@@ -197,5 +197,186 @@ console.log("\n== file-preview / git-status:Files 預覽與 Changes 徽章的小
   check(gitStatusCode(" ", "M") === "·M" && gitStatusCode("M", "M") === "MM", "gitStatusCode:空白以中點呈現");
 }
 
+console.log("\n== browser-rules:Browser 分頁的網址/scheme/partition/組合鍵判斷(main 與 renderer 共用同一份)==");
+{
+  const ELECTRON_DIR = path.resolve(__dirname, "..", "apps", "desktop", "electron");
+  const {
+    normalizeAddressInput,
+    isAllowedWebviewUrl,
+    isExternallyOpenableUrl,
+    isAllowedBrowserPartition,
+    browserPartitionForSession,
+    matchAppShortcut,
+  } = await import(pathToFileURL(path.join(ELECTRON_DIR, "browser-rules.ts")).href);
+
+  const resolve = (input) => normalizeAddressInput(input);
+  const urlOf = (input) => {
+    const r = resolve(input);
+    return r.kind === "url" ? r.url : `<${r.kind}${r.reason ? `:${r.reason}` : ""}>`;
+  };
+  const cases = [
+    // host:port、IP、IPv6、一般網域:補 http/https 的規則
+    ["localhost:5173", "http://localhost:5173/"],
+    ["localhost", "http://localhost/"],
+    ["localhost:5173/app?x=1#top", "http://localhost:5173/app?x=1#top"],
+    ["foo.localhost:3000", "http://foo.localhost:3000/"],
+    ["127.0.0.1", "http://127.0.0.1/"],
+    ["127.0.0.1:3000/a?b=1", "http://127.0.0.1:3000/a?b=1"],
+    ["[::1]:3000", "http://[::1]:3000/"],
+    ["[::1]", "http://[::1]/"],
+    ["example.com", "https://example.com/"],
+    ["example.com/path?q=1#h", "https://example.com/path?q=1#h"],
+    ["example.com:8080", "http://example.com:8080/"],
+    ["my-host:3000/x", "http://my-host:3000/x"],
+    ["user@localhost:3000", "http://user@localhost:3000/"],
+    ["//example.com/x", "https://example.com/x"],
+    ["//localhost:3000", "http://localhost:3000/"],
+    // 已有 scheme、大小寫、前後空白
+    ["https://example.com", "https://example.com/"],
+    ["  https://example.com/a  ", "https://example.com/a"],
+    ["HTTPS://EXAMPLE.COM/Path", "https://example.com/Path"],
+    ["http://localhost:5173/app", "http://localhost:5173/app"],
+    ["about:blank", "about:blank"],
+    // 空、不像網址(含空白:第一版沒有搜尋引擎)
+    ["", "<empty>"],
+    ["   ", "<empty>"],
+    ["hello world", "<invalid:notUrl>"],
+    ["what is love", "<invalid:notUrl>"],
+    ["example.com/a b", "<invalid:notUrl>"],
+    ["http://", "<invalid:notUrl>"],
+    ["x".repeat(9000), "<invalid:notUrl>"],
+    ["java\nscript:alert(1)", "<invalid:notUrl>"],
+    // 不支援的 scheme
+    ["javascript:alert(1)", "<invalid:unsupportedScheme>"],
+    ["JavaScript:alert(1)", "<invalid:unsupportedScheme>"],
+    ["file:///etc/passwd", "<invalid:unsupportedScheme>"],
+    ["FILE:///C:/Windows/win.ini", "<invalid:unsupportedScheme>"],
+    ["chrome://gpu", "<invalid:unsupportedScheme>"],
+    ["devtools://devtools/bundled/inspector.html", "<invalid:unsupportedScheme>"],
+    ["mailto:a@b.c", "<invalid:unsupportedScheme>"],
+    ["data:text/html,<b>x</b>", "<invalid:unsupportedScheme>"],
+    ["view-source:http://example.com", "<invalid:unsupportedScheme>"],
+    ["ftp://example.com/x", "<invalid:unsupportedScheme>"],
+    ["about:config", "<invalid:unsupportedScheme>"],
+    ["blob:http://example.com/abc", "<invalid:unsupportedScheme>"],
+  ];
+  const failures = cases.filter(([input, expected]) => urlOf(input) !== expected).map(([input, expected]) => `${JSON.stringify(input.length > 40 ? input.slice(0, 40) + "…" : input)} → ${urlOf(input)}(預期 ${expected})`);
+  check(failures.length === 0, `normalizeAddressInput:${cases.length} 種輸入(host:port/IP/IPv6/網域/已有 scheme/空白/含空格/不支援的 scheme)全部符合預期`, failures.join("\n       "));
+
+  const allowed = [
+    "https://example.com",
+    "http://localhost:3000/x?y=1#z",
+    "HTTP://EXAMPLE.COM",
+    "  https://example.com  ",
+    "\thttp://127.0.0.1:8080\n",
+    "http://[::1]:3000/",
+    "https:///example.com", // WHATWG:特殊 scheme 忽略多餘的斜線,Chromium 同樣解成 https://example.com/
+    "about:blank",
+  ];
+  const denied = [
+    "file:///etc/passwd",
+    "\tFILE:///x",
+    "chrome://gpu",
+    "devtools://devtools/bundled/inspector.html",
+    "javascript:alert(1)",
+    " JAVASCRIPT:alert(1) ",
+    "java\nscript:alert(1)",
+    "\u0001javascript:alert(1)",
+    "data:text/html,x",
+    "blob:http://example.com/abc",
+    "view-source:http://example.com",
+    "about:srcdoc",
+    "about:blank#x",
+    "about:blank?x",
+    "ABOUT:BLANK", // 解析後是 about:BLANK,不是剛好 about:blank:保守地拒絕
+    "ftp://example.com",
+    "ws://example.com",
+    "http://",
+    "https://",
+    "",
+    "x".repeat(9000),
+    undefined,
+    null,
+    5,
+    {},
+  ];
+  const allowedWrong = allowed.filter((u) => !isAllowedWebviewUrl(u));
+  const deniedWrong = denied.filter((u) => isAllowedWebviewUrl(u));
+  check(
+    allowedWrong.length === 0 && deniedWrong.length === 0,
+    `isAllowedWebviewUrl:${allowed.length} 個允許(含大小寫、前後空白、tab/換行變體)與 ${denied.length} 個拒絕(file/chrome/devtools/javascript/data/blob/view-source/about 其他路徑/ftp/ws/空/超長/非字串,含大小寫與控制字元變體)全部符合`,
+    `該放行卻被拒:${JSON.stringify(allowedWrong)};該拒絕卻放行:${JSON.stringify(deniedWrong)}`,
+  );
+  check(
+    isExternallyOpenableUrl("https://example.com") === true &&
+      isExternallyOpenableUrl("http://localhost:3000") === true &&
+      isExternallyOpenableUrl("about:blank") === false &&
+      isExternallyOpenableUrl("file:///x") === false &&
+      isExternallyOpenableUrl("javascript:alert(1)") === false &&
+      isExternallyOpenableUrl(undefined) === false,
+    "isExternallyOpenableUrl:只有 http(s) 能交給外部瀏覽器(about:blank、file、javascript、非字串都不行)",
+  );
+
+  const uuid = "6f1c8f0e-2b7d-4c1a-9a1e-0d9a7b2f3c4d";
+  const goodPartitions = [`deskmony-browser-${uuid}`, "deskmony-browser-abc_DEF-123", "deskmony-browser-x"];
+  const badPartitions = [
+    `persist:deskmony-browser-${uuid}`,
+    "deskmony-browser-",
+    "deskmony-browser-a b",
+    "deskmony-browser-../x",
+    "deskmony-browser-a/b",
+    "deskmony-browser-a\n",
+    "Deskmony-browser-x",
+    "deskmony-browser",
+    "other-partition",
+    "",
+    `deskmony-browser-${"a".repeat(200)}`,
+    undefined,
+    null,
+    5,
+  ];
+  check(
+    goodPartitions.every(isAllowedBrowserPartition) && badPartitions.every((p) => !isAllowedBrowserPartition(p)),
+    "isAllowedBrowserPartition:deskmony-browser-<id>(UUID/底線/連字號)合法;persist: 前綴、空 id、空白、斜線、結尾換行、大小寫不符、超長、非字串全部拒絕",
+    `bad 卻通過:${JSON.stringify(badPartitions.filter(isAllowedBrowserPartition))}`,
+  );
+  check(
+    browserPartitionForSession(uuid) === `deskmony-browser-${uuid}` &&
+      browserPartitionForSession("a/b") === undefined &&
+      browserPartitionForSession("a b") === undefined &&
+      browserPartitionForSession("persist:x") === undefined &&
+      browserPartitionForSession("") === undefined &&
+      browserPartitionForSession(5) === undefined &&
+      browserPartitionForSession("a:b") === undefined,
+    "browserPartitionForSession:UUID 的 session id 對應合法 partition(不帶 persist:);不合法的 id 回 undefined(不「清理」成別的名稱)",
+  );
+
+  const key = (type, k, mods = {}) => ({ type, key: k, control: false, meta: false, shift: false, alt: false, ...mods });
+  check(
+    matchAppShortcut(key("keyDown", "j", { control: true }), false) === "toggle-panel" &&
+      matchAppShortcut(key("keyDown", "J", { control: true }), false) === "toggle-panel" &&
+      matchAppShortcut(key("keyDown", "k", { control: true }), false) === "open-palette" &&
+      matchAppShortcut(key("keyDown", "`", { control: true }), false) === "open-terminal" &&
+      matchAppShortcut(key("keyDown", "j", { meta: true }), true) === "toggle-panel" &&
+      matchAppShortcut(key("keyDown", "k", { meta: true }), true) === "open-palette" &&
+      matchAppShortcut(key("keyDown", "`", { control: true }), true) === "open-terminal",
+    "matchAppShortcut:只認 mod+j(開關面板)、mod+k(命令面板)、ctrl+`(開 Terminal);mod 在 Windows/Linux 是 Ctrl、在 macOS 是 ⌘,ctrl+` 是字面 Ctrl",
+  );
+  check(
+    matchAppShortcut(key("keyUp", "j", { control: true }), false) === undefined &&
+      matchAppShortcut(key("keyDown", "j"), false) === undefined &&
+      matchAppShortcut(key("keyDown", "j", { control: true, shift: true }), false) === undefined &&
+      matchAppShortcut(key("keyDown", "j", { control: true, alt: true }), false) === undefined &&
+      matchAppShortcut(key("keyDown", "j", { meta: true }), false) === undefined &&
+      matchAppShortcut(key("keyDown", "j", { control: true }), true) === undefined &&
+      matchAppShortcut(key("keyDown", "`", { meta: true }), true) === undefined &&
+      matchAppShortcut(key("keyDown", "`", { control: true, meta: true }), true) === undefined &&
+      matchAppShortcut(key("keyDown", "a", { control: true }), false) === undefined &&
+      matchAppShortcut(key("keyDown", "c", { control: true }), false) === undefined &&
+      matchAppShortcut(key("keyDown", "Enter"), false) === undefined,
+    "matchAppShortcut:keyUp、沒按修飾鍵、多按 shift/alt、平台不對的修飾鍵(Windows 的 ⌘、mac 的 Ctrl+j)、⌘+`、其他鍵(Ctrl+A/C、Enter)一律不攔,照常給網頁",
+  );
+}
+
 console.log(`\n總計: ${passed} PASS, ${total - passed} FAIL`);
 process.exit(passed === total ? 0 : 1);
