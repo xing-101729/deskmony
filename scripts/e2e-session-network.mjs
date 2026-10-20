@@ -158,6 +158,9 @@ class GatewayClient {
     this.notifications = [];
     /** 收過的 push channel 名稱(用來斷言「從頭到尾沒有 S12 的子結果 push」)。 */
     this.channelsSeen = new Set();
+    /** 收過的 push 總數與逐筆 channel(P0:scoped bridge 連線必須一則都收不到)。 */
+    this.pushCount = 0;
+    this.pushChannels = [];
     this.waiters = [];
   }
 
@@ -207,6 +210,8 @@ class GatewayClient {
     }
     if (msg.kind === "event") {
       this.channelsSeen.add(msg.channel);
+      this.pushCount += 1;
+      this.pushChannels.push(msg.channel);
       if (msg.channel === "session-event") {
         this.events.push(msg.payload);
         for (const w of [...this.waiters]) w(msg.payload);
@@ -971,6 +976,52 @@ async function main() {
       );
     } catch (err) {
       record("P3.7-8 ACP bridge token 方法白名單", false, String(err?.stack ?? err));
+    }
+
+    // =====================================================================================
+    // P0(右側面板,見 docs/DECISIONS.md §L.4)scoped bridge 連線一則 push 都收不到;一般連線收得到(證明事件確實發生)
+    // =====================================================================================
+    try {
+      // 取出 A 這個 session 真實核發的 scoped token(同上面 P3.7-8 的手法)。連線之前的事件不算,下面只看連線之後的。
+      const { text } = await client.drivePrompt(A, REPORT_MCP_SERVERS_PREFIX, { timeoutMs: 30_000 });
+      const marker = "MCP_SERVERS:";
+      const mcpServers = JSON.parse(text.slice(text.indexOf(marker) + marker.length));
+      const env = Object.fromEntries((mcpServers[0].env ?? []).map((e) => [e.name, e.value]));
+      const scoped = new GatewayClient(env.DESKMONY_MCP_BRIDGE_GATEWAY_URL);
+      await scoped.connect();
+      await scoped.rpc("auth", { token: env.DESKMONY_MCP_BRIDGE_TOKEN });
+      // 另開一條**一般**連線當對照組:同一批事件它必須收得到,否則「scoped 沒收到」可能只是事件根本沒發生。
+      const control = new GatewayClient(url);
+      await control.connect();
+
+      // 觸發會 broadcast 的事件:建立 session(session-list-updated/session-updated)、人類送 prompt(session-event/
+      // session-updated)、scoped 連線**自己**呼叫 session.sendFromAgent(session-message)——連自己動作引起的 push 都不該收。
+      const probe = (await createSession(client, wsB, "net-p0-probe")).id;
+      await client.drivePrompt(probe, `p0 ${delayEchoMarker(0)}`, { timeoutMs: 30_000 });
+      await scoped.rpc("session.sendFromAgent", { sessionId: probe, message: "p0 scoped 自己送的訊息" });
+      await waitForHistory(client, probe, (ms) => ms.find((m) => m.role === "user" && m.origin?.sessionId === A), 20_000);
+      await waitForStatus(client, probe, "idle", 30_000);
+      // 給 push 足夠的時間抵達(若修法被拿掉,這段期間 scoped 連線就會收到)。
+      await sleep(1_500);
+
+      const listed = await scoped.rpc("session.listForAgent", {}).then(
+        (r) => ({ ok: true, count: r.sessions.length }),
+        (err) => ({ ok: false, message: String(err) }),
+      );
+      const controlSeen = new Set(control.pushChannels);
+      scoped.close();
+      control.close();
+      record(
+        "P0 scoped bridge 連線(含自己呼叫 session.sendFromAgent 引起的事件)一則 push 都收不到、自己 request 的 response 仍正常;同一批事件一般連線收得到(session-list-updated/session-updated/session-event/session-message)",
+        scoped.pushCount === 0 &&
+          listed.ok === true &&
+          control.pushCount > 0 &&
+          ["session-list-updated", "session-updated", "session-event", "session-message"].every((c) => controlSeen.has(c)),
+        `scoped push=${scoped.pushCount}(${[...new Set(scoped.pushChannels)].join(",")}), control push=${control.pushCount}(${[...controlSeen].join(",")}), listForAgent=${JSON.stringify(listed)}`,
+      );
+      await client.rpc("session.delete", { sessionId: probe });
+    } catch (err) {
+      record("P0 scoped bridge 連線收不到任何 push", false, String(err?.stack ?? err));
     }
 
     // =====================================================================================

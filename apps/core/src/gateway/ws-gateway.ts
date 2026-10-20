@@ -599,8 +599,9 @@ export class WsGateway {
   /**
    * S7 L4 §2.1(`attended` 的真值來源):**現在有沒有人看得到彈窗?**
    *
-   * 判定與 `broadcast()` 完全一致——「連線是 OPEN **且已認證**」,因為那正是
-   * 會收到 `permission-request` 推播的連線集合。未認證的連線刻意**不算**:
+   * 判定與 `broadcast()` 完全一致——「連線是 OPEN、**已認證**、且不是 scoped
+   * bridge 連線」,因為那正是會收到 `permission-request` 推播的連線集合
+   * (2026-10-20:scoped 連線不再收任何 push,所以它不算「有人看得到彈窗」)。未認證的連線刻意**不算**:
    * 它收不到任何推播(見 `broadcast()`),也還不能呼叫 `permission.resolve`,
    * 把它當成「有人在」會讓 escalate 進入 5 分鐘逾時 deny 的路徑,而那正是
    * S11 §4 論證要避免的錯誤(「沒人回應 ≠ 拒絕」)。**不確定時倒向
@@ -612,7 +613,7 @@ export class WsGateway {
    */
   hasConnectedClient(): boolean {
     for (const [socket, state] of this.clients) {
-      if (socket.readyState === WebSocket.OPEN && state.authenticated) return true;
+      if (socket.readyState === WebSocket.OPEN && state.authenticated && state.scopedGrant === undefined) return true;
     }
     return false;
   }
@@ -1328,7 +1329,15 @@ export class WsGateway {
     // 收到任何 agent 輸出等潛在敏感內容)。未設定 authToken 時
     // 所有連線一律 authenticated=true,行為與過去完全相同。
     for (const [client, state] of this.clients) {
-      if (client.readyState === WebSocket.OPEN && state.authenticated) client.send(payload);
+      if (client.readyState !== WebSocket.OPEN || !state.authenticated) continue;
+      // 2026-10-20(右側面板 P0,見 docs/DECISIONS.md §L.4):scoped MCP bridge 連線一律不收 push。
+      // bridge 子行程本身不讀 push(只處理自己 request 的 response),但 agent 有辦法從 bridge 子行程讀到 token——
+      // 拿到它的人自己開一條 WS 認證,就會收到**所有 session** 的對話事件與權限請求(含工具 input),
+      // 之後還有終端輸出。scoped 連線只該拿到自己 request 的 response,所以這裡直接跳過。
+      // 這是 gateway 裡**唯一**把 push 送給多條連線的地方(`send()` 只用在回應單一 request),新增任何
+      // 「推給多個連線」的路徑時都要照這個條件過濾,或直接走 `broadcast()`。
+      if (state.scopedGrant !== undefined) continue;
+      client.send(payload);
     }
   }
 }
