@@ -8,7 +8,9 @@
   "retry": "重試",
   "dismiss": "關閉訊息",
   "tabs": {
-    "terminal": "終端"
+    "terminal": "終端",
+    "changes": "變更",
+    "files": "檔案"
   },
   "terminal": {
     "tabsLabel": "終端清單",
@@ -18,5 +20,42 @@
     "exited": "程序已結束(代碼 {{code}})",
     "exitedUnknown": "程序已結束",
     "restart": "重新啟動"
+  },
+  "refresh": "重新整理",
+  "changes": {
+    "branch": "分支 {{name}}",
+    "detached": "分離的 HEAD",
+    "fileCount": "變更檔案:{{count}}",
+    "notRepo": "這個資料夾不是 git repository",
+    "notRepoHint": "「變更」顯示這個對話工作資料夾裡的 git 變更。",
+    "clean": "沒有變更——工作樹是乾淨的",
+    "truncated": "變更的檔案太多——只顯示前 {{count}} 個",
+    "binary": "二進位檔——沒有文字 diff 可以顯示",
+    "noContentChanges": "沒有內容變更(只有改名或權限變更)",
+    "diffTruncated": "diff 很大——只顯示開頭的部分",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "已修改",
+      "A": "新增",
+      "D": "刪除",
+      "R": "改名",
+      "C": "複製",
+      "U": "衝突",
+      "T": "型別變更",
+      "?": "未追蹤"
+    }
+  },
+  "files": {
+    "filter": "篩選已載入的檔案",
+    "loading": "載入中…",
+    "empty": "這個資料夾是空的",
+    "truncated": "這個資料夾還有更多項目——只列出前 {{count}} 個",
+    "symlink": "符號連結或 junction",
+    "copyPath": "複製路徑",
+    "closePreview": "關閉預覽",
+    "binary": "二進位檔({{size}})——不預覽",
+    "tooLarge": "檔案太大,無法預覽({{size}})",
+    "previewTruncated": "只顯示前 {{shown}}(共 {{total}})",
+    "emptyFile": "空檔案"
   }
 }

@@ -1,0 +1,15 @@
+{
+  "workspace": {
+    "sessionNotFound": "La conversación {{sessionId}} ya no existe",
+    "rootMissing": "La carpeta de trabajo de la conversación no existe: {{cwd}}",
+    "pathOutsideRoot": "Esa ruta está fuera de la carpeta de trabajo de la conversación: {{path}}",
+    "notFound": "No se encontró: {{path}}",
+    "notADirectory": "No es una carpeta: {{path}}",
+    "notAFile": "No es un archivo normal: {{path}}",
+    "accessDenied": "Sin permiso para leer: {{path}}",
+    "ioError": "No se pudo leer {{path}}: {{detail}}",
+    "gitUnavailable": "No se encontró git: instala git y asegúrate de que esté en el PATH",
+    "gitFailed": "git falló: {{detail}}",
+    "notARepo": "Esta carpeta de trabajo no es un repositorio git"
+  }
+}

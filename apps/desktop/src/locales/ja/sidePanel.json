@@ -8,7 +8,9 @@
   "retry": "再試行",
   "dismiss": "閉じる",
   "tabs": {
-    "terminal": "ターミナル"
+    "terminal": "ターミナル",
+    "changes": "変更",
+    "files": "ファイル"
   },
   "terminal": {
     "tabsLabel": "ターミナル一覧",
@@ -18,5 +20,42 @@
     "exited": "プロセスが終了しました(コード {{code}})",
     "exitedUnknown": "プロセスが終了しました",
     "restart": "再起動"
+  },
+  "refresh": "再読み込み",
+  "changes": {
+    "branch": "ブランチ {{name}}",
+    "detached": "HEAD が切り離されています",
+    "fileCount": "変更されたファイル:{{count}}",
+    "notRepo": "このフォルダーは git リポジトリではありません",
+    "notRepoHint": "「変更」には、この会話の作業フォルダーの git 変更が表示されます。",
+    "clean": "変更はありません——作業ツリーはきれいです",
+    "truncated": "変更されたファイルが多すぎます——先頭の {{count}} 件のみ表示",
+    "binary": "バイナリファイル——表示できるテキスト diff はありません",
+    "noContentChanges": "内容の変更はありません(名前変更またはモード変更のみ)",
+    "diffTruncated": "diff が大きいため、先頭部分のみ表示しています",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "変更",
+      "A": "追加",
+      "D": "削除",
+      "R": "名前変更",
+      "C": "コピー",
+      "U": "競合",
+      "T": "種別変更",
+      "?": "未追跡"
+    }
+  },
+  "files": {
+    "filter": "読み込み済みのファイルを絞り込み",
+    "loading": "読み込み中…",
+    "empty": "このフォルダーは空です",
+    "truncated": "このフォルダーにはさらに項目があります——先頭の {{count}} 件のみ表示",
+    "symlink": "シンボリックリンクまたは junction",
+    "copyPath": "パスをコピー",
+    "closePreview": "プレビューを閉じる",
+    "binary": "バイナリファイル({{size}})——プレビューなし",
+    "tooLarge": "大きすぎてプレビューできません({{size}})",
+    "previewTruncated": "先頭の {{shown}} のみ表示(全体 {{total}})",
+    "emptyFile": "空のファイル"
   }
 }

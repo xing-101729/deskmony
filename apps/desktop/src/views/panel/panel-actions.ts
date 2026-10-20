@@ -1,7 +1,7 @@
 import { useSessionStore } from "../../stores/session-store.js";
 import { usePanelStore } from "../../stores/panel-store.js";
 import { useTerminalStore } from "../../stores/terminal-store.js";
-import { TERMINAL_TAB_ID } from "./panel-tabs.js";
+import { CHANGES_TAB_ID, FILES_TAB_ID, TERMINAL_TAB_ID } from "./panel-tabs.js";
 
 /**
  * 面板的幾個動作(2026-10-20):快捷鍵(`mod+j`、`ctrl+\``)、命令面板與標頭切換鈕共用同一份實作——
@@ -29,6 +29,15 @@ export function togglePanel(): void {
 export function openTerminalPanel(): void {
   usePanelStore.getState().openTab(TERMINAL_TAB_ID);
   focusActiveTerminal();
+}
+
+/** 命令面板的「開 Changes」/「開 Files」:開面板並切到那個分頁(沒有選取 session 時面板顯示空狀態)。 */
+export function openChangesPanel(): void {
+  usePanelStore.getState().openTab(CHANGES_TAB_ID);
+}
+
+export function openFilesPanel(): void {
+  usePanelStore.getState().openTab(FILES_TAB_ID);
 }
 
 /** 命令面板的「新終端」:開面板、切到 Terminal 分頁、在目前 session 再開一個終端。 */

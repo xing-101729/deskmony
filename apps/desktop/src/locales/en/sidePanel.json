@@ -8,7 +8,9 @@
   "retry": "Retry",
   "dismiss": "Dismiss",
   "tabs": {
-    "terminal": "Terminal"
+    "terminal": "Terminal",
+    "changes": "Changes",
+    "files": "Files"
   },
   "terminal": {
     "tabsLabel": "Terminals",
@@ -18,5 +20,42 @@
     "exited": "Process exited (code {{code}})",
     "exitedUnknown": "Process exited",
     "restart": "Restart"
+  },
+  "refresh": "Refresh",
+  "changes": {
+    "branch": "Branch {{name}}",
+    "detached": "Detached HEAD",
+    "fileCount": "Changed files: {{count}}",
+    "notRepo": "This folder is not a git repository",
+    "notRepoHint": "Changes shows the git changes in this conversation's working folder.",
+    "clean": "No changes — the working tree is clean",
+    "truncated": "Too many changed files — showing the first {{count}}",
+    "binary": "Binary file — there is no text diff to show",
+    "noContentChanges": "No content changes (rename or mode change only)",
+    "diffTruncated": "The diff is large — only the beginning is shown",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "Modified",
+      "A": "Added",
+      "D": "Deleted",
+      "R": "Renamed",
+      "C": "Copied",
+      "U": "Conflict",
+      "T": "Type changed",
+      "?": "Untracked"
+    }
+  },
+  "files": {
+    "filter": "Filter loaded files",
+    "loading": "Loading…",
+    "empty": "This folder is empty",
+    "truncated": "This folder has more entries — only the first {{count}} are listed",
+    "symlink": "Symbolic link or junction",
+    "copyPath": "Copy path",
+    "closePreview": "Close preview",
+    "binary": "Binary file ({{size}}) — no preview",
+    "tooLarge": "Too large to preview ({{size}})",
+    "previewTruncated": "Showing only the first {{shown}} of {{total}}",
+    "emptyFile": "Empty file"
   }
 }

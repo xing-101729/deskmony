@@ -170,5 +170,32 @@ check(JSON.stringify(splitTerminalInput("abc", 10)) === JSON.stringify(["abc"]),
   check(chunks.length === 3 && chunks.every((c) => c.length <= 60_000) && noLoneSurrogate(chunks) && chunks.join("") === big, "14 萬 code unit 的貼上以 60,000 為上限 → 3 段、每段完整", `lengths=${chunks.map((c) => c.length)}`);
 }
 
+console.log("\n== file-preview / git-status:Files 預覽與 Changes 徽章的小工具 ==");
+{
+  const { languageForPath, formatBytes, joinRelPath } = await import(pathToFileURL(path.join(LIB, "file-preview.ts")).href);
+  const { gitStatusBadge, gitStatusCode } = await import(pathToFileURL(path.join(LIB, "git-status.ts")).href);
+  check(
+    languageForPath("src/App.tsx") === "tsx" && languageForPath("a/b/c.TS") === "typescript" && languageForPath("x.json") === "json" && languageForPath("run.sh") === "bash",
+    "languageForPath:依副檔名(不分大小寫、含路徑)挑出 CodeBlock 已註冊的語言",
+  );
+  check(
+    languageForPath("Makefile") === "text" && languageForPath(".gitignore") === "text" && languageForPath("a.unknownext") === "text" && languageForPath("dir.d/file") === "text",
+    "languageForPath:沒有副檔名、只有開頭的點、不認得的副檔名、副檔名在資料夾名上 → text",
+  );
+  check(
+    formatBytes(0) === "0 B" && formatBytes(1023) === "1023 B" && formatBytes(1536) === "1.5 KB" && formatBytes(5 * 1024 * 1024) === "5.0 MB" && formatBytes(-1) === "?",
+    "formatBytes:位元組/KB/MB 與非法值",
+  );
+  check(joinRelPath("", "a") === "a" && joinRelPath("sub", "d.txt") === "sub/d.txt" && joinRelPath("a/b", "c") === "a/b/c", "joinRelPath:根目錄不加前綴、其餘以 / 連接");
+  const badge = (x, y) => gitStatusBadge(x, y).letter;
+  check(
+    badge(" ", "M") === "M" && badge("M", " ") === "M" && badge("M", "M") === "M" && badge("A", " ") === "A" && badge(" ", "D") === "D" && badge("R", "M") === "M" && badge("R", " ") === "R" && badge("?", "?") === "?",
+    "gitStatusBadge:工作樹有變就看工作樹、否則看已暫存的;未追蹤是 ?",
+  );
+  check(badge("U", "U") === "U" && badge("A", "A") === "U" && badge("D", "D") === "U" && badge(" ", "U") === "U", "gitStatusBadge:任何一種衝突組合 → U");
+  check(gitStatusBadge("?", "?").tone === "ok" && gitStatusBadge(" ", "D").tone === "danger" && gitStatusBadge("U", "U").tone === "warn", "gitStatusBadge:語意色(新增/未追蹤 ok、刪除 danger、衝突 warn)");
+  check(gitStatusCode(" ", "M") === "·M" && gitStatusCode("M", "M") === "MM", "gitStatusCode:空白以中點呈現");
+}
+
 console.log(`\n總計: ${passed} PASS, ${total - passed} FAIL`);
 process.exit(passed === total ? 0 : 1);

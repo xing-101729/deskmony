@@ -36,6 +36,16 @@
       "subtitle": "この会話の作業フォルダーで shell を開く",
       "keywords": "terminal shell console ターミナル 新規 powershell bash"
     },
+    "openChanges": {
+      "title": "変更を開く",
+      "subtitle": "この会話の作業フォルダーの git 変更",
+      "keywords": "changes git diff status 変更 サイドパネル"
+    },
+    "openFiles": {
+      "title": "ファイルを開く",
+      "subtitle": "この会話の作業フォルダーのファイルを参照",
+      "keywords": "files tree browse explorer ファイル 参照 プレビュー サイドパネル"
+    },
     "toggleTheme": {
       "toLight": "ライトテーマに切り替え",
       "toDark": "ダークテーマに切り替え",

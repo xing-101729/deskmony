@@ -8,7 +8,9 @@
   "retry": "Reintentar",
   "dismiss": "Descartar",
   "tabs": {
-    "terminal": "Terminal"
+    "terminal": "Terminal",
+    "changes": "Cambios",
+    "files": "Archivos"
   },
   "terminal": {
     "tabsLabel": "Terminales",
@@ -18,5 +20,42 @@
     "exited": "El proceso terminó (código {{code}})",
     "exitedUnknown": "El proceso terminó",
     "restart": "Reiniciar"
+  },
+  "refresh": "Actualizar",
+  "changes": {
+    "branch": "Rama {{name}}",
+    "detached": "HEAD desasociado",
+    "fileCount": "Archivos modificados: {{count}}",
+    "notRepo": "Esta carpeta no es un repositorio git",
+    "notRepoHint": "«Cambios» muestra los cambios de git en la carpeta de trabajo de esta conversación.",
+    "clean": "Sin cambios: el árbol de trabajo está limpio",
+    "truncated": "Hay demasiados archivos modificados: se muestran los primeros {{count}}",
+    "binary": "Archivo binario: no hay un diff de texto que mostrar",
+    "noContentChanges": "Sin cambios de contenido (solo cambio de nombre o de modo)",
+    "diffTruncated": "El diff es grande: solo se muestra el principio",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "Modificado",
+      "A": "Añadido",
+      "D": "Eliminado",
+      "R": "Renombrado",
+      "C": "Copiado",
+      "U": "Conflicto",
+      "T": "Tipo cambiado",
+      "?": "Sin seguimiento"
+    }
+  },
+  "files": {
+    "filter": "Filtrar archivos cargados",
+    "loading": "Cargando…",
+    "empty": "Esta carpeta está vacía",
+    "truncated": "Esta carpeta tiene más elementos: solo se listan los primeros {{count}}",
+    "symlink": "Enlace simbólico o junction",
+    "copyPath": "Copiar ruta",
+    "closePreview": "Cerrar vista previa",
+    "binary": "Archivo binario ({{size}}): sin vista previa",
+    "tooLarge": "Demasiado grande para la vista previa ({{size}})",
+    "previewTruncated": "Se muestran solo los primeros {{shown}} de {{total}}",
+    "emptyFile": "Archivo vacío"
   }
 }

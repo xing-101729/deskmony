@@ -6,7 +6,7 @@ import { usePanelStore } from "./stores/panel-store.js";
 import { SessionList } from "./views/SessionList.js";
 import { SessionView } from "./views/SessionView.js";
 import { SidePanel } from "./views/panel/SidePanel.js";
-import { openNewTerminal, openTerminalPanel, togglePanel } from "./views/panel/panel-actions.js";
+import { openChangesPanel, openFilesPanel, openNewTerminal, openTerminalPanel, togglePanel } from "./views/panel/panel-actions.js";
 import { PermissionModal } from "./views/PermissionModal.js";
 import { ConnectScreen } from "./views/ConnectScreen.js";
 import { SettingsDialog } from "./views/SettingsDialog.js";
@@ -314,6 +314,26 @@ export default function App(): JSX.Element {
         keywords: t("app:commands.newTerminal.keywords"),
         run: () => openNewTerminal(),
       });
+      list.push(
+        {
+          id: "action:open-changes",
+          group: t("app:commands.groupActions"),
+          title: t("app:commands.openChanges.title"),
+          subtitle: t("app:commands.openChanges.subtitle"),
+          icon: "branch",
+          keywords: t("app:commands.openChanges.keywords"),
+          run: () => openChangesPanel(),
+        },
+        {
+          id: "action:open-files",
+          group: t("app:commands.groupActions"),
+          title: t("app:commands.openFiles.title"),
+          subtitle: t("app:commands.openFiles.subtitle"),
+          icon: "folder",
+          keywords: t("app:commands.openFiles.keywords"),
+          run: () => openFilesPanel(),
+        },
+      );
     }
 
     if (interruptedSessions.length > 0) {
