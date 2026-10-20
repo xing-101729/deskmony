@@ -16,4 +16,5 @@ export * from "./gateway.js";
 export * from "./enforcement.js";
 export * from "./notification.js";
 export * from "./recovery.js";
+export * from "./terminal.js";
 export * from "./errors.js";

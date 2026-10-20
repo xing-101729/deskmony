@@ -1703,6 +1703,8 @@ export class SessionManager extends EventEmitter {
     this.permissions.clear(sessionId); // S7:避免 Map 隨 session 生命週期無限增長。
     this.waitingSince.delete(sessionId); // S3b:同上,避免無限增長。
     this.clearPerSessionState(sessionId); // 同上,避免無限增長(含待送佇列與訊息鏈狀態)。
+    // 2026-10-20(右側面板 P1):掛在這個 session 底下的獨立終端要一併關掉(`TerminalManager`,見 index.ts 的接線)。
+    this.emit("session-deleted", sessionId);
     this.emit("session-list-updated");
   }
 

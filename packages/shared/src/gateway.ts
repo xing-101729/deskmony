@@ -10,6 +10,7 @@ import { MaskedProviderPrefsSchema, ProviderPrefsPatchInputSchema } from "./prov
 import { ConfigSetFilePatchSchema, EffectiveCoreConfigSchema, PolicyAddRuleInputSchema, PolicyRuleSchema } from "./core-config.js";
 import { NetworkAgentSummarySchema, NetworkSessionSummarySchema, ReadSessionResultSchema } from "./session-network.js";
 import { RecoveryListResultSchema } from "./recovery.js";
+import { TERMINAL_INPUT_MAX_CHARS } from "./terminal.js";
 
 /**
  * Gateway WS 訊息協議(ARCHITECTURE.md 3.2 節):
@@ -517,6 +518,44 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    *  2026-10-02:原本還有 `recovery.rerun`/`recovery.gitStatus`/
    *  `recovery.resolveDirtyWorktree`(任務 worktree 專用),已隨 task 一併移除。 */
   z.object({ ...baseRequest, method: z.literal("recovery.abandon"), params: z.object({ sessionId: z.string() }) }),
+  // ---- 2026-10-20(右側面板 P1):session 底下的獨立終端(見 packages/shared/src/terminal.ts、
+  // docs/LAYER-4-detail-design/side-panel_detail.md §P1、docs/DECISIONS.md §L.1)------------------
+  /**
+   * ⚠️ **刻意不列入 `LOCAL_ONLY_METHODS`**(使用者明確選擇「遠端也可用」,代價是主 token 外洩 = shell 外洩,
+   * 緩衝與稽核見 DECISIONS §L.1),也**刻意不在任何 scoped bridge token 的方法白名單裡**——agent 永遠開不了終端。
+   * 終端是完全不經政策引擎的執行路徑,所以每次開/關都寫稽核(`kind: "terminal-session"`)。
+   *
+   * `terminal.create`:cwd = 該 session 的工作資料夾;`cols`/`rows` 是 UI 目前量到的尺寸(core 再夾到合理範圍)。
+   * `terminal.attach`:回傳目前緩衝與最後一個片段的 `seq`(client 先訂閱 `terminal-output` push 再 attach,丟掉
+   * `seq <= 回傳 seq` 的 push,見 `TerminalOutputPushSchema`)。`terminal.input` 的 `data` 上限 `TERMINAL_INPUT_MAX_CHARS`,
+   * 超過由 schema 驗證直接拒絕(無效的請求格式)。
+   */
+  z.object({ ...baseRequest, method: z.literal("terminal.list"), params: z.object({ sessionId: z.string() }) }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("terminal.create"),
+    params: z.object({
+      sessionId: z.string(),
+      cols: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    }),
+  }),
+  z.object({ ...baseRequest, method: z.literal("terminal.attach"), params: z.object({ terminalId: z.string() }) }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("terminal.input"),
+    params: z.object({ terminalId: z.string(), data: z.string().max(TERMINAL_INPUT_MAX_CHARS) }),
+  }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("terminal.resize"),
+    params: z.object({
+      terminalId: z.string(),
+      cols: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    }),
+  }),
+  z.object({ ...baseRequest, method: z.literal("terminal.close"), params: z.object({ terminalId: z.string() }) }),
 ]);
 export type ClientRequest = z.infer<typeof ClientRequestSchema>;
 export type ClientRequestMethod = ClientRequest["method"];
@@ -588,6 +627,13 @@ export const ServerPushSchema = z.object({
      * **之後**才推,所以重新載入拿到的就是最終狀態。
      */
     "session-history-reset",
+    /**
+     * 2026-10-20(右側面板 P1):session 底下某個獨立終端的輸出(約 16 ms 合併成一筆)與狀態變化——payload 見
+     * packages/shared/src/terminal.ts 的 `TerminalOutputPushSchema`/`TerminalUpdatedPushSchema`。
+     * 一樣經 `broadcast()`:scoped bridge 連線(agent)一律收不到(P0),使用者的 shell 畫面不會外流給 agent。
+     */
+    "terminal-output",
+    "terminal-updated",
   ]),
   payload: z.unknown(),
 });

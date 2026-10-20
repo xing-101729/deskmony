@@ -20,6 +20,8 @@ import {
   type SessionEventEnvelope,
   type SessionHistoryResetPush,
   type SessionMessagePush,
+  type TerminalOutputPush,
+  type TerminalUpdatedPush,
   type UserDialogResolvedPush,
 } from "@deskmony/shared";
 import { applyConfigFilePatch } from "../config/config-file-writer.js";
@@ -27,6 +29,7 @@ import type { SessionManager } from "../session/session-manager.js";
 import type { AgentCatalog } from "../agents/agent-catalog.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
 import type { RecoveryService } from "../recovery/recovery-service.js";
+import type { TerminalManager } from "../terminal/terminal-manager.js";
 import {
   getEnabledClaudeModelIds,
   getProviderPrefsMap,
@@ -199,6 +202,12 @@ function resolveMcpBridgeConnectHost(bindHost: string): string {
  * (同一次翻案的一部分)。`config.setFile`(daemon/workspace/features/log 這類
  * 一般設定,不含 policy)使用者沒有要求開放,維持 local-only。
  * (2026-10-02 P2:原本同批的 `profile.create`/`profile.delete` 已隨 profile 一併移除。)
+ *
+ * 2026-10-20(右側面板,見 docs/DECISIONS.md §L.1):`terminal.*` **刻意不在這個清單裡**——終端是完全不經政策引擎的
+ * 執行路徑(性質與下面的 `settings.setProviderPrefs` 同類,甚至更直接),但使用者被攤開取捨之後明確選擇「遠端也可用」。
+ * 代價(主 token 外洩 = shell 外洩)靠稽核(`kind: "terminal-session"`,含是否遠端與來源位址)、終端環境變數濾掉內部憑證
+ * (`buildAgentChildEnv()`)、與「agent 永遠開不了終端」(`terminal.*` 不在任何 scoped token 的 `computeAllowedMethods()`
+ * 白名單)緩解。之後有人想「補上」這一項遺漏前,先讀 §L.1。
  */
 const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
   "config.setFile", // 一般設定(daemon/workspace/features/log,不含 policy)
@@ -500,6 +509,8 @@ export class WsGateway {
     private readonly effectiveConfig: EffectiveCoreConfig,
     /** `<DESKMONY_HOME>/config.json` 的絕對路徑,`config.setFile` 寫入用。 */
     private readonly configPath: string,
+    /** 2026-10-20(右側面板 P1):`terminal.*` 方法的資料來源,輸出/狀態變化經 `broadcast()` 轉播(見下方訂閱)。 */
+    private readonly terminalManager: TerminalManager,
     private readonly authToken?: string,
     authFailureLimit: number = DEFAULT_AUTH_FAILURE_LIMIT,
     authFailureCooldownMs: number = DEFAULT_AUTH_FAILURE_COOLDOWN_MS,
@@ -550,6 +561,14 @@ export class WsGateway {
     // 2026-10-16:某個 session 的歷史被整段改寫(`session.rewind` 刪掉了一部分訊息)——通知所有 client 重新載入那個 session。
     this.sessionManager.on("session-history-reset", (payload: SessionHistoryResetPush) => {
       this.broadcast({ kind: "event", channel: "session-history-reset", payload });
+    });
+    // 2026-10-20(右側面板 P1):面板終端的輸出與狀態變化。經 `broadcast()`——scoped bridge 連線(agent)收不到(P0),
+    // 使用者的 shell 畫面不會外流給 agent。
+    this.terminalManager.on("terminal-output", (payload: TerminalOutputPush) => {
+      this.broadcast({ kind: "event", channel: "terminal-output", payload });
+    });
+    this.terminalManager.on("terminal-updated", (payload: TerminalUpdatedPush) => {
+      this.broadcast({ kind: "event", channel: "terminal-updated", payload });
     });
   }
 
@@ -1052,7 +1071,7 @@ export class WsGateway {
     // session-manager.ts 的 `resolvePermission()`)。
 
     try {
-      const result = await this.dispatch(parsed, connState?.isLocal ?? false, callerSessionId);
+      const result = await this.dispatch(parsed, connState?.isLocal ?? false, callerSessionId, connState?.remoteAddress ?? "unknown");
       this.send(socket, { kind: "response", id: parsed.id, ok: true, result });
     } catch (err) {
       this.send(socket, toErrorResponse(parsed.id, err));
@@ -1079,8 +1098,14 @@ export class WsGateway {
    * @param callerSessionId 只有用 scoped MCP bridge token 認證的連線才有值(= token 綁定的 session id,
    *   見 `checkScopedGrantAccess()`);session 網路五個 `*ForAgent`/`*FromAgent` 方法靠它知道「是誰在呼叫」。
    *   一般連線(master token/免認證)是 `undefined`,呼叫那五個方法一律被拒(fail-closed)。
+   * @param remoteAddress 發出請求的那條連線的來源位址(2026-10-20:`terminal.create`/`terminal.close` 的稽核要記錄來源)。
    */
-  private async dispatch(request: ClientRequest, isLocal: boolean, callerSessionId?: string): Promise<unknown> {
+  private async dispatch(
+    request: ClientRequest,
+    isLocal: boolean,
+    callerSessionId?: string,
+    remoteAddress: string = "unknown",
+  ): Promise<unknown> {
     switch (request.method) {
       case "auth":
         // 已在 handleMessage() 頂端的認證閘門處理完畢,不會走到這裡
@@ -1310,6 +1335,27 @@ export class WsGateway {
         return { session: await this.recoveryService.takeover(request.params.sessionId) };
       case "recovery.abandon":
         await this.recoveryService.abandon(request.params.sessionId);
+        return { ok: true };
+      /**
+       * 2026-10-20(右側面板 P1):session 底下的獨立終端,見 packages/shared/src/gateway.ts 對應 case 與
+       * apps/core/src/terminal/terminal-manager.ts。**不在** `LOCAL_ONLY_METHODS`(使用者明確選擇遠端也可用,
+       * docs/DECISIONS.md §L.1),**不在**任何 scoped token 的白名單(`computeAllowedMethods()`,agent 開不了終端)。
+       * 開/關的稽核需要來源(`isLocal`、位址),所以傳 `{remote, remoteAddress}` 給 manager。
+       */
+      case "terminal.list":
+        return { terminals: await this.terminalManager.list(request.params.sessionId) };
+      case "terminal.create":
+        return { terminal: await this.terminalManager.create(request.params, { remote: !isLocal, remoteAddress }) };
+      case "terminal.attach":
+        return this.terminalManager.attach(request.params.terminalId);
+      case "terminal.input":
+        this.terminalManager.input(request.params.terminalId, request.params.data);
+        return { ok: true };
+      case "terminal.resize":
+        this.terminalManager.resize(request.params.terminalId, request.params.cols, request.params.rows);
+        return { ok: true };
+      case "terminal.close":
+        await this.terminalManager.close(request.params.terminalId, { remote: !isLocal, remoteAddress });
         return { ok: true };
       default: {
         const exhaustiveCheck: never = request;

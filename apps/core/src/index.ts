@@ -15,6 +15,7 @@ import { TurnLimiter } from "./cost/turn-limiter.js";
 import { CostGovernor } from "./cost/cost-governor.js";
 import { WaitingWatchdog } from "./cost/waiting-watchdog.js";
 import { RecoveryService } from "./recovery/recovery-service.js";
+import { TerminalManager } from "./terminal/terminal-manager.js";
 import { WsGateway } from "./gateway/ws-gateway.js";
 import { createStaticRequestHandler } from "./http/static-server.js";
 import { SettingsStore, migrateLegacyEnabledModelIds } from "./settings/settings-store.js";
@@ -323,6 +324,15 @@ async function main(): Promise<void> {
   // 說明。放在這裡是因為它需要 sessionManager/catalog 建構完成。
   const recoveryService = new RecoveryService(sessionManager, catalog);
 
+  // 2026-10-20(右側面板 P1):session 底下的獨立 shell 終端。session 刪除時一併關掉;core 關閉時(shutdown())也關掉;
+  // 不持久化。`TerminalManager` 在 gateway 之前建好,gateway 只訂閱它的輸出事件並轉播。
+  const terminalManager = new TerminalManager(sessionManager, auditLog);
+  sessionManager.on("session-deleted", (sessionId: string) => {
+    void terminalManager.closeSession(sessionId).catch((err: unknown) => {
+      console.error(`[core] 關閉 session ${sessionId} 底下的終端失敗(不影響 session 刪除):`, err);
+    });
+  });
+
   const gateway = new WsGateway(
     sessionManager,
     catalog,
@@ -332,6 +342,7 @@ async function main(): Promise<void> {
     notifier,
     effective,
     configPath,
+    terminalManager,
     authToken,
     config.daemon.authRateLimit.max,
     config.daemon.authRateLimit.cooldownMs,
@@ -447,7 +458,8 @@ async function main(): Promise<void> {
     turnLimiter.dispose();
     waitingWatchdog.dispose();
     await Promise.race([
-      sessionManager.shutdownAll(),
+      // 面板終端與 agent session 並行收尾,共用下面同一個逾時保護(殘留的 shell 靠下次啟動的孤兒回收)。
+      Promise.all([terminalManager.closeAll(), sessionManager.shutdownAll()]).then(() => undefined),
       new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           console.warn(

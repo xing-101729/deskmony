@@ -75,6 +75,24 @@ export interface PolicyRuleChangeDetail {
   ts: number;
 }
 
+/**
+ * 2026-10-20(右側面板 P1,見 docs/DECISIONS.md §L.1):使用者(含遠端 client)開啟/關閉了一個面板終端。獨立於
+ * `append(EnforcementEvent)`——理由與 `NotificationFailureDetail` 等相同(不是三斷路器的決策/升級/熔斷事件)。
+ *
+ * 終端是**完全不經政策引擎**的執行路徑(遠端也可用是使用者明確的選擇),稽核是這條路徑唯一的事後線索:
+ * `remote`/`remoteAddress` 取自發出 request 的那條連線(`isLocal` 與來源位址),回答「當時是從哪裡開的 shell」。
+ * shell 自己結束(使用者打 `exit`)與 session 刪除連帶關閉不記——那不是一次「使用者開/關」的操作。
+ */
+export interface TerminalSessionDetail {
+  action: "create" | "close";
+  terminalId: string;
+  sessionId: string;
+  shell: string;
+  remote: boolean;
+  remoteAddress: string;
+  ts: number;
+}
+
 export interface AuditLog {
   append(event: EnforcementEvent): void;
   /** S11 新增,見上方 `NotificationFailureDetail` 註解。 */
@@ -85,6 +103,8 @@ export interface AuditLog {
   appendTrueUnrestrictedToggle(detail: TrueUnrestrictedToggleDetail): void;
   /** 2026-08-25 新增,見上方 `PolicyRuleChangeDetail` 註解。 */
   appendPolicyRuleChange(detail: PolicyRuleChangeDetail): void;
+  /** 2026-10-20 新增,見上方 `TerminalSessionDetail` 註解。 */
+  appendTerminalSession(detail: TerminalSessionDetail): void;
 }
 
 /** 落地到 SQLite 的 `enforcement_audit` 表。 */
@@ -200,6 +220,27 @@ export class SqliteAuditLog implements AuditLog {
         .run();
     } catch (err) {
       console.error(`[enforcement] 「政策規則變更」稽核落地失敗(不影響已生效的規則變更): ${String(err)}`);
+    }
+  }
+
+  appendTerminalSession(detail: TerminalSessionDetail): void {
+    try {
+      void this.db
+        .insert(enforcementAuditTable)
+        .values({
+          id: randomUUID(),
+          ts: detail.ts,
+          kind: "terminal-session",
+          sessionId: detail.sessionId,
+          requestId: null,
+          toolName: null,
+          effect: null,
+          reason: `${detail.remote ? "遠端" : "本機"}${detail.action === "create" ? "開啟" : "關閉"}終端(${detail.shell},id=${detail.terminalId})`,
+          payload: JSON.stringify(detail),
+        })
+        .run();
+    } catch (err) {
+      console.error(`[enforcement] 「終端開關」稽核落地失敗(不影響終端本身): ${String(err)}`);
     }
   }
 }

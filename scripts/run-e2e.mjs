@@ -57,6 +57,11 @@ const SUITES = [
   // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
   // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。
   "e2e-session-network",
+  // 2026-10-20(右側面板 P1):session 底下的獨立 shell 終端(`terminal.*` gateway 方法)——真的開 shell:cwd、輸出/attach 的
+  // seq 一致、環境變數不含內部憑證、resize/input 上限、shell 自己結束、關閉/刪除 session 連帶關閉(pid 確實消失)、
+  // 每個 session 8 個的上限、scoped bridge token 不能呼叫也收不到輸出、稽核、core 重啟後不保留。一個 core 開關兩次,
+  // 帶 DESKMONY_AUTH_TOKEN 啟動;放在 e2e-session-network 之後——它疊在 scoped token 不收 push 的 P0 修補之上。
+  "e2e-side-panel-terminal",
   // 2026-10-06:session 手動改名 + AI 自動命名(臨時對話不污染主對話、不得用工具、各種退回截取首句、使用者改過不覆蓋、
   // title_source 遷移)——一個 core + fake ACP/OpenCode/PTY,一分多鐘跑完。
   "e2e-session-title",
