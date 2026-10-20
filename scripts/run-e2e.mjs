@@ -65,6 +65,10 @@ const SUITES = [
   // 每個 session 8 個的上限、scoped bridge token 不能呼叫也收不到輸出、稽核、core 重啟後不保留。一個 core 開關兩次,
   // 帶 DESKMONY_AUTH_TOKEN 啟動;放在 e2e-session-network 之後——它疊在 scoped token 不收 push 的 P0 修補之上。
   "e2e-side-panel-terminal",
+  // 2026-10-20(右側面板 P2):session 工作資料夾的唯讀查詢(`workspace.listDir/readFile/gitStatus/gitDiff`)——真的 git repo:
+  // 各種狀態與 diff、沒有 commit 的 repo、不是 repo、檔案預覽的各種上限、**路徑逃逸**(每種寫法對每個方法各測一次,含 junction)、
+  // scoped token 不能呼叫、repo 設定埋的指令(fsmonitor/filter/textconv/external diff)不會被執行。一個 core,約半分鐘。
+  "e2e-side-panel-workspace",
   // 2026-10-06:session 手動改名 + AI 自動命名(臨時對話不污染主對話、不得用工具、各種退回截取首句、使用者改過不覆蓋、
   // title_source 遷移)——一個 core + fake ACP/OpenCode/PTY,一分多鐘跑完。
   "e2e-session-title",

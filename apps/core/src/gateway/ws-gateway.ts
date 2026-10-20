@@ -30,6 +30,7 @@ import type { AgentCatalog } from "../agents/agent-catalog.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
 import type { RecoveryService } from "../recovery/recovery-service.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
+import type { WorkspaceInspector } from "../workspace/workspace-inspector.js";
 import {
   getEnabledClaudeModelIds,
   getProviderPrefsMap,
@@ -208,6 +209,11 @@ function resolveMcpBridgeConnectHost(bindHost: string): string {
  * 代價(主 token 外洩 = shell 外洩)靠稽核(`kind: "terminal-session"`,含是否遠端與來源位址)、終端環境變數濾掉內部憑證
  * (`buildAgentChildEnv()`)、與「agent 永遠開不了終端」(`terminal.*` 不在任何 scoped token 的 `computeAllowedMethods()`
  * 白名單)緩解。之後有人想「補上」這一項遺漏前,先讀 §L.1。
+ *
+ * 同日(右側面板 P2):`workspace.listDir`/`readFile`/`gitStatus`/`gitDiff` 同理**刻意不在這個清單裡**——遠端已能開 shell,
+ * 唯讀查看工作資料夾內的檔案是更弱的能力(§L.1)。它們靠路徑安全(realpath + 前綴比對,擋 symlink/junction 逃逸,
+ * apps/core/src/workspace/workspace-paths.ts)與 git 執行的防護(不執行 repo 設定裡的任意指令)限制範圍,
+ * 同樣不在任何 scoped token 的 `computeAllowedMethods()` 白名單裡。
  */
 const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
   "config.setFile", // 一般設定(daemon/workspace/features/log,不含 policy)
@@ -511,6 +517,8 @@ export class WsGateway {
     private readonly configPath: string,
     /** 2026-10-20(右側面板 P1):`terminal.*` 方法的資料來源,輸出/狀態變化經 `broadcast()` 轉播(見下方訂閱)。 */
     private readonly terminalManager: TerminalManager,
+    /** 2026-10-20(右側面板 P2):`workspace.*` 四個唯讀查詢的資料來源。 */
+    private readonly workspaceInspector: WorkspaceInspector,
     private readonly authToken?: string,
     authFailureLimit: number = DEFAULT_AUTH_FAILURE_LIMIT,
     authFailureCooldownMs: number = DEFAULT_AUTH_FAILURE_COOLDOWN_MS,
@@ -1357,6 +1365,19 @@ export class WsGateway {
       case "terminal.close":
         await this.terminalManager.close(request.params.terminalId, { remote: !isLocal, remoteAddress });
         return { ok: true };
+      /**
+       * 2026-10-20(右側面板 P2):session 工作資料夾的唯讀查詢,見 packages/shared/src/gateway.ts 對應 case 與
+       * apps/core/src/workspace/。**不在** `LOCAL_ONLY_METHODS`、**不在**任何 scoped token 的白名單(理由見上方
+       * `LOCAL_ONLY_METHODS` 的註解)。
+       */
+      case "workspace.listDir":
+        return await this.workspaceInspector.listDir(request.params.sessionId, request.params.path);
+      case "workspace.readFile":
+        return await this.workspaceInspector.readFile(request.params.sessionId, request.params.path);
+      case "workspace.gitStatus":
+        return await this.workspaceInspector.gitStatus(request.params.sessionId);
+      case "workspace.gitDiff":
+        return await this.workspaceInspector.gitDiff(request.params.sessionId, request.params.path, request.params.oldPath);
       default: {
         const exhaustiveCheck: never = request;
         throw new Error(`未知的方法: ${JSON.stringify(exhaustiveCheck)}`);

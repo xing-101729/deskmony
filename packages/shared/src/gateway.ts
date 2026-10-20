@@ -556,6 +556,31 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     }),
   }),
   z.object({ ...baseRequest, method: z.literal("terminal.close"), params: z.object({ terminalId: z.string() }) }),
+  // ---- 2026-10-20(右側面板 P2):唯讀 workspace 查詢(見 packages/shared/src/workspace.ts、
+  // docs/LAYER-4-detail-design/side-panel_detail.md §P2、docs/DECISIONS.md §L.1)------------------
+  /**
+   * 四個方法**都不列入 `LOCAL_ONLY_METHODS`**(理由同終端:遠端已能開 shell,唯讀查看檔案是更弱的能力),**也不在任何
+   * scoped bridge token 的方法白名單裡**(agent 不需要、也不該透過 gateway 看這些——它本來就有自己的檔案工具與政策)。
+   * 每個方法的 `path` 都是相對 session 工作資料夾(root)、以 `/` 分隔的字串(空字串 = root);絕對路徑、`..`、
+   * 以及 realpath 之後跑出 root 的(symlink/junction)一律拒絕(`workspace.pathOutsideRoot`)。
+   * `workspace.gitDiff` 的 `oldPath` 是 rename/copy 的舊路徑(選填,讓 diff 顯示改名後真正的內容差異),同樣要過路徑檢查。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("workspace.listDir"),
+    params: z.object({ sessionId: z.string(), path: z.string().max(4096) }),
+  }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("workspace.readFile"),
+    params: z.object({ sessionId: z.string(), path: z.string().max(4096) }),
+  }),
+  z.object({ ...baseRequest, method: z.literal("workspace.gitStatus"), params: z.object({ sessionId: z.string() }) }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("workspace.gitDiff"),
+    params: z.object({ sessionId: z.string(), path: z.string().max(4096), oldPath: z.string().max(4096).optional() }),
+  }),
 ]);
 export type ClientRequest = z.infer<typeof ClientRequestSchema>;
 export type ClientRequestMethod = ClientRequest["method"];

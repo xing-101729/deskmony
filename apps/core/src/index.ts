@@ -16,6 +16,7 @@ import { CostGovernor } from "./cost/cost-governor.js";
 import { WaitingWatchdog } from "./cost/waiting-watchdog.js";
 import { RecoveryService } from "./recovery/recovery-service.js";
 import { TerminalManager } from "./terminal/terminal-manager.js";
+import { WorkspaceInspector } from "./workspace/workspace-inspector.js";
 import { WsGateway } from "./gateway/ws-gateway.js";
 import { createStaticRequestHandler } from "./http/static-server.js";
 import { SettingsStore, migrateLegacyEnabledModelIds } from "./settings/settings-store.js";
@@ -333,6 +334,9 @@ async function main(): Promise<void> {
     });
   });
 
+  // 2026-10-20(右側面板 P2):session 工作資料夾的唯讀查詢(列資料夾/讀檔/git status/diff),路徑安全見 workspace/workspace-paths.ts。
+  const workspaceInspector = new WorkspaceInspector(sessionManager);
+
   const gateway = new WsGateway(
     sessionManager,
     catalog,
@@ -343,6 +347,7 @@ async function main(): Promise<void> {
     effective,
     configPath,
     terminalManager,
+    workspaceInspector,
     authToken,
     config.daemon.authRateLimit.max,
     config.daemon.authRateLimit.cooldownMs,
