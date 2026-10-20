@@ -10,7 +10,8 @@
   "tabs": {
     "terminal": "Terminal",
     "changes": "Cambios",
-    "files": "Archivos"
+    "files": "Archivos",
+    "browser": "Navegador"
   },
   "terminal": {
     "tabsLabel": "Terminales",
@@ -57,5 +58,21 @@
     "tooLarge": "Demasiado grande para la vista previa ({{size}})",
     "previewTruncated": "Se muestran solo los primeros {{shown}} de {{total}}",
     "emptyFile": "Archivo vacío"
+  },
+  "browser": {
+    "back": "Atrás",
+    "forward": "Adelante",
+    "reload": "Recargar",
+    "stop": "Detener carga",
+    "addressLabel": "Dirección",
+    "addressPlaceholder": "Escribe una URL, p. ej. localhost:3000",
+    "openExternal": "Abrir en el navegador predeterminado",
+    "devTools": "Abrir herramientas de desarrollo",
+    "blankTitle": "Página en blanco",
+    "unavailable": "El navegador solo está disponible en la aplicación de escritorio",
+    "invalidAddress": "Eso no parece una dirección web. Escribe una URL como localhost:3000 o example.com.",
+    "invalidScheme": "Aquí solo se pueden abrir direcciones http:// y https://.",
+    "crashed": "La página se bloqueó. Recarga para intentarlo de nuevo.",
+    "loadFailed": "No se pudo cargar {{url}} ({{description}})"
   }
 }

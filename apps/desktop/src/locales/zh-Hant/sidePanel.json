@@ -10,7 +10,8 @@
   "tabs": {
     "terminal": "終端",
     "changes": "變更",
-    "files": "檔案"
+    "files": "檔案",
+    "browser": "瀏覽器"
   },
   "terminal": {
     "tabsLabel": "終端清單",
@@ -57,5 +58,21 @@
     "tooLarge": "檔案太大,無法預覽({{size}})",
     "previewTruncated": "只顯示前 {{shown}}(共 {{total}})",
     "emptyFile": "空檔案"
+  },
+  "browser": {
+    "back": "上一頁",
+    "forward": "下一頁",
+    "reload": "重新整理",
+    "stop": "停止載入",
+    "addressLabel": "網址",
+    "addressPlaceholder": "輸入網址,例如 localhost:3000",
+    "openExternal": "用預設瀏覽器開啟",
+    "devTools": "開啟開發者工具",
+    "blankTitle": "空白頁",
+    "unavailable": "瀏覽器只有桌面版 app 才能使用",
+    "invalidAddress": "這看起來不是網址。請輸入像 localhost:3000 或 example.com 的網址。",
+    "invalidScheme": "這裡只能開啟 http:// 與 https:// 開頭的網址。",
+    "crashed": "頁面當掉了,請重新整理再試一次。",
+    "loadFailed": "無法載入 {{url}}({{description}})"
   }
 }

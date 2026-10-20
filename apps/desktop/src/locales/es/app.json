@@ -46,6 +46,11 @@
       "subtitle": "Explorar los archivos de la carpeta de trabajo de esta conversación",
       "keywords": "files tree browse explorer archivos explorar vista previa panel lateral"
     },
+    "openBrowser": {
+      "title": "Abrir Navegador",
+      "subtitle": "Navegar por la web junto a esta conversación",
+      "keywords": "browser web preview localhost url navegador vista previa panel lateral"
+    },
     "toggleTheme": {
       "toLight": "Cambiar a tema claro",
       "toDark": "Cambiar a tema oscuro",

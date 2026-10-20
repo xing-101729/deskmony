@@ -10,7 +10,8 @@
   "tabs": {
     "terminal": "Terminal",
     "changes": "Changes",
-    "files": "Files"
+    "files": "Files",
+    "browser": "Browser"
   },
   "terminal": {
     "tabsLabel": "Terminals",
@@ -57,5 +58,21 @@
     "tooLarge": "Too large to preview ({{size}})",
     "previewTruncated": "Showing only the first {{shown}} of {{total}}",
     "emptyFile": "Empty file"
+  },
+  "browser": {
+    "back": "Back",
+    "forward": "Forward",
+    "reload": "Reload",
+    "stop": "Stop loading",
+    "addressLabel": "Address",
+    "addressPlaceholder": "Enter a URL, e.g. localhost:3000",
+    "openExternal": "Open in your default browser",
+    "devTools": "Open developer tools",
+    "blankTitle": "Blank page",
+    "unavailable": "The browser is only available in the desktop app",
+    "invalidAddress": "That doesn't look like a web address. Enter a URL such as localhost:3000 or example.com.",
+    "invalidScheme": "Only http:// and https:// addresses can be opened here.",
+    "crashed": "The page crashed. Reload to try again.",
+    "loadFailed": "Couldn't load {{url}} ({{description}})"
   }
 }

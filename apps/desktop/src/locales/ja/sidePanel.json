@@ -10,7 +10,8 @@
   "tabs": {
     "terminal": "ターミナル",
     "changes": "変更",
-    "files": "ファイル"
+    "files": "ファイル",
+    "browser": "ブラウザー"
   },
   "terminal": {
     "tabsLabel": "ターミナル一覧",
@@ -57,5 +58,21 @@
     "tooLarge": "大きすぎてプレビューできません({{size}})",
     "previewTruncated": "先頭の {{shown}} のみ表示(全体 {{total}})",
     "emptyFile": "空のファイル"
+  },
+  "browser": {
+    "back": "戻る",
+    "forward": "進む",
+    "reload": "再読み込み",
+    "stop": "読み込みを停止",
+    "addressLabel": "アドレス",
+    "addressPlaceholder": "URL を入力(例: localhost:3000)",
+    "openExternal": "既定のブラウザーで開く",
+    "devTools": "開発者ツールを開く",
+    "blankTitle": "空白のページ",
+    "unavailable": "ブラウザーはデスクトップアプリでのみ使えます",
+    "invalidAddress": "Web アドレスとして認識できません。localhost:3000 や example.com のような URL を入力してください。",
+    "invalidScheme": "ここで開けるのは http:// と https:// のアドレスだけです。",
+    "crashed": "ページがクラッシュしました。再読み込みしてください。",
+    "loadFailed": "{{url}} を読み込めませんでした({{description}})"
   }
 }

@@ -46,6 +46,11 @@
       "subtitle": "この会話の作業フォルダーのファイルを参照",
       "keywords": "files tree browse explorer ファイル 参照 プレビュー サイドパネル"
     },
+    "openBrowser": {
+      "title": "ブラウザーを開く",
+      "subtitle": "この会話の横で Web を表示",
+      "keywords": "browser web preview localhost url ブラウザー プレビュー サイドパネル"
+    },
     "toggleTheme": {
       "toLight": "ライトテーマに切り替え",
       "toDark": "ダークテーマに切り替え",

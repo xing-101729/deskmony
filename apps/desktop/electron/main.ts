@@ -506,7 +506,11 @@ function installGuestGuards(): void {
       const action = matchAppShortcut(input, process.platform === "darwin");
       if (!action) return;
       event.preventDefault();
-      if (!input.isAutoRepeat) mainWindow?.webContents.send("deskmony:app-shortcut", action);
+      if (input.isAutoRepeat || !mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send("deskmony:app-shortcut", action);
+      // 鍵盤焦點要一併交還給 app 的 renderer:Ctrl+J 收起面板後 webview 被停到畫面外,Ctrl+K 要讓命令面板的輸入框拿到打字、
+      // Ctrl+` 要讓終端拿到焦點——焦點若還留在 guest 行程,這些動作做完後按鍵仍進不了 app。
+      mainWindow.webContents.focus();
     });
   });
 }

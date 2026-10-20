@@ -1,7 +1,7 @@
 import { useSessionStore } from "../../stores/session-store.js";
 import { usePanelStore } from "../../stores/panel-store.js";
 import { useTerminalStore } from "../../stores/terminal-store.js";
-import { CHANGES_TAB_ID, FILES_TAB_ID, TERMINAL_TAB_ID } from "./panel-tabs.js";
+import { BROWSER_TAB_ID, CHANGES_TAB_ID, FILES_TAB_ID, TERMINAL_TAB_ID } from "./panel-tabs.js";
 
 /**
  * 面板的幾個動作(2026-10-20):快捷鍵(`mod+j`、`ctrl+\``)、命令面板與標頭切換鈕共用同一份實作——
@@ -38,6 +38,11 @@ export function openChangesPanel(): void {
 
 export function openFilesPanel(): void {
   usePanelStore.getState().openTab(FILES_TAB_ID);
+}
+
+/** 命令面板的「開瀏覽器」:開面板並切到 Browser 分頁(只有 Electron 殼有這個分頁,入口由呼叫端依 `isBrowserSupported()` 決定要不要出現)。 */
+export function openBrowserPanel(): void {
+  usePanelStore.getState().openTab(BROWSER_TAB_ID);
 }
 
 /** 命令面板的「新終端」:開面板、切到 Terminal 分頁、在目前 session 再開一個終端。 */

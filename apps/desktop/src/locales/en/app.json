@@ -46,6 +46,11 @@
       "subtitle": "Browse files in this conversation's working folder",
       "keywords": "files tree browse explorer preview side panel"
     },
+    "openBrowser": {
+      "title": "Open Browser",
+      "subtitle": "Browse the web next to this conversation",
+      "keywords": "browser web preview localhost url side panel"
+    },
     "toggleTheme": {
       "toLight": "Switch to light theme",
       "toDark": "Switch to dark theme",

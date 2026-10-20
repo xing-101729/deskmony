@@ -28,6 +28,7 @@ export type IconName =
   | "folder"
   | "forward"
   | "gauge"
+  | "globe"
   | "image"
   | "logout"
   | "menu"
@@ -136,6 +137,14 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M4 17a9 9 0 1 1 16 0" />
       <path d="m12 13 4-3.5" />
       <circle cx="12" cy="14" r="1.4" />
+    </>
+  ),
+  // 2026-10-20(右側面板 Browser 分頁):地球。
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17" />
+      <path d="M12 3.5c2.3 2.4 3.5 5.3 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.3-3.5-8.5s1.2-6.1 3.5-8.5Z" />
     </>
   ),
   image: (

@@ -6,7 +6,16 @@ import { usePanelStore } from "./stores/panel-store.js";
 import { SessionList } from "./views/SessionList.js";
 import { SessionView } from "./views/SessionView.js";
 import { SidePanel } from "./views/panel/SidePanel.js";
-import { openChangesPanel, openFilesPanel, openNewTerminal, openTerminalPanel, togglePanel } from "./views/panel/panel-actions.js";
+import { BrowserHost } from "./views/panel/BrowserHost.js";
+import { isBrowserSupported } from "./stores/browser-store.js";
+import {
+  openBrowserPanel,
+  openChangesPanel,
+  openFilesPanel,
+  openNewTerminal,
+  openTerminalPanel,
+  togglePanel,
+} from "./views/panel/panel-actions.js";
 import { PermissionModal } from "./views/PermissionModal.js";
 import { ConnectScreen } from "./views/ConnectScreen.js";
 import { SettingsDialog } from "./views/SettingsDialog.js";
@@ -218,6 +227,16 @@ export default function App(): JSX.Element {
     ),
   );
 
+  // 2026-10-20(Browser 分頁):焦點在 webview 裡時按鍵進的是 guest 行程,上面的 `useHotkeys` 收不到。Electron main 的
+  // `before-input-event` 只攔 Ctrl/Cmd+J、Ctrl+`、Ctrl/Cmd+K 這三個(其餘按鍵一律給網頁),攔下後經 IPC 轉到這裡執行同樣的動作。
+  useEffect(() => {
+    return window.deskmony?.onAppShortcut?.((action) => {
+      if (action === "toggle-panel") togglePanel();
+      else if (action === "open-terminal") openTerminalPanel();
+      else if (action === "open-palette") setPaletteOpen(true);
+    });
+  }, []);
+
   /** 命令面板的指令清單——每一項都對應畫面上原本就存在的入口,不新增能力。
    *  i18n 專案新增:`t` 進入依賴陣列(比照 PermissionModal.tsx 的
    *  buildRememberCandidates() 慣例)——語言切換時 useTranslation() 回傳的 `t`
@@ -334,6 +353,18 @@ export default function App(): JSX.Element {
           run: () => openFilesPanel(),
         },
       );
+      // 瀏覽器分頁只有 Electron 殼有(<webview>);純瀏覽器 client 不出現這個指令。
+      if (isBrowserSupported()) {
+        list.push({
+          id: "action:open-browser",
+          group: t("app:commands.groupActions"),
+          title: t("app:commands.openBrowser.title"),
+          subtitle: t("app:commands.openBrowser.subtitle"),
+          icon: "globe",
+          keywords: t("app:commands.openBrowser.keywords"),
+          run: () => openBrowserPanel(),
+        });
+      }
     }
 
     if (interruptedSessions.length > 0) {
@@ -492,6 +523,15 @@ export default function App(): JSX.Element {
           </ErrorBoundary>
         </div>
       </div>
+
+      {/*
+        Browser 分頁的 webview 宿主(portal 到 document.body,z-45:在面板之上、所有對話框之下)。放在 App 這一層而不是面板裡,
+        因為 webview 的 DOM 節點不能搬家也不能因為面板關閉/切換分頁而卸載(見 stores/browser-store.ts 開頭)。不帶 resetKey:
+        切換 session 不該重建 webview。
+      */}
+      <ErrorBoundary label="瀏覽器">
+        <BrowserHost />
+      </ErrorBoundary>
 
       {/* 對話框各自也包一層:一個對話框壞掉不該把底下的主畫面一起帶走。 */}
       <ErrorBoundary label="權限請求">

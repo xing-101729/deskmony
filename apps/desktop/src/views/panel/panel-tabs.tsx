@@ -4,6 +4,8 @@ import type { IconName } from "../../ui/icons.js";
 import { TerminalTab } from "./TerminalTab.js";
 import { ChangesTab } from "./ChangesTab.js";
 import { FilesTab } from "./FilesTab.js";
+import { BrowserTab } from "./BrowserTab.js";
+import { isBrowserSupported } from "../../stores/browser-store.js";
 
 /**
  * 右側面板的分頁註冊陣列(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P1.3)。
@@ -34,6 +36,7 @@ export interface PanelTabDef {
 export const TERMINAL_TAB_ID = "terminal";
 export const CHANGES_TAB_ID = "changes";
 export const FILES_TAB_ID = "files";
+export const BROWSER_TAB_ID = "browser";
 
 export const PANEL_TABS: PanelTabDef[] = [
   {
@@ -56,5 +59,13 @@ export const PANEL_TABS: PanelTabDef[] = [
     titleKey: "sidePanel:tabs.files",
     isAvailable: () => true,
     Component: FilesTab,
+  },
+  {
+    id: BROWSER_TAB_ID,
+    icon: "globe",
+    titleKey: "sidePanel:tabs.browser",
+    // 只有 Electron 殼有 <webview>;純瀏覽器 client(沒有 window.deskmony)不顯示這個分頁。
+    isAvailable: isBrowserSupported,
+    Component: BrowserTab,
   },
 ];

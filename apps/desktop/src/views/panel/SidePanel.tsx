@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next";
 import { useSessionStore } from "../../stores/session-store.js";
 import { usePanelStore } from "../../stores/panel-store.js";
 import { useTerminalStore } from "../../stores/terminal-store.js";
+import { useBrowserStore } from "../../stores/browser-store.js";
 import { IconButton } from "../../ui/Button.js";
 import { Icon } from "../../ui/icons.js";
 import { useFontScale } from "../../ui/font-scale.js";
@@ -114,6 +115,8 @@ export function SidePanel(): JSX.Element | null {
   const handlePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>): void => {
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = { pointerId: event.pointerId };
+    // 拖拉期間 Browser 分頁的 webview 不吃滑鼠事件:游標一移到 guest 上,pointer capture 跨行程抓不住,拖拉會在半途中斷。
+    useBrowserStore.getState().setPointerLock(true);
     event.preventDefault();
   }, []);
   const handlePointerMove = useCallback(
@@ -128,6 +131,7 @@ export function SidePanel(): JSX.Element | null {
   const handlePointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>): void => {
     if (dragRef.current?.pointerId === event.pointerId) {
       dragRef.current = null;
+      useBrowserStore.getState().setPointerLock(false);
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
   }, []);
@@ -141,6 +145,13 @@ export function SidePanel(): JSX.Element | null {
     },
     [setWidth, layout.maxWidth, layout.width],
   );
+
+  // 拖拉中途把手消失(面板被快捷鍵關掉、版面切成覆蓋層、整個元件卸載)時不會再收到 pointerup:一定要放開鎖,否則 webview 之後永遠不吃滑鼠。
+  const handleAvailable = mounted && layout.mode !== "overlay";
+  useEffect(() => {
+    if (!handleAvailable) useBrowserStore.getState().setPointerLock(false);
+  }, [handleAvailable]);
+  useEffect(() => () => useBrowserStore.getState().setPointerLock(false), []);
 
   if (!open || !activeTab) return null;
 
