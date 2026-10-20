@@ -38,6 +38,23 @@ export function isAllowedWebviewUrl(rawUrl: unknown): boolean {
   return parsed.href === "about:blank";
 }
 
+/**
+ * 導覽事件(`will-navigate`/`will-redirect`/`will-frame-navigate`)用:主框架嚴格照 `isAllowedWebviewUrl()`;
+ * **子框架**另外放行 `about:srcdoc`、`blob:`、`data:`——這三種在 iframe 裡是 opaque origin、讀不到任何本機資源,而一般網頁(含本機開發伺服器的
+ * 預覽頁、線上編輯器)很常用 `srcdoc`/`blob:`/`data:` 的 iframe,整個擋掉會讓這些頁面壞掉;真正危險的 `file:`/`chrome:`/`devtools:`/`javascript:`
+ * 在任何框架都不放行。
+ */
+export function isAllowedNavigationUrl(rawUrl: unknown, isMainFrame: boolean): boolean {
+  if (isAllowedWebviewUrl(rawUrl)) return true;
+  if (isMainFrame || typeof rawUrl !== "string" || rawUrl.length > BROWSER_URL_MAX_LENGTH) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.protocol === "blob:" || parsed.protocol === "data:" || parsed.href === "about:srcdoc";
+  } catch {
+    return false;
+  }
+}
+
 /** 能不能交給外部瀏覽器(`shell.openExternal`):只有 http(s)——`about:blank` 沒有意義、其餘更不行。 */
 export function isExternallyOpenableUrl(rawUrl: unknown): boolean {
   if (!isAllowedWebviewUrl(rawUrl)) return false;

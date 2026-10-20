@@ -203,6 +203,7 @@ console.log("\n== browser-rules:Browser 分頁的網址/scheme/partition/組合�
   const {
     normalizeAddressInput,
     isAllowedWebviewUrl,
+    isAllowedNavigationUrl,
     isExternallyOpenableUrl,
     isAllowedBrowserPartition,
     browserPartitionForSession,
@@ -306,6 +307,20 @@ console.log("\n== browser-rules:Browser 分頁的網址/scheme/partition/組合�
     allowedWrong.length === 0 && deniedWrong.length === 0,
     `isAllowedWebviewUrl:${allowed.length} 個允許(含大小寫、前後空白、tab/換行變體)與 ${denied.length} 個拒絕(file/chrome/devtools/javascript/data/blob/view-source/about 其他路徑/ftp/ws/空/超長/非字串,含大小寫與控制字元變體)全部符合`,
     `該放行卻被拒:${JSON.stringify(allowedWrong)};該拒絕卻放行:${JSON.stringify(deniedWrong)}`,
+  );
+  check(
+    isAllowedNavigationUrl("https://example.com/x", true) === true &&
+      isAllowedNavigationUrl("about:blank", true) === true &&
+      isAllowedNavigationUrl("data:text/html,x", true) === false &&
+      isAllowedNavigationUrl("blob:http://example.com/abc", true) === false &&
+      isAllowedNavigationUrl("about:srcdoc", true) === false &&
+      isAllowedNavigationUrl("data:text/html,x", false) === true &&
+      isAllowedNavigationUrl("blob:http://example.com/abc", false) === true &&
+      isAllowedNavigationUrl("about:srcdoc", false) === true &&
+      ["file:///etc/passwd", "chrome://gpu", "devtools://devtools/x", "javascript:alert(1)", " JAVASCRIPT:alert(1)", "view-source:http://x", "ftp://x", ""].every(
+        (u) => isAllowedNavigationUrl(u, true) === false && isAllowedNavigationUrl(u, false) === false,
+      ),
+    "isAllowedNavigationUrl:主框架嚴格(只有 http(s)/about:blank);子框架另外放行 srcdoc/blob/data;file/chrome/devtools/javascript/view-source/ftp 在任何框架都不放行",
   );
   check(
     isExternallyOpenableUrl("https://example.com") === true &&
