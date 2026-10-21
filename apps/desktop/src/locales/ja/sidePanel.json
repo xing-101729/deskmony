@@ -73,6 +73,27 @@
     "invalidAddress": "Web アドレスとして認識できません。localhost:3000 や example.com のような URL を入力してください。",
     "invalidScheme": "ここで開けるのは http:// と https:// のアドレスだけです。",
     "crashed": "ページがクラッシュしました。再読み込みしてください。",
-    "loadFailed": "{{url}} を読み込めませんでした({{description}})"
+    "loadFailed": "{{url}} を読み込めませんでした({{description}})",
+    "agent": {
+      "working": "agent がブラウザーを操作中 · {{action}}",
+      "recent": "agent が先ほどブラウザーを操作しました · {{action}}",
+      "actions": {
+        "navigate": "{{url}} を開く",
+        "back": "前のページへ戻る",
+        "forward": "次のページへ進む",
+        "reload": "ページを再読み込み",
+        "screenshot": "スクリーンショットを撮る",
+        "readText": "ページのテキストを読む",
+        "readInteractive": "クリックできる要素を一覧する",
+        "clickRef": "要素 {{ref}} をクリック",
+        "clickPoint": "({{x}}, {{y}}) をクリック",
+        "type": "{{count}} 文字を入力",
+        "typeSubmit": "{{count}} 文字を入力して Enter を押す",
+        "pressKey": "{{key}} を押す",
+        "scrollUp": "上にスクロール",
+        "scrollDown": "下にスクロール",
+        "unknown": "{{op}} を実行"
+      }
+    }
   }
 }

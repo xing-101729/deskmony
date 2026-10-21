@@ -73,6 +73,27 @@
     "invalidAddress": "That doesn't look like a web address. Enter a URL such as localhost:3000 or example.com.",
     "invalidScheme": "Only http:// and https:// addresses can be opened here.",
     "crashed": "The page crashed. Reload to try again.",
-    "loadFailed": "Couldn't load {{url}} ({{description}})"
+    "loadFailed": "Couldn't load {{url}} ({{description}})",
+    "agent": {
+      "working": "agent is operating the browser · {{action}}",
+      "recent": "agent just used the browser · {{action}}",
+      "actions": {
+        "navigate": "Go to {{url}}",
+        "back": "Go back",
+        "forward": "Go forward",
+        "reload": "Reload the page",
+        "screenshot": "Take a screenshot",
+        "readText": "Read the page text",
+        "readInteractive": "List the clickable elements",
+        "clickRef": "Click element {{ref}}",
+        "clickPoint": "Click at ({{x}}, {{y}})",
+        "type": "Type {{count}} characters",
+        "typeSubmit": "Type {{count}} characters and press Enter",
+        "pressKey": "Press {{key}}",
+        "scrollUp": "Scroll up",
+        "scrollDown": "Scroll down",
+        "unknown": "Run {{op}}"
+      }
+    }
   }
 }

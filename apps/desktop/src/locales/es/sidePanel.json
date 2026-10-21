@@ -73,6 +73,27 @@
     "invalidAddress": "Eso no parece una dirección web. Escribe una URL como localhost:3000 o example.com.",
     "invalidScheme": "Aquí solo se pueden abrir direcciones http:// y https://.",
     "crashed": "La página se bloqueó. Recarga para intentarlo de nuevo.",
-    "loadFailed": "No se pudo cargar {{url}} ({{description}})"
+    "loadFailed": "No se pudo cargar {{url}} ({{description}})",
+    "agent": {
+      "working": "El agent está usando el navegador · {{action}}",
+      "recent": "El agent acaba de usar el navegador · {{action}}",
+      "actions": {
+        "navigate": "Ir a {{url}}",
+        "back": "Volver atrás",
+        "forward": "Avanzar",
+        "reload": "Recargar la página",
+        "screenshot": "Hacer una captura de pantalla",
+        "readText": "Leer el texto de la página",
+        "readInteractive": "Listar los elementos en los que se puede hacer clic",
+        "clickRef": "Hacer clic en el elemento {{ref}}",
+        "clickPoint": "Hacer clic en ({{x}}, {{y}})",
+        "type": "Escribir {{count}} caracteres",
+        "typeSubmit": "Escribir {{count}} caracteres y pulsar Enter",
+        "pressKey": "Pulsar {{key}}",
+        "scrollUp": "Desplazar hacia arriba",
+        "scrollDown": "Desplazar hacia abajo",
+        "unknown": "Ejecutar {{op}}"
+      }
+    }
   }
 }

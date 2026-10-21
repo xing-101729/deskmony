@@ -17,7 +17,8 @@ import { IconButton } from "../../ui/Button.js";
 import { Icon } from "../../ui/icons.js";
 import { useFontScale } from "../../ui/font-scale.js";
 import { PANEL_MIN_WIDTH, PANEL_SM_BREAKPOINT_PX, computePanelLayout } from "../../lib/panel-layout.js";
-import { PANEL_TABS } from "./panel-tabs.js";
+import { BROWSER_TAB_ID, PANEL_TABS } from "./panel-tabs.js";
+import { useAgentActivity } from "./agent-activity.js";
 
 /** 目前視窗/版面的量測值(餵給 `computePanelLayout()`)。 */
 interface Measured {
@@ -66,6 +67,8 @@ export function SidePanel(): JSX.Element | null {
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const forgetTerminalSession = useTerminalStore((s) => s.forgetSession);
+  // agent 正在操作目前 session 的瀏覽器:Browser 分頁標籤上顯示一個小圓點(即使使用者正停在別的分頁也看得到)。
+  const browserAgent = useAgentActivity(currentSessionId);
 
   const session = sessions.find((s) => s.id === currentSessionId);
   const tabs = useMemo(() => PANEL_TABS.filter((tab) => tab.isAvailable()), []);
@@ -205,6 +208,14 @@ export function SidePanel(): JSX.Element | null {
               >
                 <Icon name={tab.icon} size={13} />
                 {t(tab.titleKey)}
+                {tab.id === BROWSER_TAB_ID && browserAgent && (
+                  <span
+                    role="img"
+                    aria-label={browserAgent.text}
+                    title={browserAgent.text}
+                    className={`h-1.5 w-1.5 flex-shrink-0 rounded-full bg-accent ${browserAgent.working ? "animate-pulse" : "opacity-60"}`}
+                  />
+                )}
               </button>
             );
           })}

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { browserPartitionForSession, isExternallyOpenableUrl } from "../../electron/browser-rules.js";
+import { ACTIVITY_LINGER_MS, type ActionDescriptor } from "../lib/browser-activity.js";
 
 /**
  * 右側面板 Browser 分頁的狀態與動作(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P3.2)。
@@ -71,10 +72,23 @@ const BLANK_PAGE: BrowserPageState = {
   crashed: false,
 };
 
+/**
+ * agent 正在(或剛剛)操作某個 session 的瀏覽器(2026-10-21,P4b)。**純 ephemeral**:有這筆紀錄 = 指示要顯示;
+ * 最後一個指令結束後再留 `ACTIVITY_LINGER_MS` 就清掉(讓使用者來得及看到「剛剛發生了什麼」)。
+ */
+export interface AgentActivity {
+  /** 還在執行的指令數(core 對同一個 session 一次只送一個,計數是縱深防禦)。大於 0 = 「正在操作」,等於 0 = 剛剛操作過。 */
+  active: number;
+  /** 最近一個動作(i18n key + 參數,不含輸入的文字內容)。 */
+  action: ActionDescriptor;
+}
+
 interface BrowserStore {
   /** 已經建立 webview 的 session(依建立順序)——**只增不減**,除非 session 被刪除(`discard`)。 */
   created: string[];
   pages: Record<string, BrowserPageState>;
+  /** agent 操作中的指示,見 `AgentActivity`。 */
+  agentActivity: Record<string, AgentActivity>;
   /** Browser 分頁目前顯示的佔位 slot(面板關著/不在 Browser 分頁時是 `undefined`)。 */
   slot: { sessionId: string; rect: SlotRect } | undefined;
   /** 拖拉面板寬度時為真:webview 暫時不吃滑鼠事件(否則游標移到 guest 上,pointer capture 在跨行程時抓不住,拖拉會中斷)。 */
@@ -87,11 +101,25 @@ interface BrowserStore {
   setSlot: (slot: { sessionId: string; rect: SlotRect } | undefined) => void;
   setPointerLock: (locked: boolean) => void;
   patchPage: (sessionId: string, patch: Partial<BrowserPageState>) => void;
+  /** agent 開始執行一個瀏覽器指令:顯示/更新「正在操作」指示。 */
+  beginAgentAction: (sessionId: string, action: ActionDescriptor) => void;
+  /** 一個指令結束:沒有其他進行中的指令就開始倒數,`ACTIVITY_LINGER_MS` 後清掉指示。 */
+  endAgentAction: (sessionId: string) => void;
+}
+
+/** 每個 session 一個「指示留存」計時器(只在 renderer 記憶體)。 */
+const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearLinger(sessionId: string): void {
+  const timer = lingerTimers.get(sessionId);
+  if (timer !== undefined) clearTimeout(timer);
+  lingerTimers.delete(sessionId);
 }
 
 export const useBrowserStore = create<BrowserStore>((set, get) => ({
   created: [],
   pages: {},
+  agentActivity: {},
   slot: undefined,
   pointerLock: false,
 
@@ -104,11 +132,14 @@ export const useBrowserStore = create<BrowserStore>((set, get) => ({
 
   discard: (sessionId) => {
     if (!get().created.includes(sessionId)) return;
+    clearLinger(sessionId);
     set((state) => {
       const { [sessionId]: _removed, ...pages } = state.pages;
+      const { [sessionId]: _activity, ...agentActivity } = state.agentActivity;
       return {
         created: state.created.filter((id) => id !== sessionId),
         pages,
+        agentActivity,
         slot: state.slot?.sessionId === sessionId ? undefined : state.slot,
       };
     });
@@ -120,7 +151,71 @@ export const useBrowserStore = create<BrowserStore>((set, get) => ({
   setPointerLock: (pointerLock) => set({ pointerLock }),
   patchPage: (sessionId, patch) =>
     set((state) => (state.pages[sessionId] ? { pages: { ...state.pages, [sessionId]: { ...state.pages[sessionId], ...patch } } } : state)),
+
+  beginAgentAction: (sessionId, action) => {
+    clearLinger(sessionId); // 新一個指令來了:取消「準備清掉」的倒數
+    set((state) => ({
+      agentActivity: { ...state.agentActivity, [sessionId]: { active: (state.agentActivity[sessionId]?.active ?? 0) + 1, action } },
+    }));
+  },
+
+  endAgentAction: (sessionId) => {
+    const current = get().agentActivity[sessionId];
+    if (!current) return;
+    const active = Math.max(0, current.active - 1);
+    set((state) => ({ agentActivity: { ...state.agentActivity, [sessionId]: { ...current, active } } }));
+    if (active > 0) return;
+    clearLinger(sessionId);
+    lingerTimers.set(
+      sessionId,
+      setTimeout(() => {
+        lingerTimers.delete(sessionId);
+        const latest = get().agentActivity[sessionId];
+        // 倒數期間又有新指令(active > 0)就不清——那一邊會自己重新倒數。
+        if (!latest || latest.active > 0) return;
+        set((state) => {
+          const { [sessionId]: _done, ...rest } = state.agentActivity;
+          return { agentActivity: rest };
+        });
+      }, ACTIVITY_LINGER_MS),
+    );
+  },
 }));
+
+/**
+ * 等這個 session 的 webview 準備好(`dom-ready`,拿得到 webContentsId)再回傳那個 id——agent 的指令可能在使用者從沒打開過 Browser 分頁時就來了,
+ * 這時 `ensure()` 才剛把 webview 排進 `BrowserHost`,要等它掛上、載完 about:blank。逾時或 session 在等待中被刪除就 reject。
+ */
+export function waitForBrowserReady(sessionId: string, timeoutMs: number): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    let unsubscribe: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (settle: () => void): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      unsubscribe?.();
+      settle();
+    };
+    const evaluate = (): boolean => {
+      const state = useBrowserStore.getState();
+      if (!state.created.includes(sessionId)) {
+        finish(() => reject(new Error("這個 session 的瀏覽器已被移除")));
+        return true;
+      }
+      const page = state.pages[sessionId];
+      if (page?.ready && page.webContentsId !== undefined) {
+        const id = page.webContentsId;
+        finish(() => resolve(id));
+        return true;
+      }
+      return false;
+    };
+    if (evaluate()) return;
+    unsubscribe = useBrowserStore.subscribe(() => {
+      evaluate();
+    });
+    timer = setTimeout(() => finish(() => reject(new Error(`瀏覽器頁面在 ${Math.round(timeoutMs / 1000)} 秒內沒有準備好`))), timeoutMs);
+  });
+}
 
 // ---- webview 元素的指令式操作 ------------------------------------------------------------------------
 

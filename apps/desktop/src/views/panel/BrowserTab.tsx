@@ -12,11 +12,12 @@ import {
   useBrowserStore,
 } from "../../stores/browser-store.js";
 import { IconButton, Spinner } from "../../ui/Button.js";
+import { useAgentActivity } from "./agent-activity.js";
 import type { PanelTabProps } from "./panel-tabs.js";
 
 /**
  * 面板的 Browser 分頁(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P3.2):每個 session 一個 webview,
- * **只給人用**(agent 操作是 P4)。這個元件只畫**工具列**與一個**佔位 slot**——webview 本身在 App 層的 `BrowserHost`
+ * 使用者與 agent 共用(agent 經 MCP 工具操作這個 webview,見 P4;agent 操作中時標題列顯示最近一個動作)。這個元件只畫**工具列**與一個**佔位 slot**——webview 本身在 App 層的 `BrowserHost`
  * (它的 DOM 節點不能搬家、不能因為這個分頁被卸載而消失,理由見 `stores/browser-store.ts` 開頭)。
  * slot 的位置與大小每個畫面影格比對一次(`requestAnimationFrame`,只有變了才寫進 store),所以面板拖拉寬度、側欄展開收合、
  * 視窗縮放、覆蓋層切換都會跟上,不必逐一去訂閱那些事件。
@@ -26,6 +27,7 @@ export function BrowserTab({ session }: PanelTabProps): JSX.Element {
   const sessionId = session.id;
   const supported = browserPartitionForSession(sessionId) !== undefined;
   const page = useBrowserStore((s) => s.pages[sessionId]);
+  const agent = useAgentActivity(sessionId);
   const slotRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState("");
@@ -158,10 +160,19 @@ export function BrowserTab({ session }: PanelTabProps): JSX.Element {
 
       {/* 載入指示:工具列下緣一條細的進度條(載入中時動畫);標題列顯示頁面標題與轉圈。 */}
       <div className="relative h-0.5 flex-shrink-0 bg-transparent">{loading && <div className="absolute inset-0 animate-pulse bg-accent" />}</div>
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-line-subtle px-3 py-1 text-2xs text-fg-subtle">
-        {loading && <Spinner size={11} />}
-        <span className="min-w-0 flex-1 truncate" title={title}>
-          {title || t("sidePanel:browser.blankTitle")}
+      {/* 標題列。agent 操作中(或剛操作過)時,這一列改顯示「agent 正在操作瀏覽器 · 最近的動作」——**不另外加一列**:多一列會讓 slot(webview)
+          的高度隨指示出現/消失而變,agent 截圖與點擊之間的 viewport 尺寸就會對不上(browser.staleScreenshot)。 */}
+      <div
+        role={agent ? "status" : undefined}
+        className={`flex flex-shrink-0 items-center gap-2 border-b border-line-subtle px-3 py-1 text-2xs ${agent ? "bg-accent/10 text-accent" : "text-fg-subtle"}`}
+      >
+        {agent ? (
+          <span aria-hidden="true" className={`h-1.5 w-1.5 flex-shrink-0 rounded-full bg-accent ${agent.working ? "animate-pulse" : "opacity-60"}`} />
+        ) : (
+          loading && <Spinner size={11} />
+        )}
+        <span className="min-w-0 flex-1 truncate" title={agent ? `${agent.text}\n${title}` : title}>
+          {agent ? agent.text : title || t("sidePanel:browser.blankTitle")}
         </span>
       </div>
       {message && (

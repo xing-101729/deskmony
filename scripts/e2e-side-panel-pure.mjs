@@ -1297,5 +1297,375 @@ console.log("\n== browser-activity:agent 操作中的指示(最近一個動作�
   );
 }
 
+console.log("\n== browser-host-flow:收到 browser-command 之後的流程與失敗回報(假 deps)==");
+{
+  const flow = await import(pathToFileURL(path.join(LIB, "browser-host-flow.ts")).href);
+  const { runBrowserCommand, normalizeExecOutcome, commandIdOf, failure, hostFailure, READY_WAIT_MS, AUTO_OPEN_SETTLE_MS } = flow;
+
+  /** 假 deps:記錄呼叫順序,每個行為都能被覆寫。 */
+  function makeDeps(over = {}) {
+    const log = [];
+    const replies = [];
+    const deps = {
+      parseCommand: (raw) =>
+        raw && typeof raw === "object" && typeof raw.commandId === "string" && typeof raw.sessionId === "string" && ["navigate", "screenshot", "readPage", "click", "type", "pressKey", "scroll"].includes(raw.op)
+          ? { commandId: raw.commandId, sessionId: raw.sessionId, op: raw.op, args: raw.args ?? {} }
+          : undefined,
+      sessionExists: (id) => id === "s1",
+      hadActivity: () => false,
+      beginActivity: (id, op, args) => log.push(["begin", id, op, args]),
+      endActivity: (id) => log.push(["end", id]),
+      shouldAutoOpen: (id, had) => {
+        log.push(["shouldAutoOpen", id, had]);
+        return false;
+      },
+      openPanel: () => log.push(["openPanel"]),
+      sleep: async (ms) => {
+        log.push(["sleep", ms]);
+      },
+      ensureGuest: async (id) => {
+        log.push(["ensureGuest", id]);
+        return 42;
+      },
+      isCrashed: () => false,
+      exec: async (wcId, op, args) => {
+        log.push(["exec", wcId, op, args]);
+        return { ok: true, result: { url: "http://localhost/", title: "T" } };
+      },
+      reply: async (commandId, outcome) => {
+        log.push(["reply", commandId]);
+        replies.push({ commandId, outcome });
+      },
+      ...over,
+    };
+    return { deps, log, replies };
+  }
+  const names = (log) => log.map((e) => e[0]).join(",");
+  const cmd = (extra = {}) => ({ commandId: "c1", sessionId: "s1", op: "click", args: { ref: "e3" }, ...extra });
+
+  {
+    const h = makeDeps();
+    await runBrowserCommand(h.deps, cmd());
+    check(
+      names(h.log) === "begin,shouldAutoOpen,ensureGuest,exec,end,reply" &&
+        h.log[0][1] === "s1" &&
+        h.log[0][2] === "click" &&
+        h.log[3][1] === 42 &&
+        h.log[3][2] === "click" &&
+        JSON.stringify(h.log[3][3]) === JSON.stringify({ ref: "e3" }) &&
+        h.replies.length === 1 &&
+        h.replies[0].commandId === "c1" &&
+        h.replies[0].outcome.ok === true &&
+        h.replies[0].outcome.result.url === "http://localhost/",
+      "正常流程:顯示操作中 → 確保 webview 就緒 → 交給 main 執行 → 結束操作中 → 回報結果(只回一次,commandId 原樣)",
+      names(h.log),
+    );
+  }
+  {
+    const bad = makeDeps();
+    await runBrowserCommand(bad.deps, { commandId: "c9", sessionId: "s1", op: "teleport", args: {} });
+    const noId = makeDeps();
+    await runBrowserCommand(noId.deps, { sessionId: "s1", op: "click" });
+    const garbage = makeDeps();
+    await runBrowserCommand(garbage.deps, "oops");
+    check(
+      bad.replies.length === 1 &&
+        bad.replies[0].commandId === "c9" &&
+        bad.replies[0].outcome.ok === false &&
+        bad.replies[0].outcome.error.code === "browser.hostError" &&
+        names(bad.log) === "reply" &&
+        noId.replies.length === 0 &&
+        garbage.replies.length === 0 &&
+        names(garbage.log) === "",
+      "不認得的 op / 壞掉的 payload:有 commandId 就回 browser.hostError(不進任何流程、不顯示操作中);連 commandId 都沒有就什麼都不做",
+    );
+  }
+  {
+    const gone = makeDeps();
+    await runBrowserCommand(gone.deps, cmd({ sessionId: "deleted" }));
+    check(
+      gone.replies.length === 1 &&
+        gone.replies[0].outcome.ok === false &&
+        gone.replies[0].outcome.error.code === "browser.hostError" &&
+        names(gone.log) === "reply",
+      "session 不在清單裡:回 browser.hostError,不顯示操作中、不建立 webview、不執行",
+    );
+  }
+  {
+    // 自動開面板:決策輸入是「開始前就有沒有指示」;開了要等一下再繼續
+    const open = makeDeps({
+      hadActivity: () => true,
+      shouldAutoOpen: (id, had) => {
+        open.log.push(["shouldAutoOpen", id, had]);
+        return true;
+      },
+    });
+    await runBrowserCommand(open.deps, cmd());
+    const sawHad = open.log.find((e) => e[0] === "shouldAutoOpen");
+    check(
+      names(open.log) === "begin,shouldAutoOpen,openPanel,sleep,ensureGuest,exec,end,reply" && sawHad[2] === true && open.log.find((e) => e[0] === "sleep")[1] === AUTO_OPEN_SETTLE_MS,
+      "自動打開面板:先 openPanel、等 slot 就位(AUTO_OPEN_SETTLE_MS)才確保 webview 並執行;hadActivity 是 beginActivity 之前的狀態",
+      names(open.log),
+    );
+    const order = makeDeps({ hadActivity: () => (order.log.push(["hadActivity"]), true) });
+    await runBrowserCommand(order.deps, cmd());
+    check(order.log[0][0] === "hadActivity" && order.log[1][0] === "begin", "hadActivity 在 beginActivity 之前查(之後查一定是真,自動開面板就永遠不會觸發)");
+  }
+  {
+    const ensureFail = makeDeps({
+      ensureGuest: async () => {
+        throw new Error("瀏覽器頁面在 5 秒內沒有準備好");
+      },
+    });
+    await runBrowserCommand(ensureFail.deps, cmd());
+    check(
+      names(ensureFail.log) === "begin,shouldAutoOpen,end,reply" &&
+        ensureFail.replies[0].outcome.ok === false &&
+        ensureFail.replies[0].outcome.error.code === "browser.hostError" &&
+        ensureFail.replies[0].outcome.error.message === "瀏覽器頁面在 5 秒內沒有準備好" &&
+        READY_WAIT_MS === 5000 &&
+        READY_WAIT_MS < 15_000,
+      "webview 起不來(逾時/session 被刪):回 browser.hostError 帶原因,操作中指示仍然結束;等 webview 的上限遠小於 core 的 15 秒",
+    );
+    const crashed = makeDeps({ isCrashed: () => true });
+    await runBrowserCommand(crashed.deps, cmd());
+    check(
+      crashed.replies[0].outcome.ok === false && /當掉/.test(crashed.replies[0].outcome.error.message) && !names(crashed.log).includes("exec") && names(crashed.log).includes("end"),
+      "頁面 render 行程當掉:回 browser.hostError(提示重新導覽),不送指令給 main,操作中指示照常結束",
+    );
+    const noExec = makeDeps({ exec: undefined });
+    await runBrowserCommand(noExec.deps, cmd());
+    check(noExec.replies[0].outcome.ok === false && /沒有瀏覽器執行端/.test(noExec.replies[0].outcome.error.message) && !names(noExec.log).includes("ensureGuest"), "舊版殼沒有 browserExec:回 browser.hostError,連 webview 都不建立");
+    const throwing = makeDeps({
+      exec: async () => {
+        throw new Error("Error invoking remote method 'deskmony:browserExec': webContentsId 不是這個視窗的 webview");
+      },
+    });
+    await runBrowserCommand(throwing.deps, cmd());
+    check(
+      throwing.replies[0].outcome.ok === false &&
+        /webContentsId/.test(throwing.replies[0].outcome.error.message) &&
+        names(throwing.log) === "begin,shouldAutoOpen,ensureGuest,end,reply",
+      "IPC 丟例外(main 拒絕、webview 剛好被銷毀):回 browser.hostError 帶訊息,不丟出去",
+    );
+  }
+  {
+    const failed = makeDeps({
+      exec: async () => ({ ok: false, error: { code: "browser.staleRef", message: "ref 過期" } }),
+    });
+    await runBrowserCommand(failed.deps, cmd());
+    const long = makeDeps({
+      exec: async () => ({ ok: false, error: { code: "c".repeat(300), message: "m".repeat(5000) } }),
+    });
+    await runBrowserCommand(long.deps, cmd());
+    check(
+      failed.replies[0].outcome.ok === false &&
+        failed.replies[0].outcome.error.code === "browser.staleRef" &&
+        failed.replies[0].outcome.error.message === "ref 過期" &&
+        long.replies[0].outcome.error.code.length === 100 &&
+        long.replies[0].outcome.error.message.length === 2000,
+      "執行器回報的失敗(code/message)原樣轉給 core;過長的 code/message 截到 schema 上限(100/2000),不會因為驗證失敗讓 core 乾等",
+    );
+    const weird = [undefined, null, "ok", 5, {}, { ok: "yes" }, { ok: false }, { ok: false, error: "x" }].map(normalizeExecOutcome);
+    check(
+      weird.every((o) => o.ok === false && o.error.code === "browser.hostError") &&
+        normalizeExecOutcome({ ok: true, result: { a: 1 } }).ok === true &&
+        normalizeExecOutcome({ ok: true }).result === undefined &&
+        normalizeExecOutcome({ ok: false, error: { message: "x" } }).error.code === "browser.hostError" &&
+        normalizeExecOutcome({ ok: false, error: { code: "browser.noScreenshot" } }).error.message === "",
+      "normalizeExecOutcome:形狀不對的回傳(undefined/字串/缺 error…)一律 browser.hostError;ok:true 保留 result;缺 code 補 browser.hostError",
+    );
+    check(
+      commandIdOf({ commandId: "x" }) === "x" && commandIdOf({ commandId: "" }) === undefined && commandIdOf({ commandId: 5 }) === undefined && commandIdOf(null) === undefined && commandIdOf("x") === undefined,
+      "commandIdOf:只認非空字串的 commandId",
+    );
+    check(failure("a".repeat(150), "b").error.code.length === 100 && hostFailure("x").error.code === "browser.hostError", "failure/hostFailure:code 截到 100、host 錯誤用 browser.hostError");
+  }
+  {
+    // 永遠不丟例外:reply 自己失敗、beginActivity 丟例外都被吞掉/轉成回報
+    const replyThrows = makeDeps({
+      reply: async () => {
+        throw new Error("連線斷了");
+      },
+    });
+    let threw = false;
+    try {
+      await runBrowserCommand(replyThrows.deps, cmd());
+    } catch {
+      threw = true;
+    }
+    const beginThrows = makeDeps({
+      beginActivity: () => {
+        throw new Error("store 壞了");
+      },
+    });
+    let threw2 = false;
+    try {
+      await runBrowserCommand(beginThrows.deps, cmd());
+    } catch {
+      threw2 = true;
+    }
+    check(
+      !threw && !threw2 && beginThrows.replies.length === 1 && beginThrows.replies[0].outcome.ok === false && /store 壞了/.test(beginThrows.replies[0].outcome.error.message),
+      "runBrowserCommand 永遠不丟例外:回報失敗被吞掉(沒人可通知);中途意外的例外轉成 browser.hostError 回報",
+    );
+  }
+}
+
+console.log("\n== browser-store:agent 操作指示的留存與 webview 就緒等待(用真的 store、假計時器)==");
+{
+  // store 的相對 import 都以 .js 結尾(給 tsc/vite 用);Node 直接載 .ts 時要把它們對應到 .ts——只在這個測試用一個 resolve hook 處理。
+  const { register } = await import("node:module");
+  register(
+    "data:text/javascript," +
+      encodeURIComponent(`
+export async function resolve(specifier, context, nextResolve) {
+  if ((specifier.startsWith("./") || specifier.startsWith("../")) && specifier.endsWith(".js")) {
+    try { return await nextResolve(specifier.slice(0, -3) + ".ts", context); } catch {}
+  }
+  return nextResolve(specifier, context);
+}`),
+    import.meta.url,
+  );
+  const cleared = [];
+  globalThis.window = { deskmony: { browserOpenExternal: () => undefined, browserClearPartition: async (id) => cleared.push(id) } };
+  const storeUrl = pathToFileURL(path.resolve(LIB, "..", "stores", "browser-store.ts")).href;
+  const { useBrowserStore, waitForBrowserReady } = await import(storeUrl);
+  const { ACTIVITY_LINGER_MS } = await import(pathToFileURL(path.join(LIB, "browser-activity.ts")).href);
+
+  /** 假計時器:不真的等,由測試決定什麼時候觸發。 */
+  async function withFakeTimers(fn) {
+    const realSet = globalThis.setTimeout;
+    const realClear = globalThis.clearTimeout;
+    const timers = new Map();
+    let next = 1;
+    globalThis.setTimeout = (callback, ms) => {
+      const id = next++;
+      timers.set(id, { callback, ms });
+      return id;
+    };
+    globalThis.clearTimeout = (id) => {
+      timers.delete(id);
+    };
+    try {
+      await fn({
+        timers,
+        fireAll: () => {
+          for (const [id, timer] of [...timers]) {
+            timers.delete(id);
+            timer.callback();
+          }
+        },
+      });
+    } finally {
+      globalThis.setTimeout = realSet;
+      globalThis.clearTimeout = realClear;
+    }
+  }
+
+  const SID = "11111111-1111-4111-8111-111111111111";
+  const action = (key) => ({ key, params: {} });
+  const store = () => useBrowserStore.getState();
+
+  await withFakeTimers(async ({ timers, fireAll }) => {
+    store().ensure(SID);
+    store().beginAgentAction(SID, action("navigate"));
+    const a1 = store().agentActivity[SID];
+    store().beginAgentAction(SID, action("screenshot"));
+    const a2 = store().agentActivity[SID];
+    store().endAgentAction(SID);
+    const a3 = store().agentActivity[SID];
+    check(
+      a1.active === 1 && a1.action.key === "navigate" && a2.active === 2 && a2.action.key === "screenshot" && a3.active === 1 && timers.size === 0,
+      "指示:開始一個指令 active=1、再開始一個 active=2(顯示最新的動作);結束一個還有進行中的 → 不開始倒數",
+    );
+    store().endAgentAction(SID);
+    const a4 = store().agentActivity[SID];
+    const lingerTimer = [...timers.values()][0];
+    check(
+      a4.active === 0 && a4.action.key === "screenshot" && timers.size === 1 && lingerTimer.ms === ACTIVITY_LINGER_MS && ACTIVITY_LINGER_MS === 8000,
+      "最後一個指令結束:active=0(剛剛操作過)、保留最近的動作、開始 8 秒倒數",
+    );
+    fireAll();
+    check(store().agentActivity[SID] === undefined, "倒數結束:紀錄清掉,指示消失");
+
+    // 倒數期間又來新指令:取消倒數;舊倒數即使被觸發也不能清掉進行中的紀錄
+    store().beginAgentAction(SID, action("click"));
+    store().endAgentAction(SID);
+    const staleTimer = [...timers.values()][0];
+    store().beginAgentAction(SID, action("scrollDown"));
+    check(timers.size === 0 && store().agentActivity[SID].active === 1 && store().agentActivity[SID].action.key === "scrollDown", "倒數期間又來新指令:取消倒數、指示回到「正在操作」");
+    staleTimer.callback();
+    check(store().agentActivity[SID]?.active === 1, "已被取消的舊倒數即使被觸發也不會清掉進行中的紀錄");
+    store().endAgentAction(SID);
+    fireAll();
+
+    // 沒開始就結束:無害
+    store().endAgentAction(SID);
+    check(store().agentActivity[SID] === undefined && timers.size === 0, "沒有紀錄時 endAgentAction 什麼都不做");
+
+    // session 刪除:指示與倒數一併清掉
+    store().beginAgentAction(SID, action("navigate"));
+    store().endAgentAction(SID);
+    store().discard(SID);
+    check(store().agentActivity[SID] === undefined && timers.size === 0 && !store().created.includes(SID) && cleared.includes(SID), "session 被刪除:指示、倒數、webview 狀態與 partition 一併清掉");
+  });
+
+  // ---- waitForBrowserReady ----
+  await withFakeTimers(async ({ timers, fireAll }) => {
+    store().ensure(SID);
+    // 還沒就緒 → 等;之後 dom-ready(patchPage)→ 回傳 webContentsId
+    const waiting = waitForBrowserReady(SID, 5000);
+    check(timers.size === 1 && [...timers.values()][0].ms === 5000, "waitForBrowserReady:還沒就緒時掛上逾時計時器(5 秒)");
+    store().patchPage(SID, { ready: true });
+    let settled = false;
+    waiting.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await Promise.resolve();
+    check(!settled, "ready 了但還沒有 webContentsId:繼續等(沒有 id 無法交給 main)");
+    store().patchPage(SID, { webContentsId: 77 });
+    check((await waiting) === 77 && timers.size === 0, "dom-ready 之後回傳 webContentsId,並清掉計時器");
+    check((await waitForBrowserReady(SID, 5000)) === 77 && timers.size === 0, "已經就緒:立刻回傳、不掛計時器");
+
+    // 等待中 session 被刪除 → reject
+    store().discard(SID);
+    store().ensure(SID);
+    const gone = waitForBrowserReady(SID, 5000);
+    store().discard(SID);
+    let goneErr;
+    try {
+      await gone;
+    } catch (err) {
+      goneErr = err;
+    }
+    check(goneErr instanceof Error && /已被移除/.test(goneErr.message) && timers.size === 0, "等待中 session 被刪除:reject(已被移除),計時器清掉");
+
+    // 逾時 → reject
+    store().ensure(SID);
+    const slow = waitForBrowserReady(SID, 5000);
+    fireAll();
+    let slowErr;
+    try {
+      await slow;
+    } catch (err) {
+      slowErr = err;
+    }
+    check(slowErr instanceof Error && /5 秒內沒有準備好/.test(slowErr.message), "逾時:reject(5 秒內沒有準備好)");
+    store().discard(SID);
+
+    // 從沒建立過的 session → 立刻 reject
+    let neverErr;
+    try {
+      await waitForBrowserReady("22222222-2222-4222-8222-222222222222", 5000);
+    } catch (err) {
+      neverErr = err;
+    }
+    check(neverErr instanceof Error, "沒有建立過 webview 的 session:立刻 reject(不空等)");
+  });
+  delete globalThis.window;
+}
+
 console.log(`\n總計: ${passed} PASS, ${total - passed} FAIL`);
 process.exit(passed === total ? 0 : 1);

@@ -73,6 +73,27 @@
     "invalidAddress": "這看起來不是網址。請輸入像 localhost:3000 或 example.com 的網址。",
     "invalidScheme": "這裡只能開啟 http:// 與 https:// 開頭的網址。",
     "crashed": "頁面當掉了,請重新整理再試一次。",
-    "loadFailed": "無法載入 {{url}}({{description}})"
+    "loadFailed": "無法載入 {{url}}({{description}})",
+    "agent": {
+      "working": "agent 正在操作瀏覽器 · {{action}}",
+      "recent": "agent 剛操作過瀏覽器 · {{action}}",
+      "actions": {
+        "navigate": "前往 {{url}}",
+        "back": "上一頁",
+        "forward": "下一頁",
+        "reload": "重新整理頁面",
+        "screenshot": "截圖",
+        "readText": "讀取頁面文字",
+        "readInteractive": "列出可點擊的元素",
+        "clickRef": "點擊元素 {{ref}}",
+        "clickPoint": "點擊 ({{x}}, {{y}})",
+        "type": "輸入 {{count}} 個字元",
+        "typeSubmit": "輸入 {{count}} 個字元並按 Enter",
+        "pressKey": "按下 {{key}}",
+        "scrollUp": "向上捲動",
+        "scrollDown": "向下捲動",
+        "unknown": "執行 {{op}}"
+      }
+    }
   }
 }

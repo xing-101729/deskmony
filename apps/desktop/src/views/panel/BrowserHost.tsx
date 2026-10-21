@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { browserPartitionForSession } from "../../../electron/browser-rules.js";
-import { browserFrameStyle } from "../../lib/browser-frame-style.js";
+import { browserFrameInert, browserFrameStyle } from "../../lib/browser-frame-style.js";
 import { useSessionStore } from "../../stores/session-store.js";
 import {
   isBrowserSupported,
@@ -10,6 +10,7 @@ import {
   type SlotRect,
   type WebviewElement,
 } from "../../stores/browser-store.js";
+import { startBrowserHost } from "./browser-host.js";
 
 /**
  * App 層的 webview 宿主(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P3.2 與 `stores/browser-store.ts` 開頭的說明)。
@@ -18,12 +19,17 @@ import {
  * (原因是 P3.3 實驗:畫面外的 webview CDP 截圖會逾時,見 `lib/browser-frame-style.ts`)。
  * **外框與 webview 的 DOM 節點以 session id 為 key、建立後從不搬動、從不因切換分頁而卸載**。
  * 偵測到 session 被刪除才移除它的 webview 並清掉它的 partition。
+ *
+ * 2026-10-21(P4b):這個元件整個 app 生命週期都掛著,所以也在這裡啟動「agent 瀏覽器指令的執行端」(`./browser-host.ts`:每次連線開啟就
+ * 註冊成 host、收 `browser-command`、必要時替還沒有 webview 的 session 建立一個)。
  */
 export function BrowserHost(): JSX.Element | null {
   const created = useBrowserStore((s) => s.created);
   const slot = useBrowserStore((s) => s.slot);
   const pointerLock = useBrowserStore((s) => s.pointerLock);
   const sessions = useSessionStore((s) => s.sessions);
+
+  useEffect(() => startBrowserHost(), []);
 
   // session 被刪除:移除它的 webview、清掉它的 partition(DECISIONS §L.3:session 刪除時清空)。
   // 只處理「曾經建立過 webview」的 id,所以啟動時 session 清單還沒載入(空陣列)不會誤刪。
@@ -50,12 +56,25 @@ export function BrowserHost(): JSX.Element | null {
   );
 }
 
+/**
+ * 停放中的外框加 `inert`:按 Tab 時鍵盤焦點不會跑進一個看不見的頁面(opacity 0 的 webview 仍然可以被 Tab 聚焦)。以空字串經 spread 傳入——
+ * React 18 不認得 `inert`,布林值會被丟掉並警告,字串才會原樣寫成屬性;不再停放(`rect` 有值)時 prop 消失,React 會把屬性移除。
+ * **`inert` 對 CDP 截圖/輸入有沒有影響是未驗證的**(見 `scripts/spike/webview-offscreen.cjs` 的 `parked-inert` 位置);如果實驗顯示會壞,
+ * 把 `browserFrameInert()` 改成永遠回 false 即可退回沒有 inert 的停放方式。
+ */
+const INERT_PROPS = { inert: "" } as object;
+
 function BrowserFrame({ sessionId, rect, pointerLock }: { sessionId: string; rect: SlotRect | undefined; pointerLock: boolean }): JSX.Element {
   const partition = browserPartitionForSession(sessionId) ?? "";
   // 可見/停放兩種樣式與 z-index 的理由都在 `lib/browser-frame-style.ts`(純函式,有測試鎖住)。
   const style = browserFrameStyle(rect, pointerLock);
   return (
-    <div data-browser-frame={sessionId} aria-hidden={rect ? undefined : true} style={style}>
+    <div
+      data-browser-frame={sessionId}
+      aria-hidden={rect ? undefined : true}
+      style={style}
+      {...(browserFrameInert(rect) ? INERT_PROPS : undefined)}
+    >
       <BrowserWebview sessionId={sessionId} partition={partition} />
     </div>
   );
