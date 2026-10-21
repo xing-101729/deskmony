@@ -8,12 +8,15 @@
  *   3. CDP `Input.insertText` 能輸入到 focus 的 input;
  *   4. `loadURL` 之後 `did-finish-load` 正常觸發;
  *   5. 在「可見位置」與「隱藏位置」之間來回移動不會重新載入(沒有 did-start-loading/did-navigate、頁面狀態與伺服器請求數都不變)。
- * 同一組 5 項檢查對四種「位置」各跑一次(每種一個獨立的視窗與 webview,依序進行,同時只存在一個視窗):
+ * 同一組 5 項檢查對五種「位置」各跑一次(每種一個獨立的視窗與 webview,依序進行,同時只存在一個視窗):
  *   visible    基準:webview 在畫面上(sanity check,這組不過代表實驗本身有問題)
  *   offscreen  webview 外框 `position: fixed; left: -20000px`,保持 1024×768(BrowserHost 目前停放 webview 的方式)
  *   opacity0   webview 在原位但 `opacity: 0`,上面再蓋一塊不透明的面板內容區
  *   clip1x1    外框 1×1 且 `overflow: hidden`,webview 本身仍是 1024×768(被裁切成 1×1 可見)
- * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式。
+ *   parked     **BrowserHost 現行的正式停放方式**(`apps/desktop/src/lib/browser-frame-style.ts`):外框 `position: fixed; left: 0; top: 0;
+ *              width: 1024px; height: 768px; opacity: 0; z-index: -1; pointer-events: none`,上面有一塊不透明的全版面「app 外殼」(在流內、不是 positioned,
+ *              對應 `.app-shell` 的 `bg-canvas`)。不用 visibility:hidden / display:none。之後改停放方式要重驗,就用這一種。
+ * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式;`parked` 沒有 5/5 會另外大聲警告(代表目前的正式停放方式不可用)。
  *
  * ## 執行方式(從 repo 根目錄)
  *   Windows (cmd/PowerShell):  apps\desktop\node_modules\.bin\electron.cmd scripts\spike\webview-offscreen.cjs
@@ -22,11 +25,11 @@
  * 選用參數(接在腳本路徑後):`--out=<檔案>` 把結果另存成 JSON。
  *
  * ## 行為
- *  - 會依序**開 4 個 Electron 視窗**(每種位置一個,測完立刻關閉,同時只有一個;視窗是真的顯示出來的,因為正式 app 的視窗也是顯示的——
+ *  - 會依序**開 5 個 Electron 視窗**(每種位置一個,測完立刻關閉,同時只有一個;視窗是真的顯示出來的,因為正式 app 的視窗也是顯示的——
  *    用 show:false 會變成另一個實驗)。
  *  - 本機 HTTP 伺服器只綁 127.0.0.1、隨機 port,結束時關閉;userData 用暫存目錄,結束時刪除(刪不掉會在最後一行印出路徑)。
- *  - 全程有逾時(每個 CDP 指令 6 秒、每種位置 60 秒、整體 5 分鐘 watchdog),一定會自己結束:`app.exit(code)`,不留殘餘行程。
- *    預期總時間約 20–40 秒(各項檢查通過時;有逾時的項目會拉長)。
+ *  - 全程有逾時(每個 CDP 指令 6 秒、每種位置 60 秒、整體 7 分鐘 watchdog),一定會自己結束:`app.exit(code)`,不留殘餘行程。
+ *    預期總時間約 25–50 秒(各項檢查通過時;有逾時的項目會拉長——例如 offscreen 的截圖會等滿 6 秒)。
  *  - 結束碼:0 = 實驗跑完且基準(visible)5/5 通過;1 = 基準沒過(實驗結果不可信);2 = 腳本本身出錯或 watchdog 觸發。
  *    「隱藏方式行不行」看輸出的 VERDICT 行,不影響結束碼。
  */
@@ -41,7 +44,7 @@ const { app, BrowserWindow, nativeImage } = require("electron");
 const CDP_TIMEOUT_MS = 6000;
 const LOAD_TIMEOUT_MS = 10000;
 const VARIANT_TIMEOUT_MS = 60000;
-const GLOBAL_TIMEOUT_MS = 5 * 60 * 1000;
+const GLOBAL_TIMEOUT_MS = 7 * 60 * 1000;
 const SETTLE_MS = 500; // 改了位置之後等合成器反應的時間
 
 /** 四種位置;`pos` 是 host 頁面的 `window.__setPos(name)` 套用的外框與 webview 樣式。 */
@@ -50,6 +53,7 @@ const VARIANTS = [
   { name: "offscreen", desc: "外框 left:-20000px,保持 1024x768", hidden: true },
   { name: "opacity0", desc: "opacity:0,上面蓋一塊不透明的面板內容區", hidden: true },
   { name: "clip1x1", desc: "外框 1x1 + overflow:hidden,webview 仍是 1024x768", hidden: true },
+  { name: "parked", desc: "正式停放方式:fixed 0,0、1024x768、opacity 0、z-index -1、pointer-events none,上面是不透明的 app 外殼", hidden: true },
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -82,15 +86,19 @@ function hostPage(variant, guestUrl) {
 html,body{margin:0;height:100%;background:#2b2b2b;color:#ddd;font:14px sans-serif;overflow:hidden}
 #frame{position:fixed;overflow:hidden;background:#fff}
 #cover{position:fixed;left:20px;top:20px;width:600px;height:500px;background:#555;z-index:2;display:none}
+/* parked 方案:對應 App 的 .app-shell——在流內(不是 positioned、沒有 z-index)、不透明背景、鋪滿視口;fixed 且 z-index:-1 的外框會沉到它底下。 */
+#shell{display:none;height:100vh;background:#444}
 </style></head><body>
+<div id="shell">app shell (opaque, in flow)</div>
 <div id="cover">panel content (opaque, in front of the webview)</div>
 <div id="frame"><webview id="wv" partition="spike-${variant}" src="${guestUrl}" style="display:flex"></webview></div>
 <script>
 var POS = {
-  visible:   { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "1", zIndex: "1" }, wv: { width: "100%", height: "100%" }, cover: false },
-  offscreen: { frame: { left: "-20000px", top: "0px", width: "1024px", height: "768px", opacity: "1", zIndex: "1" }, wv: { width: "100%", height: "100%" }, cover: false },
-  opacity0:  { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "0", zIndex: "1" }, wv: { width: "100%", height: "100%" }, cover: true },
-  clip1x1:   { frame: { left: "20px", top: "20px", width: "1px", height: "1px", opacity: "1", zIndex: "1" }, wv: { width: "1024px", height: "768px" }, cover: false }
+  visible:   { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false },
+  offscreen: { frame: { left: "-20000px", top: "0px", width: "1024px", height: "768px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false },
+  opacity0:  { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "0", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: true, shell: false },
+  clip1x1:   { frame: { left: "20px", top: "20px", width: "1px", height: "1px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "1024px", height: "768px" }, cover: false, shell: false },
+  parked:    { frame: { left: "0px", top: "0px", width: "1024px", height: "768px", opacity: "0", zIndex: "-1", pointerEvents: "none" }, wv: { width: "100%", height: "100%" }, cover: false, shell: true }
 };
 window.__setPos = function (name) {
   var p = POS[name];
@@ -98,6 +106,7 @@ window.__setPos = function (name) {
   Object.assign(document.getElementById("frame").style, p.frame);
   Object.assign(document.getElementById("wv").style, p.wv);
   document.getElementById("cover").style.display = p.cover ? "block" : "none";
+  document.getElementById("shell").style.display = p.shell ? "block" : "none";
   return name;
 };
 window.__setPos(${JSON.stringify(variant)});
@@ -337,7 +346,7 @@ async function main() {
   const outArg = process.argv.find((arg) => arg.startsWith("--out="));
   const outPath = outArg ? outArg.slice("--out=".length) : undefined;
   console.log(`Electron ${process.versions.electron} / Chromium ${process.versions.chrome} / ${process.platform} ${os.release()}`);
-  console.log("Opens 4 windows one after another (visible, offscreen, opacity0, clip1x1); each is closed before the next opens.");
+  console.log("Opens 5 windows one after another (visible, offscreen, opacity0, clip1x1, parked); each is closed before the next opens.");
 
   await app.whenReady();
   const server = await startServer();
@@ -364,8 +373,12 @@ async function main() {
   const baselineOk = baseline !== undefined && baseline.passed === 5;
   const workable = results.filter((r) => r.hidden && r.passed === 5).map((r) => r.variant);
   if (!baselineOk) console.log("\nBASELINE (visible) DID NOT PASS 5/5 — the experiment itself is unreliable on this machine; do not draw conclusions.");
+  const parkedResult = results.find((r) => r.variant === "parked");
+  if (parkedResult && parkedResult.passed !== 5) {
+    console.log("\n!!! WARNING: the production parking method (parked: fixed 0,0 / 1024x768 / opacity 0 / z-index -1) did NOT pass 5/5 — BrowserHost parks hidden webviews this way, so P4 screenshots of unseen sessions are at risk.");
+  }
   console.log(
-    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: offscreen, opacity0, clip1x1)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
+    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: parked, opacity0, clip1x1, offscreen)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
   );
   console.log(`Duration: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 

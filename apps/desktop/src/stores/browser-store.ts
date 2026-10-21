@@ -11,7 +11,7 @@ import { browserPartitionForSession, isExternallyOpenableUrl } from "../../elect
  *  - webview 由 App 層的 `BrowserHost`(`views/panel/BrowserHost.tsx`,portal 到 `document.body`)持有,每個 session 一個,建立後從不搬動;
  *  - `BrowserTab` 只渲染一個**佔位 slot**,把 slot 的位置/大小報進這個 store(`setSlot`);
  *  - `BrowserHost` 用 `position: fixed` 把「目前 session」的 webview 疊到 slot 上,其餘的(以及 slot 不存在——面板關著、不在 Browser 分頁——時目前的)
- *    移到畫面外並保持固定尺寸。
+ *    **停放**在視口內(fixed 0,0、1024×768、opacity 0、z-index -1,不是移到畫面外——見 `lib/browser-frame-style.ts`)。
  *
  * 這個 store 只放「畫面需要的狀態」;webview 元素本身(指令式操作:`loadURL`/`goBack`…)放在模組層級的 `elements` Map,不進 zustand。
  */

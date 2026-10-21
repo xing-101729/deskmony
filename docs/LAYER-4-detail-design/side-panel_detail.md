@@ -292,11 +292,19 @@ P4 要讓 agent 操作「使用者現在沒在看」的 session 瀏覽器,所以
 > - **偏離規格:slot 位置用每個畫面影格比對(`requestAnimationFrame`,變了才寫進 store),不用 ResizeObserver**。ResizeObserver 抓不到「大小不變、只有位置變」(側欄展開/收合),
 >   要追蹤的事件太多。代價:Browser 分頁開著時每個影格讀一次 `getBoundingClientRect()`(沒變就不 setState)。
 > - **層級**:webview 外框 `z-45`——面板(含覆蓋層模式)是 `z-40`,所有對話框(`ui/Dialog.tsx` 的 PermissionModal/ConfirmDialog/SettingsDialog…是 `z-50`、命令面板 `z-[60]`)都在它之上。
+> - **停放方式(P3 review 後修正)**:不在畫面上的 webview **不再**停到 `left:-20000`——P3.3 實驗(真 Electron)顯示那樣 CDP `Page.captureScreenshot` 會逾時(其餘四項過;opacity0 與 clip1x1 都 5/5)。
+>   現在停放時外框是 `position: fixed; left: 0; top: 0; width: 1024px; height: 768px; opacity: 0; z-index: -1; pointer-events: none` 加 `aria-hidden`,**留在視口內**;
+>   **不用** `visibility: hidden`/`display: none`。它在根層疊脈絡的負 z-index,被 `.app-shell`(在流內、不是 positioned、不透明的 `bg-canvas`、鋪滿視口)的背景蓋住——
+>   在瀏覽器窗格把停放的外框強制改成不透明洋紅色,畫面上完全看不到,確認有蓋住。可見時照舊疊到 slot 上(z-45)。樣式在純函式 `src/lib/browser-frame-style.ts`,`e2e-side-panel-pure` 鎖住。
+> - **彈出視窗(P3 review 後修正)**:`<webview>` 沒有 `allowpopups` 屬性時,`window.open`/`target=_blank` 在 guest 端就被吞掉,`setWindowOpenHandler` 根本不會被呼叫(真 Electron 實測:點了毫無反應)。
+>   所以 `<webview>` 帶 `allowpopups`,而且 `will-attach-webview` 的政策(純函式 `enforceWebviewAttachPolicy()`)**強制**設成 `"true"`、不信任 renderer。安全理由:每次彈出都進永遠回傳 `deny` 的 handler,
+>   不會建立任何新視窗;只有 http(s) 目標(`popupRedirectUrl()`)改在同一個 webview 導過去,`about:blank` 與其他 scheme 什麼都不做。
 > - **拖拉面板寬度時**,webview 暫時不吃滑鼠事件(`pointerLock`):游標一移到 guest 上,pointer capture 跨行程抓不住;面板被快捷鍵關掉或變成覆蓋層時會自動放開。
 > - **快捷鍵**:焦點在 webview 裡時只攔 Ctrl/Cmd+J(開關面板)、Ctrl+\`(開 Terminal)、Ctrl/Cmd+K(命令面板)這三個,`preventDefault()` 後經 IPC 轉給 renderer,main 再把鍵盤焦點還給 app 的 renderer;其餘按鍵一律給網頁。
 >   **取捨**:Ctrl/Cmd+K 在網頁內失效(不少網站拿它當搜尋快捷鍵)——命令面板是 app 的全域入口,在 Browser 分頁裡也要能叫出來。有 Alt/Shift 修飾的組合都不攔。
 > - **CSP**:`apps/desktop/index.html` 沒有 CSP(`<meta>` 或 main 的 `onHeadersReceived` 都沒有),所以沒有東西擋 `<webview>`。日後加 CSP 時要實測 webview 還能不能附掛。
-> - **P3.3 實驗腳本**:`scripts/spike/webview-offscreen.cjs`(CommonJS:`electron <檔案>` 對 .cjs 一定走得通)。執行方式與預期時間見檔頭;**尚未實際執行**,只做過語法檢查與內嵌頁面的 script 解析。
+> - **P3.3 實驗腳本**:`scripts/spike/webview-offscreen.cjs`(CommonJS:`electron <檔案>` 對 .cjs 一定走得通)。執行方式與預期時間見檔頭;共五種位置(visible、offscreen、opacity0、clip1x1、`parked`=目前正式停放方式,
+>   之後改停放方式就用同一支重驗)。review 方在真 Electron 跑過前四種:visible 5/5、offscreen 4/5(截圖逾時)、opacity0 5/5、clip1x1 5/5(截圖尺寸是 webview 本身的 1024×768,不是裁切後的 1×1)。**第五種 `parked` 尚未實際執行**。
 
 ---
 

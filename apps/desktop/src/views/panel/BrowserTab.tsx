@@ -37,7 +37,7 @@ export function BrowserTab({ session }: PanelTabProps): JSX.Element {
     if (supported) useBrowserStore.getState().ensure(sessionId);
   }, [sessionId, supported]);
 
-  // 回報 slot 的位置與大小(viewport 座標,給 BrowserHost 的 position: fixed 用)。卸載時清掉——BrowserHost 就把 webview 移到畫面外。
+  // 回報 slot 的位置與大小(viewport 座標,給 BrowserHost 的 position: fixed 用)。卸載時清掉——BrowserHost 就把 webview 停放起來(留在視口內、opacity 0、沉到 app 外殼底下)。
   useEffect(() => {
     if (!supported) return undefined;
     let frame = 0;

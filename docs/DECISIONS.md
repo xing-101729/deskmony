@@ -389,7 +389,7 @@ gateway 方法 `session.rewind` / `session.fork`,參數 `{ sessionId, messageId 
   (Electron main 的主框架只放行 http(s) 與 `about:blank`;**子框架**另放行 `about:srcdoc`、`blob:`、`data:`——頁面自己產生的內容,讀不到本機檔案,擋掉會讓許多網站的內嵌 iframe 壞掉。)
 - 瀏覽器指令只送給**一條**本機的桌面 app 連線(`browser.registerHost` 只收 `isLocal` 的非 scoped 連線),不 broadcast。
 - agent 只能操作**自己 session** 的瀏覽器(方法參數沒有 sessionId,由 token 決定)。
-- 下載一律取消、網頁的裝置權限(相機/麥克風/定位/通知…)一律拒絕、彈出視窗改在同一頁開。
+- 下載一律取消、網頁的裝置權限(相機/麥克風/定位/通知…)一律拒絕、彈出視窗改在同一頁開(`<webview>` 帶 `allowpopups` 且由 main 強制;`setWindowOpenHandler` 永遠 `deny`,不會建立新視窗,只有 http(s) 目標在同一個 webview 導過去)。
 - 第一版不提供執行任意 JavaScript 的工具。
 - 設定開關 `features.agentBrowserTools`(預設開)可整個關掉。
 
