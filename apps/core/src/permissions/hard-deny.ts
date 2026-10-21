@@ -55,8 +55,10 @@ export interface HardDenyCheckInput {
  *  - `mcp__deskmony__browser_navigate`:Claude Agent SDK 的 `canUseTool` 收到的工具名。SDK 把 in-process MCP 工具一律組成
  *    `mcp__${serverName}__${toolName}`(查證:`@anthropic-ai/claude-agent-sdk` 的 sdk.mjs 組名的樣板字串與 sdk.d.ts 的說明),
  *    server 名稱就是我們掛的 `deskmony`;claude-code-acp 這類 ACP 後端用的也是同一種寫法。
- *  - `deskmony_browser_navigate`:OpenCode(HTTP 的 `part.tool`/`permission.asked`)的 MCP 工具名 = `<server>_<tool>`,
- *    與 `opencode-config.ts` 的 `SESSION_NETWORK_QUERY_TOOL_NAMES` 預先放行的那一套寫法相同(待實測補述)。
+ *  - `deskmony_browser_navigate`:OpenCode 的 MCP 工具名 = `<server>_<tool>`。**實測**(2026-10-21,真實 opencode 1.18.7 + `opencode/big-pickle`,
+ *    掛一個名為 `deskmony` 的 stdio MCP server):HTTP 的 tool part `tool` 與 `permission.asked` 的 `permission` 都是這個字串;
+ *    `opencode acp`(用 `AcpAdapter` 實際啟動)送進政策引擎的 permission-request `toolName` 也是這個字串。兩條路在權限請求當下 input 都還是空的
+ *    (url 在之後的 running 才到),所以 OpenCode 的 `browser_navigate` 本來就不會被第 4 類看到 url。
  *  - `mcp.deskmony.browser_navigate`:codex-acp(`@agentclientprotocol/codex-acp` 1.13.1)對 MCP 工具呼叫的 `tool_call` title
  *    (查證:它的 dist/index.js `createMcpToolCallUpdate()` 用 `mcp.${item.server}.${item.tool}`)。
  *    ⚠️ 但 codex-acp 的 MCP **權限請求**(`session/request_permission`)在已有對應 tool_call 時只帶 `toolCallId`、沒有 title 也沒有 rawInput,

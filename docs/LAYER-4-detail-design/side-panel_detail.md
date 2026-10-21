@@ -378,6 +378,65 @@ core + 一個**假的 browser host**(WS client,`registerHost` 後對每個 `brow
 9. `features.agentBrowserTools: false` 時兩份實作的 tools/list 都沒有瀏覽器工具。
 10. `e2e-hard-deny`/`e2e-policy-engine`:`browser_navigate` 三種名稱寫法到外部 host 都**不**被 hard-deny;WebFetch 到同一外部 host 仍被 hard-deny;別的 server 的同名工具仍被 hard-deny。
 
+> ### P4a 實作備註(與上文不同或規格沒寫死的地方)
+>
+> - **檔案**:`packages/shared/src/browser.ts`(工具參數、host 指令/結果、錯誤碼、`BrowserPort`)、`apps/core/src/browser/browser-relay.ts`(轉送層)、
+>   `packages/adapters/src/browser-tools.ts`(七個工具的**單一定義處**)、gateway 的 `browser.*` 方法、`hard-deny.ts` 的例外、`features.agentBrowserTools`。
+> - **偏離規格:兩份 MCP 實作從同一個模組取工具定義**。session 網路五個工具當初刻意複製文字(不想讓輕量的 bridge 子行程載入 claude-agent-sdk);
+>   瀏覽器七個工具的名稱、描述、參數 schema、結果格式化與 instructions 的瀏覽器段落都在 `browser-tools.ts`,`session-network-mcp.ts` 與 `mcp-bridge-server.ts` 各自只負責接後端
+>   (in-process 接 `BrowserPort`、bridge 接 gateway RPC)——逐字一致由結構保證,`e2e-session-network` 仍直接比對兩邊真正輸出的 tools/list 與 instructions(掛與沒掛瀏覽器都比)。
+> - **偏離規格:`browser.hostNotAllowed` 一分為二**。規格在兩個地方用了這個碼(註冊 host 被拒、導覽目標主機被拒),語意不同:前者的「host」是桌面 app,後者是網站主機名稱。
+>   導覽目標主機被拒維持 `browser.hostNotAllowed`(e2e 與給 agent 的訊息用它);註冊被拒(非本機或 scoped 連線)是 **`browser.registerNotAllowed`**。
+> - **新增的錯誤碼**(`BrowserErrorCodes`,桌面端翻譯在 `errors-browser.json` 四語系):core 產生的有 `noHost`、`hostDisconnected`(params.reason=`disconnected`/`replaced`/`send-failed`)、`timeout`、
+>   `hostNotAllowed`、`unsupportedScheme`、`invalidArgs`、`registerNotAllowed`、`resultTooLarge`、`invalidResult`;由 **host(P4b 執行器)回報**、core 原樣轉給 agent 的有 `staleRef`、
+>   `staleScreenshot`(截圖之後頁面 viewport 尺寸變了,座標失準)、`noScreenshot`、`elementNotFound`、`navigationFailed`、`hostError`。host 回了不在這份名單裡的 code 一律轉成 `browser.hostError`
+>   (擋掉 host 冒充 `gateway.scopedTokenForbidden` 之類的碼)。
+> - **導覽規則細節**(`BrowserRelay.checkNavigationTarget()`):以 WHATWG `URL` 解析、看正規化後的 hostname(`127.1`、`0x7f.0.0.1`、`2130706433` 都會變成 `127.0.0.1`,所以放行;
+>   `localhost.evil.test`、`127.0.0.1.evil.test`、`http://localhost@evil.test/`、反斜線把戲的主機是 evil.test,擋)。loopback = `localhost`、`*.localhost`、`127.0.0.0/8`、`[::1]`;
+>   **刻意不算 loopback**:IPv4-mapped IPv6(`[::ffff:7f00:1]`)、`0.0.0.0`、結尾有點的 `localhost.`(不確定時選較嚴的那一邊,要用就加進 allowedHosts)。
+>   `policy.allowedHosts` 不分大小寫、**完全比對** hostname(子網域不繼承,比照 hard-deny)。**送給 host 的是檢查過的 `URL.href`**,不是 agent 原本傳的字串。
+>   「真.無限制」用 `SessionManager.isSessionTrueUnrestricted()`——**純讀取**,刻意不呼叫 `checkAndExpireYolo()`(那個會就地降級並把「YOLO 剛過期」的訊號只留給權限決策去寫系統訊息)。
+> - **排隊與逾時**:同一個 session 一條佇列(結果/逾時/斷線才放行下一筆),不同 session 互不阻塞。逾時**從指令送給 host 的那一刻起算**(排隊等待不吃逾時);
+>   環境變數 `DESKMONY_BROWSER_NAVIGATE_TIMEOUT_MS`/`DESKMONY_BROWSER_COMMAND_TIMEOUT_MS`(預設 30 秒/15 秒)讓 e2e 縮短。bridge 對瀏覽器 RPC 的等待上限是 120 秒(要明顯大於單一指令的逾時,
+>   否則 agent 會先看到籠統的「RPC 逾時」而不是 `browser.timeout`)。host 斷線或被取代時,它的所有未完成指令(含還在排隊的、含別的 session 的)一律 `browser.hostDisconnected`。
+> - **host 結果的防線**:每個 op 用 `BROWSER_OP_RESULT_SCHEMAS` 驗證形狀;截圖 base64 換算超過 5 MB → `resultTooLarge`;readPage 的文字超過 `maxChars`(預設 20,000)與互動元素超過 500 個由 core 截斷並標 `truncated`。
+> - **`features.agentBrowserTools`**(預設 `true`,只有 file/default 兩層、沒有環境變數):`false` 時 `index.ts` 不注入 in-process `BrowserPort`、不讓 ACP/OpenCode adapter 要求瀏覽器範圍;
+>   **gateway 在 `mintMcpBridgeToken()` 再與這個設定取交集**(安全開關在 core,不在 adapter),核發結果的 `browser` 欄位(`McpBridgeTokenGrant.browser`)才是 adapter 決定 bridge 掛不掛瀏覽器工具的依據。
+>   `config.setFile` 的 patch 接受它(`config.setFile` 本身是 local-only 方法,寫入後要重啟 core 才生效);schema JSON(`docs/deskmony.config.v1.json`)已重新產生。
+> - **targeted push**:`WsGateway.pushToConnection()`——只送給**已認證、非 scoped、連線還開著**的那一條;正常情況 scoped 連線連註冊 host 都不行,這是第二道保險。`broadcast()` 的 P0 過濾不變。
+> - **呼叫者身分**:in-process 的 MCP wrapper 把閉包捕捉的 `callerSessionId` 放在 `...args` **之後**(工具參數夾帶 `callerSessionId` 也蓋不掉;e2e 有測);gateway 路徑由 token 決定,參數多塞 `sessionId` 被 zod 丟掉。
+>
+> **三種 adapter 送進政策引擎的 `browser_navigate` toolName(2026-10-21 查證/實測)**——`isDeskmonyBrowserNavigateTool()` 完整比對這三個字串(不是比結尾):
+>
+> | adapter | toolName | 依據 |
+> |---|---|---|
+> | Claude SDK(及 claude-code-acp 一類) | `mcp__deskmony__browser_navigate` | 讀 `@anthropic-ai/claude-agent-sdk` 的 sdk.mjs:in-process MCP 工具名一律組成 `mcp__${serverName}__${toolName}`(sdk.d.ts 也寫了);本機沒登入 Claude,**沒有跑真實模型** |
+> | OpenCode(HTTP) | `deskmony_browser_navigate` | **實測**:真實 opencode 1.18.7 + `opencode/big-pickle`,掛一個名為 `deskmony` 的 stdio MCP server,tool part 的 `tool` 與 `permission.asked` 的 `permission` 都是這個字串;`permission.asked` 的 `metadata` 是 `{}`,tool part 的 input 在 `running` 才有 `{url}` |
+> | OpenCode(`opencode acp`) | `deskmony_browser_navigate` | **實測**:用 Deskmony 自己的 `AcpAdapter` 啟動真實 `opencode acp`,送進政策引擎的 permission-request `toolName` 是這個字串、`input` 是 `{}`(那時還沒有 url) |
+> | codex(`@agentclientprotocol/codex-acp` 1.13.1) | `mcp.deskmony.browser_navigate`(`tool_call` 的 title) | **讀套件原始碼**(dist/index.js 的 `createMcpToolCallUpdate()`:`mcp.${server}.${tool}`,rawInput 是 `{server, tool, arguments}`);**沒有真的跑 codex** |
+>
+> ⚠️ **發現(既有限制,沒有在這輪修)**:codex-acp 的 MCP 工具**權限請求**(`session/request_permission`)在已有對應 `tool_call` 時只帶 `toolCallId`(`kind: execute`、`status: pending`、`_meta.is_mcp_tool_approval`),
+> **沒有 title 也沒有 rawInput**。`AcpAdapter` 用 `title ?? toolCallId` 當 toolName,所以 codex 的 MCP 工具(包含 `browser_navigate`)送進政策引擎的 toolName 是一串 call id、input 是空的——
+> 政策規則與「永遠允許」對它們無從比對。`browser_navigate` 因此不會被 hard-deny 誤擋(沒有 url 可看),功能不受影響;要讓 codex 的 MCP 權限請求可用,
+> `AcpAdapter` 得記住先前 `tool_call` 的 title/rawInput 再補進權限請求(後續工作)。另外 OpenCode 兩條路在權限請求當下 input 都還是空的(url 在後面才到),所以對 opencode 而言 hard-deny 第 4 類本來就看不到 `browser_navigate` 的 url。
+> 其他沒查證的後端(例如 gemini)不在這份名單裡,保守起見 `browser_navigate` 仍受第 4 類約束。
+>
+> **留給 P4b 的介面**(host 端要實作的):
+>
+> 1. 以 `browser.registerHost {}` 註冊——**每次 WS 連上(含重連)都要重新註冊**(core 在連線斷開時就註銷 host,重連後不會自動恢復)。只在 Electron 註冊;core 只收本機、非 scoped 的連線。
+> 2. 收 push `browser-command`,payload `{ commandId, sessionId, op, args }`(`BrowserCommandPushSchema`);`op` 是 `navigate`/`screenshot`/`readPage`/`click`/`type`/`pressKey`/`scroll`,`args` 的形狀見 `BrowserOpMap[op].args`;
+>    core 已驗證過 args、導覽的網址已檢查過(host 不需要、也不該再放寬)。**同一個 session 的指令 core 保證一次只送一個**;不同 session 的可能同時在飛。
+> 3. 完成後呼叫 `browser.commandResult { commandId, ok: true, result }` 或 `{ commandId, ok: false, error: { code, message } }`;`result` 的形狀見 `BrowserOpMap[op].result`:
+>    `navigate → {url, title, loaded}`、`screenshot → {mimeType:"image/jpeg", data(base64), width, height, url, title}`(`width`/`height` 是**這張圖**的像素尺寸,≤ 長邊 1568)、
+>    `readPage → {mode:"text", url, title, text, truncated}` 或 `{mode:"interactive", url, title, elements:[{ref, role, name, href?}], truncated}`、`click → {url, title}`、`type/pressKey/scroll → {}`。
+>    回的結果在逾時(導覽 30 秒、其他 15 秒)之後才到會被忽略。`ok: false` 的 `error.code` 要用 `BROWSER_HOST_ERROR_CODES`:`browser.staleRef`、`browser.staleScreenshot`、`browser.noScreenshot`、
+>    `browser.elementNotFound`、`browser.navigationFailed`、`browser.hostError`,`message` 是給 agent 看的說明。
+> 4. `staleScreenshot` 的用法:記住最近一次截圖當下的 viewport 尺寸;`click` 用 x/y 時若現在的尺寸不同(使用者開關面板,webview 在 slot 尺寸與停放的 1024×768 之間切換)就回這個錯誤,不要點下去。
+> 5. screenshot 會被 session 事件原樣存進 DB 並廣播(`ToolImage` 會在對話串顯示)——P4b 執行器請用偏低的 JPEG 品質(約 60–70),讓單張遠低於 1 MB(core 上限 5 MB 只是保險)。
+> 6. 瀏覽器工具的結果文字裡,網頁內容(`browser_read_page`)已帶「不可信資料」標示;host 回的 `text`/`name` 不需要再包一層。
+>
+> **沒有 e2e 的部分**:`browser.registerHost` 被**非本機**(非 loopback)連線呼叫的拒絕路徑——需要讓 core 綁到對外位址再用區網 IP 連,會跳 Windows 防火牆提示,這輪沒做;邏輯只有 `!isLocal` 一個條件(`dispatch()` 的 `browser.registerHost` case),`isLocal` 本身由既有的 `LOCAL_ONLY_METHODS` 路徑測過。
+
 ---
 
 ## P4b. agent 瀏覽器工具:Electron 端執行器 + UI

@@ -391,7 +391,11 @@ gateway 方法 `session.rewind` / `session.fork`,參數 `{ sessionId, messageId 
 - agent 只能操作**自己 session** 的瀏覽器(方法參數沒有 sessionId,由 token 決定)。
 - 下載一律取消、網頁的裝置權限(相機/麥克風/定位/通知…)一律拒絕、彈出視窗改在同一頁開(`<webview>` 帶 `allowpopups` 且由 main 強制;`setWindowOpenHandler` 永遠 `deny`,不會建立新視窗,只有 http(s) 目標在同一個 webview 導過去)。
 - 第一版不提供執行任意 JavaScript 的工具。
-- 設定開關 `features.agentBrowserTools`(預設開)可整個關掉。
+- 設定開關 `features.agentBrowserTools`(預設開)可整個關掉:關掉時 core 不核發帶瀏覽器範圍的 bridge token(安全開關在 gateway,不在 adapter)、不注入 in-process 的 `BrowserPort`,
+  所有 adapter 的 tools/list 都沒有 `browser_*`。
+- **導覽規則實際落地在 `BrowserRelay`(2026-10-21)**:只放行 loopback(`localhost`、`*.localhost`、`127.0.0.0/8`、`[::1]`)、`policy.allowedHosts`(不分大小寫、完全比對 hostname,子網域不繼承)、
+  或該 session 開著「真.無限制」;http/https 以外的 scheme 一律 `browser.unsupportedScheme`;被拒的指令 host **完全收不到**,core 印 `console.warn`(含 session 與原因,不另建稽核表)。
+  IPv4-mapped IPv6、`0.0.0.0`、結尾有點的 `localhost.` 刻意不算 loopback。`browser-command` 只經 targeted push 送給 `browser.registerHost` 註冊的那一條(本機、非 scoped)連線,不走 `broadcast()`。
 
 **3. 瀏覽器登入狀態:每個 session 獨立、不落地**
 
@@ -408,3 +412,5 @@ bridge 本身不讀 push,改成 scoped 連線一律不收 push。
 - core 只擋 agent **明確要求**的導覽;到了頁面上之後的連結、表單、重新導向可以走到 allowedHosts 以外——瀏覽器本質上能對外連線。要嚴格隔離就關 `features.agentBrowserTools`。
 - `policy.allowedHosts` 沒有 UI、也沒有 RPC(安全罩地基,刻意如此),只能手改 `~/.deskmony/config.json`。
 - 瀏覽器工具需要桌面 app 開著;純 headless core 或只有遠端瀏覽器 client 時,工具回 `browser.noHost`。
+- codex 的 MCP 工具權限請求(codex-acp 在已有 tool_call 時只帶 `toolCallId`)沒有工具名與參數——`AcpAdapter` 把 call id 當 toolName、input 是空的,所以政策規則與「永遠允許」對 codex 的 MCP 工具無從比對
+  (包含 `browser_navigate`;它因此不會被 hard-deny 誤擋,導覽主機限制仍由 core 強制)。這是既有限制,查證細節與三種 adapter 的 toolName 見 `side-panel_detail.md` 的 P4a 實作備註。

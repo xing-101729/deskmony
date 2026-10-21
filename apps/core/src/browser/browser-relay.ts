@@ -351,7 +351,7 @@ export class BrowserRelay {
       this.pending.set(entry.commandId, entry);
       // 同一個 session 依序:接在它目前佇列的尾端;不同 session 各有各的佇列,互不阻塞。
       const tail = this.queues.get(sessionId) ?? Promise.resolve();
-      const next = tail.then(() => this.dispatchToHost(entry));
+      const next = tail.then(() => this.dispatchToHost(entry)).catch(() => undefined); // dispatchToHost 自己不會丟;保險,佇列鏈永遠不能 reject
       this.queues.set(sessionId, next);
       void next.then(() => {
         if (this.queues.get(sessionId) === next) this.queues.delete(sessionId);
@@ -376,12 +376,18 @@ export class BrowserRelay {
           ),
         });
       }, timeoutMs);
-      const sent = entry.host.sendCommand({
-        commandId: entry.commandId,
-        sessionId: entry.sessionId,
-        op: entry.op,
-        args: entry.args,
-      });
+      // socket.send 在連線剛好關閉的邊緣可能丟例外——當成沒送出去,不能讓例外逃出這個 promise(它在佇列鏈上,逃出去 = 這個 session 的佇列壞掉)。
+      let sent = false;
+      try {
+        sent = entry.host.sendCommand({
+          commandId: entry.commandId,
+          sessionId: entry.sessionId,
+          op: entry.op,
+          args: entry.args,
+        });
+      } catch (err) {
+        console.warn(`[browser-relay] 對 host ${entry.host.id} 送指令時丟出例外:${err instanceof Error ? err.message : String(err)}`);
+      }
       if (!sent) this.settle(entry, { error: this.hostDisconnected("send-failed") });
     });
   }
