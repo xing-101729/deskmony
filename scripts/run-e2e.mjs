@@ -69,6 +69,10 @@ const SUITES = [
   // 各種狀態與 diff、沒有 commit 的 repo、不是 repo、檔案預覽的各種上限、**路徑逃逸**(每種寫法對每個方法各測一次,含 junction)、
   // scoped token 不能呼叫、repo 設定埋的指令(fsmonitor/filter/textconv/external diff)不會被執行。一個 core,約半分鐘。
   "e2e-side-panel-workspace",
+  // 2026-10-21(右側面板 P4a):agent 瀏覽器工具——真的 mcp-bridge 子行程 + 假的 browser host:導覽規則(loopback/allowedHosts/真.無限制/scheme)、
+  // host 看不到被擋的指令、`browser-command` 只送給 host、commandResult 驗證、逾時/斷線/取代、排隊、結果驗證、features.agentBrowserTools 開關。
+  // 三個 core 依序開關(含一次重啟),約一分鐘;疊在 scoped token 的 P0 修補與 e2e-session-network 的 bridge 之上,所以放在這裡。
+  "e2e-side-panel-browser",
   // 2026-10-06:session 手動改名 + AI 自動命名(臨時對話不污染主對話、不得用工具、各種退回截取首句、使用者改過不覆蓋、
   // title_source 遷移)——一個 core + fake ACP/OpenCode/PTY,一分多鐘跑完。
   "e2e-session-title",

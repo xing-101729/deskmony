@@ -43,7 +43,7 @@ import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 
 requireFreshBuild();
 
-const { checkHardDeny } = await import(
+const { checkHardDeny, isDeskmonyBrowserNavigateTool } = await import(
   pathToFileURL(path.resolve("apps/core/dist/permissions/hard-deny.js")).href
 );
 
@@ -269,6 +269,85 @@ console.log("\n=== 第 4 類:non-allowlisted-network(稽核前零覆蓋)===\n");
     "4d 猜不到 host 時回 matched:false(交給 default-deny 兜底),不是當成已核可",
     !unparseable.matched && !noHostField.matched,
     `無法解析的 url=${unparseable.matched}, 完全沒有 host 欄位=${noHostField.matched}`,
+  );
+}
+
+// ===========================================================================
+// 第 4 類補充(2026-10-21,右側面板 P4a):Deskmony 自己的 browser_navigate 不做「非白名單外連」檢查——外部網站改由 core 的 BrowserRelay
+// 導覽規則擋(loopback/allowedHosts/真.無限制,而且比 hard-deny 更嚴)。判斷綁死 `deskmony` server 名稱、完整比對,不能只比結尾。
+// ===========================================================================
+console.log("\n=== 第 4 類補充:browser_navigate 的例外(三種 adapter 的寫法;別人的同名工具與 WebFetch 不受影響)===\n");
+
+{
+  // 三種寫法(查證依據見 apps/core/src/permissions/hard-deny.ts 的 DESKMONY_BROWSER_NAVIGATE_TOOL_NAMES):
+  //  - Claude SDK / claude-code-acp:mcp__<server>__<tool>;OpenCode:<server>_<tool>;codex-acp 的 tool_call title:mcp.<server>.<tool>。
+  const DESKMONY_NAMES = [
+    ["Claude SDK", "mcp__deskmony__browser_navigate"],
+    ["OpenCode", "deskmony_browser_navigate"],
+    ["codex-acp", "mcp.deskmony.browser_navigate"],
+  ];
+  const externalUrls = [
+    "https://evil.example.com/steal",
+    "http://169.254.169.254/latest/meta-data/",
+    "https://api.example.com/v1",
+  ];
+  const loopbackUrls = ["http://localhost:3000/", "http://127.0.0.1:5173/x", "http://[::1]:8080/"];
+  const exemptFailures = [];
+  for (const [label, toolName] of DESKMONY_NAMES) {
+    for (const u of [...externalUrls, ...loopbackUrls]) {
+      for (const allowedHosts of [[], ["api.example.com"]]) {
+        const r = check({ toolName, input: { url: u }, allowedHosts });
+        if (r.matched) exemptFailures.push(`${label} ${u} allowedHosts=${JSON.stringify(allowedHosts)} → ${r.category}`);
+      }
+    }
+  }
+  record(
+    "4e browser_navigate 三種名稱寫法(mcp__deskmony__… / deskmony_… / mcp.deskmony.…)帶任何 url(外部、metadata IP、loopback)都**不**被第 4 類 hard-deny(外部網站由 core 的 BrowserRelay 擋,loopback 依 Q5 不算外連)",
+    exemptFailures.length === 0 && DESKMONY_NAMES.every(([, n]) => isDeskmonyBrowserNavigateTool(n)),
+    exemptFailures.length === 0 ? `三種寫法 × ${externalUrls.length + loopbackUrls.length} 種網址 × 2 種 allowedHosts 全部 matched:false` : exemptFailures.join("; "),
+  );
+}
+
+{
+  // 負面案例:例外只給 deskmony server 的 browser_navigate,絕不能讓同名/類似名稱的工具跟著逃過第 4 類。
+  const imposters = [
+    ["別的 MCP server 的同名工具(Claude 寫法)", "mcp__evil__browser_navigate"],
+    ["別的 MCP server 的同名工具(OpenCode 寫法)", "evil_browser_navigate"],
+    ["別的 MCP server 的同名工具(codex 寫法)", "mcp.evil.browser_navigate"],
+    ["只有結尾像", "browser_navigate"],
+    ["結尾像、前綴不同(只比結尾會放行)", "mcp__notdeskmony__browser_navigate"],
+    ["server 名稱當後綴", "mcp__deskmony-evil__browser_navigate"],
+    ["deskmony 的別的工具", "mcp__deskmony__browser_click"],
+    ["deskmony 的 send_to_session", "mcp__deskmony__send_to_session"],
+    ["多一段尾巴", "mcp__deskmony__browser_navigate_and_more"],
+    ["大小寫不同", "MCP__DESKMONY__BROWSER_NAVIGATE"],
+    ["前後空白", " mcp__deskmony__browser_navigate "],
+    ["WebFetch", "WebFetch"],
+    ["Bash 以外的網路工具", "web_search"],
+  ];
+  const leaked = [];
+  for (const [label, toolName] of imposters) {
+    const r = check({ toolName, input: { url: "https://evil.example.com/x" }, allowedHosts: [] });
+    if (!(r.matched && r.category === "non-allowlisted-network")) leaked.push(label);
+    if (isDeskmonyBrowserNavigateTool(toolName)) leaked.push(`${label}(isDeskmonyBrowserNavigateTool 回 true)`);
+  }
+  // 同一個外部 host:WebFetch 仍被擋;放進 allowedHosts 才放行——例外沒有動到其他工具的第 4 類判斷。
+  const fetchBlocked = check({ toolName: "WebFetch", input: { url: "https://evil.example.com/x" }, allowedHosts: [] });
+  const fetchAllowed = check({ toolName: "WebFetch", input: { url: "https://evil.example.com/x" }, allowedHosts: ["evil.example.com"] });
+  record(
+    "4f 例外只給 deskmony 的 browser_navigate:別的 MCP server 的同名工具(三種寫法)、只比結尾的名字、結尾像前綴不同、deskmony 的其他工具、大小寫/空白變體、WebFetch 到同一個外部 host 仍被第 4 類 hard-deny;WebFetch 對 allowedHosts 的判斷不變",
+    leaked.length === 0 && fetchBlocked.matched && fetchBlocked.category === "non-allowlisted-network" && !fetchAllowed.matched,
+    leaked.length === 0 ? `fetchBlocked=${fetchBlocked.category}, fetchAllowed.matched=${fetchAllowed.matched}` : `漏網:${leaked.join("、")}`,
+  );
+}
+
+{
+  // browser_navigate 的例外只跳過第 4 類——其他類別照常:例如它的 input 夾帶秘密路徑欄位,仍然命中第 2 類。
+  const secret = check({ toolName: "mcp__deskmony__browser_navigate", input: { url: "http://localhost/", file_path: path.join(HOME, ".ssh", "id_rsa") } });
+  record(
+    "4g browser_navigate 的例外只跳過第 4 類:input 夾帶秘密路徑仍命中第 2 類(secret-path)",
+    secret.matched && secret.category === "secret-path",
+    `category=${secret.category}`,
   );
 }
 

@@ -903,6 +903,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
               : state.policyRules.filter((r) => r.id !== rule.id),
         }));
       }
+      // 其餘 channel 這裡不處理、安全忽略(不能丟例外):`terminal-*` 由 terminal-store 訂閱;`browser-command`(2026-10-21,P4a)只會送給
+      // 註冊成 browser host 的那一條連線(P4b 才由桌面端註冊),一般 client 永遠收不到;之後新增的 channel 也一樣。
     });
     /**
      * 2026-09-04(稽核修補):斷線重連後補資料。

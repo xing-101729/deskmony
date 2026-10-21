@@ -1,0 +1,19 @@
+{
+  "browser": {
+    "noHost": "No Deskmony desktop app is open — the browser tools need the desktop app's side panel. Open the desktop app and try again.",
+    "hostDisconnected": "The Deskmony desktop app disconnected while the browser command was running. Make sure it is still open, then try again.",
+    "timeout": "The browser did not respond within {{timeoutMs}} ms ({{op}}). The page may be stuck; try again later.",
+    "hostNotAllowed": "The browser tools can only open localhost or sites listed in policy.allowedHosts; \"{{host}}\" is not one of them. To allow it, add \"{{host}}\" to policy.allowedHosts in ~/.deskmony/config.json and restart Deskmony.",
+    "unsupportedScheme": "The browser tools can only open http:// or https:// addresses, not \"{{scheme}}:\".",
+    "invalidArgs": "Invalid browser tool arguments: {{detail}}",
+    "registerNotAllowed": "Only the local, non-scoped connection from the Deskmony desktop app can register as the browser host.",
+    "resultTooLarge": "The browser returned a screenshot that is too large ({{bytes}} bytes, limit {{maxBytes}}).",
+    "invalidResult": "The browser returned a malformed result ({{op}}): {{detail}}",
+    "staleRef": "That element reference has expired because the page navigated. Run browser_read_page (interactive) again to get fresh refs.",
+    "staleScreenshot": "The page's window size changed since the last screenshot, so the coordinates are no longer accurate. Take a new screenshot first.",
+    "noScreenshot": "Take a screenshot first — the x/y coordinates of browser_click refer to the latest screenshot.",
+    "elementNotFound": "The element no longer exists or has nothing to click.",
+    "navigationFailed": "The page failed to load: {{detail}}",
+    "hostError": "The browser reported an error: {{detail}}"
+  }
+}

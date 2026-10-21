@@ -1,0 +1,19 @@
+{
+  "browser": {
+    "noHost": "Deskmony デスクトップアプリが開かれていません。ブラウザーツールにはデスクトップアプリのサイドパネルが必要です。アプリを開いてからもう一度お試しください。",
+    "hostDisconnected": "ブラウザーコマンドの実行中に Deskmony デスクトップアプリとの接続が切れました。アプリが開いたままか確認して、もう一度お試しください。",
+    "timeout": "ブラウザーが {{timeoutMs}} ms 以内に応答しませんでした({{op}})。ページが固まっている可能性があります。しばらくしてからもう一度お試しください。",
+    "hostNotAllowed": "ブラウザーツールが開けるのは localhost と policy.allowedHosts に登録されたサイトだけです。「{{host}}」は含まれていません。許可するには ~/.deskmony/config.json の policy.allowedHosts に「{{host}}」を追加して、Deskmony を再起動してください。",
+    "unsupportedScheme": "ブラウザーツールが開けるのは http:// または https:// のアドレスだけです(「{{scheme}}:」は開けません)。",
+    "invalidArgs": "ブラウザーツールの引数が正しくありません: {{detail}}",
+    "registerNotAllowed": "ブラウザーのホストとして登録できるのは、Deskmony デスクトップアプリからの、ローカルかつスコープなしの接続だけです。",
+    "resultTooLarge": "ブラウザーが返したスクリーンショットが大きすぎます({{bytes}} バイト、上限 {{maxBytes}})。",
+    "invalidResult": "ブラウザーが返した結果の形式が正しくありません({{op}}): {{detail}}",
+    "staleRef": "ページが移動したため、その要素の参照は無効になりました。browser_read_page(interactive)をもう一度実行して新しい参照を取得してください。",
+    "staleScreenshot": "前回のスクリーンショット以降にページのウィンドウサイズが変わったため、座標がずれています。先に新しいスクリーンショットを撮ってください。",
+    "noScreenshot": "先にスクリーンショットを撮ってください。browser_click の x/y は最新のスクリーンショット上の座標です。",
+    "elementNotFound": "その要素はもう存在しないか、クリックできる場所がありません。",
+    "navigationFailed": "ページを読み込めませんでした: {{detail}}",
+    "hostError": "ブラウザーがエラーを報告しました: {{detail}}"
+  }
+}

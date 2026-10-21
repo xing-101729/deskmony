@@ -1,0 +1,19 @@
+{
+  "browser": {
+    "noHost": "No hay ninguna aplicación de escritorio de Deskmony abierta: las herramientas del navegador necesitan el panel lateral de la aplicación de escritorio. Ábrela e inténtalo de nuevo.",
+    "hostDisconnected": "La aplicación de escritorio de Deskmony se desconectó mientras se ejecutaba el comando del navegador. Comprueba que sigue abierta e inténtalo de nuevo.",
+    "timeout": "El navegador no respondió en {{timeoutMs}} ms ({{op}}). Puede que la página esté bloqueada; inténtalo más tarde.",
+    "hostNotAllowed": "Las herramientas del navegador solo pueden abrir localhost o los sitios de policy.allowedHosts; \"{{host}}\" no es uno de ellos. Para permitirlo, añade \"{{host}}\" a policy.allowedHosts en ~/.deskmony/config.json y reinicia Deskmony.",
+    "unsupportedScheme": "Las herramientas del navegador solo pueden abrir direcciones http:// o https://, no \"{{scheme}}:\".",
+    "invalidArgs": "Argumentos no válidos para la herramienta del navegador: {{detail}}",
+    "registerNotAllowed": "Solo la conexión local y sin alcance limitado de la aplicación de escritorio de Deskmony puede registrarse como host del navegador.",
+    "resultTooLarge": "El navegador devolvió una captura demasiado grande ({{bytes}} bytes, límite {{maxBytes}}).",
+    "invalidResult": "El navegador devolvió un resultado con formato incorrecto ({{op}}): {{detail}}",
+    "staleRef": "La referencia de ese elemento ha caducado porque la página navegó. Ejecuta browser_read_page (interactive) de nuevo para obtener referencias nuevas.",
+    "staleScreenshot": "El tamaño de la ventana de la página cambió desde la última captura, así que las coordenadas ya no son exactas. Haz una captura nueva primero.",
+    "noScreenshot": "Haz primero una captura: las coordenadas x/y de browser_click se refieren a la última captura.",
+    "elementNotFound": "El elemento ya no existe o no tiene nada en lo que hacer clic.",
+    "navigationFailed": "No se pudo cargar la página: {{detail}}",
+    "hostError": "El navegador informó de un error: {{detail}}"
+  }
+}

@@ -86,15 +86,17 @@ export function createSessionNetworkMcpServer(
   callerSessionId: string,
   browserPort?: BrowserPort,
 ): McpSdkServerConfigWithInstance {
+  // 呼叫者身分一律排在 `...args` **之後**:就算工具參數裡夾帶了 `callerSessionId`(MCP SDK 的 zod 解析本來就會丟掉未知欄位,這是第二道保險),
+  // 也蓋不掉閉包捕捉的那個。
   const browserTools = browserPort
     ? createBrowserToolDefs({
-        navigate: (args) => browserPort.navigate({ callerSessionId, ...args }),
+        navigate: (args) => browserPort.navigate({ ...args, callerSessionId }),
         screenshot: () => browserPort.screenshot({ callerSessionId }),
-        readPage: (args) => browserPort.readPage({ callerSessionId, ...args }),
-        click: (args) => browserPort.click({ callerSessionId, ...args }),
-        type: (args) => browserPort.type({ callerSessionId, ...args }),
-        pressKey: (args) => browserPort.pressKey({ callerSessionId, ...args }),
-        scroll: (args) => browserPort.scroll({ callerSessionId, ...args }),
+        readPage: (args) => browserPort.readPage({ ...args, callerSessionId }),
+        click: (args) => browserPort.click({ ...args, callerSessionId }),
+        type: (args) => browserPort.type({ ...args, callerSessionId }),
+        pressKey: (args) => browserPort.pressKey({ ...args, callerSessionId }),
+        scroll: (args) => browserPort.scroll({ ...args, callerSessionId }),
       }).map((def) => tool(def.name, def.description, def.inputShape, def.handler))
     : [];
   return createSdkMcpServer({
