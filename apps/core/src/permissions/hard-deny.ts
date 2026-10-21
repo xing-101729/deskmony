@@ -48,6 +48,33 @@ export interface HardDenyCheckInput {
   allowedHosts: string[];
 }
 
+/**
+ * Deskmony 自己的 `browser_navigate` MCP 工具(session 網路 MCP server `deskmony`,見 packages/adapters/src/session-network-mcp.ts)在三種
+ * adapter 的政策引擎裡的**完整名稱**——判斷綁死 `deskmony` 這個 server 名稱,**不能只比結尾**(別的 MCP server 可能也有叫
+ * `browser_navigate` 的工具,它們仍要受第 4 類「非白名單外連」約束)。三種寫法各有來源(2026-10-21 查證):
+ *  - `mcp__deskmony__browser_navigate`:Claude Agent SDK 的 `canUseTool` 收到的工具名。SDK 把 in-process MCP 工具一律組成
+ *    `mcp__${serverName}__${toolName}`(查證:`@anthropic-ai/claude-agent-sdk` 的 sdk.mjs 組名的樣板字串與 sdk.d.ts 的說明),
+ *    server 名稱就是我們掛的 `deskmony`;claude-code-acp 這類 ACP 後端用的也是同一種寫法。
+ *  - `deskmony_browser_navigate`:OpenCode(HTTP 的 `part.tool`/`permission.asked`)的 MCP 工具名 = `<server>_<tool>`,
+ *    與 `opencode-config.ts` 的 `SESSION_NETWORK_QUERY_TOOL_NAMES` 預先放行的那一套寫法相同(待實測補述)。
+ *  - `mcp.deskmony.browser_navigate`:codex-acp(`@agentclientprotocol/codex-acp` 1.13.1)對 MCP 工具呼叫的 `tool_call` title
+ *    (查證:它的 dist/index.js `createMcpToolCallUpdate()` 用 `mcp.${item.server}.${item.tool}`)。
+ *    ⚠️ 但 codex-acp 的 MCP **權限請求**(`session/request_permission`)在已有對應 tool_call 時只帶 `toolCallId`、沒有 title 也沒有 rawInput,
+ *    `AcpAdapter` 因此把 call id 當成 toolName、input 是空的——這種請求在這裡認不出是什麼工具,但它也沒有 url 可供第 4 類比對,所以不會被誤判成外連;
+ *    (這是 `AcpAdapter` 既有的限制:codex 的 MCP 工具權限請求拿不到工具名,見 docs/DECISIONS.md §L.2 的備註。)
+ * 其他寫法(例如沒查證過的 gemini)不在這份名單裡,保守起見仍受第 4 類約束。
+ */
+const DESKMONY_BROWSER_NAVIGATE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "mcp__deskmony__browser_navigate",
+  "deskmony_browser_navigate",
+  "mcp.deskmony.browser_navigate",
+]);
+
+/** 這個 toolName 是不是 Deskmony 自己的 `browser_navigate`(完整比對,見上方名單的說明)。 */
+export function isDeskmonyBrowserNavigateTool(toolName: string): boolean {
+  return DESKMONY_BROWSER_NAVIGATE_TOOL_NAMES.has(toolName);
+}
+
 /** 工具名裡含這些關鍵字(不分大小寫)才視為「會修改/刪除檔案系統」的操作——
  *  worktree-escape 只對這類工具的路徑做檢查,單純讀取(Read/Glob/Grep)不算,
  *  避免「讀取 worktree 外的檔案」被誤判成「worktree 外寫入/刪除」這個更嚴重
@@ -190,7 +217,11 @@ export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
   }
 
   // 4) 非白名單外連——只對猜得到 host 的工具檢查,allowedHosts 預設空 = 全擋。
-  const host = extractHostFromInput(req.input);
+  //    **例外(2026-10-21,右側面板 P4a,docs/DECISIONS.md §L.2)**:Deskmony 自己的 `browser_navigate`(見
+  //    `isDeskmonyBrowserNavigateTool()`,完整比對三種 adapter 的寫法、綁 `deskmony` server 名稱)不做這個檢查——loopback 依 Q5 不算外連,
+  //    外部網站則由 core 的 `BrowserRelay` 導覽規則擋(只放行 loopback、`policy.allowedHosts`、或該 session 開著真.無限制,
+  //    而且比這裡**更嚴**:沒有「逐次強確認放行」這條路)。WebFetch 等其他工具的第 4 類判斷完全不變。
+  const host = isDeskmonyBrowserNavigateTool(req.toolName) ? undefined : extractHostFromInput(req.input);
   if (host !== undefined) {
     const allowed = req.allowedHosts.some((h) => h.toLowerCase() === host.toLowerCase());
     if (!allowed) {

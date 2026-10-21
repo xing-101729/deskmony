@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
-import type { SessionNetworkPort } from "@deskmony/shared";
+import type { BrowserPort, SessionNetworkPort } from "@deskmony/shared";
+import {
+  BROWSER_AUTO_ALLOWED_TOOL_LOCAL_NAMES,
+  BROWSER_INSTRUCTIONS,
+  BROWSER_TOOL_LOCAL_NAMES,
+  createBrowserToolDefs,
+} from "./browser-tools.js";
 
 /**
  * session-network-mcp.ts(2026-10-02,P3「session 網路」,取代 S12 的 `subagent-mcp.ts`;見
@@ -45,6 +51,21 @@ export const SESSION_NETWORK_ALLOWED_TOOL_NAMES = [
   `mcp__${SESSION_NETWORK_MCP_SERVER_NAME}__read_session`,
 ];
 
+/**
+ * 2026-10-21(右側面板 P4a):瀏覽器七個工具的全名(`mcp__deskmony__browser_*`)。只有 `createSessionNetworkMcpServer()` 收到
+ * `browserPort` 時才會掛;它們的名稱、描述與參數 schema 定義在 `browser-tools.ts`(與 bridge 共用同一份)。
+ */
+export const BROWSER_TOOL_NAMES = BROWSER_TOOL_LOCAL_NAMES.map((name) => `mcp__${SESSION_NETWORK_MCP_SERVER_NAME}__${name}`);
+
+/**
+ * 瀏覽器工具裡唯讀/無副作用的三個(截圖、讀頁面、捲動)可以放進 allowedTools 自動放行;`browser_navigate`/`browser_click`/
+ * `browser_type`/`browser_press_key` **刻意不在這裡**——它們會改變頁面(導覽、點擊、送出表單),走既有權限彈窗(auto 模式自動放行)。
+ * 導覽規則(只能 loopback/`policy.allowedHosts`/真.無限制)由 core 的 `BrowserRelay` 強制,與有沒有問權限無關。
+ */
+export const BROWSER_AUTO_ALLOWED_TOOL_NAMES = BROWSER_AUTO_ALLOWED_TOOL_LOCAL_NAMES.map(
+  (name) => `mcp__${SESSION_NETWORK_MCP_SERVER_NAME}__${name}`,
+);
+
 function textResult(text: string, isError = false) {
   return { content: [{ type: "text" as const, text }], ...(isError ? { isError: true } : {}) };
 }
@@ -56,11 +77,26 @@ function errorText(err: unknown): string {
 /**
  * `callerSessionId` 由呼叫端(ClaudeAgentSdkAdapter)以自己的 handle.id 閉包捕捉帶入——工具參數裡沒有任何
  * caller/parent 欄位,agent 無法冒名別的 session。
+ *
+ * `browserPort`(2026-10-21,P4a)有值時才多掛瀏覽器七個工具與 instructions 的瀏覽器段落(`features.agentBrowserTools` 關閉時
+ * `apps/core` 不注入,所以 tools/list 完全沒有它們)。瀏覽器工具的定義與 bridge 版共用 `browser-tools.ts`。
  */
 export function createSessionNetworkMcpServer(
   port: SessionNetworkPort,
   callerSessionId: string,
+  browserPort?: BrowserPort,
 ): McpSdkServerConfigWithInstance {
+  const browserTools = browserPort
+    ? createBrowserToolDefs({
+        navigate: (args) => browserPort.navigate({ callerSessionId, ...args }),
+        screenshot: () => browserPort.screenshot({ callerSessionId }),
+        readPage: (args) => browserPort.readPage({ callerSessionId, ...args }),
+        click: (args) => browserPort.click({ callerSessionId, ...args }),
+        type: (args) => browserPort.type({ callerSessionId, ...args }),
+        pressKey: (args) => browserPort.pressKey({ callerSessionId, ...args }),
+        scroll: (args) => browserPort.scroll({ callerSessionId, ...args }),
+      }).map((def) => tool(def.name, def.description, def.inputShape, def.handler))
+    : [];
   return createSdkMcpServer({
     name: SESSION_NETWORK_MCP_SERVER_NAME,
     version: "1.0.0",
@@ -75,7 +111,8 @@ export function createSessionNetworkMcpServer(
       "send_to_session:對任一 session(不能是你自己)送一則訊息;對方正忙時會排隊,等它目前這輪結束後才送達。" +
       "**系統不會自動回送任何東西**:你送出訊息後,系統不會等對方、也不會把對方的回答帶回給你——對方要不要回、回給誰,由對方自己決定。" +
       "同樣地,**收到別的 session 的訊息時(訊息開頭會標明來自哪個 session),要不要回、回給誰由你決定;" +
-      "要回覆就用 send_to_session,系統不會自動把你的回答送回去**。回覆對象也不一定是寄件者,可以是任何合適的 session。",
+      "要回覆就用 send_to_session,系統不會自動把你的回答送回去**。回覆對象也不一定是寄件者,可以是任何合適的 session。" +
+      (browserPort ? BROWSER_INSTRUCTIONS : ""),
     tools: [
       tool(
         "list_agents",
@@ -185,6 +222,7 @@ export function createSessionNetworkMcpServer(
           }
         },
       ),
+      ...browserTools,
     ],
   });
 }

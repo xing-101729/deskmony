@@ -14,7 +14,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentEvent, AgentLaunchSpec, DialogAnswer, EffortLevel, SlashCommandInfo } from "@deskmony/shared";
 import type { PromptAttachment, PromptInput } from "@deskmony/shared";
-import type { SessionNetworkPort } from "@deskmony/shared";
+import type { BrowserPort, SessionNetworkPort } from "@deskmony/shared";
 import { DeskmonyError, EffortLevelSchema, ErrorCodes } from "@deskmony/shared";
 import type {
   AdapterCapabilities,
@@ -34,6 +34,7 @@ import { invalidOptionError } from "./agent-options.js";
 import {
   SESSION_NETWORK_MCP_SERVER_NAME,
   SESSION_NETWORK_ALLOWED_TOOL_NAMES,
+  BROWSER_AUTO_ALLOWED_TOOL_NAMES,
   createSessionNetworkMcpServer,
 } from "./session-network-mcp.js";
 
@@ -123,6 +124,12 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
   private sessionNetworkPort?: SessionNetworkPort;
   setSessionNetworkPort(port: SessionNetworkPort): void {
     this.sessionNetworkPort = port;
+  }
+  // 2026-10-21(P4a):agent 瀏覽器工具(`browser_*`)的注入 port。沒注入(`features.agentBrowserTools` 關閉)時,
+  // 這個 session 的 `deskmony` MCP server 完全沒有瀏覽器工具。需要 `sessionNetworkPort` 也有——瀏覽器工具掛在同一個 MCP server 上。
+  private browserPort?: BrowserPort;
+  setBrowserPort(port: BrowserPort): void {
+    this.browserPort = port;
   }
 
   capabilities(): AdapterCapabilities {
@@ -319,11 +326,13 @@ export class ClaudeAgentSdkAdapter implements AgentAdapter {
     if (this.sessionNetworkPort) {
       // handle.id(= 這個 session 的 id)在 spawn() 開頭就已產生,這裡閉包捕捉當作**呼叫者身分**,
       // agent 無法覆寫(工具參數裡沒有任何 caller 欄位)。
-      mcpServers[SESSION_NETWORK_MCP_SERVER_NAME] = createSessionNetworkMcpServer(this.sessionNetworkPort, handle.id);
+      mcpServers[SESSION_NETWORK_MCP_SERVER_NAME] = createSessionNetworkMcpServer(this.sessionNetworkPort, handle.id, this.browserPort);
       // list_agents/list_sessions/read_session 是純查詢,自動放行;create_session/
       // send_to_session 刻意 **不** 放進 allowedTools —— 見 §4「權限」(兩者
       // 都會讓某個 session 多跑一輪、燒 token,必須走權限彈窗)。
       allowedTools.push(...SESSION_NETWORK_ALLOWED_TOOL_NAMES);
+      // 瀏覽器工具:截圖/讀頁面/捲動自動放行;導覽/點擊/輸入/按鍵走權限彈窗(導覽的主機限制由 core 的 BrowserRelay 強制,不靠彈窗)。
+      if (this.browserPort) allowedTools.push(...BROWSER_AUTO_ALLOWED_TOOL_NAMES);
     }
     if (Object.keys(mcpServers).length > 0) {
       options.mcpServers = mcpServers;

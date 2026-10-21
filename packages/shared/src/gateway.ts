@@ -11,6 +11,15 @@ import { ConfigSetFilePatchSchema, EffectiveCoreConfigSchema, PolicyAddRuleInput
 import { NetworkAgentSummarySchema, NetworkSessionSummarySchema, ReadSessionResultSchema } from "./session-network.js";
 import { RecoveryListResultSchema } from "./recovery.js";
 import { TERMINAL_INPUT_MAX_CHARS } from "./terminal.js";
+import {
+  BrowserClickArgsSchema,
+  BrowserCommandResultParamsSchema,
+  BrowserNavigateArgsSchema,
+  BrowserPressKeyArgsSchema,
+  BrowserReadPageArgsSchema,
+  BrowserScrollArgsSchema,
+  BrowserTypeArgsSchema,
+} from "./browser.js";
 
 /**
  * Gateway WS 訊息協議(ARCHITECTURE.md 3.2 節):
@@ -581,6 +590,30 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
     method: z.literal("workspace.gitDiff"),
     params: z.object({ sessionId: z.string(), path: z.string().max(4096), oldPath: z.string().max(4096).optional() }),
   }),
+  // ---- 2026-10-21(右側面板 P4a):agent 瀏覽器工具(見 packages/shared/src/browser.ts、
+  // docs/LAYER-4-detail-design/side-panel_detail.md §P4a、docs/DECISIONS.md §L.2)------------------
+  /**
+   * `browser.registerHost`:桌面 app 宣告「我是 agent 瀏覽器指令的執行端」。**只收非 scoped、且本機(`isLocal`)的連線**——
+   * 遠端 client 沒有 webview,也不該能攔截 agent 的瀏覽器指令(攔截 = 看得到 agent 在瀏覽什麼、能偽造頁面內容給 agent)。
+   * 多個 host 時以最後註冊的為準;host 連線斷開就自動註銷。`browser-command` push 之後只送給這一條連線。
+   * `browser.commandResult`:host 回報某個指令的結果——必須來自**同一條 host 連線**、`commandId` 必須是還在等的指令,
+   * 否則被忽略(記 warning)。**這兩個方法絕不在任何 scoped token 的白名單裡**(agent 不能自己當 host、也不能偽造結果)。
+   */
+  z.object({ ...baseRequest, method: z.literal("browser.registerHost"), params: z.object({}).default({}) }),
+  z.object({ ...baseRequest, method: z.literal("browser.commandResult"), params: BrowserCommandResultParamsSchema }),
+  /**
+   * 七個 bridge 專用方法,一個工具一個(`browser_navigate`…`browser_scroll`),**精確**加進 `computeAllowedMethods()`
+   * (`McpBridgeTokenScope.browser` 為真才有)。與 session 網路那五個一樣:**參數裡沒有 sessionId**——目標一律是 token 綁定的
+   * 呼叫者自己的 session;一般連線呼叫一律被拒(沒有呼叫者身分,fail-closed)。導覽規則(scheme、loopback/`allowedHosts`)
+   * 由 core 在 `BrowserRelay` 強制執行,不依賴 adapter 有沒有問權限。
+   */
+  z.object({ ...baseRequest, method: z.literal("browser.navigateForAgent"), params: BrowserNavigateArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.screenshotForAgent"), params: z.object({}).default({}) }),
+  z.object({ ...baseRequest, method: z.literal("browser.readPageForAgent"), params: BrowserReadPageArgsSchema.default({}) }),
+  z.object({ ...baseRequest, method: z.literal("browser.clickForAgent"), params: BrowserClickArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.typeForAgent"), params: BrowserTypeArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.pressKeyForAgent"), params: BrowserPressKeyArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.scrollForAgent"), params: BrowserScrollArgsSchema }),
 ]);
 export type ClientRequest = z.infer<typeof ClientRequestSchema>;
 export type ClientRequestMethod = ClientRequest["method"];
@@ -659,6 +692,13 @@ export const ServerPushSchema = z.object({
      */
     "terminal-output",
     "terminal-updated",
+    /**
+     * 2026-10-21(右側面板 P4a):core 要 host(桌面 app 的瀏覽器執行端)執行一個 agent 的瀏覽器指令——payload 見
+     * packages/shared/src/browser.ts 的 `BrowserCommandPushSchema`。**只送給 `browser.registerHost` 註冊的那一條連線**
+     * (`WsGateway` 的 targeted push),**不走 `broadcast()`**:其他 client 看不到 agent 在瀏覽什麼,scoped 連線更收不到。
+     * 沒有註冊成 host 的 client 永遠不會收到這個 channel;收到不認得的 channel 要安全忽略(桌面端的 push 分派本來就如此)。
+     */
+    "browser-command",
   ]),
   payload: z.unknown(),
 });

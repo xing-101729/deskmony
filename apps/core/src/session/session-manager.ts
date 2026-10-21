@@ -1311,6 +1311,11 @@ export class SessionManager extends EventEmitter {
     return this.permissions.setTrueUnrestricted(sessionId, enabled, isRemote);
   }
 
+  /** 這個 session 現在是否開著「真.無限制」(純讀取,見 coordinator 的說明)。`BrowserRelay` 的導覽規則用。 */
+  isSessionTrueUnrestricted(sessionId: string): boolean {
+    return this.permissions.isTrueUnrestricted(sessionId);
+  }
+
   addPolicyRule(input: PolicyAddRuleInput, isRemote: boolean): PolicyRule {
     return this.permissions.addRule(input, isRemote);
   }

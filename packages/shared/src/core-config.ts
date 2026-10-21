@@ -109,6 +109,13 @@ export const FeaturesConfigSchema = z
   .object({
     /** 對應 `DESKMONY_STATIC_DIR`。省略 = 維持既有依 monorepo 佈局推算的預設值。 */
     staticDir: z.string().min(1).optional(),
+    /**
+     * 2026-10-21(右側面板 P4a):agent 能不能操作桌面 app 右側面板的瀏覽器(MCP 工具 `browser_*`,見
+     * packages/shared/src/browser.ts)。預設 `true`;`false` 時 core 不核發帶 `browser` 範圍的 bridge token、
+     * 不注入 in-process 的 `BrowserPort`,所有 adapter 的 tools/list 都沒有瀏覽器工具。
+     * 要嚴格隔離 agent 與使用者的瀏覽器登入狀態就關掉這個(見 docs/DECISIONS.md §L.5 已知限制)。
+     */
+    agentBrowserTools: z.boolean(),
   })
   .strict();
 export type FeaturesConfig = z.infer<typeof FeaturesConfigSchema>;
@@ -545,7 +552,7 @@ export const ConfigSetFileWorkspacePatchSchema = z
   })
   .strict();
 export const ConfigSetFileFeaturesPatchSchema = z
-  .object({ staticDir: z.string().min(1).optional() })
+  .object({ staticDir: z.string().min(1).optional(), agentBrowserTools: z.boolean().optional() })
   .strict();
 export const ConfigSetFileLogPatchSchema = z
   .object({ level: LogLevelSchema.optional() })
@@ -612,7 +619,10 @@ export const EffectiveCoreConfigSchema = z
       .strict(),
     data: z.object({ dataDir: effectiveFieldSchema(z.string()) }).strict(),
     features: z
-      .object({ staticDir: effectiveFieldSchema(z.string().optional()) })
+      .object({
+        staticDir: effectiveFieldSchema(z.string().optional()),
+        agentBrowserTools: effectiveFieldSchema(z.boolean()),
+      })
       .strict(),
     log: z.object({ level: effectiveFieldSchema(LogLevelSchema) }).strict(),
     policy: z

@@ -111,6 +111,8 @@ function computeDefaultCoreConfig(): CoreConfig {
     },
     features: {
       staticDir: undefined,
+      // 2026-10-21(右側面板 P4a):預設開——agent 可以用 MCP 工具操作桌面 app 右側面板的瀏覽器(見 core-config.ts 的欄位說明)。
+      agentBrowserTools: true,
     },
     log: {
       level: "info",
@@ -169,7 +171,7 @@ const KNOWN_CONFIG_KEYS: Record<string, true | Record<string, unknown>> = {
   },
   workspace: { defaultWorkingDir: true },
   data: { dataDir: true },
-  features: { staticDir: true },
+  features: { staticDir: true, agentBrowserTools: true },
   log: { level: true },
   // S1(PolicyEngine):`rules`/`allowedHosts` 都是葉節點(陣列),不遞迴進陣列
   // 元素內部掃描未知欄位——`scanUnknownKeys()` 對陣列本來就直接 return raw,
@@ -394,6 +396,10 @@ function applyEnvOverrides(
   const staticDir = envStaticDirRaw ? envStaticDirRaw : afterFile.features.staticDir;
   const staticDirSource: ConfigSource = envStaticDirRaw ? "env" : src("features.staticDir");
 
+  // ---- features.agentBrowserTools(沒有對應環境變數,只有 file/default 兩層)----
+  const agentBrowserTools = afterFile.features.agentBrowserTools;
+  const agentBrowserToolsSource: ConfigSource = src("features.agentBrowserTools");
+
   // ---- log.level(沒有對應環境變數,只有 file/default 兩層)----
   const logLevel = afterFile.log.level;
   const logLevelSource: ConfigSource = src("log.level");
@@ -458,7 +464,7 @@ function applyEnvOverrides(
     },
     workspace: { defaultWorkingDir },
     data: { dataDir },
-    features: { staticDir },
+    features: { staticDir, agentBrowserTools },
     log: { level: logLevel },
     policy: { rules: policyRules, allowedHosts: policyAllowedHosts },
     notification: {
@@ -498,7 +504,10 @@ function applyEnvOverrides(
       defaultWorkingDir: field(defaultWorkingDir, defaultWorkingDirSource),
     },
     data: { dataDir: field(dataDir, dataDirSource) },
-    features: { staticDir: field(staticDir, staticDirSource) },
+    features: {
+      staticDir: field(staticDir, staticDirSource),
+      agentBrowserTools: field(agentBrowserTools, agentBrowserToolsSource),
+    },
     log: { level: field(logLevel, logLevelSource) },
     policy: {
       rules: field(policyRules, policyRulesSource),
@@ -598,6 +607,10 @@ function mergeFileOverDefaults(
   if (file.features?.staticDir !== undefined) {
     merged.features.staticDir = file.features.staticDir;
     fileSources["features.staticDir"] = "file";
+  }
+  if (file.features?.agentBrowserTools !== undefined) {
+    merged.features.agentBrowserTools = file.features.agentBrowserTools;
+    fileSources["features.agentBrowserTools"] = "file";
   }
   if (file.log?.level !== undefined) {
     merged.log.level = file.log.level;

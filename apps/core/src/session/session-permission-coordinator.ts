@@ -237,6 +237,19 @@ export class SessionPermissionCoordinator {
     return removed;
   }
 
+  /**
+   * 這個 session 現在是否開著「真.無限制」(2026-10-21,給 `BrowserRelay` 的導覽規則用:開著時 agent 的瀏覽器可以導覽到任何 http(s) 主機)。
+   *
+   * **純讀取、沒有副作用**——刻意不呼叫 `checkAndExpireYolo()`:那個方法在 YOLO 剛過期時會就地降級並把「剛過期」的訊號只交給
+   * 權限決策的呼叫端(去寫系統訊息、廣播 session-updated);這裡若順手消耗掉那個訊號,使用者就看不到「YOLO 已到期」的說明。
+   * 所以自己判斷:狀態是 YOLO、有 `trueUnrestricted`、而且 YOLO 還沒到期,才算開著(到期但還沒被權限決策清掉的空窗期算關著)。
+   */
+  isTrueUnrestricted(sessionId: string): boolean {
+    const state = this.permissionState.get(sessionId);
+    if (!state || state.mode !== "auto-accept-all" || state.trueUnrestricted !== true) return false;
+    return state.yoloExpiresAt === undefined || Date.now() < state.yoloExpiresAt;
+  }
+
   /** `policy.listRules` RPC 用。 */
   listRules(): PolicyRule[] {
     return this.deps.policyEngine.getRules();

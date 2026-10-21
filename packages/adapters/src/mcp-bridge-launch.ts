@@ -14,6 +14,8 @@ export interface McpBridgeLaunch {
   command: string;
   args: string[];
   env: Record<string, string>;
+  /** 這個 bridge 有掛瀏覽器七個工具(核發的 token 真的帶了 `browser` 範圍)。OpenCode 的預先放行設定要看這個。 */
+  browserTools: boolean;
 }
 
 /**
@@ -42,7 +44,12 @@ export function resolveMcpBridgeServerEntry(): string {
  * tasklist/工作管理員預設就會顯示完整命令列),見 mcp-bridge-server.ts 檔頭「環境變數」段落。
  */
 export function mintMcpBridgeLaunch(
-  deps: { sessionNetworkPort?: SessionNetworkPort; tokenMinter?: McpBridgeTokenPort },
+  deps: {
+    sessionNetworkPort?: SessionNetworkPort;
+    tokenMinter?: McpBridgeTokenPort;
+    /** 2026-10-21(P4a):要不要請求瀏覽器範圍(`features.agentBrowserTools` 為真時 apps/core 才會啟用)。實際有沒有拿到以核發結果為準。 */
+    browserTools?: boolean;
+  },
   sessionId: string,
   logLabel: string,
 ): McpBridgeLaunch | undefined {
@@ -60,8 +67,11 @@ export function mintMcpBridgeLaunch(
     return undefined;
   }
 
-  const grant: McpBridgeTokenGrant = deps.tokenMinter.mint({ sessionId, network: true });
+  const grant: McpBridgeTokenGrant = deps.tokenMinter.mint({ sessionId, network: true, browser: deps.browserTools === true });
+  // 以核發結果為準:core 會把要求的瀏覽器範圍與 `features.agentBrowserTools` 取交集。
+  const browserTools = grant.browser === true;
   return {
+    browserTools,
     command: process.execPath,
     args: [entryPath],
     env: {
@@ -72,6 +82,7 @@ export function mintMcpBridgeLaunch(
       DESKMONY_MCP_BRIDGE_GATEWAY_URL: grant.gatewayUrl,
       DESKMONY_MCP_BRIDGE_SESSION_ID: sessionId,
       DESKMONY_MCP_BRIDGE_NETWORK_ENABLED: "1",
+      ...(browserTools ? { DESKMONY_MCP_BRIDGE_BROWSER_ENABLED: "1" } : {}),
     },
   };
 }

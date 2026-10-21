@@ -33,6 +33,8 @@
  * `AgentHandle.id`(見 `AcpAdapter.spawn()`)——也是 session 網路五個方法的**呼叫者身分**:
  * gateway 從 token 取這個 id,方法參數**不收**任何 caller/parent 欄位(agent 無法冒名別的 session)。
  *
+ * (`browser: true` 另外授權瀏覽器七個方法,見下方 `browser` 欄位。)
+ *
  * `network: true` 時,核發的 token 能呼叫 session 網路對應的五個方法(`agent.listForAgent`/
  * `session.listForAgent`/`session.readForAgent`/`session.createFromAgent`/`session.sendFromAgent`);
  * `false` 時白名單為空(token 什麼都不能做)。
@@ -42,6 +44,12 @@ export interface McpBridgeTokenScope {
   sessionId: string;
   /** true 時,授權 session 網路五個工具對應的 gateway 方法。 */
   network: boolean;
+  /**
+   * true 時,授權瀏覽器七個工具對應的 gateway 方法(`browser.navigateForAgent`…`browser.scrollForAgent`,見
+   * `packages/shared/src/browser.ts`)。只有 `features.agentBrowserTools` 為真時核發的 token 才會帶——gateway 在核發時
+   * 再與這個設定取交集,所以即使呼叫端(adapter)要求了,設定關閉時也拿不到。
+   */
+  browser: boolean;
 }
 
 /** 核發結果——`gatewayUrl` 是子行程應該連線的 WS 位址(一律是子行程能連得到
@@ -53,6 +61,12 @@ export interface McpBridgeTokenGrant {
   /** 絕對過期時間(epoch ms)——即使忘了呼叫 `revokeForSession()`,token 也
    *  不會永久有效,見 `McpBridgeTokenPort` 類別註解。 */
   expiresAt: number;
+  /**
+   * 這個 token **實際**帶了瀏覽器範圍嗎(核發方與 `features.agentBrowserTools` 取交集之後的結果,不一定等於呼叫端要求的)。
+   * adapter 只在這個值為真時才讓 bridge 掛瀏覽器工具——設定關閉時,tools/list 就不會出現一個呼叫了必被拒絕的工具。
+   * 省略視為 `false`。
+   */
+  browser?: boolean;
 }
 
 export interface McpBridgeTokenPort {

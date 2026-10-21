@@ -68,6 +68,9 @@
  *     `AgentHandle.id`——僅供啟動檢查/除錯;**不會**被當成任何 RPC 參數送出(身分一律由 token 決定)。
  *   - `DESKMONY_MCP_BRIDGE_NETWORK_ENABLED`(選填,值為 `"1"` 時才生效):
  *     有值時才註冊 session 網路五個工具。
+ *   - `DESKMONY_MCP_BRIDGE_BROWSER_ENABLED`(選填,值為 `"1"` 時才生效,2026-10-21 P4a):有值時才註冊瀏覽器七個工具
+ *     (`browser_navigate`…`browser_scroll`,定義在 `browser-tools.ts`,與 in-process 版共用)並在 instructions 加上瀏覽器段落。
+ *     只有 `features.agentBrowserTools` 為真、且 core 核發的 token 帶 `browser` 範圍時,`mcp-bridge-launch.ts` 才會設它。
  *
  * 若 `DESKMONY_MCP_BRIDGE_NETWORK_ENABLED` 不是 `"1"`,這個 server 會啟動成
  * 一個**沒有任何工具**的 MCP server(理論上不會發生:`AcpAdapter.spawn()` 只在
@@ -94,6 +97,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { NetworkAgentSummary, NetworkSessionSummary, ReadSessionResult } from "@deskmony/shared";
+import { BROWSER_INSTRUCTIONS, createBrowserToolDefs } from "./browser-tools.js";
 
 /** 與 in-process 版(session-network-mcp.ts 的 `SESSION_NETWORK_MCP_SERVER_NAME`)同名,工具全名才會一致(`mcp__deskmony__<name>`)。 */
 const MCP_BRIDGE_SERVER_NAME = "deskmony";
@@ -233,9 +237,9 @@ class BridgeGatewayClient {
     });
   }
 
-  async call<T = unknown>(method: string, params: unknown): Promise<T> {
+  async call<T = unknown>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
     const ws = await this.ensureConnected();
-    return (await this.rpcOn(ws, method, params)) as T;
+    return (await this.rpcOn(ws, method, params, timeoutMs)) as T;
   }
 }
 
@@ -384,6 +388,31 @@ function registerSessionNetworkTools(server: McpServer, client: BridgeGatewayCli
   );
 }
 
+/**
+ * 瀏覽器 RPC 的等待上限。core 對每個指令各有逾時(導覽 30 秒、其他 15 秒,從送給 host 才起算),同一個 session 的指令還會排隊——
+ * 這裡的上限要明顯大於單一指令的逾時,否則 bridge 會在 core 回 `browser.timeout`(有說明的錯誤)之前先丟出籠統的「RPC 逾時」。
+ */
+const BROWSER_RPC_TIMEOUT_MS = 120_000;
+
+/** 註冊瀏覽器七個工具:定義(名稱/描述/schema/結果格式)全部來自 `browser-tools.ts`,這裡只負責把每個操作接到 gateway 的 `browser.*ForAgent`。 */
+function registerBrowserTools(server: McpServer, client: BridgeGatewayClient): void {
+  const call = <T>(method: string, params: unknown): Promise<T> => client.call<T>(method, params, BROWSER_RPC_TIMEOUT_MS);
+  const defs = createBrowserToolDefs({
+    navigate: (args) => call("browser.navigateForAgent", args),
+    screenshot: () => call("browser.screenshotForAgent", {}),
+    readPage: (args) => call("browser.readPageForAgent", args),
+    click: (args) => call("browser.clickForAgent", args),
+    type: (args) => call("browser.typeForAgent", args),
+    pressKey: (args) => call("browser.pressKeyForAgent", args),
+    scroll: (args) => call("browser.scrollForAgent", args),
+  });
+  for (const def of defs) {
+    server.registerTool(def.name, { description: def.description, inputSchema: def.inputShape }, async (args: Record<string, unknown>) =>
+      def.handler(args),
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const token = process.env.DESKMONY_MCP_BRIDGE_TOKEN;
   const gatewayUrl = process.env.DESKMONY_MCP_BRIDGE_GATEWAY_URL;
@@ -402,16 +431,22 @@ async function main(): Promise<void> {
   }
 
   const networkEnabled = process.env.DESKMONY_MCP_BRIDGE_NETWORK_ENABLED === "1";
+  const browserEnabled = process.env.DESKMONY_MCP_BRIDGE_BROWSER_ENABLED === "1";
 
   const client = new BridgeGatewayClient(gatewayUrl, token);
   const server = new McpServer(
     { name: MCP_BRIDGE_SERVER_NAME, version: "1.0.0" },
-    { instructions: SESSION_NETWORK_INSTRUCTIONS },
+    // 與 session-network-mcp.ts 一樣:掛了瀏覽器工具才附加瀏覽器段落(兩邊的 instructions 逐字一致,e2e 有比對)。
+    { instructions: SESSION_NETWORK_INSTRUCTIONS + (browserEnabled ? BROWSER_INSTRUCTIONS : "") },
   );
 
   let mountedAny = false;
   if (networkEnabled) {
     registerSessionNetworkTools(server, client);
+    mountedAny = true;
+  }
+  if (browserEnabled) {
+    registerBrowserTools(server, client);
     mountedAny = true;
   }
   if (!mountedAny) {
