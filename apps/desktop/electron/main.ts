@@ -7,11 +7,11 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import {
   browserPartitionForSession,
-  isAllowedBrowserPartition,
+  enforceWebviewAttachPolicy,
   isAllowedNavigationUrl,
-  isAllowedWebviewUrl,
   isExternallyOpenableUrl,
   matchAppShortcut,
+  popupRedirectUrl,
 } from "./browser-rules.js";
 
 const RESOURCES_CORE_DIR = "core";
@@ -452,28 +452,15 @@ function configureBrowserPartition(partition: string): void {
 
 function installWebviewAttachGuard(contents: WebContents): void {
   contents.on("will-attach-webview", (event, webPreferences, params) => {
-    const partition = params.partition;
-    if (!isAllowedBrowserPartition(partition) || !isAllowedWebviewUrl(params.src)) {
+    // 政策本體在共用的純函式(有測試):partition/src 不合法回 false → 取消 attach;否則原地把 webPreferences 與 params 改成最嚴格的值,
+    // 並**強制** `allowpopups`——沒有它時 `window.open`/`target=_blank` 在 guest 端就被吞掉、`setWindowOpenHandler` 根本不會被呼叫。
+    // 開它是安全的:每次彈出都進 `installGuestGuards()` 的 `setWindowOpenHandler`,它永遠回傳 `deny`(不會建立任何新視窗),
+    // 只有 http(s) 目標改成在同一個 webview 導過去。
+    if (!enforceWebviewAttachPolicy(webPreferences, params)) {
       event.preventDefault();
       return;
     }
-    // guest 不得有 preload(它不可信,不該摸到任何 Node/Electron API),也不得開任何會放寬隔離的選項。
-    delete webPreferences.preload;
-    delete (webPreferences as { preloadURL?: string }).preloadURL;
-    webPreferences.nodeIntegration = false;
-    webPreferences.nodeIntegrationInSubFrames = false;
-    webPreferences.nodeIntegrationInWorker = false;
-    webPreferences.contextIsolation = true;
-    webPreferences.sandbox = true;
-    webPreferences.webSecurity = true;
-    webPreferences.allowRunningInsecureContent = false;
-    webPreferences.webviewTag = false; // guest 裡不能再嵌 webview
-    webPreferences.experimentalFeatures = false;
-    // 這些 `<webview>` 屬性會影響上面的值或放寬行為:不論頁面(renderer)怎麼寫都拿掉。
-    for (const attribute of ["preload", "allowpopups", "disablewebsecurity", "nodeintegration", "nodeintegrationinsubframes", "webpreferences", "plugins"]) {
-      delete params[attribute];
-    }
-    configureBrowserPartition(partition);
+    configureBrowserPartition(params.partition);
   });
 }
 
@@ -481,11 +468,14 @@ function installGuestGuards(): void {
   app.on("web-contents-created", (_event, contents) => {
     if (contents.getType() !== "webview") return;
 
-    // 彈出視窗(target=_blank、window.open)一律拒絕;http(s) 的改在**同一個 webview** 導過去(第一版不做多分頁)。
+    // 彈出視窗(target=_blank、window.open)一律拒絕(永遠 `deny`,不會有新視窗);http(s) 的改在**同一個 webview** 導過去(第一版不做多分頁),
+    // `about:blank`(`window.open()` 不帶網址)與其他 scheme 什麼都不做(判斷見 `popupRedirectUrl()`)。
+    // 這個 handler 要被呼叫到,`<webview>` 必須帶 `allowpopups`——見 `installWebviewAttachGuard()`。
     contents.setWindowOpenHandler(({ url }) => {
-      if (isAllowedWebviewUrl(url) && url !== "about:blank") {
+      const target = popupRedirectUrl(url);
+      if (target) {
         setImmediate(() => {
-          if (!contents.isDestroyed()) void contents.loadURL(url).catch(() => undefined);
+          if (!contents.isDestroyed()) void contents.loadURL(target).catch(() => undefined);
         });
       }
       return { action: "deny" };

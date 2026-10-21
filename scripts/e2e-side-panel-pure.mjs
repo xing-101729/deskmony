@@ -208,6 +208,8 @@ console.log("\n== browser-rules:Browser 分頁的網址/scheme/partition/組合�
     isAllowedBrowserPartition,
     browserPartitionForSession,
     matchAppShortcut,
+    popupRedirectUrl,
+    enforceWebviewAttachPolicy,
   } = await import(pathToFileURL(path.join(ELECTRON_DIR, "browser-rules.ts")).href);
 
   const resolve = (input) => normalizeAddressInput(input);
@@ -391,6 +393,157 @@ console.log("\n== browser-rules:Browser 分頁的網址/scheme/partition/組合�
       matchAppShortcut(key("keyDown", "Enter"), false) === undefined,
     "matchAppShortcut:keyUp、沒按修飾鍵、多按 shift/alt、平台不對的修飾鍵(Windows 的 ⌘、mac 的 Ctrl+j)、⌘+`、其他鍵(Ctrl+A/C、Enter)一律不攔,照常給網頁",
   );
+
+  // ---- 彈出視窗(window.open / target=_blank):handler 永遠 deny,只有 http(s) 改在同一個 webview 導過去 ----
+  check(
+    popupRedirectUrl("https://example.com/a?b=1") === "https://example.com/a?b=1" &&
+      popupRedirectUrl("http://localhost:3000/popup") === "http://localhost:3000/popup" &&
+      popupRedirectUrl("about:blank") === undefined &&
+      popupRedirectUrl("file:///C:/Windows/win.ini") === undefined &&
+      popupRedirectUrl("javascript:alert(1)") === undefined &&
+      popupRedirectUrl("data:text/html,<p>x</p>") === undefined &&
+      popupRedirectUrl("blob:http://localhost/abc") === undefined &&
+      popupRedirectUrl("chrome://gpu") === undefined &&
+      popupRedirectUrl("") === undefined &&
+      popupRedirectUrl(undefined) === undefined,
+    "popupRedirectUrl:只有 http(s) 會改在同一個 webview 開;about:blank(window.open() 不帶網址)、file、javascript、data、blob、chrome、空字串、非字串都什麼都不做",
+  );
+
+  // ---- will-attach-webview 政策:強制 allowpopups、強制最嚴格的 webPreferences、拿掉放寬隔離的屬性、不合法就取消 ----
+  const goodParams = () => ({ partition: `deskmony-browser-${uuid}`, src: "about:blank" });
+  {
+    const prefs = {
+      preload: "C:/evil/preload.js",
+      preloadURL: "file:///C:/evil/preload.js",
+      nodeIntegration: true,
+      nodeIntegrationInSubFrames: true,
+      nodeIntegrationInWorker: true,
+      contextIsolation: false,
+      sandbox: false,
+      webSecurity: false,
+      allowRunningInsecureContent: true,
+      webviewTag: true,
+      experimentalFeatures: true,
+      zoomFactor: 1.5,
+    };
+    const params = { ...goodParams(), preload: "x", disablewebsecurity: "", nodeintegration: "true", nodeintegrationinsubframes: "true", webpreferences: "sandbox=no", plugins: "true", allowpopups: "false" };
+    const ok = enforceWebviewAttachPolicy(prefs, params);
+    check(
+      ok === true &&
+        !("preload" in prefs) &&
+        !("preloadURL" in prefs) &&
+        prefs.nodeIntegration === false &&
+        prefs.nodeIntegrationInSubFrames === false &&
+        prefs.nodeIntegrationInWorker === false &&
+        prefs.contextIsolation === true &&
+        prefs.sandbox === true &&
+        prefs.webSecurity === true &&
+        prefs.allowRunningInsecureContent === false &&
+        prefs.webviewTag === false &&
+        prefs.experimentalFeatures === false &&
+        prefs.zoomFactor === 1.5,
+      "enforceWebviewAttachPolicy:guest 的 webPreferences 一律強制成最嚴格的值(無 preload、無 nodeIntegration、contextIsolation/sandbox/webSecurity 開、不能再嵌 webview),不相干的設定不碰",
+      JSON.stringify(prefs),
+    );
+    check(
+      !("preload" in params) &&
+        !("disablewebsecurity" in params) &&
+        !("nodeintegration" in params) &&
+        !("nodeintegrationinsubframes" in params) &&
+        !("webpreferences" in params) &&
+        !("plugins" in params) &&
+        params.partition === `deskmony-browser-${uuid}` &&
+        params.src === "about:blank",
+      "enforceWebviewAttachPolicy:會放寬隔離的 <webview> 屬性(preload、disablewebsecurity、nodeintegration…、webpreferences、plugins)一律拿掉;partition/src 不動",
+      JSON.stringify(params),
+    );
+    check(params.allowpopups === "true", "enforceWebviewAttachPolicy:renderer 傳 allowpopups=\"false\" 也被強制改成 \"true\"(不信任 renderer)", JSON.stringify(params));
+  }
+  {
+    const params = goodParams();
+    enforceWebviewAttachPolicy({}, params);
+    check(params.allowpopups === "true", "enforceWebviewAttachPolicy:renderer 完全沒傳 allowpopups 時由政策補上 \"true\"(沒有它,target=_blank 在 guest 端就被吞掉)", JSON.stringify(params));
+  }
+  {
+    const badParamSets = [
+      { partition: `persist:deskmony-browser-${uuid}`, src: "about:blank" },
+      { partition: "other-partition", src: "about:blank" },
+      { partition: undefined, src: "about:blank" },
+      { partition: `deskmony-browser-${uuid}`, src: "file:///etc/passwd" },
+      { partition: `deskmony-browser-${uuid}`, src: "javascript:alert(1)" },
+      { partition: `deskmony-browser-${uuid}`, src: undefined },
+      { partition: `deskmony-browser-${uuid}`, src: "data:text/html,x" },
+    ];
+    const results = badParamSets.map((params) => {
+      const prefs = { sandbox: false };
+      const result = enforceWebviewAttachPolicy(prefs, params);
+      return { result, untouched: prefs.sandbox === false && !("allowpopups" in params) };
+    });
+    check(
+      results.every((r) => r.result === false && r.untouched),
+      "enforceWebviewAttachPolicy:partition 不合法(persist:、別的名稱、缺)或 src 不是 http(s)/about:blank(file、javascript、data、缺)→ 回 false 取消 attach,而且不動傳入的物件",
+      JSON.stringify(results),
+    );
+    check(
+      enforceWebviewAttachPolicy({}, { partition: `deskmony-browser-${uuid}`, src: "https://example.com/" }) === true &&
+        enforceWebviewAttachPolicy({}, { partition: `deskmony-browser-${uuid}`, src: "http://localhost:3000/" }) === true,
+      "enforceWebviewAttachPolicy:src 是 http(s) 也放行",
+    );
+  }
+}
+
+console.log("\n== browser-frame-style:webview 外框的可見/停放樣式(P4 對看不到的 session 截圖要靠它)==");
+{
+  const {
+    browserFrameStyle,
+    BROWSER_Z_INDEX,
+    BROWSER_PARKED_Z_INDEX,
+    BROWSER_PARKED_WIDTH,
+    BROWSER_PARKED_HEIGHT,
+  } = await import(pathToFileURL(path.join(LIB, "browser-frame-style.ts")).href);
+
+  const parked = browserFrameStyle(undefined, false);
+  check(
+    parked.position === "fixed" &&
+      parked.left === 0 &&
+      parked.top === 0 &&
+      parked.width === 1024 &&
+      parked.height === 768 &&
+      parked.opacity === 0 &&
+      parked.zIndex === -1 &&
+      parked.pointerEvents === "none",
+    "停放:position fixed、left 0/top 0、1024×768、opacity 0、z-index -1、pointer-events none(P3.3 實驗:這種停法 CDP 截圖可用)",
+    JSON.stringify(parked),
+  );
+  check(
+    parked.left >= 0 && parked.top >= 0 && parked.left + parked.width > 0 && parked.top + parked.height > 0,
+    "停放的外框留在視口內(left/top 不是負的)——停在畫面外(left:-20000)時 CDP 截圖會逾時",
+  );
+  check(
+    !("visibility" in parked) && !("display" in parked) && browserFrameStyle(undefined, true).pointerEvents === "none" && JSON.stringify(browserFrameStyle(undefined, true)) === JSON.stringify(parked),
+    "停放不用 visibility: hidden / display: none(兩者都會讓 webview 不再被繪製);拖拉鎖(pointerLock)不影響停放樣式",
+  );
+  check(
+    BROWSER_PARKED_Z_INDEX === -1 && BROWSER_PARKED_WIDTH === 1024 && BROWSER_PARKED_HEIGHT === 768,
+    "停放常數:z-index -1、1024×768",
+  );
+
+  const rect = { x: 609, y: 99, width: 415, height: 669 };
+  const visible = browserFrameStyle(rect, false);
+  check(
+    visible.position === "fixed" &&
+      visible.left === 609 &&
+      visible.top === 99 &&
+      visible.width === 415 &&
+      visible.height === 669 &&
+      visible.zIndex === 45 &&
+      visible.opacity === 1 &&
+      visible.pointerEvents === "auto",
+    "可見:疊在 slot 的位置與大小上、z-index 45、不透明、吃滑鼠",
+    JSON.stringify(visible),
+  );
+  check(BROWSER_Z_INDEX === 45 && BROWSER_Z_INDEX > 40 && BROWSER_Z_INDEX < 50, "可見的 z-index 在面板(z-40)之上、所有對話框(z-50 起)之下");
+  check(browserFrameStyle(rect, true).pointerEvents === "none" && browserFrameStyle(rect, true).zIndex === 45, "拖拉面板寬度中(pointerLock):可見的外框暫時不吃滑鼠,位置與 z-index 不變");
 }
 
 console.log(`\n總計: ${passed} PASS, ${total - passed} FAIL`);

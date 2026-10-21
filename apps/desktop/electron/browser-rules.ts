@@ -62,6 +62,46 @@ export function isExternallyOpenableUrl(rawUrl: unknown): boolean {
   return protocol === "http:" || protocol === "https:";
 }
 
+/** `<webview>` 的這些屬性會放寬隔離或改寫上面強制的設定:不論 renderer 怎麼寫都拿掉。 */
+const STRIPPED_WEBVIEW_ATTRIBUTES = ["preload", "disablewebsecurity", "nodeintegration", "nodeintegrationinsubframes", "webpreferences", "plugins"] as const;
+
+/**
+ * `will-attach-webview` 的政策(純函式,main 與測試共用;原地修改傳入的兩個物件):
+ *  - partition 必須是 `deskmony-browser-<id>`(不帶 `persist:`)、`src` 必須是 http(s) 或 `about:blank`,否則回傳 `false`(呼叫端要 `preventDefault()` 取消 attach);
+ *  - guest 的 webPreferences 一律強制成最嚴格的值、刪掉 `preload`/`preloadURL`;
+ *  - 會放寬隔離的 `<webview>` 屬性一律拿掉;
+ *  - `allowpopups` 反過來**強制設成允許**(不信任 renderer 傳什麼,連 "false" 也蓋掉):沒有它時 `window.open`/`target=_blank` 在 guest 端就被吞掉,
+ *    `setWindowOpenHandler` 根本不會被呼叫。開它是安全的:每次彈出都進永遠回傳 `deny` 的 handler,不會建立任何新視窗,
+ *    只有 http(s) 目標(`popupRedirectUrl()`)改在同一個 webview 導過去。
+ */
+export function enforceWebviewAttachPolicy(webPreferences: object, params: Record<string, string>): boolean {
+  if (!isAllowedBrowserPartition(params.partition) || !isAllowedWebviewUrl(params.src)) return false;
+  const prefs = webPreferences as Record<string, unknown>;
+  delete prefs.preload;
+  delete prefs.preloadURL;
+  prefs.nodeIntegration = false;
+  prefs.nodeIntegrationInSubFrames = false;
+  prefs.nodeIntegrationInWorker = false;
+  prefs.contextIsolation = true;
+  prefs.sandbox = true;
+  prefs.webSecurity = true;
+  prefs.allowRunningInsecureContent = false;
+  prefs.webviewTag = false; // guest 裡不能再嵌 webview
+  prefs.experimentalFeatures = false;
+  for (const attribute of STRIPPED_WEBVIEW_ATTRIBUTES) delete params[attribute];
+  params.allowpopups = "true";
+  return true;
+}
+
+/**
+ * 頁面要彈出視窗(`window.open`、`target=_blank`)時,`setWindowOpenHandler` 要不要把目標改成「在同一個 webview 導過去」:
+ * 只有 http(s) 才會——回傳要載入的網址;`about:blank`(`window.open()` 不帶網址)、`file:`、`javascript:`、`data:` 等一律回 `undefined`(什麼都不做)。
+ * handler 本身永遠回傳 `deny`,不會產生任何新視窗。
+ */
+export function popupRedirectUrl(rawUrl: unknown): string | undefined {
+  return isExternallyOpenableUrl(rawUrl) ? (rawUrl as string) : undefined;
+}
+
 export function isAllowedBrowserPartition(partition: unknown): boolean {
   return (
     typeof partition === "string" &&
