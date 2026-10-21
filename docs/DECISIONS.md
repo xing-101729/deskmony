@@ -414,3 +414,17 @@ bridge 本身不讀 push,改成 scoped 連線一律不收 push。
 - 瀏覽器工具需要桌面 app 開著;純 headless core 或只有遠端瀏覽器 client 時,工具回 `browser.noHost`。
 - codex 的 MCP 工具權限請求(codex-acp 在已有 tool_call 時只帶 `toolCallId`)沒有工具名與參數——`AcpAdapter` 把 call id 當 toolName、input 是空的,所以政策規則與「永遠允許」對 codex 的 MCP 工具無從比對
   (包含 `browser_navigate`;它因此不會被 hard-deny 誤擋,導覽主機限制仍由 core 強制)。這是既有限制,查證細節與三種 adapter 的 toolName 見 `side-panel_detail.md` 的 P4a 實作備註。
+- agent 與使用者**共用同一個 webview**:agent 操作期間使用者自己點頁面會互相干擾(沒有鎖);agent 輸入的文字會進到頁面目前聚焦的元素——工具描述叫 agent 不要輸入密碼,但沒有技術上的擋(使用者看得到這個瀏覽器)。
+- 「agent 操作中」的指示只是讓使用者**看得到**發生什麼事,不是安全控制;真正的限制是上面的導覽規則、`features.agentBrowserTools` 與一般的工具權限政策。
+
+**6. 桌面端執行器(P4b,2026-10-21)的決定**
+
+執行 agent 瀏覽器指令的是 Electron **main**(CDP:`webContents.debugger` + isolated world),renderer 只是 host 的中繼;各層都不信任上一層:
+
+- **網頁內容一律是不可信資料**:`readPage` 只回文字與元素描述;ref → 元素的對照表放在 isolated world(頁面的 JS 看不到),腳本不在頁面 DOM 上留任何東西;從頁面來的所有值在 host 端重新檢查型別與長度;
+  文字與密碼輸入框的 `value` 絕不回給 agent(使用者可能在裡面輸入了機密)。座標換算用的 viewport 也從 isolated world 讀,頁面騙不了。
+- **導覽 scheme 在 main 再擋一次**(core、`will-attach-webview`/導覽鎖、這裡),即使 core 的檢查有洞,main 也不會 `loadURL` 非 http(s)。
+- **舊截圖的座標在導覽/捲動/viewport 尺寸改變後一律作廢**(`browser.noScreenshot`/`browser.staleScreenshot`),寧可要求 agent 重新截圖也不點錯位置;點錯位置在使用者的登入狀態下可能是有副作用的動作。
+- **停放中的 webview 加 `inert`**(不讓 Tab 把焦點送進看不見的頁面)——它對 CDP 的影響**尚未實測**,由實驗腳本新增的 `parked-inert` 位置驗證;只有 `inert` 壞掉時退回沒有 inert 的停放(`browserFrameInert()` 回 false)。
+- **有 `commandId` 就一定回一個結果**(`browser.hostError` 兜底):host 這邊任何一環出錯都不讓 core 乾等到逾時,錯誤訊息是給 agent 看的、不含頁面內容。
+- 這一階段**沒有啟動 Electron**:CDP 對 guest 的實際行為、`debugger` 與 DevTools 並存、`inert` 的影響、UI 外觀都還沒有真機驗證(清單見 `side-panel_detail.md` 的 P4b 實作備註),要靠 `scripts/spike/webview-offscreen.cjs` 與 `scripts/verify-browser-host-real.mjs` 在真 app 上補驗。
