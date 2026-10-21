@@ -546,5 +546,756 @@ console.log("\n== browser-frame-style:webview 外框的可見/停放樣式(P4 �
   check(browserFrameStyle(rect, true).pointerEvents === "none" && browserFrameStyle(rect, true).zIndex === 45, "拖拉面板寬度中(pointerLock):可見的外框暫時不吃滑鼠,位置與 z-index 不變");
 }
 
+console.log("\n== browser-exec:agent 瀏覽器指令在桌面端的執行(假 driver;真 Electron 才能驗的只剩 browser-executor.ts 的膠水)==");
+{
+  const ELECTRON_DIR = path.resolve(__dirname, "..", "apps", "desktop", "electron");
+  const exec = await import(pathToFileURL(path.join(ELECTRON_DIR, "browser-exec.ts")).href);
+  const {
+    KEY_TABLE,
+    keyEventsFor,
+    fitWithin,
+    imageToCss,
+    isScreenshotStale,
+    executeBrowserOp,
+    createGuestState,
+    mapExecError,
+    BrowserExecError,
+    buildReadTextScript,
+    buildInteractiveScript,
+    buildResolveRefScript,
+    buildReadTextResult,
+    buildInteractiveResult,
+    interpretResolveResult,
+    dropTrailingHighSurrogate,
+    VIEWPORT_SCRIPT,
+    EDITABLE_FOCUS_SCRIPT,
+  } = exec;
+
+  // ---- 按鍵對照表 ----
+  const EXPECTED_KEYS = ["Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", "Space"];
+  const EXPECTED_VK = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, PageUp: 33, PageDown: 34, Home: 36, End: 35, Space: 32 };
+  check(
+    JSON.stringify(Object.keys(KEY_TABLE).sort()) === JSON.stringify([...EXPECTED_KEYS].sort()) &&
+      EXPECTED_KEYS.every((name) => {
+        const [down, up] = keyEventsFor(name);
+        return (
+          keyEventsFor(name).length === 2 &&
+          down.windowsVirtualKeyCode === EXPECTED_VK[name] &&
+          down.nativeVirtualKeyCode === EXPECTED_VK[name] &&
+          up.type === "keyUp" &&
+          up.windowsVirtualKeyCode === EXPECTED_VK[name] &&
+          up.key === down.key &&
+          up.code === down.code &&
+          up.text === undefined
+        );
+      }),
+    "按鍵對照表:十四個鍵(Enter/Tab/Escape/Backspace/Delete/四個方向鍵/PageUp/PageDown/Home/End/Space),每個都是一次按下 + 一次放開、windowsVirtualKeyCode 正確(Enter=13、Tab=9、Esc=27、方向鍵 37-40…)",
+  );
+  const enter = keyEventsFor("Enter");
+  const space = keyEventsFor("Space");
+  const tab = keyEventsFor("Tab");
+  check(
+    enter[0].type === "keyDown" &&
+      enter[0].text === "\r" &&
+      enter[0].key === "Enter" &&
+      space[0].type === "keyDown" &&
+      space[0].text === " " &&
+      space[0].key === " " &&
+      space[0].code === "Space" &&
+      tab[0].type === "rawKeyDown" &&
+      tab[0].text === undefined,
+    "會產生字元的鍵(Enter、Space)用 keyDown + text(Enter 是 \\r、Space 的 key 是空白、code 是 Space),其餘用 rawKeyDown 不帶 text",
+  );
+  let badKey;
+  try {
+    keyEventsFor("Control+C");
+  } catch (err) {
+    badKey = err;
+  }
+  check(badKey instanceof BrowserExecError && badKey.code === "browser.hostError", "不認得的鍵名(組合鍵、任意字元)丟 browser.hostError");
+
+  // ---- 截圖縮放與座標換算 ----
+  const f1 = fitWithin(2048, 1536, 1568);
+  const f2 = fitWithin(830, 1338, 1568);
+  const f3 = fitWithin(1568, 100, 1568);
+  const f4 = fitWithin(1569, 1, 1568);
+  check(
+    f1.scaled && f1.width === 1568 && f1.height === 1176 && !f2.scaled && f2.width === 830 && f2.height === 1338 && !f3.scaled && f4.scaled && f4.width === 1568 && f4.height === 1,
+    "fitWithin:長邊超過 1568 等比縮小(2048×1536 → 1568×1176;極端比例至少 1px),剛好 1568 與更小的不動",
+    JSON.stringify([f1, f2, f3, f4]),
+  );
+  const rec = { cssWidth: 415, cssHeight: 669, width: 830, height: 1338 };
+  const p1 = imageToCss(rec, 100, 200);
+  const p2 = imageToCss({ cssWidth: 1024, cssHeight: 768, width: 1568, height: 1176 }, 784, 588);
+  const outOfRange = [
+    [830, 0],
+    [0, 1338],
+    [-1, 5],
+  ].map(([x, y]) => {
+    try {
+      imageToCss(rec, x, y);
+      return false;
+    } catch (err) {
+      return err instanceof BrowserExecError && err.code === "browser.hostError" && /超出/.test(err.message);
+    }
+  });
+  check(
+    p1.x === 50 && p1.y === 100 && Math.abs(p2.x - 512) < 1e-9 && Math.abs(p2.y - 384) < 1e-9 && outOfRange.every(Boolean),
+    "imageToCss:截圖像素座標 → CSS px(DPR 2 的 830×1338 圖 ↔ 415×669 viewport:(100,200) → (50,100);縮到 1568 的圖 ↔ 1024×768:中心對中心);超出圖範圍的座標丟錯",
+    JSON.stringify({ p1, p2, outOfRange }),
+  );
+  check(
+    !isScreenshotStale(rec, { cssWidth: 415, cssHeight: 669 }) &&
+      !isScreenshotStale(rec, { cssWidth: 416, cssHeight: 668 }) &&
+      isScreenshotStale(rec, { cssWidth: 417, cssHeight: 669 }) &&
+      isScreenshotStale(rec, { cssWidth: 415, cssHeight: 771 }) &&
+      isScreenshotStale(rec, { cssWidth: 1024, cssHeight: 768 }) &&
+      isScreenshotStale(rec, { cssWidth: 669, cssHeight: 415 }),
+    "isScreenshotStale:viewport 尺寸差 ≤ 1px 不算變(四捨五入);差 2px 以上、停放的 1024×768、寬高對調都算「尺寸變了」",
+  );
+
+  // ---- 假 driver ----
+  const BASE_VIEWPORT = { cssWidth: 415, cssHeight: 669 };
+  function makeDriver(opts = {}) {
+    const calls = { cdp: [], eval: [], load: [], history: [], resize: [], waits: [], stops: [], cancelled: 0, sleeps: [] };
+    const driver = {
+      cdp: async (method, params) => {
+        calls.cdp.push([method, params]);
+        if (opts.cdp) return opts.cdp(method, params);
+        if (method === "Page.captureScreenshot") return { data: "JPEGDATA" };
+        return {};
+      },
+      evalIsolated: async (code) => {
+        calls.eval.push(code);
+        if (code === VIEWPORT_SCRIPT) return typeof opts.viewport === "function" ? opts.viewport() : (opts.viewport ?? BASE_VIEWPORT);
+        if (code === EDITABLE_FOCUS_SCRIPT) return typeof opts.editable === "function" ? opts.editable() : (opts.editable ?? true);
+        if (code.startsWith("((ref, focus)")) return typeof opts.resolve === "function" ? opts.resolve(code) : (opts.resolve ?? { x: 120, y: 340, focused: true });
+        if (code.includes("const NAME_MAX")) return opts.interactive ?? { url: "http://localhost/", title: "T", elements: [], truncated: false };
+        if (code.includes("const max =")) return opts.text ?? { url: "http://localhost/", title: "T", text: "hello", truncated: false };
+        throw new Error("未預期的腳本: " + code.slice(0, 40));
+      },
+      getUrl: () => opts.url ?? "http://localhost/after",
+      getTitle: () => opts.title ?? "After",
+      isLoading: () => opts.loading ?? false,
+      isUrlAllowed: (u) => /^https?:\/\//i.test(u),
+      loadUrl: async (u) => {
+        calls.load.push(u);
+      },
+      goHistory: (a) => {
+        calls.history.push(a);
+        return opts.history !== false;
+      },
+      waitForLoad: (ms) => {
+        calls.waits.push(ms);
+        return {
+          promise: Promise.resolve(opts.loadOutcome ?? { finished: true }),
+          cancel: () => {
+            calls.cancelled += 1;
+          },
+        };
+      },
+      waitForLoadStop: async (ms) => {
+        calls.stops.push(ms);
+      },
+      jpegSize: () => opts.jpegSize ?? { width: 830, height: 1338 },
+      resizeJpeg: (...a) => {
+        calls.resize.push(a);
+        return "RESIZEDJPEG";
+      },
+      sleep: async (ms) => {
+        calls.sleeps.push(ms);
+      },
+    };
+    return { driver, calls, state: createGuestState() };
+  }
+  const run = (h, op, args) => executeBrowserOp(h.driver, h.state, op, args);
+  const mouseEvents = (calls) => calls.cdp.filter(([m]) => m === "Input.dispatchMouseEvent").map(([, p]) => p);
+
+  // ---- screenshot ----
+  {
+    const h = makeDriver({ jpegSize: { width: 830, height: 1338 } });
+    const out = await run(h, "screenshot", {});
+    const capture = h.calls.cdp.find(([m]) => m === "Page.captureScreenshot");
+    check(
+      out.ok &&
+        out.result.mimeType === "image/jpeg" &&
+        out.result.data === "JPEGDATA" &&
+        out.result.width === 830 &&
+        out.result.height === 1338 &&
+        out.result.url === "http://localhost/after" &&
+        out.result.title === "After" &&
+        h.calls.resize.length === 0 &&
+        capture[1].format === "jpeg" &&
+        capture[1].quality === 65 &&
+        JSON.stringify(h.state.screenshot) === JSON.stringify({ cssWidth: 415, cssHeight: 669, width: 830, height: 1338 }),
+      "screenshot:JPEG 品質 65;長邊沒超過 1568 時不重新編碼;width/height 是截圖本身的像素;記住截圖當下的 viewport(CSS px)與圖的像素尺寸",
+      JSON.stringify(out),
+    );
+    const big = makeDriver({ jpegSize: { width: 2048, height: 1536 }, viewport: { cssWidth: 1024, cssHeight: 768 } });
+    const bigOut = await run(big, "screenshot", {});
+    check(
+      bigOut.ok &&
+        bigOut.result.width === 1568 &&
+        bigOut.result.height === 1176 &&
+        bigOut.result.data === "RESIZEDJPEG" &&
+        big.calls.resize.length === 1 &&
+        big.calls.resize[0][1] === 1568 &&
+        big.calls.resize[0][2] === 1176 &&
+        big.calls.resize[0][3] === 65 &&
+        JSON.stringify(big.state.screenshot) === JSON.stringify({ cssWidth: 1024, cssHeight: 768, width: 1568, height: 1176 }),
+      "screenshot:長邊超過 1568(DPR 2 的 1024×768 = 2048×1536)→ 縮到 1568×1176 並以品質 65 重新編碼;紀錄的是縮過的圖尺寸",
+      JSON.stringify(bigOut.ok ? { w: bigOut.result.width, h: bigOut.result.height } : bigOut),
+    );
+    const bad = [
+      await run(makeDriver({ cdp: async () => ({}) }), "screenshot", {}),
+      await run(makeDriver({ jpegSize: { width: 0, height: 0 } }), "screenshot", {}),
+      await run(makeDriver({ viewport: { cssWidth: 0, cssHeight: 0 } }), "screenshot", {}),
+    ];
+    check(bad.every((o) => !o.ok && o.error.code === "browser.hostError"), "screenshot:CDP 沒回影像、影像尺寸是 0、viewport 是 0 → browser.hostError(不回壞的結果)");
+  }
+
+  // ---- click:x/y 與 ref ----
+  {
+    const none = makeDriver();
+    const noShot = await run(none, "click", { x: 10, y: 10 });
+    check(
+      !noShot.ok && noShot.error.code === "browser.noScreenshot" && mouseEvents(none.calls).length === 0,
+      "click x/y:還沒截過圖 → browser.noScreenshot,什麼都沒點",
+    );
+
+    const h = makeDriver({ jpegSize: { width: 830, height: 1338 } });
+    await run(h, "screenshot", {});
+    const clicked = await run(h, "click", { x: 100, y: 200 });
+    const ev = mouseEvents(h.calls);
+    check(
+      clicked.ok &&
+        clicked.result.url === "http://localhost/after" &&
+        clicked.result.title === "After" &&
+        ev.length === 3 &&
+        ev[0].type === "mouseMoved" &&
+        ev[0].x === 50 &&
+        ev[0].y === 100 &&
+        ev[1].type === "mousePressed" &&
+        ev[1].button === "left" &&
+        ev[1].buttons === 1 &&
+        ev[1].clickCount === 1 &&
+        ev[1].x === 50 &&
+        ev[2].type === "mouseReleased" &&
+        ev[2].buttons === 0 &&
+        ev[2].clickCount === 1 &&
+        ev[2].y === 100,
+      "click x/y:截圖像素 (100,200) 依比例換算成 CSS (50,100),CDP 送 mouseMoved → mousePressed(left, buttons 1, clickCount 1)→ mouseReleased;回傳點擊後的 url/title",
+      JSON.stringify(ev),
+    );
+
+    // 截圖之後 viewport 尺寸變了(面板開關,停放的 1024×768)→ staleScreenshot,而且沒有點下去
+    const stale = makeDriver({ jpegSize: { width: 830, height: 1338 } });
+    await run(stale, "screenshot", {});
+    const flipped = makeDriver({ viewport: { cssWidth: 1024, cssHeight: 768 } });
+    flipped.state.screenshot = stale.state.screenshot; // 同一個 guest 的狀態,只是之後 viewport 換了
+    const staleOut = await run(flipped, "click", { x: 100, y: 200 });
+    check(
+      !staleOut.ok &&
+        staleOut.error.code === "browser.staleScreenshot" &&
+        /415×669/.test(staleOut.error.message) &&
+        /1024×768/.test(staleOut.error.message) &&
+        mouseEvents(flipped.calls).length === 0,
+      "click x/y:截圖之後 viewport 尺寸變了(415×669 → 停放的 1024×768)→ browser.staleScreenshot,訊息講明前後尺寸,沒有點下去",
+      JSON.stringify(staleOut),
+    );
+
+    // 超出圖範圍
+    const oor = await run(h, "click", { x: 830, y: 5 });
+    check(!oor.ok && oor.error.code === "browser.hostError" && mouseEvents(h.calls).length === 3, "click x/y:座標超出截圖範圍 → browser.hostError,沒有多送滑鼠事件");
+
+    // ref
+    const r = makeDriver({ resolve: { x: 120.5, y: 340.25 } });
+    const byRef = await run(r, "click", { ref: "e3" });
+    const rev = mouseEvents(r.calls);
+    const resolveScript = r.calls.eval.find((c) => c.startsWith("((ref, focus)"));
+    check(
+      byRef.ok &&
+        rev.length === 3 &&
+        rev[0].x === 120.5 &&
+        rev[0].y === 340.25 &&
+        rev[1].type === "mousePressed" &&
+        resolveScript.includes('"e3"') &&
+        resolveScript.endsWith(", false)") &&
+        r.calls.eval.every((c) => c !== VIEWPORT_SCRIPT), // ref 路徑不需要截圖/viewport
+      "click ref:在 isolated world 解析元素(scrollIntoView 後的中心座標)再送三個滑鼠事件;不需要截圖",
+      JSON.stringify(rev),
+    );
+    const staleRef = makeDriver({ resolve: { error: "stale" } });
+    const noBox = makeDriver({ resolve: { error: "nobox" } });
+    const garbage = makeDriver({ resolve: { whatever: 1 } });
+    const o1 = await run(staleRef, "click", { ref: "e9" });
+    const o2 = await run(noBox, "click", { ref: "e9" });
+    const o3 = await run(garbage, "click", { ref: "e9" });
+    check(
+      !o1.ok &&
+        o1.error.code === "browser.staleRef" &&
+        /browser_read_page/.test(o1.error.message) &&
+        !o2.ok &&
+        o2.error.code === "browser.elementNotFound" &&
+        !o3.ok &&
+        o3.error.code === "browser.hostError" &&
+        [staleRef, noBox, garbage].every((d) => mouseEvents(d.calls).length === 0),
+      "click ref:ref 過期 → browser.staleRef(訊息教 agent 重新 read_page)、元素沒有可點擊的位置 → browser.elementNotFound、結果格式不對 → browser.hostError;都沒有點下去",
+    );
+    const neither = await run(makeDriver(), "click", {});
+    check(!neither.ok && neither.error.code === "browser.hostError", "click:ref 與座標都沒給 → browser.hostError");
+    // 點擊後頁面開始導覽:等它載完(有上限)再回傳
+    const nav = makeDriver({ resolve: { x: 5, y: 5 }, loading: true });
+    await run(nav, "click", { ref: "e1" });
+    check(nav.calls.sleeps[0] === 250 && nav.calls.stops.length === 1 && nav.calls.stops[0] === 5000, "click:點擊後先等 250ms,頁面開始載入的話最多再等 5 秒載完才回傳 url/title");
+    const idle = makeDriver({ resolve: { x: 5, y: 5 }, loading: false });
+    await run(idle, "click", { ref: "e1" });
+    check(idle.calls.stops.length === 0, "click:點擊後沒有開始導覽就不多等");
+  }
+
+  // ---- type / pressKey / scroll ----
+  {
+    const ok = makeDriver({ resolve: { x: 10, y: 10, focused: true }, editable: true });
+    const typed = await run(ok, "type", { text: "hello world", ref: "e2" });
+    check(
+      typed.ok &&
+        Object.keys(typed.result).length === 0 &&
+        ok.calls.eval.some((c) => c.startsWith("((ref, focus)") && c.endsWith(", true)")) &&
+        ok.calls.cdp.filter(([m]) => m === "Input.insertText").length === 1 &&
+        ok.calls.cdp.find(([m]) => m === "Input.insertText")[1].text === "hello world" &&
+        mouseEvents(ok.calls).length === 0 &&
+        ok.calls.cdp.filter(([m]) => m === "Input.dispatchKeyEvent").length === 0,
+      "type ref:先在 isolated world 解析並聚焦該元素,再用 Input.insertText 輸入;沒有 submit 就不送任何按鍵、已聚焦就不多點一下",
+    );
+    const submit = makeDriver({ editable: true, loading: true });
+    const sOut = await run(submit, "type", { text: "q", submit: true });
+    const keys = submit.calls.cdp.filter(([m]) => m === "Input.dispatchKeyEvent").map(([, p]) => p);
+    check(
+      sOut.ok &&
+        keys.length === 2 &&
+        keys[0].type === "keyDown" &&
+        keys[0].key === "Enter" &&
+        keys[0].text === "\r" &&
+        keys[1].type === "keyUp" &&
+        submit.calls.cdp.findIndex(([m]) => m === "Input.insertText") < submit.calls.cdp.findIndex(([m]) => m === "Input.dispatchKeyEvent") &&
+        submit.calls.stops.length === 1,
+      "type submit:輸入文字之後送 Enter(keyDown 帶 \\r + keyUp),順序是先 insertText 再按鍵;之後等導覽",
+    );
+    const unfocused = makeDriver({ editable: false });
+    const noFocus = await run(unfocused, "type", { text: "x" });
+    check(
+      !noFocus.ok &&
+        noFocus.error.code === "browser.elementNotFound" &&
+        unfocused.calls.cdp.every(([m]) => m !== "Input.insertText"),
+      "type 沒給 ref 且目前沒有聚焦在可輸入的元素 → browser.elementNotFound(教 agent 用 ref 或先 click 輸入框),什麼都沒輸入",
+    );
+    // 給 ref 但元素聚焦不了:點它的中心再檢查,仍不行就報錯;點了之後聚焦了就照常輸入
+    let editableCalls = 0;
+    const clickToFocus = makeDriver({ resolve: { x: 7, y: 8, focused: false }, editable: () => ++editableCalls > 1 });
+    const cOut = await run(clickToFocus, "type", { text: "abc", ref: "e4" });
+    const stuck = makeDriver({ resolve: { x: 7, y: 8, focused: false }, editable: false });
+    const stuckOut = await run(stuck, "type", { text: "abc", ref: "e4" });
+    check(
+      cOut.ok &&
+        mouseEvents(clickToFocus.calls).length === 3 &&
+        clickToFocus.calls.cdp.some(([m]) => m === "Input.insertText") &&
+        !stuckOut.ok &&
+        stuckOut.error.code === "browser.elementNotFound" &&
+        mouseEvents(stuck.calls).length === 3 &&
+        stuck.calls.cdp.every(([m]) => m !== "Input.insertText"),
+      "type ref:元素 focus() 之後仍不是可輸入的 → 點它的中心再檢查一次;點了就聚焦的照常輸入、還是不行 → browser.elementNotFound",
+    );
+    const staleType = await run(makeDriver({ resolve: { error: "stale" } }), "type", { text: "x", ref: "e1" });
+    const emptyText = await run(makeDriver(), "type", { text: "" });
+    check(!staleType.ok && staleType.error.code === "browser.staleRef" && !emptyText.ok && emptyText.error.code === "browser.hostError", "type:ref 過期 → browser.staleRef;空字串 → browser.hostError");
+
+    const pk = makeDriver();
+    const pkOut = await run(pk, "pressKey", { key: "ArrowDown" });
+    const pkEvents = pk.calls.cdp.filter(([m]) => m === "Input.dispatchKeyEvent").map(([, p]) => p);
+    const badKey2 = await run(makeDriver(), "pressKey", { key: "F13" });
+    check(
+      pkOut.ok &&
+        pkEvents.length === 2 &&
+        pkEvents[0].type === "rawKeyDown" &&
+        pkEvents[0].windowsVirtualKeyCode === 40 &&
+        pkEvents[0].key === "ArrowDown" &&
+        pkEvents[0].code === "ArrowDown" &&
+        pkEvents[1].type === "keyUp" &&
+        !badKey2.ok &&
+        badKey2.error.code === "browser.hostError",
+      "pressKey:ArrowDown → rawKeyDown(vk 40)+ keyUp;不在列舉內的鍵 → browser.hostError、不送任何事件",
+    );
+
+    const sc = makeDriver({ viewport: { cssWidth: 400, cssHeight: 500 } });
+    await run(sc, "scroll", { direction: "down" });
+    await run(sc, "scroll", { direction: "up", amount: 2.5 });
+    await run(sc, "scroll", { direction: "down", amount: 999 });
+    const wheels = mouseEvents(sc.calls);
+    const badScroll = await run(makeDriver(), "scroll", { direction: "left" });
+    check(
+      wheels.length === 3 &&
+        wheels.every((w) => w.type === "mouseWheel" && w.x === 200 && w.y === 250 && w.deltaX === 0) &&
+        wheels[0].deltaY === 400 &&
+        wheels[1].deltaY === -1000 &&
+        wheels[2].deltaY === 20 * 400 &&
+        !badScroll.ok &&
+        badScroll.error.code === "browser.hostError",
+      "scroll:CDP mouseWheel 在 viewport 中心;單位是視窗高度的 80%(500px 高 → 預設一單位 400、向上 2.5 單位 -1000)、預設 1、上限 20;direction 不合法 → browser.hostError",
+      JSON.stringify(wheels.map((w) => w.deltaY)),
+    );
+
+    // 捲動、導覽之後舊截圖的座標沒有意義 → 要重新截圖
+    const inval = makeDriver();
+    await run(inval, "screenshot", {});
+    await run(inval, "scroll", { direction: "down" });
+    const afterScroll = await run(inval, "click", { x: 10, y: 10 });
+    await run(inval, "screenshot", {});
+    await run(inval, "navigate", { url: "http://localhost/next" });
+    const afterNav = await run(inval, "click", { x: 10, y: 10 });
+    check(
+      !afterScroll.ok && afterScroll.error.code === "browser.noScreenshot" && !afterNav.ok && afterNav.error.code === "browser.noScreenshot",
+      "捲動、導覽之後舊截圖的紀錄被清掉:再用 x/y 點擊 → browser.noScreenshot(要重新截圖)",
+    );
+  }
+
+  // ---- navigate ----
+  {
+    const h = makeDriver({ url: "http://localhost/x", title: "X" });
+    const out = await run(h, "navigate", { url: "http://localhost/x" });
+    check(
+      out.ok &&
+        out.result.url === "http://localhost/x" &&
+        out.result.title === "X" &&
+        out.result.loaded === true &&
+        h.calls.load.length === 1 &&
+        h.calls.load[0] === "http://localhost/x" &&
+        h.calls.waits.length === 1 &&
+        h.calls.waits[0] === 25_000 &&
+        h.calls.waits[0] < 30_000,
+      "navigate url:先開始觀察載入結果再 loadURL;等待上限 25 秒(小於 core 的 30 秒);載完回 {url, title, loaded:true}",
+      JSON.stringify(out),
+    );
+    const slow = makeDriver({ loadOutcome: { finished: false, timedOut: true } });
+    const slowOut = await run(slow, "navigate", { url: "http://localhost/slow" });
+    check(slowOut.ok && slowOut.result.loaded === false && slowOut.result.url === "http://localhost/after", "navigate:逾時(還在載入)→ 回 loaded:false 與目前的 url/title,不是錯誤");
+    const failed = makeDriver({ loadOutcome: { finished: false, failure: { code: -102, description: "ERR_CONNECTION_REFUSED", url: "http://localhost:1/" } } });
+    const failOut = await run(failed, "navigate", { url: "http://localhost:1/" });
+    check(
+      !failOut.ok && failOut.error.code === "browser.navigationFailed" && failOut.error.message.includes("ERR_CONNECTION_REFUSED") && failOut.error.message.includes("http://localhost:1/"),
+      "navigate:did-fail-load → browser.navigationFailed,說明含錯誤描述與網址",
+    );
+    const bad = makeDriver();
+    const schemeOut = await run(bad, "navigate", { url: "file:///etc/passwd" });
+    const jsOut = await run(bad, "navigate", { url: "javascript:alert(1)" });
+    check(
+      !schemeOut.ok && !jsOut.ok && schemeOut.error.code === "browser.hostError" && bad.calls.load.length === 0 && bad.calls.waits.length === 0,
+      "navigate:再檢查一次 scheme(縱深防禦)——file:/javascript: 即使 core 漏擋,main 也不會 loadURL",
+    );
+    const back = makeDriver();
+    const backOut = await run(back, "navigate", { action: "back" });
+    const reload = makeDriver();
+    await run(reload, "navigate", { action: "reload" });
+    const noHistory = makeDriver({ history: false });
+    const noHistOut = await run(noHistory, "navigate", { action: "forward" });
+    check(
+      backOut.ok &&
+        back.calls.history[0] === "back" &&
+        back.calls.load.length === 0 &&
+        reload.calls.history[0] === "reload" &&
+        !noHistOut.ok &&
+        noHistOut.error.code === "browser.hostError" &&
+        /下一頁/.test(noHistOut.error.message) &&
+        noHistory.calls.cancelled === 1,
+      "navigate action:back/forward/reload 走導覽歷史(不 loadURL);沒有歷史可走 → browser.hostError 並取消載入觀察",
+    );
+    const neither = await run(makeDriver(), "navigate", {});
+    const unknownOp = await run(makeDriver(), "teleport", {});
+    check(!neither.ok && neither.error.code === "browser.hostError" && !unknownOp.ok && unknownOp.error.code === "browser.hostError" && /teleport/.test(unknownOp.error.message), "navigate 沒給 url 也沒給 action、不認得的 op → browser.hostError");
+  }
+
+  // ---- 整體上限、錯誤對照 ----
+  {
+    const hung = makeDriver({ cdp: () => new Promise(() => undefined) });
+    // 不真的等 12 秒:把 setTimeout 換成立刻觸發來驗證「整體上限」確實存在且回的是 browser.hostError。
+    const realSetTimeout = globalThis.setTimeout;
+    let observedMs;
+    globalThis.setTimeout = (fn, ms, ...rest) => {
+      observedMs = ms;
+      return realSetTimeout(fn, 0, ...rest);
+    };
+    let out;
+    try {
+      out = await run(hung, "screenshot", {});
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    check(
+      !out.ok && out.error.code === "browser.hostError" && /12 秒/.test(out.error.message) && observedMs === 12_000 && observedMs < 15_000,
+      "整體上限:一個卡住的非導覽 op 12 秒就以 browser.hostError 收場(小於 core 的 15 秒,不讓 core 先逾時)",
+    );
+    const mapped = [mapExecError(new BrowserExecError("browser.staleRef", "x")), mapExecError(new Error("CDP 掛了")), mapExecError("字串"), mapExecError(new Error("")), mapExecError(new Error("a".repeat(5000)))];
+    check(
+      mapped[0].code === "browser.staleRef" &&
+        mapped[1].code === "browser.hostError" &&
+        mapped[1].message === "CDP 掛了" &&
+        mapped[2].message === "字串" &&
+        mapped[3].code === "browser.hostError" &&
+        mapped[3].message.length > 0 &&
+        mapped[4].message.length <= 1800,
+      "mapExecError:BrowserExecError 原樣保留 code;其餘一律 browser.hostError(訊息保留、空的給預設、過長截到 host 錯誤上限內)",
+    );
+  }
+
+  // ---- 結果整形(頁面來的值一律重新檢查)----
+  {
+    const text = buildReadTextResult({ url: "http://x/", title: "T", text: "a".repeat(50), truncated: false }, 10);
+    const hostile = buildReadTextResult({ url: 5, title: { evil: true }, text: ["not", "a", "string"], truncated: "yes" }, 100);
+    const surrogate = buildReadTextResult({ text: "ab😀cd" }, 3); // 在 😀 的中間切(高位 surrogate 落在第 3 個位置)
+    check(
+      text.mode === "text" &&
+        text.text.length === 10 &&
+        text.truncated === true &&
+        hostile.url === "" &&
+        hostile.title === "" &&
+        hostile.text === "" &&
+        hostile.truncated === false &&
+        surrogate.text === "ab" &&
+        surrogate.truncated === true &&
+        dropTrailingHighSurrogate("ab\ud83d") === "ab" &&
+        dropTrailingHighSurrogate("ab") === "ab",
+      "buildReadTextResult:超過 maxChars 由 host 再截一次並標 truncated;型別不對的欄位(數字網址、物件標題、陣列內文)一律當空;不切在 surrogate pair 中間",
+      JSON.stringify({ text: text.text.length, surrogate: surrogate.text }),
+    );
+    const many = Array.from({ length: 700 }, (_, i) => ({ ref: `e${i + 1}`, role: "link", name: `n${i}` }));
+    const inter = buildInteractiveResult({
+      url: "http://x/",
+      title: "T",
+      truncated: false,
+      elements: [
+        { ref: "e1", role: "link", name: "Docs", href: "https://example.com/docs" },
+        { ref: "e2", role: "link", name: "JS", href: "javascript:alert(1)" },
+        { ref: "e3", role: "link", name: "Mail", href: "mailto:a@b.c" },
+        { ref: "evil", role: "button", name: "bad ref" },
+        { ref: "e4; drop()", role: "button", name: "bad ref 2" },
+        { ref: "e5", role: 5, name: 7 },
+        "not an object",
+        null,
+        { ref: "e6", role: "x".repeat(100), name: "y".repeat(500), href: `https://example.com/${"p".repeat(5000)}` },
+      ],
+    });
+    const capped = buildInteractiveResult({ elements: many });
+    check(
+      inter.mode === "interactive" &&
+        inter.elements.map((e) => e.ref).join() === "e1,e2,e3,e5,e6" &&
+        inter.elements[0].href === "https://example.com/docs" &&
+        inter.elements[1].href === undefined &&
+        inter.elements[2].href === undefined &&
+        inter.elements[3].role === "generic" &&
+        inter.elements[3].name === "" &&
+        inter.elements[4].role.length === 40 &&
+        inter.elements[4].name.length === 120 &&
+        inter.elements[4].href.length === 2048 && // 過長的網址截在 2048 字元
+        capped.elements.length === 500 &&
+        capped.truncated === true,
+      "buildInteractiveResult:只收我們自己產生的 e<N> ref(頁面塞的別的字串丟掉)、非 http(s) 的 href 不回(javascript:/mailto:)、名稱/role/href 長度上限、型別不對的欄位用預設、超過 500 個截斷並標 truncated",
+      JSON.stringify(inter.elements.map((e) => [e.ref, e.role, e.name.length, e.href?.length])),
+    );
+    const resolveOk = interpretResolveResult({ x: 1.5, y: 2.5, focused: false });
+    check(resolveOk.x === 1.5 && resolveOk.y === 2.5 && resolveOk.focused === false, "interpretResolveResult:正常結果 → 座標與 focused");
+  }
+
+  // ---- isolated world 腳本:語法、不改動頁面 DOM、行為(用最小的假 DOM)----
+  {
+    const scripts = [VIEWPORT_SCRIPT, EDITABLE_FOCUS_SCRIPT, buildReadTextScript(100), buildInteractiveScript(500), buildResolveRefScript("e1", true), buildResolveRefScript("e1", false)];
+    const parses = scripts.every((code) => {
+      try {
+        new Function("window", "document", "location", "getComputedStyle", `return ${code}`);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    const forbidden = ["setAttribute", "removeAttribute", "dataset", ".style", "appendChild", "insertBefore", "innerHTML", "outerHTML", "classList", "createElement", "addEventListener", "eval(", "Function("];
+    const touching = scripts.flatMap((code) => forbidden.filter((token) => code.includes(token)));
+    check(
+      parses && touching.length === 0,
+      "isolated world 腳本:全部能被 JS 解析;不含任何會改動頁面 DOM/注入程式的呼叫(setAttribute/dataset/style/appendChild/innerHTML/addEventListener/eval…)——ref 對照表只存在 isolated world 的全域",
+      touching.join(","),
+    );
+
+    const rect = (w, h, l = 10, t = 20) => ({ left: l, top: t, width: w, height: h });
+    const makeEl = (tag, props = {}) => {
+      const attrs = props.attrs ?? {};
+      const el = {
+        tagName: tag,
+        type: props.type,
+        value: props.value ?? "",
+        href: props.href,
+        labels: props.labels ?? [],
+        innerText: props.text ?? "",
+        textContent: props.text ?? "",
+        disabled: props.disabled ?? false,
+        readOnly: false,
+        isContentEditable: props.editable ?? false,
+        isConnected: props.connected ?? true,
+        scrolled: [],
+        focused: false,
+        hidden: props.hidden ?? false,
+        getAttribute: (n) => (n in attrs ? attrs[n] : null),
+        closest: () => null,
+        getBoundingClientRect: () => rect(...(props.box ?? [100, 30])),
+        scrollIntoView(opts) {
+          el.scrolled.push(opts);
+        },
+        focus() {
+          el.focused = true;
+          doc.activeElement = el;
+        },
+      };
+      return el;
+    };
+    const doc = { title: "Test page", activeElement: null, getElementById: () => null };
+    const link = makeEl("A", { href: "https://example.com/docs", text: "  Docs \n page " });
+    const button = makeEl("BUTTON", { text: "Save" });
+    const dead = makeEl("BUTTON", { text: "Disabled", disabled: true });
+    const secret = makeEl("INPUT", { type: "text", value: "SECRET-TYPED-BY-USER", attrs: { placeholder: "Search" } });
+    const pass = makeEl("INPUT", { type: "password", value: "hunter2", attrs: { "aria-label": "Password" } });
+    const submit = makeEl("INPUT", { type: "submit", value: "Go" });
+    const check1 = makeEl("INPUT", { type: "checkbox", labels: [{ textContent: "Remember me" }] });
+    const invisible = makeEl("BUTTON", { text: "Hidden" });
+    const zero = makeEl("BUTTON", { text: "Zero", box: [0, 0] });
+    const jsLink = makeEl("A", { href: "javascript:alert(1)", text: "Bad link" });
+    const clickable = makeEl("DIV", { text: "Clickable div", attrs: { onclick: "x()" } });
+    doc.querySelectorAll = () => [link, button, dead, secret, pass, submit, check1, invisible, zero, jsLink, clickable];
+    const win = { innerWidth: 415, innerHeight: 669 };
+    const loc = { href: "http://localhost/page" };
+    const gcs = (el) => (el === invisible ? { visibility: "visible", display: "none" } : { visibility: "visible", display: "block" });
+    let evilCalled = false;
+    const evaluate = (code) => new Function("window", "document", "location", "getComputedStyle", "evil", `return ${code}`)(win, doc, loc, gcs, () => (evilCalled = true));
+
+    const list = evaluate(buildInteractiveScript(500));
+    const byRef = Object.fromEntries(list.elements.map((e) => [e.ref, e]));
+    check(
+      list.url === "http://localhost/page" &&
+        list.title === "Test page" &&
+        list.truncated === false &&
+        list.elements.map((e) => e.ref).join() === "e1,e2,e3,e4,e5,e6,e7,e8" &&
+        byRef.e1.role === "link" &&
+        byRef.e1.name === "Docs page" &&
+        byRef.e1.href === "https://example.com/docs" &&
+        byRef.e2.role === "button" &&
+        byRef.e2.name === "Save" &&
+        byRef.e3.role === "textbox" &&
+        byRef.e3.name === "Search" &&
+        byRef.e4.role === "textbox" &&
+        byRef.e4.name === "Password" &&
+        byRef.e5.role === "button" &&
+        byRef.e5.name === "Go" &&
+        byRef.e6.role === "checkbox" &&
+        byRef.e6.name === "Remember me" &&
+        byRef.e7.name === "Bad link" &&
+        byRef.e7.href === undefined &&
+        byRef.e8.role === "generic" &&
+        byRef.e8.name === "Clickable div" &&
+        !JSON.stringify(list).includes("SECRET-TYPED-BY-USER") &&
+        !JSON.stringify(list).includes("hunter2"),
+      "互動元素腳本:可見的連結/按鈕/輸入框/checkbox/onclick 元素依文件順序編成 e1…eN;role/name 依 aria/label/placeholder/按鈕 value/文字推得;停用的、display:none 的、零大小的略過;文字與密碼輸入框的 value(可能是使用者輸入的機密)絕不進結果;javascript: 的 href 不回",
+      JSON.stringify(list.elements),
+    );
+    const table = win.__deskmonyRefs?.table;
+    check(table?.get("e1") === link && table.get("e2") === button && table.size === 8, "ref 對照表存在 isolated world 的 window.__deskmonyRefs(元素參考,頁面看不到),每次讀取整份重建");
+
+    const resolved = evaluate(buildResolveRefScript("e2", true));
+    check(
+      resolved.x === 60 &&
+        resolved.y === 35 &&
+        resolved.focused === true &&
+        button.scrolled.length === 1 &&
+        button.scrolled[0].behavior === "instant" &&
+        button.scrolled[0].block === "center" &&
+        button.focused === true,
+      "解析 ref 腳本:scrollIntoView(instant、置中)之後回中心座標(left+width/2、top+height/2);focus=true 時聚焦並回報是否真的聚焦",
+      JSON.stringify(resolved),
+    );
+    const noFocus = evaluate(buildResolveRefScript("e1", false));
+    check(noFocus.focused === undefined && link.focused === false, "解析 ref 腳本:focus=false 不聚焦");
+    link.isConnected = false;
+    zero.getBoundingClientRect = () => rect(0, 0);
+    const detached = evaluate(buildResolveRefScript("e1", false));
+    const unknown = evaluate(buildResolveRefScript("e99", false));
+    button.getBoundingClientRect = () => rect(0, 0);
+    const nobox = evaluate(buildResolveRefScript("e2", false));
+    const injected = evaluate(buildResolveRefScript('e1"); evil(); ("', false));
+    delete win.__deskmonyRefs;
+    const noTable = evaluate(buildResolveRefScript("e2", false));
+    check(
+      detached.error === "stale" &&
+        unknown.error === "stale" &&
+        nobox.error === "nobox" &&
+        noTable.error === "stale" &&
+        injected.error === "stale" &&
+        evilCalled === false,
+      "解析 ref 腳本:元素已脫離文件、ref 不在表裡、對照表不在(導覽之後 isolated world 重建)→ stale;元素沒有大小 → nobox;ref 字串被當成資料(JSON.stringify),夾帶程式碼不會被執行",
+    );
+    const textRead = evaluate(buildReadTextScript(5));
+    doc.body = { innerText: "hello world" };
+    const textRead2 = evaluate(buildReadTextScript(5));
+    check(textRead.text === "" && textRead2.text === "hello" && textRead2.truncated === true && textRead2.url === "http://localhost/page", "讀文字腳本:沒有 body 回空字串;超過 maxChars 截斷並標 truncated");
+  }
+}
+
+console.log("\n== browser-activity:agent 操作中的指示(最近一個動作、自動開面板的判斷)==");
+{
+  const { describeBrowserAction, shortUrlForDisplay, shouldAutoOpenPanel, ACTIVITY_LINGER_MS } = await import(
+    pathToFileURL(path.join(LIB, "browser-activity.ts")).href
+  );
+  const d = (op, args) => JSON.stringify(describeBrowserAction(op, args));
+  check(
+    d("navigate", { url: "https://user:pass@example.com/a/b?token=SECRET#frag" }) === JSON.stringify({ key: "navigate", params: { url: "example.com/a/b" } }) &&
+      d("navigate", { url: "http://localhost:3000/" }) === JSON.stringify({ key: "navigate", params: { url: "localhost:3000" } }) &&
+      d("navigate", { action: "back" }) === JSON.stringify({ key: "back", params: {} }) &&
+      d("navigate", { action: "forward" }) === JSON.stringify({ key: "forward", params: {} }) &&
+      d("navigate", { action: "reload" }) === JSON.stringify({ key: "reload", params: {} }),
+    "describeBrowserAction(navigate):網址只顯示 host + 路徑(不含帳密、查詢字串、片段);back/forward/reload 各自的 key",
+  );
+  check(
+    d("screenshot", {}) === JSON.stringify({ key: "screenshot", params: {} }) &&
+      d("readPage", {}) === JSON.stringify({ key: "readText", params: {} }) &&
+      d("readPage", { mode: "interactive" }) === JSON.stringify({ key: "readInteractive", params: {} }) &&
+      d("click", { ref: "e3" }) === JSON.stringify({ key: "clickRef", params: { ref: "e3" } }) &&
+      d("click", { x: 10.4, y: 20.6 }) === JSON.stringify({ key: "clickPoint", params: { x: 10, y: 21 } }) &&
+      d("type", { text: "秘密😀abc" }) === JSON.stringify({ key: "type", params: { count: 6 } }) &&
+      d("type", { text: "x", submit: true }) === JSON.stringify({ key: "typeSubmit", params: { count: 1 } }) &&
+      d("pressKey", { key: "Enter" }) === JSON.stringify({ key: "pressKey", params: { key: "Enter" } }) &&
+      d("scroll", { direction: "up" }) === JSON.stringify({ key: "scrollUp", params: {} }) &&
+      d("scroll", { direction: "down" }) === JSON.stringify({ key: "scrollDown", params: {} }) &&
+      d("teleport", null) === JSON.stringify({ key: "unknown", params: { op: "teleport" } }),
+    "describeBrowserAction:其餘 op 的 key 與參數;輸入的文字只顯示字元數(按 code point 數、不顯示內容);不認得的 op 與 null args 不丟例外",
+  );
+  check(
+    shortUrlForDisplay("https://example.com/" + "p".repeat(200)).length === 60 &&
+      shortUrlForDisplay("https://example.com/" + "p".repeat(200)).endsWith("…") &&
+      shortUrlForDisplay("not a url") === "not a url" &&
+      shortUrlForDisplay(undefined) === "",
+    "shortUrlForDisplay:太長以刪節號截到 60 字元;解析不了的原樣;非字串回空字串",
+  );
+  check(
+    shouldAutoOpenPanel({ isCurrentSession: true, panelOpen: false, hasRecentActivity: false }) === true &&
+      shouldAutoOpenPanel({ isCurrentSession: false, panelOpen: false, hasRecentActivity: false }) === false &&
+      shouldAutoOpenPanel({ isCurrentSession: true, panelOpen: true, hasRecentActivity: false }) === false &&
+      shouldAutoOpenPanel({ isCurrentSession: true, panelOpen: false, hasRecentActivity: true }) === false &&
+      ACTIVITY_LINGER_MS === 8000,
+    "shouldAutoOpenPanel:只有「目前 session + 面板關著 + 一段操作的開頭」才自動打開(面板已開、別的 session、操作進行中使用者又關掉都不會彈出來)",
+  );
+}
+
+{
+  const { browserFrameInert } = await import(pathToFileURL(path.join(LIB, "browser-frame-style.ts")).href);
+  check(
+    browserFrameInert(undefined) === true && browserFrameInert({ x: 1, y: 2, width: 3, height: 4 }) === false,
+    "browserFrameInert:停放中的外框 inert(使用者按 Tab 進不去看不見的頁面)、可見時不 inert",
+  );
+}
+
 console.log(`\n總計: ${passed} PASS, ${total - passed} FAIL`);
 process.exit(passed === total ? 0 : 1);

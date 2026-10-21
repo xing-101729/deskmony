@@ -1,4 +1,5 @@
 import type { AppShortcutAction } from "../electron/browser-rules.js";
+import type { BrowserExecOutcome } from "../electron/browser-exec.js";
 
 declare global {
   interface Window {
@@ -51,6 +52,8 @@ declare global {
       browserOpenDevTools?: (webContentsId: number) => Promise<void>;
       /** 清掉某個 session 的瀏覽器 partition(cookie/storage/快取;session 刪除時呼叫)。 */
       browserClearPartition?: (sessionId: string) => Promise<void>;
+      /** 2026-10-21(P4b):執行 agent 的一個瀏覽器指令(CDP + isolated world,在 Electron main 端);期待中的失敗回 `{ok:false}`,不丟例外。 */
+      browserExec?: (webContentsId: number, op: string, args: unknown) => Promise<BrowserExecOutcome>;
       /** 焦點在 webview 裡時,main 攔下 `mod+j`/`mod+k`/`ctrl+\`` 並轉回 renderer 執行同樣的動作;回傳取消訂閱函式。 */
       onAppShortcut?: (callback: (action: AppShortcutAction) => void) => () => void;
     };

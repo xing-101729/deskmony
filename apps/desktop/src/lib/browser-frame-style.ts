@@ -47,6 +47,17 @@ export interface BrowserFrameStyle {
 }
 
 /**
+ * 停放中的外框要加 `inert`(2026-10-21,P4b):看不見的頁面不該被使用者按 Tab 聚焦進去(焦點進了 guest,之後的按鍵都被一個看不到的頁面吃掉)。
+ * `inert` 只影響**使用者在 host 端的互動與焦點**,不影響繪製(不像 `visibility: hidden`/`display: none`)、也不影響 CDP 對 guest 的輸入與截圖
+ * (CDP 的輸入事件直接送進 guest 的 render widget,不經 host DOM 的命中測試)——**後一點沒有實測**,`scripts/spike/webview-offscreen.cjs` 的
+ * `parked-inert` 位置就是為了在真 Electron 驗證它;驗證不過就拿掉這個函式的回傳(改回 false)即可,不影響其他行為。
+ * 可見時拿掉。
+ */
+export function browserFrameInert(rect: FrameRect | undefined): boolean {
+  return rect === undefined;
+}
+
+/**
  * @param rect 目前 session 的 Browser 分頁 slot(viewport 座標);`undefined` = 沒有 slot(面板關著、不在 Browser 分頁、不是目前 session)→ 停放。
  * @param pointerLock 拖拉面板寬度中:可見的 webview 也暫時不吃滑鼠事件。
  */

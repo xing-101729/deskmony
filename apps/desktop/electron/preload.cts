@@ -87,6 +87,14 @@ function browserOpenDevTools(webContentsId: number): Promise<void> {
   return ipcRenderer.invoke("deskmony:browserOpenDevTools", webContentsId);
 }
 
+/**
+ * 2026-10-21(P4b):執行 agent 的一個瀏覽器指令(op 與 args 的形狀見 packages/shared/src/browser.ts 的 `BrowserOpMap`)。
+ * 回傳 `{ok:true, result}` 或 `{ok:false, error:{code, message}}`——期待中的失敗(ref 過期、截圖座標失準……)不丟例外。
+ */
+function browserExec(webContentsId: number, op: string, args: unknown): Promise<unknown> {
+  return ipcRenderer.invoke("deskmony:browserExec", webContentsId, op, args);
+}
+
 function browserClearPartition(sessionId: string): Promise<void> {
   return ipcRenderer.invoke("deskmony:browserClearPartition", sessionId);
 }
@@ -136,5 +144,6 @@ contextBridge.exposeInMainWorld("deskmony", {
   browserOpenExternal,
   browserOpenDevTools,
   browserClearPartition,
+  browserExec,
   onAppShortcut,
 });

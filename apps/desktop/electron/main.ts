@@ -13,6 +13,7 @@ import {
   matchAppShortcut,
   popupRedirectUrl,
 } from "./browser-rules.js";
+import { runBrowserOp } from "./browser-executor.js";
 
 const RESOURCES_CORE_DIR = "core";
 
@@ -398,6 +399,16 @@ function registerIpcHandlers(): void {
   ipcMain.handle("deskmony:browserOpenDevTools", (event, webContentsId: unknown) => {
     assertFromMainWindow(event);
     resolveBrowserGuest(webContentsId).openDevTools({ mode: "detach" });
+  });
+
+  // 2026-10-21(P4b):agent 的瀏覽器指令在桌面端的執行(CDP + isolated world,邏輯見 browser-exec.ts / browser-executor.ts)。
+  // 與上面幾個一樣:呼叫端必須是主視窗的 renderer、webContentsId 必須是主視窗的 webview guest;op/args 的細部檢查在執行器裡
+  // (renderer 是 core 指令的轉手,core 已經驗證過參數;這裡的檢查是縱深防禦,期待中的失敗回 {ok:false},不丟例外)。
+  ipcMain.handle("deskmony:browserExec", async (event, webContentsId: unknown, op: unknown, args: unknown) => {
+    assertFromMainWindow(event);
+    const guest = resolveBrowserGuest(webContentsId);
+    if (typeof op !== "string") throw new Error("Invalid browser op");
+    return await runBrowserOp(guest, op, args);
   });
 
   ipcMain.handle("deskmony:browserClearPartition", async (event, sessionId: unknown) => {
