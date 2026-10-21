@@ -8,15 +8,21 @@
  *   3. CDP `Input.insertText` 能輸入到 focus 的 input;
  *   4. `loadURL` 之後 `did-finish-load` 正常觸發;
  *   5. 在「可見位置」與「隱藏位置」之間來回移動不會重新載入(沒有 did-start-loading/did-navigate、頁面狀態與伺服器請求數都不變)。
- * 同一組 5 項檢查對五種「位置」各跑一次(每種一個獨立的視窗與 webview,依序進行,同時只存在一個視窗):
- *   visible    基準:webview 在畫面上(sanity check,這組不過代表實驗本身有問題)
- *   offscreen  webview 外框 `position: fixed; left: -20000px`,保持 1024×768(BrowserHost 目前停放 webview 的方式)
- *   opacity0   webview 在原位但 `opacity: 0`,上面再蓋一塊不透明的面板內容區
- *   clip1x1    外框 1×1 且 `overflow: hidden`,webview 本身仍是 1024×768(被裁切成 1×1 可見)
- *   parked     **BrowserHost 現行的正式停放方式**(`apps/desktop/src/lib/browser-frame-style.ts`):外框 `position: fixed; left: 0; top: 0;
- *              width: 1024px; height: 768px; opacity: 0; z-index: -1; pointer-events: none`,上面有一塊不透明的全版面「app 外殼」(在流內、不是 positioned,
- *              對應 `.app-shell` 的 `bg-canvas`)。不用 visibility:hidden / display:none。之後改停放方式要重驗,就用這一種。
- * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式;`parked` 沒有 5/5 會另外大聲警告(代表目前的正式停放方式不可用)。
+ * 同一組 5 項檢查對六種「位置」各跑一次(每種一個獨立的視窗與 webview,依序進行,同時只存在一個視窗):
+ *   visible       基準:webview 在畫面上(sanity check,這組不過代表實驗本身有問題)
+ *   offscreen     webview 外框 `position: fixed; left: -20000px`,保持 1024×768
+ *   opacity0      webview 在原位但 `opacity: 0`,上面再蓋一塊不透明的面板內容區
+ *   clip1x1       外框 1×1 且 `overflow: hidden`,webview 本身仍是 1024×768(被裁切成 1×1 可見)
+ *   parked        P3 的停放方式(`apps/desktop/src/lib/browser-frame-style.ts`):外框 `position: fixed; left: 0; top: 0;
+ *                 width: 1024px; height: 768px; opacity: 0; z-index: -1; pointer-events: none`,上面有一塊不透明的全版面「app 外殼」(在流內、不是 positioned,
+ *                 對應 `.app-shell` 的 `bg-canvas`)。不用 visibility:hidden / display:none。
+ *   parked-inert  **BrowserHost 現行的正式停放方式**(P4b):同 `parked`,外框再加 `inert` 屬性(`browserFrameInert()`)——停放中的 webview 看不見,
+ *                 不能讓使用者按 Tab 把鍵盤焦點送進去。`inert` 對 CDP 截圖/輸入有沒有影響是**未驗證**的,這一組就是在驗它;切換位置時
+ *                 (visible <-> parked-inert)會移除/加上 `inert`,和 BrowserHost 把 session 在面板與停放之間來回移動的情形一致。
+ *                 之後改停放方式要重驗,就用這一種。
+ * 另外對 visible / parked / parked-inert 各做一個**資訊性**的鍵盤檢查(不計入 5 項):在 host 頁面按 Tab,焦點有沒有進到 webview
+ * (WEBVIEW = 進去了;BODY = 沒有)。預期 visible 與 parked 會進去、parked-inert 不會——這就是加 `inert` 的目的。
+ * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式;`parked-inert` 沒有 5/5 會另外大聲警告(代表目前的正式停放方式不可用)。
  *
  * ## 執行方式(從 repo 根目錄)
  *   Windows (cmd/PowerShell):  apps\desktop\node_modules\.bin\electron.cmd scripts\spike\webview-offscreen.cjs
@@ -25,11 +31,11 @@
  * 選用參數(接在腳本路徑後):`--out=<檔案>` 把結果另存成 JSON。
  *
  * ## 行為
- *  - 會依序**開 5 個 Electron 視窗**(每種位置一個,測完立刻關閉,同時只有一個;視窗是真的顯示出來的,因為正式 app 的視窗也是顯示的——
+ *  - 會依序**開 6 個 Electron 視窗**(每種位置一個,測完立刻關閉,同時只有一個;視窗是真的顯示出來的,因為正式 app 的視窗也是顯示的——
  *    用 show:false 會變成另一個實驗)。
  *  - 本機 HTTP 伺服器只綁 127.0.0.1、隨機 port,結束時關閉;userData 用暫存目錄,結束時刪除(刪不掉會在最後一行印出路徑)。
  *  - 全程有逾時(每個 CDP 指令 6 秒、每種位置 60 秒、整體 7 分鐘 watchdog),一定會自己結束:`app.exit(code)`,不留殘餘行程。
- *    預期總時間約 25–50 秒(各項檢查通過時;有逾時的項目會拉長——例如 offscreen 的截圖會等滿 6 秒)。
+ *    預期總時間約 30–60 秒(各項檢查通過時;有逾時的項目會拉長——例如 offscreen 的截圖會等滿 6 秒)。
  *  - 結束碼:0 = 實驗跑完且基準(visible)5/5 通過;1 = 基準沒過(實驗結果不可信);2 = 腳本本身出錯或 watchdog 觸發。
  *    「隱藏方式行不行」看輸出的 VERDICT 行,不影響結束碼。
  */
@@ -47,14 +53,18 @@ const VARIANT_TIMEOUT_MS = 60000;
 const GLOBAL_TIMEOUT_MS = 7 * 60 * 1000;
 const SETTLE_MS = 500; // 改了位置之後等合成器反應的時間
 
-/** 四種位置;`pos` 是 host 頁面的 `window.__setPos(name)` 套用的外框與 webview 樣式。 */
+/** 六種位置;各自的外框與 webview 樣式在 host 頁面的 `POS` 表,由 `window.__setPos(name)` 套用。 */
 const VARIANTS = [
   { name: "visible", desc: "webview 在畫面上(基準)", hidden: false },
   { name: "offscreen", desc: "外框 left:-20000px,保持 1024x768", hidden: true },
   { name: "opacity0", desc: "opacity:0,上面蓋一塊不透明的面板內容區", hidden: true },
   { name: "clip1x1", desc: "外框 1x1 + overflow:hidden,webview 仍是 1024x768", hidden: true },
-  { name: "parked", desc: "正式停放方式:fixed 0,0、1024x768、opacity 0、z-index -1、pointer-events none,上面是不透明的 app 外殼", hidden: true },
+  { name: "parked", desc: "P3 的停放方式:fixed 0,0、1024x768、opacity 0、z-index -1、pointer-events none,上面是不透明的 app 外殼", hidden: true },
+  { name: "parked-inert", desc: "正式停放方式:同 parked,外框再加 inert 屬性(停放中按 Tab 進不去)", hidden: true },
 ];
+
+/** 會做資訊性鍵盤檢查(Tab 焦點會不會進 webview)的位置。 */
+const TAB_PROBE_VARIANTS = new Set(["visible", "parked", "parked-inert"]);
 
 // ---------------------------------------------------------------------------------------------
 // 本機 HTTP 伺服器:測試頁(有 click handler、input、可見文字)、第二頁(給 loadURL 檢查)、host 頁(內含 <webview>)
@@ -93,17 +103,22 @@ html,body{margin:0;height:100%;background:#2b2b2b;color:#ddd;font:14px sans-seri
 <div id="cover">panel content (opaque, in front of the webview)</div>
 <div id="frame"><webview id="wv" partition="spike-${variant}" src="${guestUrl}" style="display:flex"></webview></div>
 <script>
+var PARKED_FRAME = { left: "0px", top: "0px", width: "1024px", height: "768px", opacity: "0", zIndex: "-1", pointerEvents: "none" };
 var POS = {
-  visible:   { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false },
-  offscreen: { frame: { left: "-20000px", top: "0px", width: "1024px", height: "768px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false },
-  opacity0:  { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "0", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: true, shell: false },
-  clip1x1:   { frame: { left: "20px", top: "20px", width: "1px", height: "1px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "1024px", height: "768px" }, cover: false, shell: false },
-  parked:    { frame: { left: "0px", top: "0px", width: "1024px", height: "768px", opacity: "0", zIndex: "-1", pointerEvents: "none" }, wv: { width: "100%", height: "100%" }, cover: false, shell: true }
+  visible:   { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false, inert: false },
+  offscreen: { frame: { left: "-20000px", top: "0px", width: "1024px", height: "768px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false, inert: false },
+  opacity0:  { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "0", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: true, shell: false, inert: false },
+  clip1x1:   { frame: { left: "20px", top: "20px", width: "1px", height: "1px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "1024px", height: "768px" }, cover: false, shell: false, inert: false },
+  parked:    { frame: PARKED_FRAME, wv: { width: "100%", height: "100%" }, cover: false, shell: true, inert: false },
+  // 正式停放方式:parked + inert(BrowserHost 的 browserFrameInert())。離開停放(移回 visible)時 inert 屬性會被移除。
+  "parked-inert": { frame: PARKED_FRAME, wv: { width: "100%", height: "100%" }, cover: false, shell: true, inert: true }
 };
 window.__setPos = function (name) {
   var p = POS[name];
   if (!p) throw new Error("unknown position " + name);
-  Object.assign(document.getElementById("frame").style, p.frame);
+  var frame = document.getElementById("frame");
+  Object.assign(frame.style, p.frame);
+  if (p.inert) frame.setAttribute("inert", ""); else frame.removeAttribute("inert");
   Object.assign(document.getElementById("wv").style, p.wv);
   document.getElementById("cover").style.display = p.cover ? "block" : "none";
   document.getElementById("shell").style.display = p.shell ? "block" : "none";
@@ -217,6 +232,7 @@ async function runVariant(server, variant) {
   };
 
   console.log(`\n== ${variant.name}: ${variant.desc} ==`);
+  let tabFocus; // 資訊性的 Tab 焦點檢查結果(沒做或失敗就是 undefined)
   hits = {};
   const port = server.address().port;
   const win = new BrowserWindow({
@@ -313,6 +329,26 @@ async function runVariant(server, variant) {
       const title = await evalInGuest(guest, "document.title");
       return { ok: title === "spike-second", detail: `title=${JSON.stringify(title)} url=${guest.getURL()}` };
     });
+
+    // ---- 資訊性:按 Tab 焦點會不會進 webview(不計入 5 項,失敗也不影響結果)----
+    if (TAB_PROBE_VARIANTS.has(variant.name)) {
+      try {
+        await setPos(variant.name);
+        await sleep(SETTLE_MS);
+        win.focus();
+        win.webContents.focus();
+        await win.webContents.executeJavaScript("document.activeElement && document.activeElement.blur && document.activeElement.blur(), 0");
+        for (let i = 0; i < 3; i++) {
+          win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Tab" });
+          win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Tab" });
+          await sleep(120);
+        }
+        tabFocus = await win.webContents.executeJavaScript("document.activeElement ? document.activeElement.tagName : 'NONE'");
+        console.log(`  [INFO] pressing Tab 3x in the host page: document.activeElement = ${tabFocus}  (WEBVIEW = focus went into the webview, BODY = it did not)`);
+      } catch (error) {
+        console.log(`  [INFO] Tab-focus probe failed (ignored): ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.log(`  [SETUP FAILED] ${message}`);
@@ -322,7 +358,7 @@ async function runVariant(server, variant) {
     await sleep(300);
   }
   checks.sort((a, b) => a.id - b.id);
-  return { variant: variant.name, hidden: variant.hidden, checks, passed: checks.filter((c) => c.ok).length };
+  return { variant: variant.name, hidden: variant.hidden, checks, passed: checks.filter((c) => c.ok).length, tabFocus };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -346,7 +382,7 @@ async function main() {
   const outArg = process.argv.find((arg) => arg.startsWith("--out="));
   const outPath = outArg ? outArg.slice("--out=".length) : undefined;
   console.log(`Electron ${process.versions.electron} / Chromium ${process.versions.chrome} / ${process.platform} ${os.release()}`);
-  console.log("Opens 5 windows one after another (visible, offscreen, opacity0, clip1x1, parked); each is closed before the next opens.");
+  console.log("Opens 6 windows one after another (visible, offscreen, opacity0, clip1x1, parked, parked-inert); each is closed before the next opens.");
 
   await app.whenReady();
   const server = await startServer();
@@ -367,18 +403,32 @@ async function main() {
   console.log("\n==== SUMMARY (checks passed / 5) ====");
   for (const r of results) {
     const failed = r.checks.filter((c) => !c.ok).map((c) => c.id);
-    console.log(`  ${r.variant.padEnd(10)} ${r.passed}/5${failed.length ? `   FAIL: ${failed.join(",")}` : ""}${r.aborted ? `   ABORTED: ${r.aborted}` : ""}`);
+    console.log(
+      `  ${r.variant.padEnd(13)} ${r.passed}/5${failed.length ? `   FAIL: ${failed.join(",")}` : ""}${r.tabFocus ? `   Tab-focus: ${r.tabFocus}` : ""}${r.aborted ? `   ABORTED: ${r.aborted}` : ""}`,
+    );
   }
   const baseline = results.find((r) => r.variant === "visible");
   const baselineOk = baseline !== undefined && baseline.passed === 5;
   const workable = results.filter((r) => r.hidden && r.passed === 5).map((r) => r.variant);
   if (!baselineOk) console.log("\nBASELINE (visible) DID NOT PASS 5/5 — the experiment itself is unreliable on this machine; do not draw conclusions.");
   const parkedResult = results.find((r) => r.variant === "parked");
-  if (parkedResult && parkedResult.passed !== 5) {
-    console.log("\n!!! WARNING: the production parking method (parked: fixed 0,0 / 1024x768 / opacity 0 / z-index -1) did NOT pass 5/5 — BrowserHost parks hidden webviews this way, so P4 screenshots of unseen sessions are at risk.");
+  const inertResult = results.find((r) => r.variant === "parked-inert");
+  if (inertResult && inertResult.passed !== 5) {
+    console.log("\n!!! WARNING: the production parking method (parked-inert: fixed 0,0 / 1024x768 / opacity 0 / z-index -1 / inert) did NOT pass 5/5 — BrowserHost parks hidden webviews this way, so P4 screenshots/clicks on unseen sessions are at risk.");
+    if (parkedResult && parkedResult.passed === 5) {
+      console.log("    `parked` (the same without inert) DID pass 5/5, so `inert` is what breaks it: make `browserFrameInert()` in apps/desktop/src/lib/browser-frame-style.ts return false (and keep tabIndex=-1 or similar as the keyboard-focus guard).");
+    }
+  } else if (parkedResult && parkedResult.passed !== 5) {
+    console.log("\n!!! WARNING: `parked` (without inert) did NOT pass 5/5 although `parked-inert` did — unexpected; re-run before drawing conclusions.");
+  }
+  if (inertResult && inertResult.tabFocus !== undefined) {
+    const blocked = inertResult.tabFocus !== "WEBVIEW";
+    console.log(
+      `\nINERT KEYBOARD GUARD: ${blocked ? "OK — Tab did not move focus into the inert parked webview" : "NOT EFFECTIVE — Tab still reached the inert parked webview"}${parkedResult && parkedResult.tabFocus !== undefined ? ` (without inert, parked: ${parkedResult.tabFocus})` : ""}`,
+    );
   }
   console.log(
-    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: parked, opacity0, clip1x1, offscreen)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
+    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: parked-inert, parked, opacity0, clip1x1, offscreen)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
   );
   console.log(`Duration: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
