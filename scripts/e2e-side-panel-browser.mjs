@@ -34,6 +34,8 @@
  *   BR-11  真的 `@deskmony/client` 的 GatewayClient 當 host:收得到 `browser-command` push(不會因為不認得的 channel 出錯)並能回結果。
  *   BR-12  `features.agentBrowserTools: false`:bridge 沒有瀏覽器環境旗標、tools/list 只有五個 session 網路工具(與 in-process 一致),
  *          scoped token 呼叫 `browser.*ForAgent` 被拒;預設(true)時 effective config 為 true;`config.setFile` 接受這個欄位。
+ *   BR-13  (P4b)桌面端執行器(`apps/desktop/electron/browser-exec.ts`)與 core/shared 的契約沒有漂移:按鍵表、常數、逾時(小於 core 的)、
+ *          錯誤碼一致;每個 op 的執行結果都通得過 core 的結果 schema。需要能直接載入 .ts 的 Node(>= 22.18),否則略過。
  *
  * 用法:node scripts/e2e-side-panel-browser.mjs
  * 前置需求:pnpm build 已跑過(dist 是最新的)。
@@ -1223,6 +1225,87 @@ async function main() {
       );
     } catch (err) {
       record("BR-12b features.agentBrowserTools=false", false, String(err?.stack ?? err));
+    }
+
+    // =====================================================================================
+    // BR-13 桌面端執行器(apps/desktop/electron/browser-exec.ts,P4b)與 core/shared 的契約沒有漂移:
+    // 常數一致、逾時小於 core 的、錯誤碼一致、每個 op 的結果都通得過 core 的結果 schema(否則 core 會回 browser.invalidResult)。
+    // 執行器邏輯本身的測試在 e2e-side-panel-pure.mjs(假 driver);這裡只驗「和 core 對得上」,所以讀的是 shared 的 dist(requireFreshBuild 已確認是新的)。
+    // =====================================================================================
+    try {
+      if (!process.features.typescript) {
+        console.log("[BR-13] 略過:這個 Node 不能直接載入 .ts(需要 >= 22.18,或加 --experimental-strip-types)");
+      } else {
+        const shared = await import(pathToFileURL(path.join(REPO_ROOT, "packages", "shared", "dist", "index.js")).href);
+        const exec = await import(pathToFileURL(path.join(REPO_ROOT, "apps", "desktop", "electron", "browser-exec.ts")).href);
+        const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
+        // 假 driver:每個 op 都有一個「合理」的頁面回應。
+        const fakeDriver = {
+          cdp: async (method) => (method === "Page.captureScreenshot" ? { data: "FAKEJPEG" } : {}),
+          evalIsolated: async (code) => {
+            if (code === exec.VIEWPORT_SCRIPT) return { cssWidth: 415, cssHeight: 669 };
+            if (code === exec.EDITABLE_FOCUS_SCRIPT) return true;
+            if (code.startsWith("((ref, focus)")) return { x: 10, y: 20, focused: true };
+            if (code.includes("const NAME_MAX")) {
+              return { url: "http://localhost/", title: "T", truncated: false, elements: [{ ref: "e1", role: "link", name: "Docs", href: "http://localhost/docs" }, { ref: "e2", role: "button", name: "" }] };
+            }
+            return { url: "http://localhost/", title: "T", text: "hello", truncated: false };
+          },
+          getUrl: () => "http://localhost/after",
+          getTitle: () => "After",
+          isLoading: () => false,
+          isUrlAllowed: (u) => /^https?:\/\//i.test(u),
+          loadUrl: async () => undefined,
+          goHistory: () => true,
+          waitForLoad: () => ({ promise: Promise.resolve({ finished: true }), cancel: () => undefined }),
+          waitForLoadStop: async () => undefined,
+          jpegSize: () => ({ width: 830, height: 1338 }),
+          resizeJpeg: () => "RESIZED",
+          sleep: async () => undefined,
+        };
+        const state = exec.createGuestState();
+        const calls = [
+          ["navigate", { url: "http://localhost/x" }],
+          ["navigate", { action: "reload" }],
+          ["screenshot", {}],
+          ["readPage", { mode: "text", maxChars: 100 }],
+          ["readPage", { mode: "interactive" }],
+          ["click", { ref: "e1" }],
+          ["click", { x: 100, y: 200 }],
+          ["type", { text: "hi", ref: "e2", submit: true }],
+          ["pressKey", { key: "Enter" }],
+          ["scroll", { direction: "down", amount: 2 }],
+        ];
+        const invalid = [];
+        for (const [op, opArgs] of calls) {
+          const outcome = await exec.executeBrowserOp(fakeDriver, state, op, opArgs);
+          const parsed = outcome.ok ? shared.BROWSER_OP_RESULT_SCHEMAS[op].safeParse(outcome.result) : { success: false, error: outcome.error };
+          if (!parsed.success) invalid.push(`${op}(${JSON.stringify(opArgs)}): ${JSON.stringify(parsed.error)}`);
+        }
+
+        const checks = {
+          keys: sameSet(shared.BROWSER_KEYS, Object.keys(exec.KEY_TABLE)),
+          opsHandled: sameSet(shared.BROWSER_OPS, ["navigate", "screenshot", "readPage", "click", "type", "pressKey", "scroll"]),
+          screenshotEdge: exec.SCREENSHOT_MAX_EDGE === shared.BROWSER_SCREENSHOT_MAX_EDGE,
+          scroll: exec.SCROLL_DEFAULT_AMOUNT === shared.BROWSER_SCROLL_DEFAULT_AMOUNT && exec.SCROLL_MAX_AMOUNT === shared.BROWSER_SCROLL_MAX_AMOUNT,
+          readPage: exec.READ_PAGE_DEFAULT_MAX_CHARS === shared.BROWSER_READ_PAGE_DEFAULT_MAX_CHARS && exec.READ_PAGE_MAX_CHARS === shared.BROWSER_READ_PAGE_MAX_CHARS,
+          timeouts:
+            exec.NAVIGATE_WAIT_MS < shared.BROWSER_NAVIGATE_TIMEOUT_MS &&
+            exec.NAVIGATE_DEADLINE_MS < shared.BROWSER_NAVIGATE_TIMEOUT_MS &&
+            exec.COMMAND_DEADLINE_MS < shared.BROWSER_COMMAND_TIMEOUT_MS &&
+            exec.SETTLE_START_MS + exec.SETTLE_MAX_MS < exec.COMMAND_DEADLINE_MS,
+          errorCodes: sameSet(Object.values(exec.ExecErrorCodes), shared.BROWSER_HOST_ERROR_CODES),
+          resultSchemas: invalid.length === 0,
+        };
+        record(
+          "BR-13 桌面端執行器與 core/shared 的契約一致:按鍵表 = BROWSER_KEYS、截圖長邊/捲動/讀頁面常數相同、逾時都小於 core 的(導覽 30 秒、其他 15 秒)、錯誤碼 = BROWSER_HOST_ERROR_CODES;十個代表性呼叫(七個 op、含 ref 與 x/y 兩種點擊)的結果都通得過 core 的結果 schema",
+          Object.values(checks).every(Boolean),
+          JSON.stringify({ ...checks, invalid }),
+        );
+      }
+    } catch (err) {
+      record("BR-13 桌面端執行器與 core 的契約", false, String(err?.stack ?? err));
     }
   } catch (err) {
     console.error(`\n[FATAL] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
