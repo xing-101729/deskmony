@@ -613,6 +613,27 @@ async function unitTests() {
     );
   }
 
+  // ---- 1v:pathUnder 規則看得到 filesystem MCP 的 `paths` 陣列與 move_file 的 `source`/`destination`——allow 要每一個都在邊界內 ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const engine = new PolicyEngine({
+      rules: [
+        { tool: "mcp.fs.read_multiple_files", when: { pathUnder: workingDir }, effect: "allow" },
+        { tool: "mcp.fs.move_file", when: { pathUnder: workingDir }, effect: "allow" },
+      ],
+      allowedHosts: [],
+    });
+    const decide = (tool, args) => engine.decide(baseReq({ toolName: `mcp.fs.${tool}`, input: codexMcpInput("fs", tool, args) }), ctx).effect;
+    const allInside = decide("read_multiple_files", { paths: [path.join(workingDir, "a.txt"), path.join(workingDir, "b.txt")] });
+    const oneOutside = decide("read_multiple_files", { paths: [path.join(workingDir, "a.txt"), path.join(outsideDir, "b.txt")] });
+    const moveInside = decide("move_file", { source: path.join(workingDir, "a.txt"), destination: path.join(workingDir, "b.txt") });
+    record(
+      "1v pathUnder allow 規則看得到 paths 陣列與 source/destination:全部在邊界內 allow,paths 裡有一個在外面 escalate;move_file 兩端都在 worktree 內 allow",
+      allInside === "allow" && oneOutside === "escalate" && moveInside === "allow",
+      `paths 全在內=${allInside}, paths 一個在外=${oneOutside}, move 兩端在內=${moveInside}`,
+    );
+  }
+
   rmSync(workingDir, { recursive: true, force: true });
   rmSync(outsideDir, { recursive: true, force: true });
 }

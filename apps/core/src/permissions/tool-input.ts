@@ -30,7 +30,13 @@ const COMMAND_KEYS = ["command", "cmd", "script"];
 /** 常見的「目標路徑」欄位名稱(檔案類工具)。 */
 // `filepath`(全小寫):OpenCode 的 `permission.asked` 在工具 part 的完整 input 還沒收到時,退而求其次用的
 // metadata(實測 edit 是 `{filepath, diff}`),見 packages/adapters/src/opencode-adapter.ts。
-const PATH_KEYS = ["file_path", "filePath", "filepath", "path", "notebook_path", "directory", "dir_path", "target_path"];
+// `source`/`destination`(2026-10-22):參考實作 filesystem MCP 的 `move_file`(搬走 = 來源那一端也被改動,所以兩端都要檢查)。
+// 名稱很通用,別的工具拿來放非路徑的字串(例如 `source: "web"`)時會被當成相對 workingDir 的路徑——落在 worktree 內,
+// hard-deny 不會因此誤擋;對 config 規則只會讓 allow 更難命中、deny 更容易命中。
+const PATH_KEYS = ["file_path", "filePath", "filepath", "path", "notebook_path", "directory", "dir_path", "target_path", "source", "destination"];
+
+/** 值是路徑**陣列**的欄位:filesystem MCP 的 `read_multiple_files {paths: [...]}`。陣列裡不是字串的元素略過。 */
+const PATH_LIST_KEYS = ["paths"];
 
 /** 常見的「host/URL」欄位名稱(網路類工具)。 */
 const HOST_KEYS = ["host", "hostname"];
@@ -84,7 +90,15 @@ export function extractCommandCandidates(input: unknown): string[] {
 /** 從工具呼叫的 input 猜測「目標路徑」候選清單(檔案類),可能同時命中多個
  *  (例如同一個 input 物件裡剛好有 `path` 也有 `directory`)。猜不到回傳空陣列。 */
 export function extractPathCandidates(input: unknown): string[] {
-  return stringValues(input, PATH_KEYS);
+  const out = stringValues(input, PATH_KEYS);
+  for (const layer of inputLayers(input)) {
+    for (const key of PATH_LIST_KEYS) {
+      const value = layer[key];
+      if (!Array.isArray(value)) continue;
+      for (const item of value) if (typeof item === "string" && item.length > 0) out.push(item);
+    }
+  }
+  return out;
 }
 
 /** 從工具呼叫的 input 猜測「目標 host」候選清單(網路類)。猜不到回傳空陣列。 */

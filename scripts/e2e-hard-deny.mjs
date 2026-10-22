@@ -34,7 +34,8 @@
  *
  * 2026-10-22:codex-acp 把工具參數包在 `arguments` 裡(MCP 工具是 `{server, tool, arguments}`),
  * 「codex 的 arguments 外殼」一節驗證四類都看得到這一層、只解一層,以及同一個 input 裡無害的
- * 欄位遮不住危險的那一個(見 apps/core/src/permissions/tool-input.ts 的 `inputLayers()`)。
+ * 欄位遮不住危險的那一個(見 apps/core/src/permissions/tool-input.ts 的 `inputLayers()`);C5/C6 驗證參考實作
+ * filesystem MCP 的 `source`/`destination`(move_file)與 `paths` 陣列(read_multiple_files)也看得到。
  *
  * 用法:node scripts/e2e-hard-deny.mjs
  * 前置需求:pnpm build 已跑過
@@ -378,6 +379,44 @@ const codexMcp = (server, tool, args) => ({ toolName: `mcp.${server}.${tool}`, i
     "C4 【設計邊界,刻意斷言不命中】只解一層:arguments 裡再一層的物件、字串形式的 arguments 都不看",
     !deeper.matched && !stringArgs.matched,
     `更深一層=${deeper.matched}, 字串 arguments=${stringArgs.matched}`,
+  );
+}
+
+{
+  // 參考實作 filesystem MCP 另外兩種路徑欄位:move_file 的 `source`/`destination`、read_multiple_files 的 `paths` 陣列。
+  // 搬檔會改動來源那一端,所以來源在 worktree 外也算 worktree-escape。Claude SDK 的 MCP 工具沒有外殼,最外層也要看得到。
+  const cases = [
+    ["move_file 的 destination 在 worktree 外", codexMcp("filesystem", "move_file", { source: path.join(WORKTREE, "a.txt"), destination: path.join(os.tmpdir(), "outside.txt") }), "worktree-escape"],
+    ["move_file 的 source 在 worktree 外(搬走 = 改動來源)", codexMcp("filesystem", "move_file", { source: path.join(os.tmpdir(), "outside.txt"), destination: path.join(WORKTREE, "a.txt") }), "worktree-escape"],
+    ["read_multiple_files 的 paths 裡夾一個 ~/.ssh/id_rsa", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, "a.ts"), path.join(HOME, ".ssh", "id_rsa")] }), "secret-path"],
+    ["read_multiple_files 的 paths 裡有 .env", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, ".env")] }), "secret-path"],
+    ["Claude SDK 形狀(無外殼)的 move_file", { toolName: "mcp__filesystem__move_file", input: { source: path.join(WORKTREE, "a.txt"), destination: path.join(os.tmpdir(), "outside.txt") } }, "worktree-escape"],
+  ];
+  const missed = cases.filter(([, c, category]) => {
+    const r = check(c);
+    return !(r.matched && r.category === category);
+  });
+  record(
+    `C5 filesystem MCP 的 source/destination/paths 欄位:${cases.length} 種(move_file 兩端、read_multiple_files 陣列、無外殼形狀)全部命中對應類別`,
+    missed.length === 0,
+    missed.length === 0 ? `全部 ${cases.length} 種都命中` : `未命中:${missed.map(([l, c]) => `${l} → ${JSON.stringify(check(c))}`).join("、")}`,
+  );
+}
+
+{
+  // 對照組:兩端都在 worktree 內的搬檔、全是無害檔案的 paths、拿 `source` 放非路徑字串的工具(會被當成 worktree 內的相對路徑)、
+  // paths 裡夾非字串元素——都不命中。
+  const benign = [
+    ["move_file 兩端都在 worktree 內", codexMcp("filesystem", "move_file", { source: path.join(WORKTREE, "a.txt"), destination: path.join(WORKTREE, "b.txt") })],
+    ["read_multiple_files 全是無害檔", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, "a.ts"), path.join(os.tmpdir(), "harmless.txt")] })],
+    ["source 放的不是路徑", codexMcp("search", "query", { source: "web", query: "deskmony" })],
+    ["paths 裡夾非字串元素", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, "a.ts"), 42, null, { nested: true }] })],
+  ];
+  const wrongly = benign.filter(([, c]) => check(c).matched);
+  record(
+    "C6 source/destination/paths 不誤擋:worktree 內搬檔、無害的 paths、source 放非路徑字串、paths 夾非字串元素都不命中",
+    wrongly.length === 0,
+    wrongly.length === 0 ? `${benign.length} 個對照組皆未命中(正確)` : `被誤擋:${wrongly.map(([l, c]) => `${l} → ${JSON.stringify(check(c))}`).join("、")}`,
   );
 }
 
