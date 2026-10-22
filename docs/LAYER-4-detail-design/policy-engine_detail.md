@@ -121,6 +121,9 @@ decide(req: PermissionRequest, ctx: ExecContext): PolicyDecision
 - `commandMatches`:regex,**自動包 `^...$` 強制完整匹配**——避免 `npm test` 的 pattern 意外放行 `npm test; rm -rf /`。
 - `pathUnder`:兩邊都做 `path.resolve()` + **`fs.realpathSync` 解析符號連結**(防 symlink 逃逸),再判斷前綴;必須以路徑分隔符為界(`/a/b` 不得匹配 `/a/bc`)。
 - **規則依序比對,第一個 match 即決定**(deny 規則應排在 allow 之前——寫入時 deny 一律 unshift 到陣列前端)。
+- **多個候選值**(2026-10-22):指令/路徑是從 input 的已知欄位猜的,一個 input 可能猜出好幾個(不同欄位,或 codex 包在 `arguments` 外殼裡的參數)。`allow` 規則要**每一個**候選都符合、`deny` 規則只要**任一**符合;猜不到任何候選一律不 match。這樣候選變多時 allow 只會更難命中、deny 只會更容易命中。(在此之前 `pathUnder` 對 deny 也要求全部在邊界內,多一個邊界外的候選 deny 就失效。)
+
+> **codex 的 `arguments` 外殼**(2026-10-22):codex-acp 把工具參數包在 `arguments` 裡(MCP 工具 rawInput 是 `{server, tool, arguments}`)。`apps/core/src/permissions/tool-input.ts` 的 `inputLayers()` 讓 hard-deny 與 config 規則同時看最外層與 `arguments` 那一層(是物件時),**只解一層、不遞迴**——跟 Claude Agent SDK 的 MCP 工具(input 本身就是參數物件)看到同樣深度;更深的物件是工具資料,遞迴進去會讓不可學習的 hard-deny 誤擋。hard-deny 也改成檢查**所有**候選,不再只看第一個(否則一個無害欄位就能遮住同一個 input 裡危險的那一個)。
 
 > **shell 的誠實限制(HLD §4)**:`commandMatches` 對 `bash -c "..."`、`$()`、base64 無能為力。**故 allowlist 只用來放行「你確認過的具體指令」,不用來做安全判斷**;安全來自 hard-deny + worktree 邊界 +(S12)沙箱。
 

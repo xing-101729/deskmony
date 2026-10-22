@@ -177,10 +177,9 @@
  *          title、沒有 rawInput(codex 認為先前的 `tool_call` 已經講過了),選項是 codex 的 MCP 核可 id(`allow_once`/`cancel`)。
  *       3. 允許:`tool_call_update`(in_progress)→(completed);拒絕:`tool_call_update`(failed)。最後回一句
  *          `CODEX_MCP_RESULT:` + JSON `{allowed}`。
- *     `rawInput` 有給時 `tool_call` 改帶它、取代 codex 的 `{server, tool, arguments}` 外殼:codex 把真正的參數包在
- *     `arguments` 裡,而 core 的 hard-deny 只看最外層欄位(見 apps/core/src/permissions/tool-input.ts),e2e 要證明「補上的
- *     input 確實送到 hard-deny」時就用最外層帶路徑的形狀。`permissionTitle` 有給時權限請求自己帶這個 title(驗證「請求
- *     本身有值的欄位優先」)。
+ *     `rawInput` 有給時 `tool_call` 改帶它、取代 codex 的 `{server, tool, arguments}` 外殼:e2e 只想驗「補上的 input 確實
+ *     送到 hard-deny」、不想同時依賴 core 解開 `arguments` 外殼(apps/core/src/permissions/tool-input.ts 的 `inputLayers()`)時,
+ *     就用最外層帶路徑的形狀。`permissionTitle` 有給時權限請求自己帶這個 title(驗證「請求本身有值的欄位優先」)。
  *   - 若 prompt 文字等於 EMPTY_RESULT_TOOL_NAME_PREFIX
  *     ("ACP_EMPTY_RESULT_TOOL_NAME",不接受任何參數)(CLI/TUI「工具失敗那
  *     一行要有工具名稱」的 e2e 用,見 scripts/e2e-cli.mjs 的案例 12 與

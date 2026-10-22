@@ -14,16 +14,20 @@ import path from "node:path";
  *     的欄位命名(見 packages/adapters/src/acp-adapter.ts 對 `permission-request`
  *     的組裝)。
  * 因此這裡的欄位名稱清單是 **best-effort 的啟發式**,不是型別安全的解析——
- * 猜不到就回傳 `undefined`/空陣列,呼叫端(hard-deny.ts/policy-engine.ts)必須
+ * 猜不到就回傳空陣列,呼叫端(hard-deny.ts/policy-engine.ts)必須
  * 把「猜不到」導向「不 match」而不是「當作已確認安全」,維持 fail-safe 方向
  * (見 policy-engine_detail.md §3「判定失敗時的方向」)。
+ *
+ * 每個 `extract*Candidates()` 都回傳**所有**猜得到的值(各層、各欄位依序),不是只取第一個:
+ * hard-deny 要每一個都檢查,config 規則依 effect 決定要「全部」還是「任一」符合(見
+ * policy-engine.ts 的 `ruleMatches()`)。只取第一個的話,一個無害的欄位就能把同一個 input 裡
+ * 危險的那一個遮住。
  */
 
-/** 常見的「指令字串」欄位名稱(Bash 類工具),依序嘗試。 */
+/** 常見的「指令字串」欄位名稱(Bash 類工具)。 */
 const COMMAND_KEYS = ["command", "cmd", "script"];
 
-/** 常見的「目標路徑」欄位名稱(檔案類工具),依序嘗試,可能同時命中多個
- *  (例如同一個 input 物件裡剛好有 `path` 也有 `directory`)。 */
+/** 常見的「目標路徑」欄位名稱(檔案類工具)。 */
 // `filepath`(全小寫):OpenCode 的 `permission.asked` 在工具 part 的完整 input 還沒收到時,退而求其次用的
 // metadata(實測 edit 是 `{filepath, diff}`),見 packages/adapters/src/opencode-adapter.ts。
 const PATH_KEYS = ["file_path", "filePath", "filepath", "path", "notebook_path", "directory", "dir_path", "target_path"];
@@ -37,49 +41,64 @@ function asRecord(input: unknown): Record<string, unknown> | undefined {
   return input as Record<string, unknown>;
 }
 
-/** 從工具呼叫的 input 猜測「指令字串」(Bash 類)。猜不到回傳 undefined。 */
-export function extractCommandFromInput(input: unknown): string | undefined {
-  const obj = asRecord(input);
-  if (!obj) return undefined;
-  for (const key of COMMAND_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return undefined;
+/**
+ * 工具參數所在的物件層:最外層,加上 `arguments` 欄位(是物件時)那一層。
+ *
+ * 2026-10-22:codex-acp(1.13.1)把工具真正的參數包在 `arguments` 裡——MCP 工具的 rawInput 是
+ * `{server, tool, arguments}`(dist 的 `createMcpRawInput()`),其餘 function call 是 `{name, arguments}`、
+ * dynamic tool 是 `{arguments}`。只看最外層的話,hard-deny 對 codex 的 MCP 工具(例如 filesystem MCP 的
+ * `read_file {path: "~/.ssh/id_rsa"}`、fetch MCP 的 `{url}`)什麼都看不到,auto 模式下直接落到「未分類
+ * 中間地帶自動放行」。
+ *
+ * 只解**一層**、不遞迴:Claude Agent SDK 的 MCP 工具 input 本來就是參數物件本身,解一層正好讓 codex 跟它
+ * 看到同樣深度的欄位。更深的物件是工具的資料(文件內容、表單欄位…),不是它要碰的路徑/網址——遞迴進去
+ * 會讓 hard-deny 這個不可學習的地板開始誤擋,而經常誤喊的地板會讓人習慣性略過真正該看的那幾次。
+ * 不要求旁邊有 `server`/`tool`:codex 的三種外殼都該看,別的後端剛好有物件型 `arguments` 參數時多檢查一層,
+ * 只會讓 hard-deny 更嚴、config 規則依 effect 往安全側偏(見 policy-engine.ts 的 `ruleMatches()`)。
+ * `arguments` 是字串(未解析的 JSON)時看不進去,維持「猜不到」。
+ */
+function inputLayers(input: unknown): Record<string, unknown>[] {
+  const top = asRecord(input);
+  if (!top) return [];
+  const nested = asRecord(top.arguments);
+  return nested ? [top, nested] : [top];
 }
 
-/** 從工具呼叫的 input 猜測「目標路徑」候選清單(檔案類)。猜不到回傳空陣列。 */
-export function extractPathCandidates(input: unknown): string[] {
-  const obj = asRecord(input);
-  if (!obj) return [];
+/** 各層裡這些欄位的非空字串值,依層、依欄位順序。 */
+function stringValues(input: unknown, keys: readonly string[]): string[] {
   const out: string[] = [];
-  for (const key of PATH_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) out.push(value);
+  for (const layer of inputLayers(input)) {
+    for (const key of keys) {
+      const value = layer[key];
+      if (typeof value === "string" && value.length > 0) out.push(value);
+    }
   }
   return out;
 }
 
-/** 從工具呼叫的 input 猜測「目標 host」(網路類)。猜不到回傳 undefined。 */
-export function extractHostFromInput(input: unknown): string | undefined {
-  const obj = asRecord(input);
-  if (!obj) return undefined;
-  for (const key of HOST_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  for (const key of URL_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) {
-      try {
-        return new URL(value).hostname;
-      } catch {
-        // 不是合法 URL,無法判斷 host——維持 undefined(呼叫端視為「猜不到」,
-        // 不視為「已核可的 host」)。
-      }
+/** 從工具呼叫的 input 猜測「指令字串」候選清單(Bash 類)。猜不到回傳空陣列。 */
+export function extractCommandCandidates(input: unknown): string[] {
+  return stringValues(input, COMMAND_KEYS);
+}
+
+/** 從工具呼叫的 input 猜測「目標路徑」候選清單(檔案類),可能同時命中多個
+ *  (例如同一個 input 物件裡剛好有 `path` 也有 `directory`)。猜不到回傳空陣列。 */
+export function extractPathCandidates(input: unknown): string[] {
+  return stringValues(input, PATH_KEYS);
+}
+
+/** 從工具呼叫的 input 猜測「目標 host」候選清單(網路類)。猜不到回傳空陣列。 */
+export function extractHostCandidates(input: unknown): string[] {
+  const out = stringValues(input, HOST_KEYS);
+  for (const value of stringValues(input, URL_KEYS)) {
+    try {
+      out.push(new URL(value).hostname);
+    } catch {
+      // 不是合法 URL,無法判斷 host——不列入候選(呼叫端視為「猜不到」,
+      // 不視為「已核可的 host」)。
     }
   }
-  return undefined;
+  return out;
 }
 
 /**

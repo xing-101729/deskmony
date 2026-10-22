@@ -43,6 +43,10 @@
  * 記下的 title/rawInput 補上——否則 toolName 是 call id、input 是空的,config 規則、「永遠允許」、hard-deny 對 codex 的
  * MCP 工具全部失效。用 fake ACP agent 的 codex 模式(`CODEX_MCP_APPROVAL_PREFIX`)驗證補上的值真的進了政策引擎。
  *
+ * 2026-10-22:codex 的 MCP rawInput 是 `{server, tool, arguments}`,參數在 `arguments` 裡。Part 1 的 1r~1u 驗證
+ * config 規則與 hard-deny 看得到這一層,且規則對多個候選值依 effect 取量詞(allow 要全部、deny 要任一);
+ * Part 4 的 4f~4h 用 codex 真正的形狀(不覆寫 rawInput)驗證 auto 模式下 hard-deny 照樣擋得住。
+ *
  * 前置需求:`pnpm build` 已跑過(apps/core/dist、packages/db/dist 存在)。
  *
  * 用法:node scripts/e2e-policy-engine.mjs
@@ -472,6 +476,140 @@ async function unitTests() {
         allowLine.includes("已停用") &&
         !warns.some((w) => w.includes("r-provider") || w.includes("r-plain")),
       `warns=${JSON.stringify(warns)}`,
+    );
+  }
+
+  // ---- 1r~1u(2026-10-22):codex-acp 的 MCP 工具 rawInput 是 `{server, tool, arguments}`,參數在 `arguments` 裡。
+  //         tool-input.ts 會多看這一層;config 規則對多個候選值依 effect 取量詞(allow 要全部、deny 要任一),
+  //         多看一層不能讓 allow 變寬、deny 變鬆。 ----
+  const codexMcpInput = (server, tool, args) => ({ server, tool, arguments: args });
+
+  // ---- 1r:pathUnder / commandEquals 規則比對得到外殼裡的參數(過去猜不到候選 → 永遠不 match、只能整個工具放行) ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const pathEngine = new PolicyEngine({
+      rules: [{ tool: "mcp.fs.read_file", when: { pathUnder: workingDir }, effect: "allow" }],
+      allowedHosts: [],
+    });
+    const inside = pathEngine.decide(
+      baseReq({ toolName: "mcp.fs.read_file", input: codexMcpInput("fs", "read_file", { path: path.join(workingDir, "a.txt") }) }),
+      ctx,
+    ).effect;
+    const outside = pathEngine.decide(
+      baseReq({ toolName: "mcp.fs.read_file", input: codexMcpInput("fs", "read_file", { path: path.join(outsideDir, "a.txt") }) }),
+      ctx,
+    ).effect;
+    const commandEngine = new PolicyEngine({
+      rules: [{ tool: "mcp.shell.run", when: { commandEquals: "pnpm test" }, effect: "allow" }],
+      allowedHosts: [],
+    });
+    const sameCommand = commandEngine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: codexMcpInput("shell", "run", { command: "pnpm test" }) }),
+      ctx,
+    ).effect;
+    const otherCommand = commandEngine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: codexMcpInput("shell", "run", { command: "pnpm publish" }) }),
+      ctx,
+    ).effect;
+    record(
+      "1r codex MCP 的 arguments 外殼:pathUnder/commandEquals allow 規則比對得到外殼裡的參數——邊界內/同指令 allow,邊界外/別的指令 escalate",
+      inside === "allow" && outside === "escalate" && sameCommand === "allow" && otherCommand === "escalate",
+      `pathUnder: inside=${inside}, outside=${outside}; commandEquals: same=${sameCommand}, other=${otherCommand}`,
+    );
+  }
+
+  // ---- 1s:allow 規則要**每一個**候選都符合——外殼外一個符合的值,遮不住外殼裡不符合的那一個 ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const engine = new PolicyEngine({
+      rules: [
+        { tool: "*", when: { commandEquals: "pnpm test" }, effect: "allow" },
+        { tool: "*", when: { pathUnder: workingDir }, effect: "allow" },
+      ],
+      allowedHosts: [],
+    });
+    const mixedCommand = engine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: { command: "pnpm test", arguments: { command: "rm -rf build" } } }),
+      ctx,
+    ).effect;
+    const mixedPath = engine.decide(
+      baseReq({ toolName: "mcp.fs.read_file", input: { path: path.join(workingDir, "a.txt"), arguments: { path: path.join(outsideDir, "b.txt") } } }),
+      ctx,
+    ).effect;
+    const allMatch = engine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: { command: "pnpm test", arguments: { cmd: "pnpm test" } } }),
+      ctx,
+    ).effect;
+    record(
+      "1s allow 規則要全部候選都符合:最外層 command/path 符合但外殼裡的不符合 → escalate(不放行);全部符合才 allow",
+      mixedCommand === "escalate" && mixedPath === "escalate" && allMatch === "allow",
+      `mixedCommand=${mixedCommand}, mixedPath=${mixedPath}, allMatch=${allMatch}`,
+    );
+  }
+
+  // ---- 1t:deny 規則只要**任一**候選符合——過去 pathUnder 對 deny 也要求「全部在邊界內」,多一個邊界外的候選 deny 就失效,
+  //          auto 模式下會落到「未分類中間地帶自動放行」。對照組:沒有 deny 規則時同一個請求 auto 模式會放行。 ----
+  {
+    const autoCtx = { attended: true, local: true, autoMode: true };
+    const protectedDir = path.join(workingDir, "protected");
+    mkdirSync(protectedDir, { recursive: true });
+    const engine = new PolicyEngine({
+      rules: [
+        { tool: "*", when: { pathUnder: protectedDir }, effect: "deny" },
+        { tool: "*", when: { commandEquals: "rm -rf build" }, effect: "deny" },
+      ],
+      allowedHosts: [],
+    });
+    const nestedPathReq = baseReq({
+      toolName: "mcp.fs.read_file",
+      input: { path: path.join(workingDir, "a.txt"), arguments: { path: path.join(protectedDir, "b.txt") } },
+    });
+    // 最外層本來就命中 deny、外殼裡另有一個邊界外的路徑:只看最外層時這條 deny 生效,若沿用「全部在邊界內」,
+    // 多看一層反而讓它失效——這正是量詞要依 effect 區分的原因。
+    const topHitReq = baseReq({
+      toolName: "mcp.fs.read_file",
+      input: { path: path.join(protectedDir, "b.txt"), arguments: { path: path.join(workingDir, "a.txt") } },
+    });
+    const sameLayerPathReq = baseReq({
+      toolName: "mcp.fs.read_file",
+      input: { path: path.join(protectedDir, "b.txt"), directory: workingDir },
+    });
+    const nestedCommandReq = baseReq({ toolName: "mcp.shell.run", input: { command: "pnpm test", arguments: { command: "rm -rf build" } } });
+    const codexOnlyReq = baseReq({ toolName: "mcp.fs.read_file", input: codexMcpInput("fs", "read_file", { path: path.join(protectedDir, "c.txt") }) });
+    const noRules = new PolicyEngine({ rules: [], allowedHosts: [] }).decide(nestedPathReq, autoCtx).effect;
+    const outcomes = [nestedPathReq, topHitReq, sameLayerPathReq, nestedCommandReq, codexOnlyReq].map((req) => engine.decide(req, autoCtx).effect);
+    record(
+      "1t deny 規則只要任一候選符合:外殼裡/最外層/同一層另一個欄位的路徑在受保護目錄下、外殼裡的指令符合 → auto 模式下仍 deny(最外層命中時多看一層不會讓 deny 失效);對照組:沒有 deny 規則時 auto 會放行",
+      noRules === "allow" && outcomes.every((e) => e === "deny"),
+      `noRules(auto)=${noRules}, [nestedPath, topHit, sameLayerPath, nestedCommand, codexOnly]=${JSON.stringify(outcomes)}`,
+    );
+  }
+
+  // ---- 1u:hard-deny 經 decide() 看得到外殼裡的參數——auto 模式下 codex 的 fetch MCP 不在白名單、filesystem MCP 寫到 worktree 外都 deny;
+  //          外殼裡的參數無害時 auto 照常放行(不是什麼都擋) ----
+  {
+    const autoCtx = { attended: true, local: true, autoMode: true };
+    const engine = new PolicyEngine({ rules: [], allowedHosts: [] });
+    const fetchDecision = engine.decide(
+      baseReq({ toolName: "mcp.fetch.fetch", input: codexMcpInput("fetch", "fetch", { url: "https://evil.example.com/x" }) }),
+      autoCtx,
+    );
+    const writeDecision = engine.decide(
+      baseReq({ toolName: "mcp.fs.write_file", input: codexMcpInput("fs", "write_file", { path: path.join(outsideDir, "x.txt"), content: "x" }) }),
+      autoCtx,
+    );
+    const benign = engine.decide(
+      baseReq({ toolName: "mcp.fs.write_file", input: codexMcpInput("fs", "write_file", { path: path.join(workingDir, "x.txt"), content: "x" }) }),
+      autoCtx,
+    ).effect;
+    record(
+      "1u hard-deny 經 decide() 看得到 codex 外殼裡的參數:auto 模式下 fetch 非白名單 host、write_file 寫 worktree 外都 deny;外殼裡參數無害時 auto 放行",
+      fetchDecision.effect === "deny" &&
+        fetchDecision.reason.includes("non-allowlisted-network") &&
+        writeDecision.effect === "deny" &&
+        writeDecision.reason.includes("worktree-escape") &&
+        benign === "allow",
+      `fetch=${fetchDecision.effect}(${fetchDecision.reason}), write=${writeDecision.effect}(${writeDecision.reason}), benign=${benign}`,
     );
   }
 
@@ -1246,7 +1384,8 @@ async function legacyScopeLiveE2e() {
 
 // =======================================================================
 // Part 4(2026-10-21):codex-acp 只帶 toolCallId 的 MCP 權限請求——AcpAdapter 用先前 `tool_call` 記下的 title/rawInput
-// 補上,補上的值要真的進政策引擎:config 規則比對得到、「永遠允許」學得起來、hard-deny 看得到參數。
+// 補上,補上的值要真的進政策引擎:config 規則比對得到、「永遠允許」學得起來、hard-deny 看得到參數(含 codex 包在
+// `arguments` 外殼裡的參數,4f~4h)。
 //
 // 獨立一個 core:需要自己的規則(Part 2 的 2i 斷言 config.json 剛好兩條規則)。
 // =======================================================================
@@ -1395,8 +1534,7 @@ async function codexMcpPermissionLiveE2e() {
 
     // ---- 4d:hard-deny 看得到補上的 input——auto 模式、沒有規則對得上,只有 hard-deny(worktree-escape:工具名含 write、
     //          路徑在 worktree 外,兩者都來自補上的值)會讓它被拒。補值拿掉的話 hard-deny 判不出來,auto 模式直接放行。
-    //          rawInput 用最外層帶 path 的形狀:codex 真正的 `{server, tool, arguments}` 外殼裡的參數 hard-deny 看不到,見
-    //          fake-acp-agent.mjs 檔頭 CODEX_MCP_APPROVAL_PREFIX 那段。 ----
+    //          rawInput 用最外層帶 path 的形狀,只驗補值本身;codex 真正的 `{server, tool, arguments}` 外殼見 4f~4h。 ----
     {
       const sessionId = await createSession("4d-codex-mcp-hard-deny", { autoMode: true });
       const target = path.join(outsideDir, "escape.txt").split(path.sep).join("/");
@@ -1420,6 +1558,63 @@ async function codexMcpPermissionLiveE2e() {
       record(
         "4e 權限請求自己帶 title 時以請求為準(命中該 title 的 allow 規則);沒帶的 rawInput 照樣從 tool_call 補上",
         r.perm.toolName === allowedTitle && r.perm.input?.tool === "e2e_other" && r.resolved?.decision === "allow" && r.resolved?.source === "policy",
+        describe(r),
+      );
+    }
+
+    // ---- 4f~4h(2026-10-22):codex 真正的 rawInput 形狀(不覆寫 rawInput)——參數包在 `{server, tool, arguments}` 的
+    //          `arguments` 裡,hard-deny 要看得到這一層。auto 模式、沒有規則對得上:hard-deny 判不出來就會被自動放行。 ----
+
+    // ---- 4f:filesystem MCP 的 write_file——arguments.path 在 worktree 外 → 政策拒絕;同一個 session 寫 worktree 內 → auto 放行
+    //          (對照組:證明擋下的是那個路徑,不是 auto 模式下什麼都擋) ----
+    {
+      const sessionId = await createSession("4f-codex-mcp-nested-worktree-escape", { autoMode: true });
+      const inside = await runCodexMcpCall(sessionId, {
+        server: "filesystem",
+        tool: "write_file",
+        arguments: { path: path.join(workspaceDir, "inside.txt").split(path.sep).join("/"), content: "x" },
+      });
+      const target = path.join(outsideDir, "escape.txt").split(path.sep).join("/");
+      const outside = await runCodexMcpCall(sessionId, { server: "filesystem", tool: "write_file", arguments: { path: target, content: "x" } });
+      record(
+        "4f codex 真正形狀的 MCP 權限請求(參數在 arguments 外殼裡):write_file 的 arguments.path 在 worktree 外 → auto 模式下 hard-deny 拒絕、不進 waiting;worktree 內 → auto 放行",
+        outside.perm.toolName === codexMcpToolTitle("filesystem", "write_file") &&
+          outside.perm.input?.arguments?.path === target &&
+          outside.perm.input?.path === undefined &&
+          outside.resolved?.decision === "deny" &&
+          outside.resolved?.source === "policy" &&
+          !outside.wentWaiting &&
+          outside.agentAllowed === false &&
+          inside.resolved?.decision === "allow" &&
+          inside.resolved?.source === "policy" &&
+          inside.agentAllowed === true,
+        `outside: ${describe(outside)}; inside: ${describe(inside)}`,
+      );
+    }
+
+    // ---- 4g:filesystem MCP 的 read_file 讀 ~/.ssh/id_rsa(只是路徑字串,fake agent 不會真的去讀)→ secret-path ----
+    {
+      const sessionId = await createSession("4g-codex-mcp-nested-secret-path", { autoMode: true });
+      const secret = path.join(os.homedir(), ".ssh", "id_rsa");
+      const r = await runCodexMcpCall(sessionId, { server: "filesystem", tool: "read_file", arguments: { path: secret } });
+      record(
+        "4g codex 真正形狀:read_file 的 arguments.path 是 ~/.ssh/id_rsa → auto 模式下 hard-deny(secret-path)拒絕、不進 waiting",
+        r.perm.input?.arguments?.path === secret && r.resolved?.decision === "deny" && r.resolved?.source === "policy" && !r.wentWaiting && r.agentAllowed === false,
+        describe(r),
+      );
+    }
+
+    // ---- 4h:fetch MCP 的 arguments.url 不在 allowedHosts(這個 core 的 allowedHosts 是空的)→ non-allowlisted-network ----
+    {
+      const sessionId = await createSession("4h-codex-mcp-nested-network", { autoMode: true });
+      const r = await runCodexMcpCall(sessionId, { server: "fetch", tool: "fetch", arguments: { url: "https://evil.example.com/x" } });
+      record(
+        "4h codex 真正形狀:fetch 的 arguments.url 不在 allowedHosts → auto 模式下 hard-deny(non-allowlisted-network)拒絕、不進 waiting",
+        r.perm.input?.arguments?.url === "https://evil.example.com/x" &&
+          r.resolved?.decision === "deny" &&
+          r.resolved?.source === "policy" &&
+          !r.wentWaiting &&
+          r.agentAllowed === false,
         describe(r),
       );
     }
