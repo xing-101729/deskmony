@@ -32,7 +32,10 @@
  *       type + submit → press_key → scroll → 導覽到外部網站被拒 → 連結導覽 + ref 過期 + 上一頁/重新整理 → 載入失敗。
  *  4. 「停放」階段(腳本會暫停,請你在 app 裡**關掉右側面板,或改選 `verify-browser (other)`**,讓那個 webview 看不到):
  *     再做 screenshot、click(ref 與 x/y)、type、scroll——這是 P3.3 實驗之後最重要的一項(停放中的 webview 還能不能被 CDP 操作,
- *     含 `inert` 有沒有破壞它)。
+ *     含停放時 webview 的 `tabindex="-1"` 有沒有破壞它)。
+ *     注意:2026-10-23 第一次真機完整執行時,停放階段的 P-5a/P-5b(click)FAIL,當時歸因於停放外框的 `inert`;事後發現是**這支腳本自己的 bug**
+ *     (用「累計的 click 事件數 + 1」比對頁面的點擊計數,頁面重新載入後計數歸零,所以停放階段的點擊一定比不上),見 `expectOneClick()` 的註解。
+ *     那次的對照(拿掉 inert 後只跑 `--phase=parked` 就全過)同時改變了兩件事,所以**沒有證明 inert 會擋 CDP 點擊**。
  *  5. 每一步印 PASS/FAIL;最後印總結與一份**需要你目視確認的 UI 清單**;清理:刪掉兩個 session(app 會連同它們的 webview 一起移除)、
  *     關掉 MCP bridge、關掉測試頁伺服器。
  *
@@ -136,16 +139,44 @@ function record(id, ok, label, detail) {
   if (detail) console.log(`       ${detail}`);
 }
 
-/** 一個驗證步驟:`fn` 回 `{ok, detail}`,丟例外算 FAIL(把訊息印出來)。 */
+const truncate = (text, max) => (text.length > max ? `${text.slice(0, max)}…(+${text.length - max} 字)` : text);
+
+/** 所有工具呼叫(MCP 工具與 scoped RPC)的紀錄:任何一步 FAIL 時印出那一步期間的呼叫,不用再猜當時發生了什麼。 */
+const callLog = [];
+/** 測試頁伺服器(main() 啟動後設定):FAIL 診斷會印頁面最後回報的版面與最近的事件。 */
+let pageServerRef;
+
+/** 步驟 FAIL 時印出的原始資料:那一步期間的工具呼叫(參數、isError、回傳文字前 300 字)、步驟自己附的 `raw`、頁面的版面與最近事件。 */
+function dumpFailure(id, raw, fromIndex) {
+  const lines = [];
+  for (const call of callLog.slice(fromIndex).slice(-8)) lines.push(`call ${call.name} ${JSON.stringify(call.args ?? {})} → ${call.summary}`);
+  if (raw !== undefined) lines.push(`raw: ${truncate(JSON.stringify(raw), 1500)}`);
+  if (pageServerRef) {
+    lines.push(`頁面最後回報的版面: ${JSON.stringify(pageServerRef.latestLayout() ?? null)}`);
+    lines.push(`頁面最近的事件: ${JSON.stringify(pageServerRef.events.slice(-8).map(({ at: _at, ...rest }) => rest))}`);
+  }
+  console.log(`       --- ${id} 失敗時的原始資料 ---`);
+  for (const line of lines) console.log(`       ${line}`);
+}
+
+/** 一個驗證步驟:`fn` 回 `{ok, detail, raw?}`,丟例外算 FAIL(把訊息印出來);FAIL 時一律再印 `dumpFailure()` 的原始資料。 */
 async function step(id, label, fn) {
+  const fromIndex = callLog.length;
   try {
-    const { ok, detail } = await fn();
+    const { ok, detail, raw } = await fn();
     record(id, ok, label, detail);
+    if (!ok) dumpFailure(id, raw, fromIndex);
     return ok;
   } catch (err) {
     record(id, false, label, `例外: ${err instanceof Error ? err.message : String(err)}`);
+    dumpFailure(id, undefined, fromIndex);
     return false;
   }
+}
+
+/** 頁面文字結果(`browser_read_page`/`browser_screenshot` 的文字部分)開頭的 url / title 兩行。 */
+function pageHeader(text) {
+  return { url: /^url: (.*)$/m.exec(text)?.[1], title: /^title: (.*)$/m.exec(text)?.[1] };
 }
 
 function resolveOutDir() {
@@ -393,6 +424,7 @@ const TEST_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Deskm
 <style>
 body{margin:0;font:16px sans-serif;background:#fff;color:#111}
 #info{position:absolute;left:30px;top:16px;margin:0;font-size:18px}
+#status{position:absolute;left:30px;top:56px;margin:0;font-size:14px}
 #tick{position:absolute;left:30px;top:96px;margin:0}
 #btn{position:absolute;left:30px;top:150px;width:220px;height:56px;font-size:18px;background:#d22;color:#fff;border:0}
 #f{position:absolute;left:30px;top:240px;margin:0}
@@ -402,6 +434,7 @@ body{margin:0;font:16px sans-serif;background:#fff;color:#111}
 #bottom{position:absolute;left:30px;top:3500px}
 </style></head><body>
 <h2 id="info">VERIFY_PAGE_@NONCE@</h2>
+<p id="status">clicks:0</p>
 <p id="tick">tick:0</p>
 <button id="btn" type="button">Click me</button>
 <form id="f"><input id="inp" type="text" aria-label="Verify input" autocomplete="off"></form>
@@ -410,7 +443,9 @@ body{margin:0;font:16px sans-serif;background:#fff;color:#111}
 <script>
 function send(o){ try { fetch("/__event", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(o), keepalive: true }); } catch (e) {} }
 var clicks = 0;
-document.getElementById("btn").addEventListener("click", function () { clicks++; document.getElementById("info").textContent = "CLICKED_" + clicks; send({ type: "click", n: clicks }); });
+// 點擊計數寫在 #status,**不要動 #info**:#info 的 VERIFY_PAGE_<nonce> 是「現在還在測試頁上」的標記,後面的步驟(V-9)靠它確認頁面沒被動到。
+// (第一版把計數寫進 #info,第一次點擊之後標記就消失了,V-9 因此誤判 FAIL——那是腳本的錯,不是產品的錯。)
+document.getElementById("btn").addEventListener("click", function () { clicks++; document.getElementById("status").textContent = "clicks:" + clicks; send({ type: "click", n: clicks }); });
 var inp = document.getElementById("inp");
 inp.addEventListener("input", function () { send({ type: "input", value: inp.value }); });
 document.getElementById("f").addEventListener("submit", function (e) { e.preventDefault(); send({ type: "submit", value: inp.value }); });
@@ -549,8 +584,16 @@ async function main() {
     await scopedConn.connect();
     await scopedConn.rpc("auth", { token: env.DESKMONY_MCP_BRIDGE_TOKEN });
     cleanups.push(() => scopedConn.close());
-    scoped = scopedConn;
+    // 用 scoped token 直接打 gateway:拿得到 errorCode(MCP 工具只回錯誤文字);呼叫也記進 callLog。
+    scoped = {
+      tryRpc: async (method, params, timeoutMs) => {
+        const res = await scopedConn.tryRpc(method, params, timeoutMs);
+        callLog.push({ name: `rpc ${method}`, args: params, summary: res.ok ? `ok ${truncate(JSON.stringify(res.result ?? null), 300)}` : `error code=${res.code} message=${JSON.stringify(truncate(String(res.message), 300))}` });
+        return res;
+      },
+    };
     page = await startPageServer();
+    pageServerRef = page;
     cleanups.push(() => page.close());
     console.log(`[setup] 測試頁: ${page.url}`);
 
@@ -567,7 +610,14 @@ async function main() {
     // 一個工具呼叫(MCP)→ { res, text, isError }
     const tool = async (name, toolArgs) => {
       const res = await bridge.call(name, toolArgs);
-      return { res, text: textOf(res), isError: res.isError === true };
+      const text = textOf(res);
+      const images = res.content?.filter((c) => c.type === "image").length ?? 0;
+      callLog.push({
+        name,
+        args: toolArgs,
+        summary: `isError=${res.isError === true}${images ? ` images=${images}` : ""} text=${JSON.stringify(truncate(text, 300))}`,
+      });
+      return { res, text, isError: res.isError === true };
     };
     // 取一張截圖:存檔、解析尺寸、跟頁面回報的 viewport 比對比例。
     const takeScreenshot = async (label) => {
@@ -585,6 +635,17 @@ async function main() {
       return { text, isError, elements: isError ? undefined : parseInteractive(text) };
     };
     const findEl = (elements, role, nameRe) => elements?.find((e) => e.role === role && nameRe.test(e.name));
+    /**
+     * `mark` 之後頁面回報的 click 事件:等到第一個(最多 4 秒),再多等一下,確認只有一個(重複點擊也算錯)。
+     * **不要用頁面的點擊計數 `n` 去比對**:頁面重新載入(導覽、reload)時計數歸零,而這支腳本的事件紀錄是整個執行期間累計的——
+     * 第一版用「累計的 click 事件數 + 1」當預期的 n,停放階段(頁面在 P-1 重新載入過)的點擊就算真的送達也一定比不上,P-5a/P-5b 因此必定 FAIL。
+     */
+    const expectOneClick = async (mark) => {
+      const first = await page.waitFor((e) => e.type === "click", 4000, mark);
+      if (first) await sleep(300);
+      const events = page.events.slice(mark).filter((e) => e.type === "click").map(({ at: _at, ...rest }) => rest);
+      return { count: events.length, events };
+    };
 
     // 一個階段的全部步驟。`phase` 是 "visible" 或 "parked"(只影響編號與檔名)。
     const runPhase = async (phase) => {
@@ -649,10 +710,13 @@ async function main() {
       await step(`${P}-5a`, "browser_click(ref):按鈕的 click handler 真的被觸發(頁面回報 click)", async () => {
         if (!btnRef) return { ok: false, detail: "沒有按鈕的 ref(上一步失敗)" };
         const mark = page.mark();
-        const before = page.events.filter((e) => e.type === "click").length;
         const { text, isError } = await tool("browser_click", { ref: btnRef });
-        const event = await page.waitFor((e) => e.type === "click" && e.n === before + 1, 4000, mark);
-        return { ok: !isError && event !== undefined, detail: isError ? text : `result=${text.replace(/\s+/g, " ")} pageEvent=${JSON.stringify(event)}` };
+        const landed = await expectOneClick(mark);
+        return {
+          ok: !isError && landed.count === 1,
+          detail: isError ? text : `result=${text.replace(/\s+/g, " ")} 這次點擊之後頁面回報的 click 事件=${JSON.stringify(landed.events)}`,
+          raw: { clickResult: { isError, text: truncate(text, 300) }, landed },
+        };
       });
 
       // ---- click by x/y(要先截圖;x/y 是截圖上的像素座標)----
@@ -664,12 +728,14 @@ async function main() {
         const x = Math.round((layout.btn.x * shot.size.width) / layout.w);
         const y = Math.round((layout.btn.y * shot.size.height) / layout.h);
         const mark = page.mark();
-        const before = page.events.filter((e) => e.type === "click").length;
         const { text, isError } = await tool("browser_click", { x, y });
-        const event = await page.waitFor((e) => e.type === "click" && e.n === before + 1, 4000, mark);
+        const landed = await expectOneClick(mark);
         return {
-          ok: !isError && event !== undefined,
-          detail: isError ? text : `按鈕中心 css=(${layout.btn.x.toFixed(1)},${layout.btn.y.toFixed(1)}) → 截圖像素 (${x},${y})(圖 ${shot.size.width}x${shot.size.height} / viewport ${layout.w}x${layout.h});pageEvent=${JSON.stringify(event)}`,
+          ok: !isError && landed.count === 1,
+          detail: isError
+            ? text
+            : `按鈕中心 css=(${layout.btn.x.toFixed(1)},${layout.btn.y.toFixed(1)}) → 截圖像素 (${x},${y})(圖 ${shot.size.width}x${shot.size.height} / viewport ${layout.w}x${layout.h});這次點擊之後頁面回報的 click 事件=${JSON.stringify(landed.events)}`,
+          raw: { clickResult: { isError, text: truncate(text, 300) }, landed, layout },
         };
       });
 
@@ -726,9 +792,20 @@ async function main() {
           const ext = await scoped.tryRpc("browser.navigateForAgent", { url: EXTERNAL_URL });
           const file = await scoped.tryRpc("browser.navigateForAgent", { url: "file:///C:/Windows/win.ini" });
           const still = await tool("browser_read_page", { mode: "text" });
+          // 「頁面沒被動到」用三個獨立的訊號:讀頁面沒有錯誤、url 還是測試頁、文字裡還有 #info 的 nonce 標記
+          // (標記只有頁面重新載入或換頁才會變;點擊計數寫在 #status,不會動它)。
+          const header = pageHeader(still.text);
+          const readOk = !still.isError;
+          const urlOk = header.url === page.url;
+          const nonceOk = still.text.includes(`VERIFY_PAGE_${NONCE}`);
           return {
-            ok: !ext.ok && ext.code === "browser.hostNotAllowed" && !file.ok && file.code === "browser.unsupportedScheme" && still.text.includes(`VERIFY_PAGE_${NONCE}`),
-            detail: `外部 → ${ext.ok ? "意外成功" : ext.code};file: → ${file.ok ? "意外成功" : file.code};讀頁面仍是測試頁=${still.text.includes(`VERIFY_PAGE_${NONCE}`)}`,
+            ok: !ext.ok && ext.code === "browser.hostNotAllowed" && !file.ok && file.code === "browser.unsupportedScheme" && readOk && urlOk && nonceOk,
+            detail: `外部 → ${ext.ok ? "意外成功" : ext.code};file: → ${file.ok ? "意外成功" : file.code};讀頁面 isError=${still.isError} url=${header.url} title=${header.title} 含 nonce 標記=${nonceOk}`,
+            raw: {
+              ext,
+              file,
+              still: { isError: still.isError, url: header.url, title: header.title, expectedUrl: page.url, text: truncate(still.text, 300) },
+            },
           };
         });
 
@@ -835,7 +912,7 @@ async function main() {
   [ ] 面板原本關著、目前選取的是 verify-browser (agent) 時,第一個指令讓面板自動打開並切到 Browser 分頁;之後你手動關掉面板,下一個指令(8 秒內)不會又把它彈出來
   [ ] 指示出現/消失時,webview 的位置與大小沒有跳動(標題列沒有多一列)
   [ ] 停放階段你切回 verify-browser (agent) + 開 Browser 分頁:頁面還在(沒重新載入)、剛剛輸入的文字還在
-  [ ] 停放階段按 Tab:焦點不會跑進看不見的頁面(inert);回到可見後 Tab 可以進頁面
+  [ ] 停放階段按 Tab:焦點不會跑進看不見的頁面(webview 的 tabindex=-1);回到可見後 Tab 可以進頁面
   [ ] 截圖之後你手動拖拉面板寬度(webview 尺寸變了)→ 再叫 agent 用 x/y 點擊,會得到 browser.staleScreenshot(這項腳本無法自動觸發)
 `);
   if (exitCode === 0 && failed.length > 0) exitCode = 1;
