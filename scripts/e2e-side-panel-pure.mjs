@@ -1296,15 +1296,15 @@ console.log("\n== browser-activity:agent 操作中的指示(最近一個動作�
     "browserWebviewTabIndex:停放中的 webview tabindex=-1(使用者按 Tab 進不去看不見的頁面)、可見時不設屬性",
   );
 
-  // 回歸保護(真 app 實測,2026-10-23):停放時加 `inert` 會讓 CDP 的滑鼠點擊完全送不進頁面(其餘輸入/截圖都正常),拿掉才 9/9 通過。
-  // 任何讓 webview「無法被聚焦」的做法都有同樣的風險,所以停放的 Tab 防護只能是 tabindex。這裡檢查程式碼(不含註解)沒有再用這些做法。
+  // 接線檢查:BrowserHost 真的把 `browserWebviewTabIndex(rect)` 傳給 <webview> 的 tabIndex(停放的 Tab 防護是它;外框不再加 inert)。
+  // 注意:這裡**不**宣稱 inert 有害——2026-10-23 一度以為 inert 會擋 CDP 點擊,事後發現那是驗證腳本的計數 bug,inert 的影響仍未釐清(見 browser-frame-style.ts)。
+  // 這個檢查只鎖住「現在用的是哪一種防護」,換回 inert 時連同這個檢查一起改。
   const fs = await import("node:fs");
   const stripComments = (source) => source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
   const hostCode = stripComments(fs.readFileSync(path.resolve(LIB, "..", "views", "panel", "BrowserHost.tsx"), "utf8"));
-  const styleCode = stripComments(fs.readFileSync(path.join(LIB, "browser-frame-style.ts"), "utf8"));
   check(
-    !/\binert\b/.test(hostCode) && !/\binert\b/.test(styleCode) && !/\bdisabled\b/.test(hostCode) && !/\.blur\(/.test(hostCode) && /tabIndex=\{tabIndex\}/.test(hostCode) && /browserWebviewTabIndex\(rect\)/.test(hostCode),
-    "BrowserHost 不用 inert/disabled/blur 擋停放中的 webview(會讓 CDP 點擊送不進去),只用 tabIndex(停放 -1)",
+    /tabIndex=\{tabIndex\}/.test(hostCode) && /browserWebviewTabIndex\(rect\)/.test(hostCode) && !/\binert\b/.test(hostCode),
+    "BrowserHost:停放的 Tab 防護是 <webview> 的 tabIndex(browserWebviewTabIndex(rect)),外框沒有 inert",
   );
 }
 

@@ -425,6 +425,9 @@ bridge 本身不讀 push,改成 scoped 連線一律不收 push。
   文字與密碼輸入框的 `value` 絕不回給 agent(使用者可能在裡面輸入了機密)。座標換算用的 viewport 也從 isolated world 讀,頁面騙不了。
 - **導覽 scheme 在 main 再擋一次**(core、`will-attach-webview`/導覽鎖、這裡),即使 core 的檢查有洞,main 也不會 `loadURL` 非 http(s)。
 - **舊截圖的座標在導覽/捲動/viewport 尺寸改變後一律作廢**(`browser.noScreenshot`/`browser.staleScreenshot`),寧可要求 agent 重新截圖也不點錯位置;點錯位置在使用者的登入狀態下可能是有副作用的動作。
-- **停放中的 webview 加 `inert`**(不讓 Tab 把焦點送進看不見的頁面)——它對 CDP 的影響**尚未實測**,由實驗腳本新增的 `parked-inert` 位置驗證;只有 `inert` 壞掉時退回沒有 inert 的停放(`browserFrameInert()` 回 false)。
+- **停放中的 webview 退出 Tab 順序**(`<webview tabindex="-1">`,不讓 Tab 把焦點送進看不見的頁面;可見時移除)。最初用外框 `inert`,真 app 完整驗證時停放階段 click 失敗而改用 tabindex——
+  **但事後發現那個失敗是驗證腳本的計數 bug(頁面重新載入後點擊計數歸零,腳本卻用累計事件數比對),與 inert 無關**,所以「inert 會擋 CDP 點擊」**沒有成立也沒有被推翻**;
+  tabindex 能不能擋住 Tab、會不會影響 CDP 點擊同樣還沒在真 Electron 驗證。實驗腳本(`parked-inert`/`parked-tabindex` 並排)與修好的驗證腳本負責決定;細節與換回 inert 的方式見 `side-panel_detail.md` 的 P4b 實作備註。
 - **有 `commandId` 就一定回一個結果**(`browser.hostError` 兜底):host 這邊任何一環出錯都不讓 core 乾等到逾時,錯誤訊息是給 agent 看的、不含頁面內容。
-- 這一階段**沒有啟動 Electron**:CDP 對 guest 的實際行為、`debugger` 與 DevTools 並存、`inert` 的影響、UI 外觀都還沒有真機驗證(清單見 `side-panel_detail.md` 的 P4b 實作備註),要靠 `scripts/spike/webview-offscreen.cjs` 與 `scripts/verify-browser-host-real.mjs` 在真 app 上補驗。
+- 實作這一階段時**沒有啟動 Electron**;之後 review 方在真 Electron 跑過實驗腳本與驗證腳本(結果與其中一個腳本 bug 見上一項),但 `debugger` 與 DevTools 並存、停放時 Tab 防護(tabindex)對 Tab 與 CDP 點擊的影響、最小化視窗時的截圖等
+  還沒有完整的真機驗證(清單見 `side-panel_detail.md` 的 P4b 實作備註),要靠 `scripts/spike/webview-offscreen.cjs` 與修好的 `scripts/verify-browser-host-real.mjs` 在真 app 上補驗。

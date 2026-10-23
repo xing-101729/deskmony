@@ -50,11 +50,13 @@ export interface BrowserFrameStyle {
  * 停放中的 `<webview>` 要退出 Tab 順序(2026-10-21 P4b,10-23 修正):看不見的頁面不該被使用者按 Tab 聚焦進去(焦點進了 guest,之後的按鍵都被一個看不到的頁面吃掉)。
  * 停放時回 `-1`(`tabindex="-1"`:不在循序鍵盤導覽裡,但程式與 CDP 仍可聚焦它),可見時回 `undefined`(不設屬性,回到預設)。
  *
- * **為什麼不是 `inert`**:最初用的是外框 `inert`,真 app 實測(2026-10-23):停放階段 CDP 的點擊**完全沒有送達頁面**(滑鼠按下/放開被吃掉,
- * 工具卻回成功),而截圖、讀頁面、輸入文字、按鍵、捲動都正常;拿掉 `inert` 之後停放階段 9/9 全過。`inert` 除了擋 Tab,也讓 host 端不能聚焦那個 webview——
- * CDP 的滑鼠按下需要把 guest 帶到焦點,被擋就點不到。所以**不能用任何會阻止 webview 被聚焦的做法**(`inert`、`disabled`、focus 進來就 blur 之類),
- * 只能把它移出 Tab 順序。`tabindex="-1"` 是否同時擋得住 Tab 並且不影響 CDP 點擊,要看實驗腳本 `scripts/spike/webview-offscreen.cjs` 的 `parked-tabindex`
- * 位置(5 項檢查加 Tab 檢查)——**尚未在真 Electron 驗證**。
+ * **為什麼是 `tabindex` 而不是 `inert`(以及這個決定的證據有多弱)**:最初的 Tab 防護是停放外框的 `inert`。實驗腳本(真 Electron,2026-10-23)驗過它:
+ * `parked-inert` 5/5、Tab 進不去。但同一天驗證腳本在真 app 的停放階段 click(P-5a/P-5b)FAIL,當時歸因於 `inert` 而改用 tabindex。
+ * **事後發現那兩個 FAIL 是驗證腳本自己的 bug**(用「累計的 click 事件數 + 1」比對頁面的點擊計數,頁面重新載入後計數歸零,所以完整執行的停放階段點擊一定比不上,
+ * 與 inert 無關),而當時的對照(拿掉 inert、只跑 `--phase=parked`)同時改變了兩件事——所以「`inert` 會擋 CDP 點擊」**既沒有被證明、也沒有被推翻**,
+ * 缺的是「inert 開著、只跑停放階段」(或修好腳本後的完整執行)那一次對照。目前採 `tabindex="-1"` 是協調者的決定:它只讓 webview 退出循序導覽,
+ * 不影響它被程式/CDP 聚焦,是較保守的做法;但它**能不能擋住 Tab、會不會影響 CDP 點擊也都還沒在真 Electron 驗證**,
+ * 實驗腳本 `scripts/spike/webview-offscreen.cjs` 的 `parked-tabindex` 與 `parked-inert` 兩個位置(各 5 項檢查加 Tab 檢查)就是用來比較這兩種防護的。
  */
 export function browserWebviewTabIndex(rect: FrameRect | undefined): -1 | undefined {
   return rect === undefined ? -1 : undefined;

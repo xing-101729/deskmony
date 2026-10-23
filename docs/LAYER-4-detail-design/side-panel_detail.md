@@ -304,7 +304,7 @@ P4 要讓 agent 操作「使用者現在沒在看」的 session 瀏覽器,所以
 >   **取捨**:Ctrl/Cmd+K 在網頁內失效(不少網站拿它當搜尋快捷鍵)——命令面板是 app 的全域入口,在 Browser 分頁裡也要能叫出來。有 Alt/Shift 修飾的組合都不攔。
 > - **CSP**:`apps/desktop/index.html` 沒有 CSP(`<meta>` 或 main 的 `onHeadersReceived` 都沒有),所以沒有東西擋 `<webview>`。日後加 CSP 時要實測 webview 還能不能附掛。
 > - **P3.3 實驗腳本**:`scripts/spike/webview-offscreen.cjs`(CommonJS:`electron <檔案>` 對 .cjs 一定走得通)。執行方式與預期時間見檔頭;共五種位置(visible、offscreen、opacity0、clip1x1、`parked`=目前正式停放方式,
->   之後改停放方式就用同一支重驗)。review 方在真 Electron 跑過前四種:visible 5/5、offscreen 4/5(截圖逾時)、opacity0 5/5、clip1x1 5/5(截圖尺寸是 webview 本身的 1024×768,不是裁切後的 1×1)。**第五種 `parked` 尚未實際執行**。(2026-10-21 P4b:腳本多了第六種 `parked-inert`——現行正式停放方式 = `parked` + `inert`,見 P4b 實作備註;腳本檔頭已改成六種。)
+>   之後改停放方式就用同一支重驗)。review 方在真 Electron 跑過前四種:visible 5/5、offscreen 4/5(截圖逾時)、opacity0 5/5、clip1x1 5/5(截圖尺寸是 webview 本身的 1024×768,不是裁切後的 1×1)。**第五種 `parked` 尚未實際執行**。(P4b:腳本又多了 `parked-inert` 與 `parked-tabindex` 兩種(現行正式停放方式 = `parked` + `<webview tabindex="-1">`),並改成走 app 式的生命週期;見 P4b 實作備註。)
 
 ---
 
@@ -465,8 +465,8 @@ core + 一個**假的 browser host**(WS client,`registerHost` 後對每個 `brow
 > | `src/lib/browser-host-flow.ts` | 收到 `browser-command` 之後的**決策邏輯**(順序、各種失敗怎麼回報);沒有 import,副作用經 `HostFlowDeps` 注入 |
 > | `src/views/panel/browser-host.ts` | 把上面那個流程接到真的 store、WS client、IPC;`startBrowserHost()`(每次連線開啟都 `browser.registerHost`)由 `BrowserHost` 掛載時呼叫 |
 > | `src/lib/browser-activity.ts`、`src/views/panel/agent-activity.ts`、`stores/browser-store.ts` | 「agent 操作中」指示:動作描述(i18n key + 參數)、留存計時、`waitForBrowserReady()` |
-> | `src/lib/browser-frame-style.ts` | `browserFrameInert()`;`BrowserHost.tsx` 對停放中的外框加 `inert` |
-> | `scripts/spike/webview-offscreen.cjs`、`scripts/verify-browser-host-real.mjs` | 實驗腳本的第六個位置 `parked-inert`;對真 app 的驗證腳本 |
+> | `src/lib/browser-frame-style.ts` | `browserWebviewTabIndex()`(停放 → `-1`);`BrowserHost.tsx` 把它傳給 `<webview>` 的 `tabIndex` |
+> | `scripts/spike/webview-offscreen.cjs`、`scripts/verify-browser-host-real.mjs` | 實驗腳本的 `parked-inert`/`parked-tabindex` 位置與 app 式生命週期;對真 app 的驗證腳本 |
 >
 > **為什麼拆成純函式 + driver/deps**:跟 `browser-rules.ts` 同一個慣例——Node 直接載入 `.ts`(不需 build、不需 Electron)就能測。真正只能在 Electron 裡驗的只剩 `browser-executor.ts` 那層膠水(清單見下)。
 > `e2e-side-panel-pure.mjs` 用假 driver + 最小的假 DOM 驗執行流程、isolated world 腳本的行為與「不改動頁面 DOM」,用假 deps 驗 host 流程,用**真的 zustand store + 假計時器**驗指示留存與 `waitForBrowserReady()`;
@@ -499,21 +499,28 @@ core + 一個**假的 browser host**(WS client,`registerHost` 後對每個 `brow
 >   指示放在 **Browser 分頁既有的標題列**(取代頁面標題)、Browser 分頁標籤的小圓點、面板開關鈕的小圓點。**不在 slot 上方加一列**——多一列會讓 webview 的高度隨指示出現/消失而變,截圖與點擊之間的 viewport 尺寸就會對不上(`staleScreenshot`)。
 > - **自動打開面板**:只在「一段操作的開頭」(該 session 之前沒有指示紀錄)+ 目前選取的就是這個 session + 面板關著時觸發,並等 300 ms 讓 slot 就位;面板開著但停在別的分頁時不搶走使用者正在看的分頁(只有圓點);
 >   使用者在操作進行中把面板關掉,8 秒內的下一個指令不會又彈出來。
-> - **`inert`**:停放中的外框加 `inert`(`browserFrameInert()`;React 18 不認得這個屬性,以空字串經 spread 傳入),按 Tab 不會把鍵盤焦點送進看不見的頁面。**`inert` 對 CDP 截圖/輸入有沒有影響是未驗證的**,
->   所以實驗腳本多了第六個位置 `parked-inert`(parked + `inert`,切回 visible 時移除),並附一個資訊性的 Tab 焦點檢查。如果實驗顯示只有 `inert` 讓 5 項檢查壞掉,把 `browserFrameInert()` 改成永遠回 `false` 即可退回 P3 的停放方式(再另想辦法擋鍵盤焦點,例如對 `<webview>` 設 `tabindex="-1"`)。
+> - **停放中的 Tab 防護**(使用者按 Tab 不該把焦點送進看不見的頁面;opacity 0 的 webview 仍然可以被 Tab 聚焦)。現況是 `<webview tabindex="-1">`(`browserWebviewTabIndex()` 停放 → `-1`、可見 → 不設),
+>   它只讓 webview 退出循序導覽,不影響程式/CDP 聚焦它。**這個決定的歷史與證據(請不要只看結論)**:
+>   1. 最初是停放外框的 `inert`。實驗腳本第一版(真 Electron,2026-10-23):`parked-inert` 5/5、Tab 進不去(BODY);沒加 inert 的 `parked` Tab 會進 webview。
+>   2. 同一天驗證腳本在真 app 完整執行(可見階段 + 停放階段),停放階段 P-5a/P-5b(click)FAIL(工具回成功、頁面沒收到 click),其餘都 PASS;當時歸因於 `inert`,並用「拿掉 inert、只跑 `--phase=parked`」得到 9/9 當作佐證,於是改用 tabindex(commit 920ecf2)。
+>   3. **事後發現那個 FAIL 是驗證腳本自己的 bug**:V-5a/V-5b/P-5a/P-5b 用「頁面至今累計收到的 click 事件數 + 1」當預期的頁面點擊計數 `n`,但頁面重新載入後計數歸零,完整執行的停放階段(P-1 重新載入過頁面)
+>      點擊就算真的送達也一定比不上——**與 inert 無關**,而且和觀察到的症狀(工具成功、url/title 正確、頁面沒「收到」click)完全吻合。2 的對照同時改變了兩件事(inert 與只跑停放階段,後者讓計數器是新的),所以**沒有證明 inert 會擋 CDP 點擊**。
+>      已修(`expectOneClick()`:只看「這次點擊之後」出現的 click 事件、要剛好一個)。
+>   4. 所以現在的狀態是:「`inert` 會擋 CDP 點擊」既沒有被證明、也沒有被推翻;`tabindex` 能不能擋住 Tab、會不會影響 CDP 點擊也都還沒在真 Electron 驗證。實驗腳本(app 式生命週期 + `parked-inert`/`parked-tabindex` 兩個位置、各 5 項檢查加 Tab 檢查,摘要有並排結論)
+>      與修好的驗證腳本就是用來決定的:完整執行驗證腳本的停放階段若 9/9 且 Tab 檢查 OK,就維持 tabindex;若想換回 `inert`,改 `browserWebviewTabIndex()` 與 `BrowserHost` 的接線(外框加 `inert`,React 18 不認得這個屬性,要以空字串經 spread 傳入)即可。
 >
 > **只能在真 Electron 驗證的事**(`pnpm test` 驗不到;對應的檢查在 `webview-offscreen.cjs` 與 `verify-browser-host-real.mjs`)
 >
 > 1. `webContents.debugger.attach("1.3")` 對 `<webview>` guest 能用,而且**使用者同時開著這個 webview 的 DevTools 時**仍能 attach(或 detach 之後能重新 attach)——Electron 版本之間有差,這裡沒有實測。
-> 2. `Page.captureScreenshot` 在「可見」與「停放」(含 `inert`)兩種狀態都回正常的畫面;JPEG 品質 65 的檔案大小與 `nativeImage` 縮放後的畫質。
+> 2. `Page.captureScreenshot` 在「可見」與「停放」(含 `tabindex="-1"`)兩種狀態都回正常的畫面;JPEG 品質 65 的檔案大小與 `nativeImage` 縮放後的畫質。
 >    **另外沒測的情境**:Deskmony 視窗被最小化或完全被別的視窗遮住時,Chromium 可能停止繪製 guest,截圖會逾時(回 `browser.hostError`)——兩個腳本都沒覆蓋這種情況,要手動試。
-> 3. `Input.dispatchMouseEvent`/`dispatchKeyEvent`/`insertText` 對 guest 的實際效果——特別是 guest 認為自己沒有焦點(`document.hasFocus()` 為假)時,`:focus` 樣式與 focus 事件的行為,以及 `inert` 的影響。
+> 3. `Input.dispatchMouseEvent`/`dispatchKeyEvent`/`insertText` 對 guest 的實際效果——特別是 guest 認為自己沒有焦點(`document.hasFocus()` 為假)時,`:focus` 樣式與 focus 事件的行為,以及停放時 `tabindex="-1"`(或當初的 `inert`)的影響;`tabindex="-1"` 能不能真的擋住 Tab(`<webview>` 是 shadow host,要實測)。
 > 4. `executeJavaScriptInIsolatedWorld` 對 `<webview>` guest 可用、isolated world 的 `window` 確實與頁面隔離、ref 對照表在導覽後確實消失。
 > 5. `did-finish-load`/`did-fail-load`/`did-stop-loading` 的實際時序(特別是點連結後的導覽、`loadURL` 同網址、history 的 back/forward 是否都會觸發 `did-finish-load`)、`navigationHistory`、截圖 `nativeImage` 的解碼與縮放。
 > 6. 面板開關、拖拉寬度時 viewport 尺寸的變化與 `staleScreenshot` 的實際觸發;自動打開面板後 300 ms 是否足夠讓 slot 就位。
 > 7. 所有 UI(指示、圓點、自動打開、四語系文字)的實際外觀——這輪沒有啟動 Electron,只過了 typecheck/build。
 >
-> **執行方式**:實驗腳本 `apps\desktop\node_modules\.bin\electron.cmd scripts\spike\webview-offscreen.cjs`(開六個視窗依序跑,約 30–60 秒,自己結束);驗證腳本先照它檔頭的 PowerShell 指令啟動 dev app(`DESKMONY_E2E_EXTRA_PROVIDERS` 提供 fake ACP provider),
+> **執行方式**:實驗腳本 `apps\desktop\node_modules\.bin\electron.cmd scripts\spike\webview-offscreen.cjs`(開七個視窗依序跑,約 45–90 秒,自己結束);驗證腳本先照它檔頭的 PowerShell 指令啟動 dev app(`DESKMONY_E2E_EXTRA_PROVIDERS` 提供 fake ACP provider),
 > 再 `node scripts/verify-browser-host-real.mjs --core-port=<n> --token=<t>`。
 
 ---

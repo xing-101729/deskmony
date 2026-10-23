@@ -81,8 +81,7 @@ const ALLOW_POPUPS = { allowpopups: "true" } as object;
  * React 先建立元素、設完屬性才把它加進 DOM,而且 `partition` 排在 `src` 前面。
  *
  * `tabIndex`:停放中是 `-1`(退出 Tab 順序,使用者按 Tab 不會把焦點送進看不見的頁面),可見時不設。這是唯一會隨停放/可見變動的 prop;React 只更新有變的屬性,
- * 所以 `partition`/`src` 不受影響。**不要改成 `inert`、`disabled` 或「focus 進來就 blur」**:任何讓 webview 無法被聚焦的做法都會讓 CDP 的滑鼠點擊送不進
- * 停放中的頁面(真 app 實測過 `inert`,細節見 `lib/browser-frame-style.ts` 的 `browserWebviewTabIndex()`)。
+ * 所以 `partition`/`src` 不受影響。為什麼用 tabindex 而不是外框 `inert`、這個決定的證據有多弱,見 `lib/browser-frame-style.ts` 的 `browserWebviewTabIndex()`。
  */
 const BrowserWebview = memo(function BrowserWebview({
   sessionId,

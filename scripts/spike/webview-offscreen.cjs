@@ -16,16 +16,15 @@
  *   parked          P3 的停放方式(`apps/desktop/src/lib/browser-frame-style.ts`):外框 `position: fixed; left: 0; top: 0;
  *                   width: 1024px; height: 768px; opacity: 0; z-index: -1; pointer-events: none`,上面有一塊不透明的全版面「app 外殼」(在流內、不是 positioned,
  *                   對應 `.app-shell` 的 `bg-canvas`)。不用 visibility:hidden / display:none。
- *   parked-inert    **已被淘汰的做法,留著當對照**:同 `parked`,外框再加 `inert`。真 app 實測(2026-10-23)這會讓 CDP 的滑鼠點擊完全送不進停放中的頁面
- *                   (工具回成功、頁面沒收到 click),其他輸入/截圖都正常。第一版實驗腳本沒抓到這個失敗(見下面的「生命週期」),所以這一組現在
- *                   應該會在檢查 2(點擊)與檢查 5(來回移動後再點擊)FAIL——它 FAIL 才代表實驗夠像真 app;如果它 5/5 通過,腳本會印出警告,
- *                   意思是這支實驗還是沒能重現真 app 的失敗,**不能拿它的通過當作「這種做法可以」**。
+ *   parked-inert    前一版的正式停放方式:同 `parked`,外框再加 `inert`(讓停放中的 webview 不能被 Tab 聚焦)。第一版實驗腳本(真 Electron,2026-10-23)是 5/5、Tab 進不去。
+ *                   同一天驗證腳本在真 app 的停放階段 click 失敗,當時歸因於 inert,**事後發現是驗證腳本自己的計數 bug**(見 `verify-browser-host-real.mjs`
+ *                   的 `expectOneClick()` 註解),所以 inert 會不會影響 CDP 點擊**沒有結論**。這一組(加上下面的生命週期)就是在補那個對照。
  *   parked-tabindex **BrowserHost 現行的正式停放方式**:同 `parked`,再把 `<webview>` 設 `tabindex="-1"`(可見時移除),只是讓它退出 Tab 順序,
  *                   不阻止它被聚焦(`BrowserHost.tsx`、`browserWebviewTabIndex()`)。要確認的有兩件事:5 項檢查都過(尤其點擊)、Tab 檢查進不去。
  *
- * ## 生命週期(為什麼第一版沒抓到 inert 的問題)
+ * ## 生命週期(讓實驗更像真 app)
  * 第一版的每個視窗一載入就在目標位置、馬上做檢查;真 app 的 webview 是「出生在停放位置 → 面板打開變可見、agent/使用者操作過 → 使用者切到別的 session
- * 又被停放 → embedder(使用者)的焦點在別處,agent 再叫它點擊」。現在每個位置的視窗都照這個順序:
+ * 又被停放 → embedder(使用者)的焦點在別處,agent 再叫它點擊」。這是最接近真 app 的做法,也是 inert 若真有問題最可能現形的情境。現在每個位置的視窗都照這個順序:
  *   1. host 頁面載入時 webview 就**出生在該位置**(`inert`/`tabindex`/`aria-hidden` 直接寫在 HTML 裡,和 React 建立元素時一樣);
  *   2. 移到 `visible`,用 CDP 點按鈕、點輸入框、輸入文字(像 agent 在可見狀態下操作),再清空輸入框;
  *   3. 移到目標位置(inert 等在這時才**動態**加上),等 SETTLE_MS;
@@ -35,7 +34,8 @@
  *
  * 另外對 visible / parked / parked-inert / parked-tabindex 各做一個鍵盤檢查(不計入 5 項,但納入結論):在 host 頁面按 Tab 三次,記錄每次之後
  * `document.activeElement` 的標籤(WEBVIEW = 焦點進了 webview;其他 = 沒進去)。預期 visible 與 parked 會進去,parked-tabindex 與 parked-inert 不會。
- * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式;`parked-tabindex` 沒有 5/5 或 Tab 進得去會另外大聲警告(代表目前的正式停放方式有問題)。
+ * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式與「Tab 防護」的結論(parked-tabindex 與 parked-inert 各一行:5 項是否全過、Tab 是否進得去);
+ * `parked-tabindex` 沒有 5/5 或 Tab 進得去會另外大聲警告(代表目前的正式停放方式有問題)。
  *
  * ## 執行方式(從 repo 根目錄)
  *   Windows (cmd/PowerShell):  apps\desktop\node_modules\.bin\electron.cmd scripts\spike\webview-offscreen.cjs
@@ -73,15 +73,12 @@ const VARIANTS = [
   { name: "opacity0", desc: "opacity:0,上面蓋一塊不透明的面板內容區", hidden: true },
   { name: "clip1x1", desc: "外框 1x1 + overflow:hidden,webview 仍是 1024x768", hidden: true },
   { name: "parked", desc: "P3 的停放方式:fixed 0,0、1024x768、opacity 0、z-index -1、pointer-events none,上面是不透明的 app 外殼", hidden: true },
-  { name: "parked-inert", desc: "已淘汰(對照,預期點擊 FAIL):同 parked,外框再加 inert 屬性", hidden: true },
+  { name: "parked-inert", desc: "前一版的正式停放方式(對照):同 parked,外框再加 inert 屬性", hidden: true },
   { name: "parked-tabindex", desc: "正式停放方式:同 parked,<webview> 設 tabindex=-1(退出 Tab 順序,仍可被聚焦)", hidden: true },
 ];
 
 /** 會做鍵盤檢查(按 Tab 焦點會不會進 webview)的位置。 */
 const TAB_PROBE_VARIANTS = new Set(["visible", "parked", "parked-inert", "parked-tabindex"]);
-
-/** 結論用:被淘汰、不能被推薦的位置(它通過也不代表可用)。 */
-const REJECTED_VARIANTS = new Set(["parked-inert"]);
 
 // ---------------------------------------------------------------------------------------------
 // 本機 HTTP 伺服器:測試頁(有 click handler、input、可見文字)、第二頁(給 loadURL 檢查)、host 頁(內含 <webview>)
@@ -514,25 +511,27 @@ async function main() {
   }
   const baseline = results.find((r) => r.variant === "visible");
   const baselineOk = baseline !== undefined && baseline.passed === 5;
-  // 被淘汰的位置(parked-inert)就算通過也不列入「可用」。
-  const workable = results.filter((r) => r.hidden && r.passed === 5 && !REJECTED_VARIANTS.has(r.variant)).map((r) => r.variant);
+  const workable = results.filter((r) => r.hidden && r.passed === 5).map((r) => r.variant);
   if (!baselineOk) console.log("\nBASELINE (visible) DID NOT PASS 5/5 — the experiment itself is unreliable on this machine; do not draw conclusions.");
   const parkedResult = results.find((r) => r.variant === "parked");
   const inertResult = results.find((r) => r.variant === "parked-inert");
   const tabindexResult = results.find((r) => r.variant === "parked-tabindex");
 
-  // ---- 實驗可信度:parked-inert 在真 app 會點擊失敗;實驗要能重現,否則代表這支實驗還是不夠像真 app ----
-  if (inertResult) {
-    const clickFailed = inertResult.checks.some((c) => (c.id === 2 || c.id === 5) && !c.ok);
-    if (clickFailed) {
-      console.log("\nREPRODUCED: `parked-inert` fails the click check (2 and/or 5) here, like the real app did on 2026-10-23 — this experiment is faithful enough to catch the inert problem.");
-    } else if (inertResult.passed === 5) {
-      console.log(
-        "\n!!! EXPERIMENT NOT FAITHFUL: `parked-inert` passed 5/5 here, but the real app's parked phase failed every CDP click with inert on (2026-10-23). " +
-          "Do NOT read any pass in this run as 'this hiding method is fine' — a method that prevents the webview from being focused is known to break clicks in the real app. " +
-          "Whatever differs between this page and the app (focus state, a real user interaction, timing) still needs to be found.",
-      );
-    }
+  // ---- 兩種 Tab 防護的並排結論(inert 會不會影響 CDP 點擊是這次實驗要補的對照;沒有預設立場)----
+  const guardLine = (name, r) => {
+    if (!r) return `  ${name}: (not run)`;
+    const clickFailed = r.checks.filter((c) => (c.id === 2 || c.id === 5) && !c.ok).map((c) => c.id);
+    const tab = r.tabFocus === undefined ? "Tab check did not run" : r.tabFocus === "WEBVIEW" ? "Tab STILL reaches the webview" : "Tab blocked";
+    return `  ${name}: ${r.passed}/5${clickFailed.length ? ` (click checks failing: ${clickFailed.join(",")})` : ""}; ${tab}`;
+  };
+  console.log("\nTAB GUARD COMPARISON (a usable guard = 5/5 including the click checks AND Tab blocked):");
+  console.log(guardLine("parked-tabindex (current)", tabindexResult));
+  console.log(guardLine("parked-inert    (previous)", inertResult));
+  console.log(guardLine("parked          (no guard)", parkedResult));
+  if (inertResult && inertResult.checks.some((c) => (c.id === 2 || c.id === 5) && !c.ok) && parkedResult && parkedResult.passed === 5) {
+    console.log("  -> `inert` breaks CDP clicks here while `parked` passes: this reproduces the problem the real-app run was (wrongly or rightly) blamed on inert.");
+  } else if (inertResult && inertResult.passed === 5 && parkedResult && parkedResult.passed === 5) {
+    console.log("  -> `inert` does NOT break CDP clicks in this experiment (consistent with the real-app click failure having been a verification-script bug).");
   }
 
   // ---- 正式停放方式:parked-tabindex ----
@@ -555,7 +554,7 @@ async function main() {
     }
   }
   console.log(
-    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: parked-tabindex, parked, opacity0, clip1x1, offscreen; never parked-inert)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
+    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: parked-tabindex, parked-inert, parked, opacity0, clip1x1, offscreen — but a parked method without a working Tab guard still lets Tab into the hidden page; see TAB GUARD COMPARISON)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
   );
   console.log(`Duration: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
