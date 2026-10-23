@@ -8,21 +8,34 @@
  *   3. CDP `Input.insertText` 能輸入到 focus 的 input;
  *   4. `loadURL` 之後 `did-finish-load` 正常觸發;
  *   5. 在「可見位置」與「隱藏位置」之間來回移動不會重新載入(沒有 did-start-loading/did-navigate、頁面狀態與伺服器請求數都不變)。
- * 同一組 5 項檢查對六種「位置」各跑一次(每種一個獨立的視窗與 webview,依序進行,同時只存在一個視窗):
- *   visible       基準:webview 在畫面上(sanity check,這組不過代表實驗本身有問題)
- *   offscreen     webview 外框 `position: fixed; left: -20000px`,保持 1024×768
- *   opacity0      webview 在原位但 `opacity: 0`,上面再蓋一塊不透明的面板內容區
- *   clip1x1       外框 1×1 且 `overflow: hidden`,webview 本身仍是 1024×768(被裁切成 1×1 可見)
- *   parked        P3 的停放方式(`apps/desktop/src/lib/browser-frame-style.ts`):外框 `position: fixed; left: 0; top: 0;
- *                 width: 1024px; height: 768px; opacity: 0; z-index: -1; pointer-events: none`,上面有一塊不透明的全版面「app 外殼」(在流內、不是 positioned,
- *                 對應 `.app-shell` 的 `bg-canvas`)。不用 visibility:hidden / display:none。
- *   parked-inert  **BrowserHost 現行的正式停放方式**(P4b):同 `parked`,外框再加 `inert` 屬性(`browserFrameInert()`)——停放中的 webview 看不見,
- *                 不能讓使用者按 Tab 把鍵盤焦點送進去。`inert` 對 CDP 截圖/輸入有沒有影響是**未驗證**的,這一組就是在驗它;切換位置時
- *                 (visible <-> parked-inert)會移除/加上 `inert`,和 BrowserHost 把 session 在面板與停放之間來回移動的情形一致。
- *                 之後改停放方式要重驗,就用這一種。
- * 另外對 visible / parked / parked-inert 各做一個**資訊性**的鍵盤檢查(不計入 5 項):在 host 頁面按 Tab,焦點有沒有進到 webview
- * (WEBVIEW = 進去了;BODY = 沒有)。預期 visible 與 parked 會進去、parked-inert 不會——這就是加 `inert` 的目的。
- * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式;`parked-inert` 沒有 5/5 會另外大聲警告(代表目前的正式停放方式不可用)。
+ * 同一組 5 項檢查對七種「位置」各跑一次(每種一個獨立的視窗與 webview,依序進行,同時只存在一個視窗):
+ *   visible         基準:webview 在畫面上(sanity check,這組不過代表實驗本身有問題)
+ *   offscreen       webview 外框 `position: fixed; left: -20000px`,保持 1024×768
+ *   opacity0        webview 在原位但 `opacity: 0`,上面再蓋一塊不透明的面板內容區
+ *   clip1x1         外框 1×1 且 `overflow: hidden`,webview 本身仍是 1024×768(被裁切成 1×1 可見)
+ *   parked          P3 的停放方式(`apps/desktop/src/lib/browser-frame-style.ts`):外框 `position: fixed; left: 0; top: 0;
+ *                   width: 1024px; height: 768px; opacity: 0; z-index: -1; pointer-events: none`,上面有一塊不透明的全版面「app 外殼」(在流內、不是 positioned,
+ *                   對應 `.app-shell` 的 `bg-canvas`)。不用 visibility:hidden / display:none。
+ *   parked-inert    **已被淘汰的做法,留著當對照**:同 `parked`,外框再加 `inert`。真 app 實測(2026-10-23)這會讓 CDP 的滑鼠點擊完全送不進停放中的頁面
+ *                   (工具回成功、頁面沒收到 click),其他輸入/截圖都正常。第一版實驗腳本沒抓到這個失敗(見下面的「生命週期」),所以這一組現在
+ *                   應該會在檢查 2(點擊)與檢查 5(來回移動後再點擊)FAIL——它 FAIL 才代表實驗夠像真 app;如果它 5/5 通過,腳本會印出警告,
+ *                   意思是這支實驗還是沒能重現真 app 的失敗,**不能拿它的通過當作「這種做法可以」**。
+ *   parked-tabindex **BrowserHost 現行的正式停放方式**:同 `parked`,再把 `<webview>` 設 `tabindex="-1"`(可見時移除),只是讓它退出 Tab 順序,
+ *                   不阻止它被聚焦(`BrowserHost.tsx`、`browserWebviewTabIndex()`)。要確認的有兩件事:5 項檢查都過(尤其點擊)、Tab 檢查進不去。
+ *
+ * ## 生命週期(為什麼第一版沒抓到 inert 的問題)
+ * 第一版的每個視窗一載入就在目標位置、馬上做檢查;真 app 的 webview 是「出生在停放位置 → 面板打開變可見、agent/使用者操作過 → 使用者切到別的 session
+ * 又被停放 → embedder(使用者)的焦點在別處,agent 再叫它點擊」。現在每個位置的視窗都照這個順序:
+ *   1. host 頁面載入時 webview 就**出生在該位置**(`inert`/`tabindex`/`aria-hidden` 直接寫在 HTML 裡,和 React 建立元素時一樣);
+ *   2. 移到 `visible`,用 CDP 點按鈕、點輸入框、輸入文字(像 agent 在可見狀態下操作),再清空輸入框;
+ *   3. 移到目標位置(inert 等在這時才**動態**加上),等 SETTLE_MS;
+ *   4. 讓 host 頁面的焦點落在別的元素(`#other`,模擬使用者按了 session 清單);
+ *   5. 才開始 5 項檢查;檢查 5 來回移動兩輪之後**再點一次**(再次動態加上屬性之後的點擊)。
+ * 另外 host 頁面還對齊 app 的細節:停放時外框有 `aria-hidden="true"`、webview 帶 `allowpopups="true"`。
+ *
+ * 另外對 visible / parked / parked-inert / parked-tabindex 各做一個鍵盤檢查(不計入 5 項,但納入結論):在 host 頁面按 Tab 三次,記錄每次之後
+ * `document.activeElement` 的標籤(WEBVIEW = 焦點進了 webview;其他 = 沒進去)。預期 visible 與 parked 會進去,parked-tabindex 與 parked-inert 不會。
+ * 輸出每一項 PASS/FAIL 與細節,最後給出建議的隱藏方式;`parked-tabindex` 沒有 5/5 或 Tab 進得去會另外大聲警告(代表目前的正式停放方式有問題)。
  *
  * ## 執行方式(從 repo 根目錄)
  *   Windows (cmd/PowerShell):  apps\desktop\node_modules\.bin\electron.cmd scripts\spike\webview-offscreen.cjs
@@ -31,11 +44,11 @@
  * 選用參數(接在腳本路徑後):`--out=<檔案>` 把結果另存成 JSON。
  *
  * ## 行為
- *  - 會依序**開 6 個 Electron 視窗**(每種位置一個,測完立刻關閉,同時只有一個;視窗是真的顯示出來的,因為正式 app 的視窗也是顯示的——
+ *  - 會依序**開 7 個 Electron 視窗**(每種位置一個,測完立刻關閉,同時只有一個;視窗是真的顯示出來的,因為正式 app 的視窗也是顯示的——
  *    用 show:false 會變成另一個實驗)。
  *  - 本機 HTTP 伺服器只綁 127.0.0.1、隨機 port,結束時關閉;userData 用暫存目錄,結束時刪除(刪不掉會在最後一行印出路徑)。
- *  - 全程有逾時(每個 CDP 指令 6 秒、每種位置 60 秒、整體 7 分鐘 watchdog),一定會自己結束:`app.exit(code)`,不留殘餘行程。
- *    預期總時間約 30–60 秒(各項檢查通過時;有逾時的項目會拉長——例如 offscreen 的截圖會等滿 6 秒)。
+ *  - 全程有逾時(每個 CDP 指令 6 秒、每種位置 90 秒、整體 10 分鐘 watchdog),一定會自己結束:`app.exit(code)`,不留殘餘行程。
+ *    預期總時間約 45–90 秒(各項檢查通過時;有逾時的項目會拉長——例如 offscreen 的截圖會等滿 6 秒)。
  *  - 結束碼:0 = 實驗跑完且基準(visible)5/5 通過;1 = 基準沒過(實驗結果不可信);2 = 腳本本身出錯或 watchdog 觸發。
  *    「隱藏方式行不行」看輸出的 VERDICT 行,不影響結束碼。
  */
@@ -49,22 +62,26 @@ const { app, BrowserWindow, nativeImage } = require("electron");
 
 const CDP_TIMEOUT_MS = 6000;
 const LOAD_TIMEOUT_MS = 10000;
-const VARIANT_TIMEOUT_MS = 60000;
-const GLOBAL_TIMEOUT_MS = 7 * 60 * 1000;
+const VARIANT_TIMEOUT_MS = 90000;
+const GLOBAL_TIMEOUT_MS = 10 * 60 * 1000;
 const SETTLE_MS = 500; // 改了位置之後等合成器反應的時間
 
-/** 六種位置;各自的外框與 webview 樣式在 host 頁面的 `POS` 表,由 `window.__setPos(name)` 套用。 */
+/** 七種位置;各自的外框與 webview 樣式/屬性在下面的 `POSITIONS` 表,host 頁面由 `window.__setPos(name)` 套用。 */
 const VARIANTS = [
   { name: "visible", desc: "webview 在畫面上(基準)", hidden: false },
   { name: "offscreen", desc: "外框 left:-20000px,保持 1024x768", hidden: true },
   { name: "opacity0", desc: "opacity:0,上面蓋一塊不透明的面板內容區", hidden: true },
   { name: "clip1x1", desc: "外框 1x1 + overflow:hidden,webview 仍是 1024x768", hidden: true },
   { name: "parked", desc: "P3 的停放方式:fixed 0,0、1024x768、opacity 0、z-index -1、pointer-events none,上面是不透明的 app 外殼", hidden: true },
-  { name: "parked-inert", desc: "正式停放方式:同 parked,外框再加 inert 屬性(停放中按 Tab 進不去)", hidden: true },
+  { name: "parked-inert", desc: "已淘汰(對照,預期點擊 FAIL):同 parked,外框再加 inert 屬性", hidden: true },
+  { name: "parked-tabindex", desc: "正式停放方式:同 parked,<webview> 設 tabindex=-1(退出 Tab 順序,仍可被聚焦)", hidden: true },
 ];
 
-/** 會做資訊性鍵盤檢查(Tab 焦點會不會進 webview)的位置。 */
-const TAB_PROBE_VARIANTS = new Set(["visible", "parked", "parked-inert"]);
+/** 會做鍵盤檢查(按 Tab 焦點會不會進 webview)的位置。 */
+const TAB_PROBE_VARIANTS = new Set(["visible", "parked", "parked-inert", "parked-tabindex"]);
+
+/** 結論用:被淘汰、不能被推薦的位置(它通過也不代表可用)。 */
+const REJECTED_VARIANTS = new Set(["parked-inert"]);
 
 // ---------------------------------------------------------------------------------------------
 // 本機 HTTP 伺服器:測試頁(有 click handler、input、可見文字)、第二頁(給 loadURL 檢查)、host 頁(內含 <webview>)
@@ -89,37 +106,59 @@ document.getElementById("btn").addEventListener("click", function () { window.__
 const SECOND_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>spike-second</title></head>
 <body style="background:#fff"><h1>SPIKE_SECOND_PAGE</h1></body></html>`;
 
-/** host 頁:一個外框 div 裡放一個 <webview>,以及一塊平常隱藏的「面板內容區」遮罩(opacity0 方案用)。 */
+const PARKED_FRAME = { left: "0px", top: "0px", width: "1024px", height: "768px", opacity: "0", zIndex: "-1", pointerEvents: "none" };
+const FILL = { width: "100%", height: "100%" };
+
+/**
+ * 每個位置:`frame`(外框的行內樣式)、`wv`(webview 的行內樣式)、`cover`/`shell`(遮罩與 app 外殼是否顯示)、
+ * `inert`(外框的 inert 屬性)、`ariaHidden`(外框的 aria-hidden,app 停放時有)、`wvTabindex`(webview 的 tabindex,`null` = 不設)。
+ * 同一份表既用來產生 host 頁面的**初始 HTML**(webview 出生在該位置、屬性直接寫在標記裡),也嵌進頁面給 `__setPos()` 動態切換用。
+ */
+const POSITIONS = {
+  visible: { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: FILL, cover: false, shell: false, inert: false, ariaHidden: false, wvTabindex: null },
+  offscreen: { frame: { left: "-20000px", top: "0px", width: "1024px", height: "768px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: FILL, cover: false, shell: false, inert: false, ariaHidden: false, wvTabindex: null },
+  opacity0: { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "0", zIndex: "1", pointerEvents: "auto" }, wv: FILL, cover: true, shell: false, inert: false, ariaHidden: false, wvTabindex: null },
+  clip1x1: { frame: { left: "20px", top: "20px", width: "1px", height: "1px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "1024px", height: "768px" }, cover: false, shell: false, inert: false, ariaHidden: false, wvTabindex: null },
+  parked: { frame: PARKED_FRAME, wv: FILL, cover: false, shell: true, inert: false, ariaHidden: true, wvTabindex: null },
+  "parked-inert": { frame: PARKED_FRAME, wv: FILL, cover: false, shell: true, inert: true, ariaHidden: true, wvTabindex: null },
+  "parked-tabindex": { frame: PARKED_FRAME, wv: FILL, cover: false, shell: true, inert: false, ariaHidden: true, wvTabindex: "-1" },
+};
+
+/**
+ * host 頁:一個外框 div 裡放一個 <webview>(帶 `allowpopups`,和 app 一樣),一塊平常隱藏的「面板內容區」遮罩(opacity0 方案用),
+ * 以及一個不在 Tab 順序裡、可程式聚焦的 `#other` 按鈕(模擬使用者把焦點放在 app 的別處,例如 session 清單)。
+ * webview 出生在 `variant` 的位置:該位置的 inert / aria-hidden / tabindex 直接寫在初始標記裡。
+ */
 function hostPage(variant, guestUrl) {
+  const p = POSITIONS[variant];
+  if (!p) throw new Error(`unknown variant ${variant}`);
+  const frameAttrs = `${p.inert ? " inert" : ""}${p.ariaHidden ? ' aria-hidden="true"' : ""}`;
+  const wvAttrs = p.wvTabindex !== null ? ` tabindex="${p.wvTabindex}"` : "";
   return `<!doctype html><html><head><meta charset="utf-8"><title>spike-host-${variant}</title>
 <style>
 html,body{margin:0;height:100%;background:#2b2b2b;color:#ddd;font:14px sans-serif;overflow:hidden}
 #frame{position:fixed;overflow:hidden;background:#fff}
 #cover{position:fixed;left:20px;top:20px;width:600px;height:500px;background:#555;z-index:2;display:none}
+#other{position:fixed;right:10px;top:10px;z-index:5}
 /* parked 方案:對應 App 的 .app-shell——在流內(不是 positioned、沒有 z-index)、不透明背景、鋪滿視口;fixed 且 z-index:-1 的外框會沉到它底下。 */
 #shell{display:none;height:100vh;background:#444}
 </style></head><body>
 <div id="shell">app shell (opaque, in flow)</div>
+<button id="other" type="button" tabindex="-1">other</button>
 <div id="cover">panel content (opaque, in front of the webview)</div>
-<div id="frame"><webview id="wv" partition="spike-${variant}" src="${guestUrl}" style="display:flex"></webview></div>
+<div id="frame"${frameAttrs}><webview id="wv" partition="spike-${variant}" src="${guestUrl}" allowpopups="true"${wvAttrs} style="display:flex"></webview></div>
 <script>
-var PARKED_FRAME = { left: "0px", top: "0px", width: "1024px", height: "768px", opacity: "0", zIndex: "-1", pointerEvents: "none" };
-var POS = {
-  visible:   { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false, inert: false },
-  offscreen: { frame: { left: "-20000px", top: "0px", width: "1024px", height: "768px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: false, shell: false, inert: false },
-  opacity0:  { frame: { left: "20px", top: "20px", width: "600px", height: "500px", opacity: "0", zIndex: "1", pointerEvents: "auto" }, wv: { width: "100%", height: "100%" }, cover: true, shell: false, inert: false },
-  clip1x1:   { frame: { left: "20px", top: "20px", width: "1px", height: "1px", opacity: "1", zIndex: "1", pointerEvents: "auto" }, wv: { width: "1024px", height: "768px" }, cover: false, shell: false, inert: false },
-  parked:    { frame: PARKED_FRAME, wv: { width: "100%", height: "100%" }, cover: false, shell: true, inert: false },
-  // 正式停放方式:parked + inert(BrowserHost 的 browserFrameInert())。離開停放(移回 visible)時 inert 屬性會被移除。
-  "parked-inert": { frame: PARKED_FRAME, wv: { width: "100%", height: "100%" }, cover: false, shell: true, inert: true }
-};
+var POS = ${JSON.stringify(POSITIONS)};
 window.__setPos = function (name) {
   var p = POS[name];
   if (!p) throw new Error("unknown position " + name);
   var frame = document.getElementById("frame");
+  var wv = document.getElementById("wv");
   Object.assign(frame.style, p.frame);
   if (p.inert) frame.setAttribute("inert", ""); else frame.removeAttribute("inert");
-  Object.assign(document.getElementById("wv").style, p.wv);
+  if (p.ariaHidden) frame.setAttribute("aria-hidden", "true"); else frame.removeAttribute("aria-hidden");
+  Object.assign(wv.style, p.wv);
+  if (p.wvTabindex !== null) wv.setAttribute("tabindex", p.wvTabindex); else wv.removeAttribute("tabindex");
   document.getElementById("cover").style.display = p.cover ? "block" : "none";
   document.getElementById("shell").style.display = p.shell ? "block" : "none";
   return name;
@@ -213,6 +252,63 @@ function analyzeScreenshot(base64) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// CDP 點擊與「app 裡一個 webview 的一生」
+// ---------------------------------------------------------------------------------------------
+
+/** 用 CDP 在 guest 的 (x, y)(頁面 CSS px)點一下:mouseMoved、mousePressed、mouseReleased(和 app 的執行器送的一樣)。 */
+async function cdpClickAt(guest, x, y) {
+  await cdp(guest, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  await cdp(guest, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
+  await cdp(guest, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
+}
+
+/** 點 guest 裡某個元素的中心;回傳點擊前後頁面的點擊計數。 */
+async function cdpClickElement(guest, id) {
+  const before = await evalInGuest(guest, "window.__clicks");
+  const rect = JSON.parse(await evalInGuest(guest, `JSON.stringify(document.getElementById(${JSON.stringify(id)}).getBoundingClientRect())`));
+  const x = Math.round(rect.left + rect.width / 2);
+  const y = Math.round(rect.top + rect.height / 2);
+  await cdpClickAt(guest, x, y);
+  await sleep(150);
+  const after = await evalInGuest(guest, "window.__clicks");
+  return { before, after, x, y };
+}
+
+/**
+ * 讓 webview 走一遍 app 裡的一生(第一版實驗沒有做這件事,所以沒抓到 `inert` 讓停放中的點擊失效——見檔頭的「生命週期」):
+ * 出生在目標位置(host 頁面的初始 HTML)→ 移到可見、agent 式的操作(點按鈕、點輸入框、輸入文字,再清空)→ 移回目標位置(屬性在這時動態加上)→
+ * host 頁面的焦點落到別的元素(使用者按了 session 清單)。回傳給檢查用的描述字串。失敗不中斷(預熱本身壞了,後面的檢查會自己說明)。
+ */
+async function simulateAppLifecycle(win, guest, variant, setPos) {
+  const notes = [];
+  try {
+    await setPos("visible");
+    await sleep(SETTLE_MS);
+    const click = await cdpClickElement(guest, "btn");
+    notes.push(`visible click ${click.before}->${click.after}`);
+    const inp = JSON.parse(await evalInGuest(guest, 'JSON.stringify(document.getElementById("inp").getBoundingClientRect())'));
+    await cdpClickAt(guest, Math.round(inp.left + inp.width / 2), Math.round(inp.top + inp.height / 2));
+    await cdp(guest, "Input.insertText", { text: "warm" });
+    await sleep(100);
+    notes.push(`typed=${JSON.stringify(await evalInGuest(guest, 'document.getElementById("inp").value'))}`);
+    await evalInGuest(guest, 'document.getElementById("inp").value = "", 0'); // 清空,讓後面的檢查從乾淨狀態開始
+  } catch (error) {
+    notes.push(`warm-up failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  await setPos(variant.name);
+  await sleep(SETTLE_MS);
+  try {
+    win.focus();
+    await win.webContents.executeJavaScript('document.getElementById("other").focus(), document.activeElement.id');
+    await sleep(200);
+    notes.push("host focus moved to #other");
+  } catch (error) {
+    notes.push(`moving host focus failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return notes.join("; ");
+}
+
+// ---------------------------------------------------------------------------------------------
 // 一種位置的 5 項檢查
 // ---------------------------------------------------------------------------------------------
 
@@ -253,6 +349,9 @@ async function runVariant(server, variant) {
     await sleep(SETTLE_MS);
     const setPos = (name) => win.webContents.executeJavaScript(`window.__setPos(${JSON.stringify(name)})`);
 
+    // ---- 0. app 式的生命週期(可見操作 → 停放 → host 焦點移走),之後才開始檢查 ----
+    console.log(`  [lifecycle] ${await simulateAppLifecycle(win, guest, variant, setPos)}`);
+
     // ---- 1. 截圖非空白 ----
     await attempt(1, "CDP Page.captureScreenshot returns a non-blank image", async () => {
       const { data } = await cdp(guest, "Page.captureScreenshot", { format: "png" });
@@ -261,15 +360,7 @@ async function runVariant(server, variant) {
 
     // ---- 2. 滑鼠點擊觸發 click handler ----
     await attempt(2, "CDP Input.dispatchMouseEvent click fires the page's click handler", async () => {
-      const before = await evalInGuest(guest, "window.__clicks");
-      const rect = JSON.parse(await evalInGuest(guest, 'JSON.stringify(document.getElementById("btn").getBoundingClientRect())'));
-      const x = Math.round(rect.left + rect.width / 2);
-      const y = Math.round(rect.top + rect.height / 2);
-      await cdp(guest, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
-      await cdp(guest, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
-      await cdp(guest, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
-      await sleep(150);
-      const after = await evalInGuest(guest, "window.__clicks");
+      const { before, after, x, y } = await cdpClickElement(guest, "btn");
       return { ok: after === before + 1, detail: `clicks ${before} -> ${after} at (${x},${y})` };
     });
 
@@ -284,7 +375,7 @@ async function runVariant(server, variant) {
     });
 
     // ---- 5(先於 4,因為 4 會導覽離開測試頁)來回移動不重新載入 ----
-    await attempt(5, "moving between visible and this position does not reload the page", async () => {
+    await attempt(5, "moving between visible and this position does not reload the page, and a click still lands afterwards", async () => {
       const snapshot = async () => ({
         loadId: await evalInGuest(guest, "window.__loadId"),
         value: await evalInGuest(guest, 'document.getElementById("inp").value'),
@@ -315,9 +406,17 @@ async function runVariant(server, variant) {
       }
       const after = await snapshot();
       const same = before.loadId === after.loadId && before.value === after.value && before.clicks === after.clicks && before.serverHits === after.serverHits;
+      // 來回移動(屬性再次動態加上/移除)之後再點一次:這是 `inert` 讓點擊失效的情境(app 裡切走 session 再回來叫 agent 點擊)。
+      let clickAfter;
+      try {
+        clickAfter = await cdpClickElement(guest, "btn");
+      } catch (error) {
+        clickAfter = { error: error instanceof Error ? error.message : String(error) };
+      }
+      const clickOk = clickAfter.error === undefined && clickAfter.after === clickAfter.before + 1;
       return {
-        ok: same && events.length === 0,
-        detail: `events=[${events.join(",")}] loadId ${before.loadId === after.loadId ? "same" : "CHANGED"} inputValue ${before.value === after.value ? "kept" : "LOST"} serverHits ${before.serverHits}->${after.serverHits}`,
+        ok: same && events.length === 0 && clickOk,
+        detail: `events=[${events.join(",")}] loadId ${before.loadId === after.loadId ? "same" : "CHANGED"} inputValue ${before.value === after.value ? "kept" : "LOST"} serverHits ${before.serverHits}->${after.serverHits}; click after round trip: ${clickAfter.error ?? `clicks ${clickAfter.before} -> ${clickAfter.after}`}`,
       };
     });
 
@@ -330,7 +429,7 @@ async function runVariant(server, variant) {
       return { ok: title === "spike-second", detail: `title=${JSON.stringify(title)} url=${guest.getURL()}` };
     });
 
-    // ---- 資訊性:按 Tab 焦點會不會進 webview(不計入 5 項,失敗也不影響結果)----
+    // ---- 鍵盤檢查:按 Tab 焦點會不會進 webview(不計入 5 項,但納入結論;失敗不影響 5 項結果)----
     if (TAB_PROBE_VARIANTS.has(variant.name)) {
       try {
         await setPos(variant.name);
@@ -338,13 +437,16 @@ async function runVariant(server, variant) {
         win.focus();
         win.webContents.focus();
         await win.webContents.executeJavaScript("document.activeElement && document.activeElement.blur && document.activeElement.blur(), 0");
+        const seen = [];
         for (let i = 0; i < 3; i++) {
           win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Tab" });
           win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Tab" });
           await sleep(120);
+          seen.push(await win.webContents.executeJavaScript("document.activeElement ? document.activeElement.tagName : 'NONE'"));
         }
-        tabFocus = await win.webContents.executeJavaScript("document.activeElement ? document.activeElement.tagName : 'NONE'");
-        console.log(`  [INFO] pressing Tab 3x in the host page: document.activeElement = ${tabFocus}  (WEBVIEW = focus went into the webview, BODY = it did not)`);
+        // 只要有一次焦點落在 WEBVIEW 就算 Tab 進得去(進去之後焦點在 guest 裡,host 的 activeElement 會一直是 WEBVIEW)。
+        tabFocus = seen.includes("WEBVIEW") ? "WEBVIEW" : seen[seen.length - 1];
+        console.log(`  [INFO] pressing Tab 3x in the host page: document.activeElement after each = ${seen.join(", ")}  (WEBVIEW = focus went into the webview)`);
       } catch (error) {
         console.log(`  [INFO] Tab-focus probe failed (ignored): ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -382,7 +484,10 @@ async function main() {
   const outArg = process.argv.find((arg) => arg.startsWith("--out="));
   const outPath = outArg ? outArg.slice("--out=".length) : undefined;
   console.log(`Electron ${process.versions.electron} / Chromium ${process.versions.chrome} / ${process.platform} ${os.release()}`);
-  console.log("Opens 6 windows one after another (visible, offscreen, opacity0, clip1x1, parked, parked-inert); each is closed before the next opens.");
+  console.log(
+    "Opens 7 windows one after another (visible, offscreen, opacity0, clip1x1, parked, parked-inert, parked-tabindex); each is closed before the next opens.\n" +
+      "Each window follows an app-like lifecycle (born in position -> visible + CDP interaction -> back to position -> host focus elsewhere) before the checks.",
+  );
 
   await app.whenReady();
   const server = await startServer();
@@ -409,26 +514,48 @@ async function main() {
   }
   const baseline = results.find((r) => r.variant === "visible");
   const baselineOk = baseline !== undefined && baseline.passed === 5;
-  const workable = results.filter((r) => r.hidden && r.passed === 5).map((r) => r.variant);
+  // 被淘汰的位置(parked-inert)就算通過也不列入「可用」。
+  const workable = results.filter((r) => r.hidden && r.passed === 5 && !REJECTED_VARIANTS.has(r.variant)).map((r) => r.variant);
   if (!baselineOk) console.log("\nBASELINE (visible) DID NOT PASS 5/5 — the experiment itself is unreliable on this machine; do not draw conclusions.");
   const parkedResult = results.find((r) => r.variant === "parked");
   const inertResult = results.find((r) => r.variant === "parked-inert");
-  if (inertResult && inertResult.passed !== 5) {
-    console.log("\n!!! WARNING: the production parking method (parked-inert: fixed 0,0 / 1024x768 / opacity 0 / z-index -1 / inert) did NOT pass 5/5 — BrowserHost parks hidden webviews this way, so P4 screenshots/clicks on unseen sessions are at risk.");
-    if (parkedResult && parkedResult.passed === 5) {
-      console.log("    `parked` (the same without inert) DID pass 5/5, so `inert` is what breaks it: make `browserFrameInert()` in apps/desktop/src/lib/browser-frame-style.ts return false (and keep tabIndex=-1 or similar as the keyboard-focus guard).");
+  const tabindexResult = results.find((r) => r.variant === "parked-tabindex");
+
+  // ---- 實驗可信度:parked-inert 在真 app 會點擊失敗;實驗要能重現,否則代表這支實驗還是不夠像真 app ----
+  if (inertResult) {
+    const clickFailed = inertResult.checks.some((c) => (c.id === 2 || c.id === 5) && !c.ok);
+    if (clickFailed) {
+      console.log("\nREPRODUCED: `parked-inert` fails the click check (2 and/or 5) here, like the real app did on 2026-10-23 — this experiment is faithful enough to catch the inert problem.");
+    } else if (inertResult.passed === 5) {
+      console.log(
+        "\n!!! EXPERIMENT NOT FAITHFUL: `parked-inert` passed 5/5 here, but the real app's parked phase failed every CDP click with inert on (2026-10-23). " +
+          "Do NOT read any pass in this run as 'this hiding method is fine' — a method that prevents the webview from being focused is known to break clicks in the real app. " +
+          "Whatever differs between this page and the app (focus state, a real user interaction, timing) still needs to be found.",
+      );
     }
-  } else if (parkedResult && parkedResult.passed !== 5) {
-    console.log("\n!!! WARNING: `parked` (without inert) did NOT pass 5/5 although `parked-inert` did — unexpected; re-run before drawing conclusions.");
   }
-  if (inertResult && inertResult.tabFocus !== undefined) {
-    const blocked = inertResult.tabFocus !== "WEBVIEW";
-    console.log(
-      `\nINERT KEYBOARD GUARD: ${blocked ? "OK — Tab did not move focus into the inert parked webview" : "NOT EFFECTIVE — Tab still reached the inert parked webview"}${parkedResult && parkedResult.tabFocus !== undefined ? ` (without inert, parked: ${parkedResult.tabFocus})` : ""}`,
-    );
+
+  // ---- 正式停放方式:parked-tabindex ----
+  if (tabindexResult) {
+    if (tabindexResult.passed !== 5) {
+      console.log(
+        "\n!!! WARNING: the production parking method (parked-tabindex: fixed 0,0 / 1024x768 / opacity 0 / z-index -1 / <webview tabindex=-1>) did NOT pass 5/5 — BrowserHost parks hidden webviews this way, so P4 screenshots/clicks on unseen sessions are at risk.",
+      );
+      if (parkedResult && parkedResult.passed === 5) {
+        console.log("    `parked` (the same without tabindex) DID pass 5/5, so tabindex is what breaks it: make `browserWebviewTabIndex()` in apps/desktop/src/lib/browser-frame-style.ts return undefined and find another way to keep Tab out of a parked webview (without making it unfocusable).");
+      }
+    } else if (parkedResult && parkedResult.passed !== 5) {
+      console.log("\n!!! WARNING: `parked` (without tabindex) did NOT pass 5/5 although `parked-tabindex` did — unexpected; re-run before drawing conclusions.");
+    }
+    if (tabindexResult.tabFocus !== undefined) {
+      const blocked = tabindexResult.tabFocus !== "WEBVIEW";
+      console.log(
+        `\nTAB GUARD (parked-tabindex): ${blocked ? "OK — Tab did not move focus into the parked webview" : "NOT EFFECTIVE — Tab still reached the parked webview (tabindex=-1 is not enough)"}${parkedResult && parkedResult.tabFocus !== undefined ? ` (control, parked without tabindex: ${parkedResult.tabFocus})` : ""}`,
+      );
+    }
   }
   console.log(
-    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: parked-inert, parked, opacity0, clip1x1, offscreen)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
+    `\nVERDICT: ${workable.length ? `hidden webview works with: ${workable.join(", ")} (prefer them in this order: parked-tabindex, parked, opacity0, clip1x1, offscreen; never parked-inert)` : "NO hiding method passed all 5 checks — P4 must keep the webview visible (e.g. 1x1 is not enough) or auto-open the panel"}`,
   );
   console.log(`Duration: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
