@@ -39,6 +39,10 @@
  *     `PermissionRequest.providerId` 確實從 session 一路帶進引擎);
  *   另外 core 啟動時對每一條帶舊範圍的規則 console.warn(不靜默),且 `policy.addRule` 不再接受舊範圍。
  *
+ * 2026-10-21(Part 4):codex-acp 對已經送過 `tool_call` 的 MCP 工具發權限請求時只帶 `toolCallId`,AcpAdapter 要用先前
+ * 記下的 title/rawInput 補上——否則 toolName 是 call id、input 是空的,config 規則、「永遠允許」、hard-deny 對 codex 的
+ * MCP 工具全部失效。用 fake ACP agent 的 codex 模式(`CODEX_MCP_APPROVAL_PREFIX`)驗證補上的值真的進了政策引擎。
+ *
  * 前置需求:`pnpm build` 已跑過(apps/core/dist、packages/db/dist 存在)。
  *
  * 用法:node scripts/e2e-policy-engine.mjs
@@ -50,7 +54,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
+import { CODEX_MCP_APPROVAL_PREFIX, CODEX_MCP_RESULT_PREFIX, WRITE_FILE_PREFIX, codexMcpToolTitle } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
@@ -1241,6 +1245,209 @@ async function legacyScopeLiveE2e() {
 }
 
 // =======================================================================
+// Part 4(2026-10-21):codex-acp 只帶 toolCallId 的 MCP 權限請求——AcpAdapter 用先前 `tool_call` 記下的 title/rawInput
+// 補上,補上的值要真的進政策引擎:config 規則比對得到、「永遠允許」學得起來、hard-deny 看得到參數。
+//
+// 獨立一個 core:需要自己的規則(Part 2 的 2i 斷言 config.json 剛好兩條規則)。
+// =======================================================================
+async function codexMcpPermissionLiveE2e() {
+  const PORT = 4336;
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-data-"));
+  const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-home-"));
+  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-ws-"));
+  const outsideDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-outside-"));
+
+  const ALLOWED = { server: "deskmony", tool: "e2e_allowed" };
+  const BLOCKED = { server: "deskmony", tool: "e2e_blocked" };
+  const allowedTitle = codexMcpToolTitle(ALLOWED.server, ALLOWED.tool);
+  const blockedTitle = codexMcpToolTitle(BLOCKED.server, BLOCKED.tool);
+  const configJson = {
+    version: 1,
+    policy: {
+      rules: [
+        { id: "codex-mcp-deny", tool: blockedTitle, effect: "deny" },
+        { id: "codex-mcp-allow", tool: allowedTitle, effect: "allow" },
+      ],
+      allowedHosts: [],
+    },
+  };
+  writeFileSync(path.join(homeDir, "config.json"), JSON.stringify(configJson, null, 2), "utf8");
+
+  let coreProc;
+  let client;
+  const createdSessions = [];
+  const createSession = async (title, { autoMode = false } = {}) => {
+    const created = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
+    createdSessions.push(created.session.id);
+    if (autoMode) await client.rpc("session.setPermissionMode", { sessionId: created.session.id, mode: "auto-accept-edits" });
+    return created.session.id;
+  };
+  const sendCodexMcpCall = async (sessionId, spec) => {
+    const startIdx = client.events.length;
+    await client.rpc("session.sendPrompt", { sessionId, prompt: { text: `${CODEX_MCP_APPROVAL_PREFIX}${JSON.stringify(spec)}` } });
+    const perm = (await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "permission-request", 15_000, startIdx)).event;
+    return { startIdx, perm };
+  };
+  const isTurnEnd = (sessionId) => (e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error");
+  /** 這一輪 agent 回的 `CODEX_MCP_RESULT:{allowed}`——agent 端實際收到的核可結果(證明選到的是 codex 的選項 id)。 */
+  const agentAllowedSince = (sessionId, startIdx) => {
+    const reply = client.events
+      .slice(startIdx)
+      .filter((e) => e.sessionId === sessionId && e.event.type === "message-delta")
+      .map((e) => e.event.delta)
+      .join("");
+    const at = reply.indexOf(CODEX_MCP_RESULT_PREFIX);
+    if (at < 0) return undefined;
+    try {
+      return JSON.parse(reply.slice(at + CODEX_MCP_RESULT_PREFIX.length)).allowed;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * 送一個 codex 式的 MCP 工具呼叫,等它的權限請求與這一輪結束。政策沒有自動決定(升級給人)時回合不會自己結束——等一小段
+   * 之後代人拒絕收尾,讓那種情況(例如補值被拿掉)照常記成 FAIL,不卡住整支測試。
+   */
+  const runCodexMcpCall = async (sessionId, spec) => {
+    const updatesBefore = client.sessionUpdates.length;
+    const { startIdx, perm } = await sendCodexMcpCall(sessionId, spec);
+    const ended = await client.waitForEvent(isTurnEnd(sessionId), 5_000, startIdx).catch(() => null);
+    if (!ended) {
+      await client.rpc("permission.resolve", { sessionId, requestId: perm.requestId, decision: "deny" }).catch(() => {});
+      await client.waitForEvent(isTurnEnd(sessionId), 15_000, startIdx).catch(() => null);
+    }
+    await sleep(300); // 讓 permission-resolved / session-updated 推播都送達
+    const resolved = (client.permissionResolvedEvents ?? []).find((r) => r.sessionId === sessionId && r.requestId === perm.requestId);
+    const wentWaiting = client.sessionUpdates.slice(updatesBefore).some((u) => u.id === sessionId && u.status === "waiting");
+    return { perm, resolved, wentWaiting, agentAllowed: agentAllowedSince(sessionId, startIdx) };
+  };
+  const describe = (r) =>
+    `toolName=${r.perm.toolName}, input=${JSON.stringify(r.perm.input)}, resolved=${JSON.stringify(r.resolved && { decision: r.resolved.decision, source: r.resolved.source })}, wentWaiting=${r.wentWaiting}, agentAllowed=${r.agentAllowed}`;
+
+  try {
+    coreProc = startCore({ port: PORT, dataDir, homeDir, workspaceDir, permissionTimeoutMs: 20_000 });
+    await waitForPort(`ws://localhost:${PORT}`, 20_000);
+    client = new MiniGatewayClient(`ws://localhost:${PORT}`);
+    await client.connect();
+
+    // ---- 4a:config allow 規則(tool = codex 的 MCP 工具 title)命中 → 自動放行;權限請求事件帶的是補上的 title 與 rawInput ----
+    {
+      const sessionId = await createSession("4a-codex-mcp-config-allow");
+      const args = { message: "hello from codex" };
+      const r = await runCodexMcpCall(sessionId, { ...ALLOWED, arguments: args });
+      const expectedInput = { server: ALLOWED.server, tool: ALLOWED.tool, arguments: args };
+      record(
+        "4a codex 只帶 toolCallId 的 MCP 權限請求:toolName/input/description 補成 tool_call 的 title 與 rawInput,config allow 規則命中、自動放行、不進 waiting",
+        r.perm.toolName === allowedTitle &&
+          r.perm.description === allowedTitle &&
+          JSON.stringify(r.perm.input) === JSON.stringify(expectedInput) &&
+          r.resolved?.decision === "allow" &&
+          r.resolved?.source === "policy" &&
+          !r.wentWaiting &&
+          r.agentAllowed === true,
+        describe(r),
+      );
+    }
+
+    // ---- 4b:config deny 規則命中 → 自動拒絕(agent 收到的是 codex 的 cancel 選項) ----
+    {
+      const sessionId = await createSession("4b-codex-mcp-config-deny");
+      const r = await runCodexMcpCall(sessionId, { ...BLOCKED, arguments: { target: "x" } });
+      record(
+        "4b codex 的 MCP 工具命中 config deny 規則 → 自動拒絕、不進 waiting,agent 收到拒絕",
+        r.perm.toolName === blockedTitle && r.resolved?.decision === "deny" && r.resolved?.source === "policy" && !r.wentWaiting && r.agentAllowed === false,
+        describe(r),
+      );
+    }
+
+    // ---- 4c:「永遠允許」學得起來——第一次升級給人,人選「永遠允許這個工具」(規則照桌面端
+    //          apps/desktop/src/views/PermissionModal.tsx 的 buildRememberCandidates() 產生:`{tool: toolName, effect: "allow"}`),
+    //          同一個工具的下一次呼叫(新的 toolCallId)就由政策自動放行。補值拿掉的話 toolName 是那一次的 call id,學了也對不上下一次。 ----
+    {
+      const sessionId = await createSession("4c-codex-mcp-always-allow");
+      const spec = { server: "deskmony", tool: "e2e_remember" };
+      const rememberTitle = codexMcpToolTitle(spec.server, spec.tool);
+      const { startIdx, perm } = await sendCodexMcpCall(sessionId, { ...spec, arguments: { n: 1 } });
+      await sleep(500);
+      const firstStatus = (await client.rpc("session.list", {})).sessions.find((s) => s.id === sessionId)?.status;
+      await client.rpc("permission.resolve", {
+        sessionId,
+        requestId: perm.requestId,
+        decision: "allow",
+        rememberRule: { tool: perm.toolName, effect: "allow" },
+      });
+      await client.waitForEvent(isTurnEnd(sessionId), 15_000, startIdx);
+      const firstAllowed = agentAllowedSince(sessionId, startIdx);
+      const second = await runCodexMcpCall(sessionId, { ...spec, arguments: { n: 2 } });
+      record(
+        "4c codex 的 MCP 工具「永遠允許」:第一次升級給人(toolName 是工具 title),記住規則後同一個工具的下一次呼叫由政策自動放行",
+        perm.toolName === rememberTitle &&
+          firstStatus === "waiting" &&
+          firstAllowed === true &&
+          second.perm.toolName === rememberTitle &&
+          second.resolved?.decision === "allow" &&
+          second.resolved?.source === "policy" &&
+          !second.wentWaiting,
+        `first: toolName=${perm.toolName}, status=${firstStatus}, agentAllowed=${firstAllowed}; second: ${describe(second)}`,
+      );
+    }
+
+    // ---- 4d:hard-deny 看得到補上的 input——auto 模式、沒有規則對得上,只有 hard-deny(worktree-escape:工具名含 write、
+    //          路徑在 worktree 外,兩者都來自補上的值)會讓它被拒。補值拿掉的話 hard-deny 判不出來,auto 模式直接放行。
+    //          rawInput 用最外層帶 path 的形狀:codex 真正的 `{server, tool, arguments}` 外殼裡的參數 hard-deny 看不到,見
+    //          fake-acp-agent.mjs 檔頭 CODEX_MCP_APPROVAL_PREFIX 那段。 ----
+    {
+      const sessionId = await createSession("4d-codex-mcp-hard-deny", { autoMode: true });
+      const target = path.join(outsideDir, "escape.txt").split(path.sep).join("/");
+      const r = await runCodexMcpCall(sessionId, { server: "fs", tool: "write_file", rawInput: { path: target, content: "x" } });
+      record(
+        "4d codex 只帶 toolCallId 的 MCP 權限請求:補上的 toolName 與 input 送到 hard-deny(worktree 外寫入)→ auto 模式下仍被政策拒絕、不進 waiting",
+        r.perm.toolName === codexMcpToolTitle("fs", "write_file") &&
+          r.perm.input?.path === target &&
+          r.resolved?.decision === "deny" &&
+          r.resolved?.source === "policy" &&
+          !r.wentWaiting &&
+          r.agentAllowed === false,
+        describe(r),
+      );
+    }
+
+    // ---- 4e:請求本身有帶的欄位優先——權限請求自己帶 title 時用它(不被先前 tool_call 的 title 蓋掉),沒帶的 rawInput 仍補上 ----
+    {
+      const sessionId = await createSession("4e-codex-mcp-request-title-wins");
+      const r = await runCodexMcpCall(sessionId, { server: "deskmony", tool: "e2e_other", permissionTitle: allowedTitle });
+      record(
+        "4e 權限請求自己帶 title 時以請求為準(命中該 title 的 allow 規則);沒帶的 rawInput 照樣從 tool_call 補上",
+        r.perm.toolName === allowedTitle && r.perm.input?.tool === "e2e_other" && r.resolved?.decision === "allow" && r.resolved?.source === "policy",
+        describe(r),
+      );
+    }
+
+    for (const sid of createdSessions) {
+      try {
+        await client.rpc("session.delete", { sessionId: sid });
+      } catch {
+        // ignore
+      }
+    }
+  } catch (err) {
+    record("Part 4 即時 e2e 執行過程發生未預期錯誤", false, String(err));
+  } finally {
+    client?.close();
+    await killProcessTree(coreProc);
+  }
+
+  for (const dir of [dataDir, homeDir, workspaceDir, outsideDir]) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// =======================================================================
 async function main() {
   if (!existsSync(CORE_ENTRY)) {
     console.error(`找不到 ${CORE_ENTRY} —— 請先執行 pnpm build`);
@@ -1255,6 +1462,9 @@ async function main() {
 
   log("\n=== Part 3:舊 profile 範圍規則 + providerId 範圍的即時 e2e(P2.8) ===");
   await legacyScopeLiveE2e();
+
+  log("\n=== Part 4:codex 只帶 toolCallId 的 MCP 權限請求,補上的 toolName/input 進政策引擎 ===");
+  await codexMcpPermissionLiveE2e();
 
   const failed = results.filter((r) => !r.ok);
   log(`\n\n========== 總結:${results.length - failed.length}/${results.length} 通過 ==========`);
