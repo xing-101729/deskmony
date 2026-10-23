@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { browserPartitionForSession } from "../../../electron/browser-rules.js";
-import { browserFrameInert, browserFrameStyle } from "../../lib/browser-frame-style.js";
+import { browserFrameStyle, browserWebviewTabIndex } from "../../lib/browser-frame-style.js";
 import { useSessionStore } from "../../stores/session-store.js";
 import {
   isBrowserSupported,
@@ -56,26 +56,13 @@ export function BrowserHost(): JSX.Element | null {
   );
 }
 
-/**
- * 停放中的外框加 `inert`:按 Tab 時鍵盤焦點不會跑進一個看不見的頁面(opacity 0 的 webview 仍然可以被 Tab 聚焦)。以空字串經 spread 傳入——
- * React 18 不認得 `inert`,布林值會被丟掉並警告,字串才會原樣寫成屬性;不再停放(`rect` 有值)時 prop 消失,React 會把屬性移除。
- * **`inert` 對 CDP 截圖/輸入有沒有影響是未驗證的**(見 `scripts/spike/webview-offscreen.cjs` 的 `parked-inert` 位置);如果實驗顯示會壞,
- * 把 `browserFrameInert()` 改成永遠回 false 即可退回沒有 inert 的停放方式。
- */
-const INERT_PROPS = { inert: "" } as object;
-
 function BrowserFrame({ sessionId, rect, pointerLock }: { sessionId: string; rect: SlotRect | undefined; pointerLock: boolean }): JSX.Element {
   const partition = browserPartitionForSession(sessionId) ?? "";
   // 可見/停放兩種樣式與 z-index 的理由都在 `lib/browser-frame-style.ts`(純函式,有測試鎖住)。
   const style = browserFrameStyle(rect, pointerLock);
   return (
-    <div
-      data-browser-frame={sessionId}
-      aria-hidden={rect ? undefined : true}
-      style={style}
-      {...(browserFrameInert(rect) ? INERT_PROPS : undefined)}
-    >
-      <BrowserWebview sessionId={sessionId} partition={partition} />
+    <div data-browser-frame={sessionId} aria-hidden={rect ? undefined : true} style={style}>
+      <BrowserWebview sessionId={sessionId} partition={partition} tabIndex={browserWebviewTabIndex(rect)} />
     </div>
   );
 }
@@ -89,11 +76,23 @@ function BrowserFrame({ sessionId, rect, pointerLock }: { sessionId: string; rec
 const ALLOW_POPUPS = { allowpopups: "true" } as object;
 
 /**
- * 真正的 `<webview>`。`memo` + 常數 props:外框因為 slot 移動而重新渲染時,這個元件不重新渲染、webview 元素的屬性不被重設
+ * 真正的 `<webview>`。`memo`:外框因為 slot 移動而重新渲染時,props 沒變就不重新渲染、webview 元素的屬性不被重設
  * (`src` 只在建立時是 `about:blank`;之後導覽走 `loadURL()`,見 `browserNavigate()`)。`partition` 必須在附掛前就設好——
  * React 先建立元素、設完屬性才把它加進 DOM,而且 `partition` 排在 `src` 前面。
+ *
+ * `tabIndex`:停放中是 `-1`(退出 Tab 順序,使用者按 Tab 不會把焦點送進看不見的頁面),可見時不設。這是唯一會隨停放/可見變動的 prop;React 只更新有變的屬性,
+ * 所以 `partition`/`src` 不受影響。**不要改成 `inert`、`disabled` 或「focus 進來就 blur」**:任何讓 webview 無法被聚焦的做法都會讓 CDP 的滑鼠點擊送不進
+ * 停放中的頁面(真 app 實測過 `inert`,細節見 `lib/browser-frame-style.ts` 的 `browserWebviewTabIndex()`)。
  */
-const BrowserWebview = memo(function BrowserWebview({ sessionId, partition }: { sessionId: string; partition: string }): JSX.Element {
+const BrowserWebview = memo(function BrowserWebview({
+  sessionId,
+  partition,
+  tabIndex,
+}: {
+  sessionId: string;
+  partition: string;
+  tabIndex: number | undefined;
+}): JSX.Element {
   const ref = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const element = ref.current as WebviewElement | null;
@@ -107,6 +106,7 @@ const BrowserWebview = memo(function BrowserWebview({ sessionId, partition }: { 
       src="about:blank"
       style={{ display: "flex", width: "100%", height: "100%" }}
       {...ALLOW_POPUPS}
+      tabIndex={tabIndex}
     />
   );
 });

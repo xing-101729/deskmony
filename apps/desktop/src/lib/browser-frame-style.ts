@@ -47,14 +47,17 @@ export interface BrowserFrameStyle {
 }
 
 /**
- * 停放中的外框要加 `inert`(2026-10-21,P4b):看不見的頁面不該被使用者按 Tab 聚焦進去(焦點進了 guest,之後的按鍵都被一個看不到的頁面吃掉)。
- * `inert` 只影響**使用者在 host 端的互動與焦點**,不影響繪製(不像 `visibility: hidden`/`display: none`)、也不影響 CDP 對 guest 的輸入與截圖
- * (CDP 的輸入事件直接送進 guest 的 render widget,不經 host DOM 的命中測試)——**後一點沒有實測**,`scripts/spike/webview-offscreen.cjs` 的
- * `parked-inert` 位置就是為了在真 Electron 驗證它;驗證不過就拿掉這個函式的回傳(改回 false)即可,不影響其他行為。
- * 可見時拿掉。
+ * 停放中的 `<webview>` 要退出 Tab 順序(2026-10-21 P4b,10-23 修正):看不見的頁面不該被使用者按 Tab 聚焦進去(焦點進了 guest,之後的按鍵都被一個看不到的頁面吃掉)。
+ * 停放時回 `-1`(`tabindex="-1"`:不在循序鍵盤導覽裡,但程式與 CDP 仍可聚焦它),可見時回 `undefined`(不設屬性,回到預設)。
+ *
+ * **為什麼不是 `inert`**:最初用的是外框 `inert`,真 app 實測(2026-10-23):停放階段 CDP 的點擊**完全沒有送達頁面**(滑鼠按下/放開被吃掉,
+ * 工具卻回成功),而截圖、讀頁面、輸入文字、按鍵、捲動都正常;拿掉 `inert` 之後停放階段 9/9 全過。`inert` 除了擋 Tab,也讓 host 端不能聚焦那個 webview——
+ * CDP 的滑鼠按下需要把 guest 帶到焦點,被擋就點不到。所以**不能用任何會阻止 webview 被聚焦的做法**(`inert`、`disabled`、focus 進來就 blur 之類),
+ * 只能把它移出 Tab 順序。`tabindex="-1"` 是否同時擋得住 Tab 並且不影響 CDP 點擊,要看實驗腳本 `scripts/spike/webview-offscreen.cjs` 的 `parked-tabindex`
+ * 位置(5 項檢查加 Tab 檢查)——**尚未在真 Electron 驗證**。
  */
-export function browserFrameInert(rect: FrameRect | undefined): boolean {
-  return rect === undefined;
+export function browserWebviewTabIndex(rect: FrameRect | undefined): -1 | undefined {
+  return rect === undefined ? -1 : undefined;
 }
 
 /**
