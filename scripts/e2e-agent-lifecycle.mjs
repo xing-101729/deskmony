@@ -33,6 +33,7 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
@@ -176,6 +177,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;
@@ -246,9 +248,11 @@ async function testNotesDir() {
 
   let core, client;
   try {
-    core = startCore({ port: 4700, dataDir, homeDir, workspaceDir });
-    await waitForPort("ws://127.0.0.1:4700", 20_000);
-    client = new MiniGatewayClient("ws://127.0.0.1:4700");
+    // 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+    const port = await allocatePort();
+    core = startCore({ port, dataDir, homeDir, workspaceDir });
+    await waitForPort(`ws://127.0.0.1:${port}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${port}`);
     await client.connect();
 
     // ---- A ---------------------------------------------------------------

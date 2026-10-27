@@ -64,11 +64,10 @@
  *
  * ---- port 配置 --------------------------------------------------------
  *
- * 既有套件用掉的 port(`grep -hoE "[0-9]{4}" scripts/*.mjs` 過一輪):
- * 4317-4389、4700-4713(agent-lifecycle/lead-gate)、4720-4721(e2e-cli)、
- * 5321、9999。4730 以上整段是空的,這裡取 4730 一個就夠 —— strong 權限
- * 請求不需要第二個 core,只要讓寫入目標落在 session workingDir **之外**
- * 就會命中 hard-deny 的 worktree-escape 類別。
+ * 一個 core 就夠 —— strong 權限請求不需要第二個 core,只要讓寫入目標落在
+ * session workingDir **之外**就會命中 hard-deny 的 worktree-escape 類別。
+ * 2026-10-27 起 port 由 lib/e2e-ports.mjs 動態挑選(原本寫死 4730)——寫死的
+ * 號碼防不了另一個 worktree 同時跑同一支。
  *
  * 用法:node scripts/e2e-cli-tui.mjs
  */
@@ -81,6 +80,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -92,7 +92,7 @@ const CLI_ENTRY = path.join(REPO_ROOT, "apps", "cli", "dist", "bin.js");
 const NODE_PTY_ENTRY = path.join(REPO_ROOT, "node_modules", "node-pty", "lib", "index.js");
 
 /** 見檔頭「port 配置」。 */
-const PORT_TUI = 4730;
+const PORT_TUI = await allocatePort();
 const URL_TUI = `ws://127.0.0.1:${PORT_TUI}`;
 
 const results = [];
@@ -211,6 +211,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir }) {
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;

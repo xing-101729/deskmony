@@ -71,6 +71,7 @@ import {
   opencodeToolInput,
 } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_OPENCODE, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -78,7 +79,8 @@ requireFreshBuild();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
-const PORT = 4390;
+// 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+const PORT = await allocatePort();
 /** 刻意設小:C 送剛好這麼多個工具、D 多送一個,見檔頭。 */
 const TURN_MAX_TOOL_CALLS = 3;
 /** 收到補送的 tool-call 之後,給 core 把這個事件處理完的時間——若有 bug,翻回 busy 的
@@ -245,6 +247,7 @@ function startCore({ dataDir, homeDir, workspaceDir }) {
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, PORT);
   let stdoutBuffer = "";
   const dbPathPromise = new Promise((resolve) => {
     proc.stdout.on("data", (chunk) => {

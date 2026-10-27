@@ -18,7 +18,7 @@
  *      wire 上真的帶 `variant`;換 model 時不再適用的 variant 被清掉;建立時指定(核對 provider 目錄的 model 清單)。
  *   E. 沒有 `/config/providers` 的 OpenCode(標準 fake):不能選思考程度(明確錯誤),既有的換 model 照舊。
  *
- * 一個 core(port 4760),fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
+ * 一個 core(port 動態挑選,見 lib/e2e-ports.mjs),fake 後端經 `DESKMONY_E2E_EXTRA_PROVIDERS` 注入(見 lib/e2e-providers.mjs)。
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -30,6 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONFIG_UPDATE_PREFIX, FAKE_ACP_CONFIG_MODELS, REPORT_CONFIG_PREFIX, REPORT_SESSIONS_PREFIX } from "./fake-acp-agent.mjs";
 import { fakeTitleFor } from "./lib/fake-title-modes.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import {
   e2eProvidersEnv,
   FAKE_ACP,
@@ -44,7 +45,8 @@ requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const CORE_PORT = 4760;
+// 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+const CORE_PORT = await allocatePort();
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const distUrl = (...p) => pathToFileURL(path.join(REPO_ROOT, ...p)).href;
 
@@ -78,6 +80,7 @@ function startCore(port, homeDir, dataDir, workspaceDir) {
     ...e2eProvidersEnv([fakeAcpOptionsProvider(), fakeOpencodeVariantsProvider()]),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:err] ${chunk}`));
   proc.on("exit", (code, signal) => console.log(`[core] process exited (code=${code} signal=${signal})`));
