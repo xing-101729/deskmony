@@ -1,6 +1,6 @@
-import type { PolicyRule } from "@deskmony/shared";
+import { extractCommandCandidates, extractPathCandidates, type PolicyRule } from "@deskmony/shared";
 import { checkHardDeny } from "./hard-deny.js";
-import { extractCommandCandidates, extractPathCandidates, isPathUnder, resolveRealpathBestEffort } from "./tool-input.js";
+import { isPathUnder, resolveRealpathBestEffort } from "./tool-input.js";
 
 /**
  * policy-engine.ts(S1:PolicyEngine 主體)。

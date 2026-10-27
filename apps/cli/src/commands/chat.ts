@@ -269,7 +269,7 @@ export async function chatCommand(options: GlobalOptions): Promise<void> {
                 tracker.ensureNewline();
                 const answer = await askPermission(
                   rl,
-                  { sessionId, toolName: event.toolName, input: event.input, strong: event.strong === true },
+                  { sessionId, toolName: event.toolName, input: event.input, strong: event.strong === true, workingDir: currentSession.workingDir },
                   options.color,
                 );
                 try {

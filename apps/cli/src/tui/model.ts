@@ -704,7 +704,10 @@ export function buildPermissionResolution(model: TuiModel, decision: "allow" | "
     sessionId: current.sessionId,
     requestId: current.requestId,
     decision,
-    rememberRule: remember ? buildNarrowestRememberRule(current.toolName, current.input) : undefined,
+    // 佔位 session(尚未同步)的 workingDir 是空字串,當成沒有。
+    rememberRule: remember
+      ? buildNarrowestRememberRule(current.toolName, current.input, model.sessions.get(current.sessionId)?.session.workingDir || undefined)
+      : undefined,
   };
 }
 

@@ -1,12 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import {
-  extractCommandCandidates,
-  extractHostCandidates,
-  extractPathCandidates,
-  isPathUnder,
-  resolveRealpathBestEffort,
-} from "./tool-input.js";
+import { extractCommandCandidates, extractPathCandidates } from "@deskmony/shared";
+import { extractHostCandidates, isPathUnder, resolveRealpathBestEffort } from "./tool-input.js";
 
 /**
  * hard-deny.ts(S1:內建、config 不可關閉的硬性 deny 類 — F4)。
