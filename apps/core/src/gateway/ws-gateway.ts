@@ -18,6 +18,7 @@ import {
   type ServerPush,
   type Session,
   type SessionEventEnvelope,
+  type SessionHistoryResetPush,
   type SessionMessagePush,
   type UserDialogResolvedPush,
 } from "@deskmony/shared";
@@ -545,6 +546,10 @@ export class WsGateway {
     // (取代 S12 的 `child-result` push:「子完成 → 結果自動注入父」已整個移除。)
     this.sessionManager.on("session-message", (payload: SessionMessagePush) => {
       this.broadcast({ kind: "event", channel: "session-message", payload });
+    });
+    // 2026-10-16:某個 session 的歷史被整段改寫(`session.rewind` 刪掉了一部分訊息)——通知所有 client 重新載入那個 session。
+    this.sessionManager.on("session-history-reset", (payload: SessionHistoryResetPush) => {
+      this.broadcast({ kind: "event", channel: "session-history-reset", payload });
     });
   }
 
@@ -1133,7 +1138,9 @@ export class WsGateway {
       case "session.create":
         return { session: await this.sessionManager.createSession(request.params) };
       case "session.sendPrompt":
-        await this.sessionManager.sendPrompt(request.params.sessionId, request.params.prompt);
+        await this.sessionManager.sendPrompt(request.params.sessionId, request.params.prompt, {
+          messageId: request.params.messageId,
+        });
         return { ok: true };
       case "session.interrupt":
         await this.sessionManager.interrupt(request.params.sessionId);
@@ -1160,6 +1167,12 @@ export class WsGateway {
         return { session: await this.sessionManager.renameSession(request.params.sessionId, request.params.title) };
       case "session.autoTitle":
         return await this.sessionManager.autoTitleSession(request.params.sessionId);
+      // 2026-10-16:訊息 hover 動作列的倒回/分支,見 packages/shared/src/gateway.ts 對應 case 的說明。人類 UI 專用——
+      // 不在任何 scoped bridge token 的方法白名單裡(`computeAllowedMethods()`),agent 呼叫不到。
+      case "session.rewind":
+        return await this.sessionManager.rewindSession(request.params.sessionId, request.params.messageId);
+      case "session.fork":
+        return await this.sessionManager.forkSession(request.params.sessionId, request.params.messageId, request.params.titleSuffix);
       case "permission.resolve":
         // rememberRule 若帶 escalate-strong 的 requestId,SessionManager 端會
         // 強制忽略(C4 紀律③);遠端連線帶 rememberRule 已在 handleMessage()

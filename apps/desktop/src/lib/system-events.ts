@@ -27,11 +27,14 @@ export function resolveSystemEventText(raw: string, t: TFunction): string {
         const detail = params?.detail ? `\n${String(params.detail)}` : "";
         return `${label} ${message}${detail}`;
       }
-      if (event === "session.sendFailed") {
+      if (event === "session.sendFailed" || event === "session.rewindFailed" || event === "session.forkFailed") {
         // 2026-10-15:`session.sendPrompt` 被 core 拒絕(agent 重新啟動失敗、預算擋下……)時由 session-store 在本地插入的提示
         // (不落地)。params 帶的是那個 DeskmonyError 的 code/errorParams/message——渲染時才用 `errors:<code>` 翻譯(和
         // translateError() 同一套規則),所以使用者切換語言時這行也跟著換。
-        const label = t("systemEvents:session.sendFailed.label", { defaultValue: "[訊息未送出]" });
+        // 2026-10-16:訊息 hover 動作列的倒回/分支被 core 拒絕(忙碌中、訊息不存在……)時同樣的做法,只是標籤不同。
+        const label = t(`systemEvents:${event}.label`, {
+          defaultValue: event === "session.sendFailed" ? "[訊息未送出]" : event === "session.rewindFailed" ? "[倒回失敗]" : "[分支失敗]",
+        });
         const message = String(params?.message ?? "");
         const code = typeof params?.code === "string" ? params.code : undefined;
         const errorParams =
@@ -64,6 +67,14 @@ export function systemEventTone(raw: string): SystemEventTone {
       case "session.revivedFresh":
       case "session.continuedAfterInterrupt":
         return "info";
+      // 2026-10-16:倒回/分支的說明一律是 `warn`——不管 agent 讀的是紀錄還是從頭開始,「檔案沒有還原」都是使用者該留意的事。
+      case "session.rewoundFromTranscript":
+      case "session.rewoundFromTranscriptTruncated":
+      case "session.rewoundFresh":
+      case "session.rewoundDeferred":
+      case "session.forkedFromTranscript":
+      case "session.forkedFromTranscriptTruncated":
+      case "session.forkedFresh":
       case "session.revivedFromTranscript":
       case "session.revivedFromTranscriptTruncated":
       case "session.revivedWithoutMemory":

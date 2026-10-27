@@ -39,6 +39,14 @@
  *     `PermissionRequest.providerId` 確實從 session 一路帶進引擎);
  *   另外 core 啟動時對每一條帶舊範圍的規則 console.warn(不靜默),且 `policy.addRule` 不再接受舊範圍。
  *
+ * 2026-10-21(Part 4):codex-acp 對已經送過 `tool_call` 的 MCP 工具發權限請求時只帶 `toolCallId`,AcpAdapter 要用先前
+ * 記下的 title/rawInput 補上——否則 toolName 是 call id、input 是空的,config 規則、「永遠允許」、hard-deny 對 codex 的
+ * MCP 工具全部失效。用 fake ACP agent 的 codex 模式(`CODEX_MCP_APPROVAL_PREFIX`)驗證補上的值真的進了政策引擎。
+ *
+ * 2026-10-22:codex 的 MCP rawInput 是 `{server, tool, arguments}`,參數在 `arguments` 裡。Part 1 的 1r~1u 驗證
+ * config 規則與 hard-deny 看得到這一層,且規則對多個候選值依 effect 取量詞(allow 要全部、deny 要任一);
+ * Part 4 的 4f~4h 用 codex 真正的形狀(不覆寫 rawInput)驗證 auto 模式下 hard-deny 照樣擋得住。
+ *
  * 前置需求:`pnpm build` 已跑過(apps/core/dist、packages/db/dist 存在)。
  *
  * 用法:node scripts/e2e-policy-engine.mjs
@@ -50,7 +58,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
+import { CODEX_MCP_APPROVAL_PREFIX, CODEX_MCP_RESULT_PREFIX, WRITE_FILE_PREFIX, codexMcpToolTitle } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
@@ -468,6 +476,161 @@ async function unitTests() {
         allowLine.includes("已停用") &&
         !warns.some((w) => w.includes("r-provider") || w.includes("r-plain")),
       `warns=${JSON.stringify(warns)}`,
+    );
+  }
+
+  // ---- 1r~1u(2026-10-22):codex-acp 的 MCP 工具 rawInput 是 `{server, tool, arguments}`,參數在 `arguments` 裡。
+  //         tool-input.ts 會多看這一層;config 規則對多個候選值依 effect 取量詞(allow 要全部、deny 要任一),
+  //         多看一層不能讓 allow 變寬、deny 變鬆。 ----
+  const codexMcpInput = (server, tool, args) => ({ server, tool, arguments: args });
+
+  // ---- 1r:pathUnder / commandEquals 規則比對得到外殼裡的參數(過去猜不到候選 → 永遠不 match、只能整個工具放行) ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const pathEngine = new PolicyEngine({
+      rules: [{ tool: "mcp.fs.read_file", when: { pathUnder: workingDir }, effect: "allow" }],
+      allowedHosts: [],
+    });
+    const inside = pathEngine.decide(
+      baseReq({ toolName: "mcp.fs.read_file", input: codexMcpInput("fs", "read_file", { path: path.join(workingDir, "a.txt") }) }),
+      ctx,
+    ).effect;
+    const outside = pathEngine.decide(
+      baseReq({ toolName: "mcp.fs.read_file", input: codexMcpInput("fs", "read_file", { path: path.join(outsideDir, "a.txt") }) }),
+      ctx,
+    ).effect;
+    const commandEngine = new PolicyEngine({
+      rules: [{ tool: "mcp.shell.run", when: { commandEquals: "pnpm test" }, effect: "allow" }],
+      allowedHosts: [],
+    });
+    const sameCommand = commandEngine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: codexMcpInput("shell", "run", { command: "pnpm test" }) }),
+      ctx,
+    ).effect;
+    const otherCommand = commandEngine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: codexMcpInput("shell", "run", { command: "pnpm publish" }) }),
+      ctx,
+    ).effect;
+    record(
+      "1r codex MCP 的 arguments 外殼:pathUnder/commandEquals allow 規則比對得到外殼裡的參數——邊界內/同指令 allow,邊界外/別的指令 escalate",
+      inside === "allow" && outside === "escalate" && sameCommand === "allow" && otherCommand === "escalate",
+      `pathUnder: inside=${inside}, outside=${outside}; commandEquals: same=${sameCommand}, other=${otherCommand}`,
+    );
+  }
+
+  // ---- 1s:allow 規則要**每一個**候選都符合——外殼外一個符合的值,遮不住外殼裡不符合的那一個 ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const engine = new PolicyEngine({
+      rules: [
+        { tool: "*", when: { commandEquals: "pnpm test" }, effect: "allow" },
+        { tool: "*", when: { pathUnder: workingDir }, effect: "allow" },
+      ],
+      allowedHosts: [],
+    });
+    const mixedCommand = engine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: { command: "pnpm test", arguments: { command: "rm -rf build" } } }),
+      ctx,
+    ).effect;
+    const mixedPath = engine.decide(
+      baseReq({ toolName: "mcp.fs.read_file", input: { path: path.join(workingDir, "a.txt"), arguments: { path: path.join(outsideDir, "b.txt") } } }),
+      ctx,
+    ).effect;
+    const allMatch = engine.decide(
+      baseReq({ toolName: "mcp.shell.run", input: { command: "pnpm test", arguments: { cmd: "pnpm test" } } }),
+      ctx,
+    ).effect;
+    record(
+      "1s allow 規則要全部候選都符合:最外層 command/path 符合但外殼裡的不符合 → escalate(不放行);全部符合才 allow",
+      mixedCommand === "escalate" && mixedPath === "escalate" && allMatch === "allow",
+      `mixedCommand=${mixedCommand}, mixedPath=${mixedPath}, allMatch=${allMatch}`,
+    );
+  }
+
+  // ---- 1t:deny 規則只要**任一**候選符合——過去 pathUnder 對 deny 也要求「全部在邊界內」,多一個邊界外的候選 deny 就失效,
+  //          auto 模式下會落到「未分類中間地帶自動放行」。對照組:沒有 deny 規則時同一個請求 auto 模式會放行。 ----
+  {
+    const autoCtx = { attended: true, local: true, autoMode: true };
+    const protectedDir = path.join(workingDir, "protected");
+    mkdirSync(protectedDir, { recursive: true });
+    const engine = new PolicyEngine({
+      rules: [
+        { tool: "*", when: { pathUnder: protectedDir }, effect: "deny" },
+        { tool: "*", when: { commandEquals: "rm -rf build" }, effect: "deny" },
+      ],
+      allowedHosts: [],
+    });
+    const nestedPathReq = baseReq({
+      toolName: "mcp.fs.read_file",
+      input: { path: path.join(workingDir, "a.txt"), arguments: { path: path.join(protectedDir, "b.txt") } },
+    });
+    // 最外層本來就命中 deny、外殼裡另有一個邊界外的路徑:只看最外層時這條 deny 生效,若沿用「全部在邊界內」,
+    // 多看一層反而讓它失效——這正是量詞要依 effect 區分的原因。
+    const topHitReq = baseReq({
+      toolName: "mcp.fs.read_file",
+      input: { path: path.join(protectedDir, "b.txt"), arguments: { path: path.join(workingDir, "a.txt") } },
+    });
+    const sameLayerPathReq = baseReq({
+      toolName: "mcp.fs.read_file",
+      input: { path: path.join(protectedDir, "b.txt"), directory: workingDir },
+    });
+    const nestedCommandReq = baseReq({ toolName: "mcp.shell.run", input: { command: "pnpm test", arguments: { command: "rm -rf build" } } });
+    const codexOnlyReq = baseReq({ toolName: "mcp.fs.read_file", input: codexMcpInput("fs", "read_file", { path: path.join(protectedDir, "c.txt") }) });
+    const noRules = new PolicyEngine({ rules: [], allowedHosts: [] }).decide(nestedPathReq, autoCtx).effect;
+    const outcomes = [nestedPathReq, topHitReq, sameLayerPathReq, nestedCommandReq, codexOnlyReq].map((req) => engine.decide(req, autoCtx).effect);
+    record(
+      "1t deny 規則只要任一候選符合:外殼裡/最外層/同一層另一個欄位的路徑在受保護目錄下、外殼裡的指令符合 → auto 模式下仍 deny(最外層命中時多看一層不會讓 deny 失效);對照組:沒有 deny 規則時 auto 會放行",
+      noRules === "allow" && outcomes.every((e) => e === "deny"),
+      `noRules(auto)=${noRules}, [nestedPath, topHit, sameLayerPath, nestedCommand, codexOnly]=${JSON.stringify(outcomes)}`,
+    );
+  }
+
+  // ---- 1u:hard-deny 經 decide() 看得到外殼裡的參數——auto 模式下 codex 的 fetch MCP 不在白名單、filesystem MCP 寫到 worktree 外都 deny;
+  //          外殼裡的參數無害時 auto 照常放行(不是什麼都擋) ----
+  {
+    const autoCtx = { attended: true, local: true, autoMode: true };
+    const engine = new PolicyEngine({ rules: [], allowedHosts: [] });
+    const fetchDecision = engine.decide(
+      baseReq({ toolName: "mcp.fetch.fetch", input: codexMcpInput("fetch", "fetch", { url: "https://evil.example.com/x" }) }),
+      autoCtx,
+    );
+    const writeDecision = engine.decide(
+      baseReq({ toolName: "mcp.fs.write_file", input: codexMcpInput("fs", "write_file", { path: path.join(outsideDir, "x.txt"), content: "x" }) }),
+      autoCtx,
+    );
+    const benign = engine.decide(
+      baseReq({ toolName: "mcp.fs.write_file", input: codexMcpInput("fs", "write_file", { path: path.join(workingDir, "x.txt"), content: "x" }) }),
+      autoCtx,
+    ).effect;
+    record(
+      "1u hard-deny 經 decide() 看得到 codex 外殼裡的參數:auto 模式下 fetch 非白名單 host、write_file 寫 worktree 外都 deny;外殼裡參數無害時 auto 放行",
+      fetchDecision.effect === "deny" &&
+        fetchDecision.reason.includes("non-allowlisted-network") &&
+        writeDecision.effect === "deny" &&
+        writeDecision.reason.includes("worktree-escape") &&
+        benign === "allow",
+      `fetch=${fetchDecision.effect}(${fetchDecision.reason}), write=${writeDecision.effect}(${writeDecision.reason}), benign=${benign}`,
+    );
+  }
+
+  // ---- 1v:pathUnder 規則看得到 filesystem MCP 的 `paths` 陣列與 move_file 的 `source`/`destination`——allow 要每一個都在邊界內 ----
+  {
+    const ctx = { attended: true, local: true, autoMode: false };
+    const engine = new PolicyEngine({
+      rules: [
+        { tool: "mcp.fs.read_multiple_files", when: { pathUnder: workingDir }, effect: "allow" },
+        { tool: "mcp.fs.move_file", when: { pathUnder: workingDir }, effect: "allow" },
+      ],
+      allowedHosts: [],
+    });
+    const decide = (tool, args) => engine.decide(baseReq({ toolName: `mcp.fs.${tool}`, input: codexMcpInput("fs", tool, args) }), ctx).effect;
+    const allInside = decide("read_multiple_files", { paths: [path.join(workingDir, "a.txt"), path.join(workingDir, "b.txt")] });
+    const oneOutside = decide("read_multiple_files", { paths: [path.join(workingDir, "a.txt"), path.join(outsideDir, "b.txt")] });
+    const moveInside = decide("move_file", { source: path.join(workingDir, "a.txt"), destination: path.join(workingDir, "b.txt") });
+    record(
+      "1v pathUnder allow 規則看得到 paths 陣列與 source/destination:全部在邊界內 allow,paths 裡有一個在外面 escalate;move_file 兩端都在 worktree 內 allow",
+      allInside === "allow" && oneOutside === "escalate" && moveInside === "allow",
+      `paths 全在內=${allInside}, paths 一個在外=${oneOutside}, move 兩端在內=${moveInside}`,
     );
   }
 
@@ -1241,6 +1404,266 @@ async function legacyScopeLiveE2e() {
 }
 
 // =======================================================================
+// Part 4(2026-10-21):codex-acp 只帶 toolCallId 的 MCP 權限請求——AcpAdapter 用先前 `tool_call` 記下的 title/rawInput
+// 補上,補上的值要真的進政策引擎:config 規則比對得到、「永遠允許」學得起來、hard-deny 看得到參數(含 codex 包在
+// `arguments` 外殼裡的參數,4f~4h)。
+//
+// 獨立一個 core:需要自己的規則(Part 2 的 2i 斷言 config.json 剛好兩條規則)。
+// =======================================================================
+async function codexMcpPermissionLiveE2e() {
+  const PORT = 4336;
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-data-"));
+  const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-home-"));
+  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-ws-"));
+  const outsideDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-outside-"));
+
+  const ALLOWED = { server: "deskmony", tool: "e2e_allowed" };
+  const BLOCKED = { server: "deskmony", tool: "e2e_blocked" };
+  const allowedTitle = codexMcpToolTitle(ALLOWED.server, ALLOWED.tool);
+  const blockedTitle = codexMcpToolTitle(BLOCKED.server, BLOCKED.tool);
+  const configJson = {
+    version: 1,
+    policy: {
+      rules: [
+        { id: "codex-mcp-deny", tool: blockedTitle, effect: "deny" },
+        { id: "codex-mcp-allow", tool: allowedTitle, effect: "allow" },
+      ],
+      allowedHosts: [],
+    },
+  };
+  writeFileSync(path.join(homeDir, "config.json"), JSON.stringify(configJson, null, 2), "utf8");
+
+  let coreProc;
+  let client;
+  const createdSessions = [];
+  const createSession = async (title, { autoMode = false } = {}) => {
+    const created = await client.rpc("session.create", { providerId: FAKE_ACP, workingDir: workspaceDir, title }, 30_000);
+    createdSessions.push(created.session.id);
+    if (autoMode) await client.rpc("session.setPermissionMode", { sessionId: created.session.id, mode: "auto-accept-edits" });
+    return created.session.id;
+  };
+  const sendCodexMcpCall = async (sessionId, spec) => {
+    const startIdx = client.events.length;
+    await client.rpc("session.sendPrompt", { sessionId, prompt: { text: `${CODEX_MCP_APPROVAL_PREFIX}${JSON.stringify(spec)}` } });
+    const perm = (await client.waitForEvent((e) => e.sessionId === sessionId && e.event.type === "permission-request", 15_000, startIdx)).event;
+    return { startIdx, perm };
+  };
+  const isTurnEnd = (sessionId) => (e) => e.sessionId === sessionId && (e.event.type === "completed" || e.event.type === "error");
+  /** 這一輪 agent 回的 `CODEX_MCP_RESULT:{allowed}`——agent 端實際收到的核可結果(證明選到的是 codex 的選項 id)。 */
+  const agentAllowedSince = (sessionId, startIdx) => {
+    const reply = client.events
+      .slice(startIdx)
+      .filter((e) => e.sessionId === sessionId && e.event.type === "message-delta")
+      .map((e) => e.event.delta)
+      .join("");
+    const at = reply.indexOf(CODEX_MCP_RESULT_PREFIX);
+    if (at < 0) return undefined;
+    try {
+      return JSON.parse(reply.slice(at + CODEX_MCP_RESULT_PREFIX.length)).allowed;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * 送一個 codex 式的 MCP 工具呼叫,等它的權限請求與這一輪結束。政策沒有自動決定(升級給人)時回合不會自己結束——等一小段
+   * 之後代人拒絕收尾,讓那種情況(例如補值被拿掉)照常記成 FAIL,不卡住整支測試。
+   */
+  const runCodexMcpCall = async (sessionId, spec) => {
+    const updatesBefore = client.sessionUpdates.length;
+    const { startIdx, perm } = await sendCodexMcpCall(sessionId, spec);
+    const ended = await client.waitForEvent(isTurnEnd(sessionId), 5_000, startIdx).catch(() => null);
+    if (!ended) {
+      await client.rpc("permission.resolve", { sessionId, requestId: perm.requestId, decision: "deny" }).catch(() => {});
+      await client.waitForEvent(isTurnEnd(sessionId), 15_000, startIdx).catch(() => null);
+    }
+    await sleep(300); // 讓 permission-resolved / session-updated 推播都送達
+    const resolved = (client.permissionResolvedEvents ?? []).find((r) => r.sessionId === sessionId && r.requestId === perm.requestId);
+    const wentWaiting = client.sessionUpdates.slice(updatesBefore).some((u) => u.id === sessionId && u.status === "waiting");
+    return { perm, resolved, wentWaiting, agentAllowed: agentAllowedSince(sessionId, startIdx) };
+  };
+  const describe = (r) =>
+    `toolName=${r.perm.toolName}, input=${JSON.stringify(r.perm.input)}, resolved=${JSON.stringify(r.resolved && { decision: r.resolved.decision, source: r.resolved.source })}, wentWaiting=${r.wentWaiting}, agentAllowed=${r.agentAllowed}`;
+
+  try {
+    coreProc = startCore({ port: PORT, dataDir, homeDir, workspaceDir, permissionTimeoutMs: 20_000 });
+    await waitForPort(`ws://localhost:${PORT}`, 20_000);
+    client = new MiniGatewayClient(`ws://localhost:${PORT}`);
+    await client.connect();
+
+    // ---- 4a:config allow 規則(tool = codex 的 MCP 工具 title)命中 → 自動放行;權限請求事件帶的是補上的 title 與 rawInput ----
+    {
+      const sessionId = await createSession("4a-codex-mcp-config-allow");
+      const args = { message: "hello from codex" };
+      const r = await runCodexMcpCall(sessionId, { ...ALLOWED, arguments: args });
+      const expectedInput = { server: ALLOWED.server, tool: ALLOWED.tool, arguments: args };
+      record(
+        "4a codex 只帶 toolCallId 的 MCP 權限請求:toolName/input/description 補成 tool_call 的 title 與 rawInput,config allow 規則命中、自動放行、不進 waiting",
+        r.perm.toolName === allowedTitle &&
+          r.perm.description === allowedTitle &&
+          JSON.stringify(r.perm.input) === JSON.stringify(expectedInput) &&
+          r.resolved?.decision === "allow" &&
+          r.resolved?.source === "policy" &&
+          !r.wentWaiting &&
+          r.agentAllowed === true,
+        describe(r),
+      );
+    }
+
+    // ---- 4b:config deny 規則命中 → 自動拒絕(agent 收到的是 codex 的 cancel 選項) ----
+    {
+      const sessionId = await createSession("4b-codex-mcp-config-deny");
+      const r = await runCodexMcpCall(sessionId, { ...BLOCKED, arguments: { target: "x" } });
+      record(
+        "4b codex 的 MCP 工具命中 config deny 規則 → 自動拒絕、不進 waiting,agent 收到拒絕",
+        r.perm.toolName === blockedTitle && r.resolved?.decision === "deny" && r.resolved?.source === "policy" && !r.wentWaiting && r.agentAllowed === false,
+        describe(r),
+      );
+    }
+
+    // ---- 4c:「永遠允許」學得起來——第一次升級給人,人選「永遠允許這個工具」(規則照桌面端
+    //          apps/desktop/src/views/PermissionModal.tsx 的 buildRememberCandidates() 產生:`{tool: toolName, effect: "allow"}`),
+    //          同一個工具的下一次呼叫(新的 toolCallId)就由政策自動放行。補值拿掉的話 toolName 是那一次的 call id,學了也對不上下一次。 ----
+    {
+      const sessionId = await createSession("4c-codex-mcp-always-allow");
+      const spec = { server: "deskmony", tool: "e2e_remember" };
+      const rememberTitle = codexMcpToolTitle(spec.server, spec.tool);
+      const { startIdx, perm } = await sendCodexMcpCall(sessionId, { ...spec, arguments: { n: 1 } });
+      await sleep(500);
+      const firstStatus = (await client.rpc("session.list", {})).sessions.find((s) => s.id === sessionId)?.status;
+      await client.rpc("permission.resolve", {
+        sessionId,
+        requestId: perm.requestId,
+        decision: "allow",
+        rememberRule: { tool: perm.toolName, effect: "allow" },
+      });
+      await client.waitForEvent(isTurnEnd(sessionId), 15_000, startIdx);
+      const firstAllowed = agentAllowedSince(sessionId, startIdx);
+      const second = await runCodexMcpCall(sessionId, { ...spec, arguments: { n: 2 } });
+      record(
+        "4c codex 的 MCP 工具「永遠允許」:第一次升級給人(toolName 是工具 title),記住規則後同一個工具的下一次呼叫由政策自動放行",
+        perm.toolName === rememberTitle &&
+          firstStatus === "waiting" &&
+          firstAllowed === true &&
+          second.perm.toolName === rememberTitle &&
+          second.resolved?.decision === "allow" &&
+          second.resolved?.source === "policy" &&
+          !second.wentWaiting,
+        `first: toolName=${perm.toolName}, status=${firstStatus}, agentAllowed=${firstAllowed}; second: ${describe(second)}`,
+      );
+    }
+
+    // ---- 4d:hard-deny 看得到補上的 input——auto 模式、沒有規則對得上,只有 hard-deny(worktree-escape:工具名含 write、
+    //          路徑在 worktree 外,兩者都來自補上的值)會讓它被拒。補值拿掉的話 hard-deny 判不出來,auto 模式直接放行。
+    //          rawInput 用最外層帶 path 的形狀,只驗補值本身;codex 真正的 `{server, tool, arguments}` 外殼見 4f~4h。 ----
+    {
+      const sessionId = await createSession("4d-codex-mcp-hard-deny", { autoMode: true });
+      const target = path.join(outsideDir, "escape.txt").split(path.sep).join("/");
+      const r = await runCodexMcpCall(sessionId, { server: "fs", tool: "write_file", rawInput: { path: target, content: "x" } });
+      record(
+        "4d codex 只帶 toolCallId 的 MCP 權限請求:補上的 toolName 與 input 送到 hard-deny(worktree 外寫入)→ auto 模式下仍被政策拒絕、不進 waiting",
+        r.perm.toolName === codexMcpToolTitle("fs", "write_file") &&
+          r.perm.input?.path === target &&
+          r.resolved?.decision === "deny" &&
+          r.resolved?.source === "policy" &&
+          !r.wentWaiting &&
+          r.agentAllowed === false,
+        describe(r),
+      );
+    }
+
+    // ---- 4e:請求本身有帶的欄位優先——權限請求自己帶 title 時用它(不被先前 tool_call 的 title 蓋掉),沒帶的 rawInput 仍補上 ----
+    {
+      const sessionId = await createSession("4e-codex-mcp-request-title-wins");
+      const r = await runCodexMcpCall(sessionId, { server: "deskmony", tool: "e2e_other", permissionTitle: allowedTitle });
+      record(
+        "4e 權限請求自己帶 title 時以請求為準(命中該 title 的 allow 規則);沒帶的 rawInput 照樣從 tool_call 補上",
+        r.perm.toolName === allowedTitle && r.perm.input?.tool === "e2e_other" && r.resolved?.decision === "allow" && r.resolved?.source === "policy",
+        describe(r),
+      );
+    }
+
+    // ---- 4f~4h(2026-10-22):codex 真正的 rawInput 形狀(不覆寫 rawInput)——參數包在 `{server, tool, arguments}` 的
+    //          `arguments` 裡,hard-deny 要看得到這一層。auto 模式、沒有規則對得上:hard-deny 判不出來就會被自動放行。 ----
+
+    // ---- 4f:filesystem MCP 的 write_file——arguments.path 在 worktree 外 → 政策拒絕;同一個 session 寫 worktree 內 → auto 放行
+    //          (對照組:證明擋下的是那個路徑,不是 auto 模式下什麼都擋) ----
+    {
+      const sessionId = await createSession("4f-codex-mcp-nested-worktree-escape", { autoMode: true });
+      const inside = await runCodexMcpCall(sessionId, {
+        server: "filesystem",
+        tool: "write_file",
+        arguments: { path: path.join(workspaceDir, "inside.txt").split(path.sep).join("/"), content: "x" },
+      });
+      const target = path.join(outsideDir, "escape.txt").split(path.sep).join("/");
+      const outside = await runCodexMcpCall(sessionId, { server: "filesystem", tool: "write_file", arguments: { path: target, content: "x" } });
+      record(
+        "4f codex 真正形狀的 MCP 權限請求(參數在 arguments 外殼裡):write_file 的 arguments.path 在 worktree 外 → auto 模式下 hard-deny 拒絕、不進 waiting;worktree 內 → auto 放行",
+        outside.perm.toolName === codexMcpToolTitle("filesystem", "write_file") &&
+          outside.perm.input?.arguments?.path === target &&
+          outside.perm.input?.path === undefined &&
+          outside.resolved?.decision === "deny" &&
+          outside.resolved?.source === "policy" &&
+          !outside.wentWaiting &&
+          outside.agentAllowed === false &&
+          inside.resolved?.decision === "allow" &&
+          inside.resolved?.source === "policy" &&
+          inside.agentAllowed === true,
+        `outside: ${describe(outside)}; inside: ${describe(inside)}`,
+      );
+    }
+
+    // ---- 4g:filesystem MCP 的 read_file 讀 ~/.ssh/id_rsa(只是路徑字串,fake agent 不會真的去讀)→ secret-path ----
+    {
+      const sessionId = await createSession("4g-codex-mcp-nested-secret-path", { autoMode: true });
+      const secret = path.join(os.homedir(), ".ssh", "id_rsa");
+      const r = await runCodexMcpCall(sessionId, { server: "filesystem", tool: "read_file", arguments: { path: secret } });
+      record(
+        "4g codex 真正形狀:read_file 的 arguments.path 是 ~/.ssh/id_rsa → auto 模式下 hard-deny(secret-path)拒絕、不進 waiting",
+        r.perm.input?.arguments?.path === secret && r.resolved?.decision === "deny" && r.resolved?.source === "policy" && !r.wentWaiting && r.agentAllowed === false,
+        describe(r),
+      );
+    }
+
+    // ---- 4h:fetch MCP 的 arguments.url 不在 allowedHosts(這個 core 的 allowedHosts 是空的)→ non-allowlisted-network ----
+    {
+      const sessionId = await createSession("4h-codex-mcp-nested-network", { autoMode: true });
+      const r = await runCodexMcpCall(sessionId, { server: "fetch", tool: "fetch", arguments: { url: "https://evil.example.com/x" } });
+      record(
+        "4h codex 真正形狀:fetch 的 arguments.url 不在 allowedHosts → auto 模式下 hard-deny(non-allowlisted-network)拒絕、不進 waiting",
+        r.perm.input?.arguments?.url === "https://evil.example.com/x" &&
+          r.resolved?.decision === "deny" &&
+          r.resolved?.source === "policy" &&
+          !r.wentWaiting &&
+          r.agentAllowed === false,
+        describe(r),
+      );
+    }
+
+    for (const sid of createdSessions) {
+      try {
+        await client.rpc("session.delete", { sessionId: sid });
+      } catch {
+        // ignore
+      }
+    }
+  } catch (err) {
+    record("Part 4 即時 e2e 執行過程發生未預期錯誤", false, String(err));
+  } finally {
+    client?.close();
+    await killProcessTree(coreProc);
+  }
+
+  for (const dir of [dataDir, homeDir, workspaceDir, outsideDir]) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// =======================================================================
 async function main() {
   if (!existsSync(CORE_ENTRY)) {
     console.error(`找不到 ${CORE_ENTRY} —— 請先執行 pnpm build`);
@@ -1255,6 +1678,9 @@ async function main() {
 
   log("\n=== Part 3:舊 profile 範圍規則 + providerId 範圍的即時 e2e(P2.8) ===");
   await legacyScopeLiveE2e();
+
+  log("\n=== Part 4:codex 只帶 toolCallId 的 MCP 權限請求,補上的 toolName/input 進政策引擎 ===");
+  await codexMcpPermissionLiveE2e();
 
   const failed = results.filter((r) => !r.ok);
   log(`\n\n========== 總結:${results.length - failed.length}/${results.length} 通過 ==========`);

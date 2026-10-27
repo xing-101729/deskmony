@@ -162,6 +162,20 @@ jobs:
       #     @electron/get 沒設;漏洞情境是「多使用者共用的快取」,打包時下載
       #     Electron binary 不是那種情境。
       #
+      # 2026-10-27:再接受一個 high。**它跟上面兩筆不同,在 production 路徑上**:
+      #
+      #   GHSA-mrhx-c7xc-m3w5  zod <4.6.6(3.x 沒有修補版)
+      #     路徑:core / shared / adapters 直接相依 zod ^3.23.8(3.25.76)。zod 4
+      #     的副本(codex-acp、MCP/ACP sdk 的 peer)已在 lockfile 升到 4.6.7。
+      #     量過:4.6.6 的修補只是「陣列超過 `.max()` 就提早停」,沒設上限的
+      #     `z.array()` 在 4.6.7 一樣每個元素產生一個 issue——我們的 schema 都
+      #     沒設上限,所以單純遷移到 zod 4 不會縮小暴露面。真正的暴露面在
+      #     apps/core 的 ws-gateway:它在認證**之前**就對每則訊息跑完整的
+      #     `ClientRequestSchema.parse`,而 ws 的 maxPayload 是預設 100 MiB,
+      #     未認證的連線送一個大陣列就能讓 core OOM。這要在 gateway 修(認證前
+      #     只解析 auth 訊息、設 maxPayload),不是靠相依版本;在那之前,這筆
+      #     ignore 等於接受一個認證前的 DoS(預設只綁 127.0.0.1)。
+      #
       # 另有兩個 moderate 沒有可用的修補,沒加進 ignore(低於 --audit-level
       # high 不會讓 job 變紅,但仍會印出來,保持可見):
       #   GHSA-hp3w-g68c-fv3c  sprintf-js <=1.1.3:electron-builder → @electron/get
@@ -170,9 +184,11 @@ jobs:
       #   GHSA-rj75-hqrm-r3gf  postcss-selector-parser <7.1.6:修補只在 7.x,
       #     tailwindcss@3 要求 ^6;只在建置時解析我們自己的 CSS。
       #
-      # ⚠️ ignoreGhsas 是**依 GHSA 編號全域忽略**,不看路徑。哪天這兩個套件
-      # 出現在 production 相依路徑上,audit 不會再提醒——動到 tailwind、
+      # ⚠️ ignoreGhsas 是**依 GHSA 編號全域忽略**,不看路徑。哪天 braces、
+      # http-cache-semantics 出現在 production 相依路徑上,audit 不會再提醒——動到 tailwind、
       # electron-builder 或新增會帶進 braces/got 的 production 相依時,要回來
       # 重看這兩筆;有修補版或升上 tailwindcss@4 之後就把對應的那筆刪掉。
+      # zod 那筆同理:任何一份 zod 4 退回 <4.6.6 也不會再被抓到;遷移到 zod 4
+      # (並替會收外部輸入的陣列加 `.max()`)之後就把它刪掉。
       - name: pnpm audit
         run: pnpm audit --audit-level high

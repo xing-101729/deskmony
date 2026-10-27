@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { providerEffortChoices } from "@deskmony/shared";
+import { providerEffortChoices, providerEffortSelectionState } from "@deskmony/shared";
 import { useSessionStore, selectAvailableProviders } from "../stores/session-store.js";
 import { reconcileSelection, type NewSessionSelection } from "../lib/new-session-selection.js";
 import { Button } from "../ui/Button.js";
@@ -14,7 +14,8 @@ import { EmptyState } from "../ui/Feedback.js";
  * 「用哪個 agent 開新對話」的選單組:**agent 下拉**(從這台電腦偵測到、且沒被停用的 provider,顯示 label + 版本)
  * + **model 下拉**(該 provider 的 models;`supportsModelSelection` 為 false 或清單為空時整個隱藏)
  * + **思考程度**(2026-10-06 起不只 Claude:清單由 `providerEffortChoices()` 決定——Claude 的固定 5 級、OpenCode
- * 選定 model 的 variants;建立前不知道就隱藏)+(選填)**工作資料夾**。「要等 session 開起來才知道選項」的 agent
+ * 選定 model 的 variants;建立前不知道就隱藏;2026-10-16 起 OpenCode 沒選 model / 選的 model 沒有 variants 時改顯示 disabled 的
+ * 下拉說明原因,不再整個消失)+(選填)**工作資料夾**。「要等 session 開起來才知道選項」的 agent
  * (ACP:Codex / Gemini / OpenCode ACP)改顯示一行說明:建立後在對話標題列選,會記住上次的選擇。取代原本的「選 profile」下拉與
  * ProfileCreateDialog——SessionList 側欄頂部與「在這個 session 底下開新 session」對話框共用同一份,選擇狀態由呼叫端持有(見
  * lib/new-session-selection.ts,上次的選擇存 localStorage)。
@@ -119,18 +120,30 @@ export function AgentPicker({
     </Select>
   ) : null;
 
-  const effortChoices = provider ? providerEffortChoices(provider, effective.model || undefined) : undefined;
-  const effortSelect =
-    effortChoices && effortChoices.length > 0 ? (
+  // 2026-10-16:沒有選項時不再整個消失——OpenCode 預設 model(`opencode/big-pickle`)沒有 variants,使用者看不到思考程度
+  // 就不知道換成別的 model 才能選。provider 能選、只是現在選不了(還沒選 model / 選的 model 沒有)→ 顯示 disabled 的下拉,
+  // 選項文字就是原因(緊湊排版沒有欄位標籤,說明必須在控制項本身)。判斷見 `providerEffortSelectionState()`。
+  const effortState = provider ? providerEffortSelectionState(provider, effective.model || undefined) : undefined;
+  let effortSelect: JSX.Element | null = null;
+  if (effortState?.kind === "choices") {
+    effortSelect = (
       <Select aria-label={t("agentPicker:effortAriaLabel")} value={effective.effort} onChange={(e) => set({ effort: e.target.value })}>
         <option value="">{t("agentPicker:defaultEffortOption")}</option>
-        {effortChoices.map((value) => (
+        {effortState.choices.map((value) => (
           <option key={value} value={value}>
             {value}
           </option>
         ))}
       </Select>
-    ) : null;
+    );
+  } else if (effortState?.kind === "pickModelFirst" || effortState?.kind === "modelHasNone") {
+    const reason = t(effortState.kind === "pickModelFirst" ? "agentPicker:effortPickModelFirst" : "agentPicker:effortModelUnsupported");
+    effortSelect = (
+      <Select aria-label={t("agentPicker:effortAriaLabel")} value="" disabled title={reason}>
+        <option value="">{reason}</option>
+      </Select>
+    );
+  }
 
   // 建立前不知道選項的 agent:說明建立後在哪裡選。
   const optionsLaterNote = provider?.optionsAfterStart ? (

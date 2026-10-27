@@ -34,6 +34,101 @@ cpSync(tmpDir, bundleDir, { recursive: true });
 rmSync(tmpDir, { recursive: true });
 
 /**
+ * 2026-10-16:確認 codex 相關兩個套件是「鎖定的版本」而且「帶著 windowsHide patch」,否則讓打包失敗。
+ *
+ * 為什麼要在這裡驗:`pnpm deploy --legacy` **不讀 pnpm-lock.yaml**(log 會印 "prohibits to read or write a lockfile"),
+ * 依 package.json 的版本範圍重新解析。過去 adapters 寫 `^1.4.0`,安裝檔實際打進去的是當時最新的 1.13.1,開發和測試用的
+ * lockfile 卻是 1.4.0——版本不一致沒有任何人發現。codex 開新對話會跳出主控台視窗的修正是 pnpm patch
+ * (patches/*.patch,為 `codex-acp` 與 `@openai/codex` 的 spawn 補 `windowsHide: true`),patch 只對「版本完全相同」的套件生效;
+ * deploy 若解析到別的版本,patch 就悄悄沒套上,而安裝檔照樣打得出來。所以:
+ *   1. 期望版本從 package.json 讀(adapters 的 `@agentclientprotocol/codex-acp` 精確版本、根目錄 `pnpm.overrides` 的
+ *      `@openai/codex` 精確版本),不在這裡再寫死一份;
+ *   2. 對 deploy 出來的實際檔案檢查版本與 `windowsHide: true`,不符就丟錯。
+ * 升級這兩個套件時:改精確版本、`pnpm patch` 重做 patch,這道檢查會在漏做任何一步時擋下。
+ */
+function readJson(file) {
+  return JSON.parse(readFileSync(file, "utf8"));
+}
+function exactVersionOrThrow(label, value) {
+  if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) {
+    throw new Error(`[bundle-core] ${label} 必須是精確版本(例如 "1.13.1",不能有 ^ 或 ~),目前是 ${JSON.stringify(value)}。`);
+  }
+  return value;
+}
+function verifyCodexBundle(nodeModulesDir) {
+  const expectedAcp = exactVersionOrThrow(
+    'packages/adapters/package.json 的 dependencies["@agentclientprotocol/codex-acp"]',
+    readJson(path.join(root, "packages", "adapters", "package.json")).dependencies?.["@agentclientprotocol/codex-acp"],
+  );
+  const expectedCodex = exactVersionOrThrow(
+    '根目錄 package.json 的 pnpm.overrides["@openai/codex"]',
+    readJson(path.join(root, "package.json")).pnpm?.overrides?.["@openai/codex"],
+  );
+
+  const acpDir = path.join(nodeModulesDir, "@agentclientprotocol", "codex-acp");
+  const codexDir = path.join(nodeModulesDir, "@openai", "codex");
+  for (const [name, dir] of [["@agentclientprotocol/codex-acp", acpDir], ["@openai/codex", codexDir]]) {
+    if (!existsSync(path.join(dir, "package.json"))) {
+      throw new Error(`[bundle-core] 找不到 ${name}(預期在 ${dir});deploy 的目錄結構變了?`);
+    }
+  }
+  const acpVersion = readJson(path.join(acpDir, "package.json")).version;
+  const codexVersion = readJson(path.join(codexDir, "package.json")).version;
+  if (acpVersion !== expectedAcp) {
+    throw new Error(
+      `[bundle-core] 打進安裝檔的 @agentclientprotocol/codex-acp 是 ${acpVersion},但鎖定版本是 ${expectedAcp}。` +
+        `pnpm deploy --legacy 不讀 lockfile、只看 package.json;請確認 packages/adapters/package.json 寫的是精確版本。`,
+    );
+  }
+  if (codexVersion !== expectedCodex) {
+    throw new Error(
+      `[bundle-core] 打進安裝檔的 @openai/codex 是 ${codexVersion},但鎖定版本是 ${expectedCodex}。` +
+        `請確認根目錄 package.json 的 pnpm.overrides["@openai/codex"] 有被 deploy 套用(它是 codex-acp 的間接相依)。`,
+    );
+  }
+
+  // codex-acp:`startCodexConnection()` 裡每個 spawn 都要帶 windowsHide: true。
+  const acpSource = readFileSync(path.join(acpDir, "dist", "index.js"), "utf8");
+  const start = acpSource.indexOf("function startCodexConnection(");
+  const end = start < 0 ? -1 : acpSource.indexOf("attachLogs(codex)", start);
+  if (start < 0 || end < 0) {
+    throw new Error(
+      `[bundle-core] 在 codex-acp ${acpVersion} 的 dist/index.js 找不到 startCodexConnection();` +
+        `程式結構變了,patch(patches/)需要對照新版本重做,這道檢查也要跟著調整。`,
+    );
+  }
+  const connectionSource = acpSource.slice(start, end);
+  const acpSpawns = (connectionSource.match(/\bspawn\(/g) ?? []).length;
+  const acpHides = (connectionSource.match(/windowsHide:\s*true/g) ?? []).length;
+  if (acpSpawns === 0 || acpHides !== acpSpawns) {
+    throw new Error(
+      `[bundle-core] codex-acp ${acpVersion} 的 startCodexConnection() 有 ${acpSpawns} 個 spawn、只有 ${acpHides} 個帶 windowsHide: true;` +
+        `codex 開新對話會跳出主控台視窗。pnpm patch 沒有套用到 deploy 出來的套件(patches/ 與 package.json 的 pnpm.patchedDependencies)。`,
+    );
+  }
+
+  // @openai/codex:bin/codex.js 啟動 codex.exe 的 spawn 要帶 windowsHide: true(stdio: "inherit",光靠上一層的旗標擋不住)。
+  const codexSource = readFileSync(path.join(codexDir, "bin", "codex.js"), "utf8");
+  const spawnCall = /spawn\(binaryPath[\s\S]*?\n\}\);/.exec(codexSource);
+  if (!spawnCall) {
+    throw new Error(
+      `[bundle-core] 在 @openai/codex ${codexVersion} 的 bin/codex.js 找不到 spawn(binaryPath, ...);` +
+        `程式結構變了,patch 需要對照新版本重做,這道檢查也要跟著調整。`,
+    );
+  }
+  if (!/windowsHide:\s*true/.test(spawnCall[0])) {
+    throw new Error(
+      `[bundle-core] @openai/codex ${codexVersion} 的 bin/codex.js 啟動 codex.exe 時沒有帶 windowsHide: true;` +
+        `codex 開新對話會跳出主控台視窗。pnpm patch 沒有套用到 deploy 出來的套件。`,
+    );
+  }
+  console.log(
+    `[bundle-core] codex check OK: codex-acp ${acpVersion} (${acpHides}/${acpSpawns} spawn 帶 windowsHide), @openai/codex ${codexVersion} (codex.exe spawn 帶 windowsHide)`,
+  );
+}
+verifyCodexBundle(path.join(bundleDir, "node_modules"));
+
+/**
  * ABI fix-up (README「已知限制」→「已解決」,見該章節完整說明):`pnpm deploy`
  * 剛部署出來的 `better-sqlite3` 原生模組是用「系統 Node」的 ABI
  * (NODE_MODULE_VERSION,本機 Node 22 為 127)編譯/下載的 —— 這是

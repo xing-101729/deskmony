@@ -1,12 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import {
-  extractCommandFromInput,
-  extractHostFromInput,
-  extractPathCandidates,
-  isPathUnder,
-  resolveRealpathBestEffort,
-} from "./tool-input.js";
+import { extractCommandCandidates, extractPathCandidates } from "@deskmony/shared";
+import { extractHostCandidates, isPathUnder, resolveRealpathBestEffort } from "./tool-input.js";
 
 /**
  * hard-deny.ts(S1:內建、config 不可關閉的硬性 deny 類 — F4)。
@@ -176,8 +171,7 @@ export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
   // 3) force-push / 危險 git——只對猜得到「指令字串」的工具做 regex 掃描
   //    (見 policy-engine_detail.md §2「shell 的誠實限制」:這裡的 pattern 只
   //    擋明顯的意外,擋不住 `bash -c`/`$()`/base64 刻意繞過)。
-  const command = extractCommandFromInput(req.input);
-  if (command !== undefined) {
+  for (const command of extractCommandCandidates(req.input)) {
     for (const { category, test } of DANGEROUS_GIT_PATTERNS) {
       if (test(command)) {
         return {
@@ -190,8 +184,7 @@ export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
   }
 
   // 4) 非白名單外連——只對猜得到 host 的工具檢查,allowedHosts 預設空 = 全擋。
-  const host = extractHostFromInput(req.input);
-  if (host !== undefined) {
+  for (const host of extractHostCandidates(req.input)) {
     const allowed = req.allowedHosts.some((h) => h.toLowerCase() === host.toLowerCase());
     if (!allowed) {
       return {

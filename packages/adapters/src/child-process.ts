@@ -29,7 +29,8 @@ export function killProcessTree(child: ChildProcess): void {
   if (child.exitCode !== null || child.signalCode !== null || child.killed) return;
   if (process.platform === "win32") {
     if (child.pid) {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      // 2026-10-16:`windowsHide`——打包版 core 沒有主控台,taskkill 不帶這個旗標可能閃出主控台視窗。
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
     }
   } else {
     child.kill("SIGTERM");

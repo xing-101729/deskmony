@@ -294,3 +294,64 @@ Linux `$XDG_CONFIG_HOME`/`~/.config`),整個目錄樹納入秘密路徑:`Deskmon
   agent 在 bash 指令字串裡 `cat` 它看不到(§C7 的誠實限制)。
 - 要真正擋住這些,需要讓 agent 跑在不同的 OS 使用者 / 容器 / 沙箱裡——目前沒有,PTY 那條路同樣沒有(§C7)。這次補的是「agent 不需要任何特殊技巧、一行 `echo $VAR`
   就拿到主 token」這個最便宜的路徑。
+
+---
+
+## K. 2026-10-16 修訂:訊息倒回與分支
+
+對話裡每則**自己送出的訊息**滑過去會出現「倒回」與「分支」(同時有時間戳與複製;AI 回覆有時間戳、複製、轉傳到…;別的 session 送來的訊息只有時間戳與複製)。
+gateway 方法 `session.rewind` / `session.fork`,參數 `{ sessionId, messageId }`(分支另有選填的 `titleSuffix`),`messageId` 是 `messages.id`。
+
+**1. 定案的語意**
+
+- **倒回到使用者訊息 M**:對話回到 M **送出之前**。M 以及之後所有訊息(user / assistant / tool / system)從 DB 刪除;agent 目前的後端對話結束,開一個**全新**的後端對話
+  (不能接回舊的——舊的含 M 之後的內容);M 之前的 DB 對話用 `session-transcript.ts` 組成文字紀錄,附在下一則 prompt 前面(M 之前沒有任何文字對話 = 全新對話、不附紀錄)。
+  M 的原文與附件回傳給 UI,放回輸入框讓使用者修改後重送。model / 思考程度保留(重新啟動時取自 session 列)。
+- **在使用者訊息 M 分支**:建一個新 session(同 provider、model、思考程度、工作資料夾),把原 session 中 M **之前**的訊息(所有角色,保留順序、`created_at`、`origin`、
+  `attachments`)複製過去,新 session 的第一則 prompt 附上那段紀錄。**原 session 完全不動**。標題 = 原標題 + 後綴(桌面端傳目前語言的字串,core 預設「(分支)」),標題來源沿用原 session 的
+  (`default` 維持預設標題、第一則人類輸入後自動命名;`user` / `auto` 加後綴後沿用——使用者取的名字不會被降級成可被 AI 自動覆蓋);新 session 不掛 `parentSessionId`(它是獨立的對話,
+  不是原 session 開出來幫忙的子 session)。UI 切到新 session 並把 M 放進它的輸入框。
+- **只倒對話,檔案不動**。agent 已經改過的檔案不會還原;倒回前的確認框(`confirmDialog()`)與對話裡的系統說明都明講這一點。倒回**不可復原**(DB 的訊息真的刪掉),所以倒回要確認、分支不用。
+- 只有**閒置**(非 busy / waiting)時可用;busy 時按鈕停用並用 tooltip 說明,core 也擋(`sessionHistory.busy`)。終端程式(PTY)沒有對話可言,不提供(`sessionHistory.unsupported`)。
+  目標必須是**人類在這個 session 輸入的 user 訊息**:別的 session 送來/轉傳的(有 `origin`)、assistant / tool / system 都不行(`sessionHistory.messageNotRewindable`);不屬於這個 session 的 id
+  一律當作不存在(`sessionHistory.messageNotFound`,不洩漏它存在與否)。沒有 runtime 的 session(core 重啟後的 closed / interrupted、被回收的 error)也可以倒回。
+- 串流中的 assistant 訊息不顯示動作列。
+
+**2. 為什麼不用「原生分支」(adapter 層的 rebase / branch)**
+
+舊分支 `feat/message-actions`(`18efdd9`,基底很舊、做到一半、約 940 行)的設計是在 `AgentAdapter` 介面加 rebase / fork,Claude SDK、ACP、OpenCode 各自實作,另外在 DB 加分支位置欄位。放棄的理由:
+
+- **三個後端各有一套完全不同的對話儲存與 resume 語意**(Claude 的對話檔 + `resumeSessionAt`、ACP 看 agent 有沒有宣告 resume / load、OpenCode 的伺服器端 session),原生做法要各寫各的,
+  每一家都有「舊對話到底有沒有被改乾淨」的獨立風險——倒回的重點是**被移除的內容絕不能再出現在 agent 的記憶裡**,原生做法的正確性取決於每個後端的細節。
+  全新的後端對話 + 文字紀錄對三家(以及任何新的 ACP agent)是同一條路,而且自動復活的路徑(`respawnRuntime()` → `pendingTranscript`)已經有 e2e 護著。
+- DB 是單一事實來源:UI 顯示的、倒回刪掉的、分支複製的、紀錄組出來的,都是同一份 `messages`,沒有第二份「後端認為的歷史」需要保持同步。
+- 代價(誠實記錄):agent 讀的是紀錄,不是真的記得——**沒有先前的工具呼叫結果、檔案內容、思考過程**;紀錄有長度上限(`TRANSCRIPT_MAX_CHARS` 12,000 字元、最多 400 則,超過從最舊的丟並在說明註明);
+  附件在紀錄裡只標記「附件內容未附上」。需要完整保留 agent 內部狀態的使用者,應該用 agent 自己的功能(例如 Claude Code 自己的 checkpoint)。
+
+**3. 實作上要守的幾件事(為什麼是這樣)**
+
+- **清掉 `backendSessionId`**:倒回時在同一個 DB 交易裡刪訊息並把 `sessions.backend_session_id` 設成 NULL。否則任何重新啟動路徑(自動復活、復原視圖的「繼續」、core 重啟後)都會把含被移除內容的舊後端對話接回來。
+  這也讓「沒有 runtime 時倒回」自然成立:只改 DB,下一則人類訊息走自動復活,後端識別碼是空的,所以一定是全新對話 + 紀錄。倒回後復原視圖的 `canContinue` 變 false(e2e 驗證)。
+- **有 runtime 就立刻重新啟動**:狀態標成忙碌(收掉 agent 與重新啟動要幾秒,也擋住重複操作)→ 收掉 agent(子行程、待決權限 / 提問並推播、MCP bridge token、事件迴圈,和 `reclaimSession()` 同一套)→ 改 DB →
+  `respawnRuntime()`。重新啟動失敗時倒回仍然生效,session 標 error,下一則訊息會再試。倒回在 per-session 鎖裡進行,和送出訊息、重新啟動互斥。權限模式和所有重新啟動一樣重設為 `always-ask`。
+- **排序鍵 `(created_at, rowid)`**:user 與 assistant 訊息常常同一毫秒寫入(`read_session` 曾因此排序錯亂),「M 之前 / M 及之後」、`session.history`、對話紀錄都用同一個鍵;`getHistory()` 因此明確
+  `ORDER BY created_at, rowid`(過去靠 JS 穩定排序碰巧一致)。e2e 直接改 DB 讓 `created_at` 與寫入順序不一致、或全部相同,驗證歷史順序與倒回切點;拿掉 ORDER BY 這組會失敗。
+- **紀錄開頭的說明講對原因**:`buildTranscript()` 的 `intro`:`revive`(app 重新開啟,預設)/ `rewind` / `fork`。沒有 runtime 時倒回,下一則訊息的自動復活也要用 `rewind` 說明——記在記憶體
+  (`SessionManager.rewoundWhileStopped`),不新增 DB 欄位;**已知限制**:core 在那之前又重啟的話退回 `revive` 說明,而那時 app 確實重新開啟過,說法仍然正確。
+- **client 指定 `messageId`**:`session.sendPrompt` 多一個選填的 `messageId`(UUID),core 用它當這則使用者訊息的 `messages.id`。桌面端樂觀回顯時就有一個本地 id,過去它和 DB 的 id 對不上,剛送出的
+  訊息要倒回就找不到那一筆。重複的 id(含別的 session 已用過的)在做任何有副作用的事**之前**就以 `session.messageIdConflict` 拒絕,**不做成冪等**:第一次嘗試可能在寫進 DB 之後、交給 agent 之前就失敗了,
+  冪等會把那次失敗吞掉。INSERT 本來就排在 `adapter.sendPrompt()` 之前,併發的重複請求寫入失敗時不會把 prompt 交給 agent。
+- **其他 client 同步**:倒回完成(系統說明已寫進 DB)後推播 `session-history-reset`,開著該 session 的 client 丟掉手上的訊息重新載入(既有的推播只會「追加」,沒有一條能表達「這些訊息不存在了」)。
+  分支只建新 session,走既有的 `session-list-updated`。
+- **安全**:`session.rewind` / `session.fork` 不在任何 scoped MCP bridge token 的方法白名單裡(白名單只有 session 網路那五個,其餘 fail-closed),agent 倒回不了任何 session(含自己),
+  `scripts/e2e-session-network.mjs` P3.7-8 驗證。它們**不是** `LOCAL_ONLY_METHODS`:遠端 client 能 `session.delete`,倒回 / 分支沒有比它更危險。
+
+**4. 已知限制**
+
+- 倒回 / 分支之後,舊的後端對話留在 agent 那邊沒有刪(Claude 的對話檔、OpenCode 的 session 等),只是 Deskmony 不再引用——會慢慢累積。
+- 只有桌面 UI 有入口;CLI / TUI 沒有(RPC 是通的)。
+- 倒回會取代輸入框目前的內容(使用者按下倒回要的就是「把那則訊息放回來改」)。
+- 同一個 core 的 UI 在倒回進行的幾秒內看到 session 忙碌(收掉 agent、重新啟動)。
+
+**驗證**:`scripts/e2e-session-rewind.mjs`(假 ACP agent 的 `--resume` / `--config-options`、假 OpenCode、假 PTY;一個 core 開關三次:活著 / 重啟後沒有 runtime / 崩潰後 interrupted,約 1.5 分鐘)與
+`e2e-session-network` P3.7-8;桌面端用隔離 core 搭配瀏覽器實測(hover 三種訊息、版面不跳、時間戳、複製、倒回與分支全流程)。
