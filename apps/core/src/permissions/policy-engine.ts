@@ -1,6 +1,6 @@
-import type { PolicyRule } from "@deskmony/shared";
+import { extractCommandCandidates, extractPathCandidates, type PolicyRule } from "@deskmony/shared";
 import { checkHardDeny } from "./hard-deny.js";
-import { extractCommandFromInput, extractPathCandidates, isPathUnder, resolveRealpathBestEffort } from "./tool-input.js";
+import { isPathUnder, resolveRealpathBestEffort } from "./tool-input.js";
 
 /**
  * policy-engine.ts(S1:PolicyEngine 主體)。
@@ -266,15 +266,20 @@ export class PolicyEngine {
     }
 
     if (rule.when) {
+      // 一個 input 可能猜出好幾個指令/路徑候選(不同欄位、codex 的 `arguments` 外殼,見 tool-input.ts)。
+      // allow 規則要**每一個**都符合、deny 規則只要**任一**符合:候選變多時 allow 只會更難命中、deny 只會更容易命中,
+      // 多看一層參數不會反過來放寬什麼。過去 pathUnder 對 deny 也要求全部在邊界內——那樣多一個邊界外的候選,
+      // deny 規則就失效,auto 模式下會落到「未分類中間地帶自動放行」。
+      // 猜不到任何候選 → 不 match(不 fail-open)。
+      const satisfied = <T>(candidates: T[], test: (candidate: T) => boolean): boolean =>
+        candidates.length > 0 && (rule.effect === "allow" ? candidates.every(test) : candidates.some(test));
+
       if (rule.when.commandEquals !== undefined) {
-        const command = extractCommandFromInput(req.input);
-        if (command === undefined) return false; // 猜不到指令 → 不 match(不 fail-open)。
-        if (command.trim() !== rule.when.commandEquals.trim()) return false;
+        const expected = rule.when.commandEquals.trim();
+        if (!satisfied(extractCommandCandidates(req.input), (command) => command.trim() === expected)) return false;
       }
 
       if (rule.when.commandMatches !== undefined) {
-        const command = extractCommandFromInput(req.input);
-        if (command === undefined) return false;
         // 強制 `^...$` 完整匹配——避免 `npm test` 這種 pattern 意外放行
         // `npm test; rm -rf /`(見 core-config.ts 的 `commandMatches` 註解)。
         let anchored: RegExp;
@@ -283,18 +288,13 @@ export class PolicyEngine {
         } catch {
           return false; // 使用者寫的 regex 本身無效——視為不 match,不拋錯中斷決策。
         }
-        if (!anchored.test(command.trim())) return false;
+        if (!satisfied(extractCommandCandidates(req.input), (command) => anchored.test(command.trim()))) return false;
       }
 
       if (rule.when.pathUnder !== undefined) {
-        const candidates = extractPathCandidates(req.input);
-        if (candidates.length === 0) return false; // 猜不到路徑 → 不 match。
         const boundary = resolveRealpathBestEffort(rule.when.pathUnder, req.workingDir);
-        const allUnder = candidates.every((rawPath) => {
-          const resolved = resolveRealpathBestEffort(rawPath, req.workingDir);
-          return isPathUnder(resolved, boundary);
-        });
-        if (!allUnder) return false;
+        const under = (rawPath: string) => isPathUnder(resolveRealpathBestEffort(rawPath, req.workingDir), boundary);
+        if (!satisfied(extractPathCandidates(req.input), under)) return false;
       }
     }
 

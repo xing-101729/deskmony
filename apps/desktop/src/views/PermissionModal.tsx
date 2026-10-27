@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import type { PolicyRule } from "@deskmony/shared";
+import { rememberRuleCandidates, type PolicyRule, type RememberRuleScope } from "@deskmony/shared";
 import { useSessionStore } from "../stores/session-store.js";
 import { Dialog } from "../ui/Dialog.js";
 import { Button } from "../ui/Button.js";
@@ -24,103 +24,49 @@ import { displaySessionTitle } from "./SessionTitle.js";
  * 消失又沒有回應——那會讓 agent 卡住等一個使用者以為已經處理掉的請求。
  */
 
-const COMMAND_KEYS = ["command", "cmd", "script"];
-const PATH_KEYS = ["file_path", "filePath", "path", "notebook_path", "directory", "dir_path", "target_path"];
-
-function asRecord(input: unknown): Record<string, unknown> | undefined {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
-  return input as Record<string, unknown>;
-}
-
-function extractCommand(input: unknown): string | undefined {
-  const obj = asRecord(input);
-  if (!obj) return undefined;
-  for (const key of COMMAND_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return undefined;
-}
-
-function extractPath(input: unknown): string | undefined {
-  const obj = asRecord(input);
-  if (!obj) return undefined;
-  for (const key of PATH_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return undefined;
-}
-
-function dirnameOf(p: string): string {
-  const normalized = p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const idx = normalized.lastIndexOf("/");
-  if (idx <= 0) return normalized.startsWith("/") ? "/" : normalized;
-  return normalized.slice(0, idx);
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 interface RememberCandidate {
   label: string;
   description: string;
   rule: PolicyRule;
 }
 
-/** 純函式,在 useMemo 裡呼叫(非元件本身)——`t` 比照 lib/error-i18n.ts 的
- *  translateError() 慣例,由呼叫端的 useTranslation() 傳入,不直接 import
- *  i18next 單例。 */
+/**
+ * 「永遠允許…」的範圍選項。候選本身(與 CLI/TUI 的 `[A]` 共用,最窄的排第一個、預設選它)來自
+ * @deskmony/shared 的 `rememberRuleCandidates()`,這裡只套上文字。純函式,在 useMemo 裡呼叫——`t` 比照
+ * lib/error-i18n.ts 的 translateError() 慣例,由呼叫端的 useTranslation() 傳入,不直接 import i18next 單例。
+ */
 function buildRememberCandidates(toolName: string, input: unknown, workingDir: string | undefined, t: TFunction): RememberCandidate[] {
-  const command = extractCommand(input);
-  if (command !== undefined) {
-    const candidates: RememberCandidate[] = [
-      {
+  return rememberRuleCandidates(toolName, input, workingDir).map(({ scope, rule }) => ({ ...describeScope(scope, toolName, t), rule }));
+}
+
+function describeScope(scope: RememberRuleScope, toolName: string, t: TFunction): { label: string; description: string } {
+  switch (scope.kind) {
+    case "command-exact":
+      return {
         label: t("permission:remember.commandExactLabel"),
-        description: t("permission:remember.commandExactDescription", { toolName, command }),
-        rule: { tool: toolName, when: { commandEquals: command }, effect: "allow" },
-      },
-    ];
-    const firstWord = command.trim().split(/\s+/)[0];
-    if (firstWord) {
-      const pattern = `^${escapeRegExp(firstWord)}\\b.*`;
-      candidates.push({
-        label: t("permission:remember.commandPrefixLabel", { firstWord }),
-        description: t("permission:remember.commandPrefixDescription", { toolName, pattern }),
-        rule: { tool: toolName, when: { commandMatches: pattern }, effect: "allow" },
-      });
-    }
-    return candidates;
-  }
-
-  const path = extractPath(input);
-  if (path !== undefined) {
-    const dir = dirnameOf(path);
-    const candidates: RememberCandidate[] = [
-      {
+        description: t("permission:remember.commandExactDescription", { toolName, command: scope.command }),
+      };
+    case "command-prefix":
+      return {
+        label: t("permission:remember.commandPrefixLabel", { firstWord: scope.firstWord }),
+        description: t("permission:remember.commandPrefixDescription", { toolName, pattern: scope.pattern }),
+      };
+    case "path":
+      return {
         label: t("permission:remember.pathExactLabel"),
-        description: t("permission:remember.pathScopeDescription", { toolName, path: dir }),
-        rule: { tool: toolName, when: { pathUnder: dir }, effect: "allow" },
-      },
-    ];
-    if (workingDir && workingDir !== dir) {
-      candidates.push({
+        description: t("permission:remember.pathScopeDescription", { toolName, path: scope.dir }),
+      };
+    case "working-dir":
+      return {
         label: t("permission:remember.pathWorkdirLabel"),
-        description: t("permission:remember.pathScopeDescription", { toolName, path: workingDir }),
-        rule: { tool: toolName, when: { pathUnder: workingDir }, effect: "allow" },
-      });
-    }
-    return candidates;
+        description: t("permission:remember.pathScopeDescription", { toolName, path: scope.dir }),
+      };
+    case "tool":
+      return {
+        label: t("permission:remember.toolExactLabel"),
+        description: t("permission:remember.toolExactDescription", { toolName }),
+      };
   }
-
-  return [
-    {
-      label: t("permission:remember.toolExactLabel"),
-      description: t("permission:remember.toolExactDescription", { toolName }),
-      rule: { tool: toolName, effect: "allow" },
-    },
-  ];
 }
 
 function RememberRuleSection({

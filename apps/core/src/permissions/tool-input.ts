@@ -1,85 +1,32 @@
 import fs from "node:fs";
 import path from "node:path";
+import { toolInputFieldValues } from "@deskmony/shared";
 
 /**
  * tool-input.ts(S1:PolicyEngine + hard-deny 共用的工具呼叫輸入解析)。
  *
- * **誠實的限制**:`AgentEvent`(permission-request)的 `input` 欄位型別是
- * `z.unknown()`(見 packages/shared/src/events.ts)——三個後端(Claude Agent
- * SDK / ACP / OpenCode)各自把不同形狀的工具參數塞進這裡:
- *   - Claude Agent SDK:canonical 工具名(`"Write"`/`"Bash"`/...)+ 官方定義的
- *     input 形狀(`file_path`/`command`/...)。
- *   - ACP:`toolName` 是 agent 自己取的**人類可讀標題**(例如 fake-acp-agent
- *     的 `"Write file"`),`input` 是 `toolCall.rawInput`——沒有任何跨後端保證
- *     的欄位命名(見 packages/adapters/src/acp-adapter.ts 對 `permission-request`
- *     的組裝)。
- * 因此這裡的欄位名稱清單是 **best-effort 的啟發式**,不是型別安全的解析——
- * 猜不到就回傳 `undefined`/空陣列,呼叫端(hard-deny.ts/policy-engine.ts)必須
- * 把「猜不到」導向「不 match」而不是「當作已確認安全」,維持 fail-safe 方向
- * (見 policy-engine_detail.md §3「判定失敗時的方向」)。
+ * 指令/路徑候選的抽取(含 codex 的 `arguments` 外殼)在 packages/shared/src/tool-input.ts——桌面彈窗與 CLI 的
+ * 「永遠允許」規則候選(shared 的 remember-rule.ts)也用同一份,UI 提議的規則才比對得到它自己的請求。這裡留下只有 core 需要的部分:host 候選(要用 `URL`
+ * 解析,shared 的編譯設定不含 Node/DOM 型別)與 realpath/路徑邊界判斷(要用 `node:fs`)。猜不到一律回傳空陣列,
+ * 呼叫端把「猜不到」導向「不 match」(見 shared 那份檔頭的說明)。
  */
-
-/** 常見的「指令字串」欄位名稱(Bash 類工具),依序嘗試。 */
-const COMMAND_KEYS = ["command", "cmd", "script"];
-
-/** 常見的「目標路徑」欄位名稱(檔案類工具),依序嘗試,可能同時命中多個
- *  (例如同一個 input 物件裡剛好有 `path` 也有 `directory`)。 */
-// `filepath`(全小寫):OpenCode 的 `permission.asked` 在工具 part 的完整 input 還沒收到時,退而求其次用的
-// metadata(實測 edit 是 `{filepath, diff}`),見 packages/adapters/src/opencode-adapter.ts。
-const PATH_KEYS = ["file_path", "filePath", "filepath", "path", "notebook_path", "directory", "dir_path", "target_path"];
 
 /** 常見的「host/URL」欄位名稱(網路類工具)。 */
 const HOST_KEYS = ["host", "hostname"];
 const URL_KEYS = ["url", "uri", "endpoint"];
 
-function asRecord(input: unknown): Record<string, unknown> | undefined {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
-  return input as Record<string, unknown>;
-}
-
-/** 從工具呼叫的 input 猜測「指令字串」(Bash 類)。猜不到回傳 undefined。 */
-export function extractCommandFromInput(input: unknown): string | undefined {
-  const obj = asRecord(input);
-  if (!obj) return undefined;
-  for (const key of COMMAND_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return undefined;
-}
-
-/** 從工具呼叫的 input 猜測「目標路徑」候選清單(檔案類)。猜不到回傳空陣列。 */
-export function extractPathCandidates(input: unknown): string[] {
-  const obj = asRecord(input);
-  if (!obj) return [];
-  const out: string[] = [];
-  for (const key of PATH_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) out.push(value);
-  }
-  return out;
-}
-
-/** 從工具呼叫的 input 猜測「目標 host」(網路類)。猜不到回傳 undefined。 */
-export function extractHostFromInput(input: unknown): string | undefined {
-  const obj = asRecord(input);
-  if (!obj) return undefined;
-  for (const key of HOST_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  for (const key of URL_KEYS) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) {
-      try {
-        return new URL(value).hostname;
-      } catch {
-        // 不是合法 URL,無法判斷 host——維持 undefined(呼叫端視為「猜不到」,
-        // 不視為「已核可的 host」)。
-      }
+/** 從工具呼叫的 input 猜測「目標 host」候選清單(網路類),各層、各欄位都收。猜不到回傳空陣列。 */
+export function extractHostCandidates(input: unknown): string[] {
+  const out = toolInputFieldValues(input, HOST_KEYS);
+  for (const value of toolInputFieldValues(input, URL_KEYS)) {
+    try {
+      out.push(new URL(value).hostname);
+    } catch {
+      // 不是合法 URL,無法判斷 host——不列入候選(呼叫端視為「猜不到」,
+      // 不視為「已核可的 host」)。
     }
   }
-  return undefined;
+  return out;
 }
 
 /**

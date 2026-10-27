@@ -48,6 +48,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SUITES = [
   // 單元層級、毫秒級跑完(不啟動 core)—— 放第一個當快速煙霧測試。
   "e2e-hard-deny",
+  // 2026-10-22:「永遠允許」的規則候選(packages/shared/src/remember-rule.ts,桌面彈窗與 CLI 共用)——每個候選丟進
+  // PolicyEngine 都要放行產生它的請求。單元層級、不啟動 core,毫秒級。
+  "e2e-remember-candidates",
   // 2026-10-14:GatewayClient 首次連線失敗後的補載(假 WebSocket,不啟動 core,約 4 秒)。
   "e2e-gateway-client-startup",
   // 2026-10-16:對話串「連續工具呼叫收成一組」的純函式(apps/desktop/src/lib/chat-groups.ts)——不啟動 core、
