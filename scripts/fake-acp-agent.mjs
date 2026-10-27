@@ -167,6 +167,20 @@
  *     不在兩邊各寫一份字面值。用來決定性地驗證 AcpAdapter 會把 `tool_call_update`
  *     帶來的參數補送成同一個 toolCallId 的第二個 `tool-call` 事件,而 core 不重複
  *     計數(`count` 個工具只計 `count` 次)。
+ *   - 若 prompt 文字以 CODEX_MCP_APPROVAL_PREFIX("ACP_CODEX_MCP_APPROVAL ")開頭,其後接一段 JSON
+ *     `{"server": string, "tool": string, "arguments"?: object, "rawInput"?: unknown, "permissionTitle"?: string}`
+ *     (2026-10-21,scripts/e2e-policy-engine.mjs Part 4 用):照 codex-acp 1.13.1 對 MCP 工具的順序送一個工具呼叫
+ *     (讀它的 dist 確認:`createMcpToolCallUpdate()`,與 `buildMcpPermissionRequest()` 有 `correlatedCallId` 的分支)——
+ *       1. `tool_call`(`kind: "execute"`、`status: "in_progress"`、title `mcp.<server>.<tool>`、rawInput
+ *          `{server, tool, arguments}`、`_meta.is_mcp_tool_call`)。
+ *       2. `session/request_permission`,`toolCall` **只有** `{toolCallId, kind: "execute", status: "pending"}`——沒有
+ *          title、沒有 rawInput(codex 認為先前的 `tool_call` 已經講過了),選項是 codex 的 MCP 核可 id(`allow_once`/`cancel`)。
+ *       3. 允許:`tool_call_update`(in_progress)→(completed);拒絕:`tool_call_update`(failed)。最後回一句
+ *          `CODEX_MCP_RESULT:` + JSON `{allowed}`。
+ *     `rawInput` 有給時 `tool_call` 改帶它、取代 codex 的 `{server, tool, arguments}` 外殼:codex 把真正的參數包在
+ *     `arguments` 裡,而 core 的 hard-deny 只看最外層欄位(見 apps/core/src/permissions/tool-input.ts),e2e 要證明「補上的
+ *     input 確實送到 hard-deny」時就用最外層帶路徑的形狀。`permissionTitle` 有給時權限請求自己帶這個 title(驗證「請求
+ *     本身有值的欄位優先」)。
  *   - 若 prompt 文字等於 EMPTY_RESULT_TOOL_NAME_PREFIX
  *     ("ACP_EMPTY_RESULT_TOOL_NAME",不接受任何參數)(CLI/TUI「工具失敗那
  *     一行要有工具名稱」的 e2e 用,見 scripts/e2e-cli.mjs 的案例 12 與
@@ -341,6 +355,12 @@ export const OPENCODE_TOOL_CALLS_PREFIX = "ACP_OPENCODE_TOOL_CALLS ";
 export const OPENCODE_TOOL_PENDING_TITLE = "opencode_tool";
 export const opencodeToolRunningTitle = (index) => `opencode_tool_running_${index}`;
 export const opencodeToolInput = (index) => ({ message: `opencode-style-input-${index}`, limit: index + 10 });
+/** e2e-policy-engine.mjs Part 4 用:照 codex-acp 對 MCP 工具的順序送工具呼叫與「只帶 toolCallId」的權限請求,見檔頭註解。 */
+export const CODEX_MCP_APPROVAL_PREFIX = "ACP_CODEX_MCP_APPROVAL ";
+/** 上面那一輪結尾的回覆前綴(後接 `{allowed}` 的 JSON)。 */
+export const CODEX_MCP_RESULT_PREFIX = "CODEX_MCP_RESULT:";
+/** codex-acp 給 MCP 工具取的 title(`createMcpToolCallUpdate()`)。 */
+export const codexMcpToolTitle = (server, tool) => `mcp.${server}.${tool}`;
 /** CLI/TUI「工具失敗那一行要有工具名稱」e2e 用(不接受參數),見檔頭註解。 */
 export const EMPTY_RESULT_TOOL_NAME_PREFIX = "ACP_EMPTY_RESULT_TOOL_NAME";
 /** 上面那一輪用到的固定字串——e2e 直接 import,不在兩邊各寫一份字面值。 */
@@ -671,6 +691,8 @@ class FakeAcpAgent {
         await this.handleDiffContent(params.sessionId, text.slice(DIFF_CONTENT_PREFIX.length), cx);
       } else if (text.startsWith(OPENCODE_TOOL_CALLS_PREFIX)) {
         await this.handleOpencodeToolCalls(params.sessionId, text.slice(OPENCODE_TOOL_CALLS_PREFIX.length), cx);
+      } else if (text.startsWith(CODEX_MCP_APPROVAL_PREFIX)) {
+        await this.handleCodexMcpApproval(params.sessionId, text.slice(CODEX_MCP_APPROVAL_PREFIX.length), cx);
       } else if (text === UPSERT_TOOL_CALLS_PREFIX) {
         await this.handleUpsertToolCalls(params.sessionId, cx);
       } else if (text === EMPTY_RESULT_TOOL_NAME_PREFIX) {
@@ -1278,6 +1300,50 @@ class FakeAcpAgent {
         content: { type: "text", text: `睡了 ${ms}ms 後正常結束` },
       },
     });
+  }
+
+  /** 2026-10-21:照 codex-acp 對 MCP 工具的順序送一個工具呼叫,權限請求只帶 toolCallId,見檔頭註解。 */
+  async handleCodexMcpApproval(sessionId, rawJson, cx) {
+    const { server, tool, arguments: args = {}, rawInput, permissionTitle } = JSON.parse(rawJson);
+    const toolCallId = `call_${randomUUID()}`;
+    const update = (fields) => cx.notify(acp.methods.client.session.update, { sessionId, update: { toolCallId, ...fields } });
+
+    await update({
+      sessionUpdate: "tool_call",
+      kind: "execute",
+      title: codexMcpToolTitle(server, tool),
+      status: "in_progress",
+      rawInput: rawInput ?? { server, tool, arguments: args },
+      _meta: { is_mcp_tool_call: true },
+    });
+
+    const permissionResponse = await cx.request(acp.methods.client.session.requestPermission, {
+      sessionId,
+      toolCall: { toolCallId, kind: "execute", status: "pending", ...(permissionTitle ? { title: permissionTitle } : {}) },
+      _meta: { is_mcp_tool_approval: true },
+      options: [
+        { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+        { optionId: "cancel", name: "Cancel", kind: "reject_once" },
+      ],
+    });
+    const outcome = permissionResponse.outcome;
+    const allowed = outcome.outcome === "selected" && outcome.optionId === "allow_once";
+
+    if (allowed) {
+      await update({ sessionUpdate: "tool_call_update", status: "in_progress" });
+      await update({
+        sessionUpdate: "tool_call_update",
+        status: "completed",
+        rawOutput: { result: { content: [{ type: "text", text: "ok" }] }, error: null },
+      });
+    } else {
+      await update({
+        sessionUpdate: "tool_call_update",
+        status: "failed",
+        rawOutput: { result: null, error: { message: "user cancelled MCP tool call" } },
+      });
+    }
+    await this.say(sessionId, cx, `${CODEX_MCP_RESULT_PREFIX}${JSON.stringify({ allowed })}`);
   }
 
   async handleWriteFile(sessionId, rawJson, cx) {
