@@ -55,6 +55,8 @@ import { acpOptionChoices, acpSessionOptions, findAcpConfigOption, invalidOption
  *    `canUseTool`)。ACP 的回覆需要從 agent 提供的 `options`(每個都是
  *    `allow_once`/`allow_always`/`reject_once`/`reject_always` 之一)裡選一個
  *    `optionId`,而不是單純的 boolean,所以要記住每筆請求當下的 `options`。
+ *    權限請求的 `toolCall` 是一則 `ToolCallUpdate`(沒帶的欄位 = 沿用先前的值),codex-acp 對 MCP 工具就只帶
+ *    `toolCallId`——title 與 rawInput 由收到訊息當下記住的工具資訊補上,見 `rememberToolCallInfo()`。
  *  - `interrupt()` 對應 `session/cancel` 通知;`dispose()` 關閉 ACP 連線、
  *    結束子程序,並讓所有懸置的權限請求以「挑一個 reject 系列的 option
  *    (找不到就回 cancelled)」收場,不讓 agent 的 `requestPermission` 呼叫
@@ -309,11 +311,27 @@ export class AcpAdapter implements AgentAdapter {
     // 2026-10-06(AI 自動命名):命名用臨時 session 的 id(見 `generateTitle()`)。權限請求的 handler 在 internal 建好之前
     // 就得註冊,所以這個 Set 先在這裡建、再放進 internal。
     const titleSessionIds = new Set<string>();
+    // 2026-10-21:toolCallId -> 最近一次 `tool_call`/`tool_call_update` 帶來的 title 與 rawInput,供權限請求補欄位。
+    // 必須在**收到訊息的當下**記,不能等 `consume()`:SDK 對每則訊息是並行分派的,權限請求的 handler 一收到就跑,
+    // 而 `consume()` 可能還卡在處理更早的 update(例如前一個編輯工具完成時的讀檔快照),那時它還沒看到這個工具的 `tool_call`。
+    // 所以在連線讀到訊息、交給 SDK 之前先過一層,依線上的順序記錄——codex-acp 送權限請求前會先等 `tool_call` 通知送出。
+    const toolCallInfo = new Map<string, ToolCallInfo>();
 
-    const stream = acp.ndJsonStream(
+    const rawStream = acp.ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
       Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
     );
+    const stream: acp.Stream = {
+      writable: rawStream.writable,
+      readable: rawStream.readable.pipeThrough(
+        new TransformStream<acp.AnyMessage, acp.AnyMessage>({
+          transform(message, controller) {
+            rememberToolCallInfo(toolCallInfo, message, titleSessionIds);
+            controller.enqueue(message);
+          },
+        }),
+      ),
+    };
 
     const clientApp = acp
       .client({ name: "deskmony" })
@@ -325,15 +343,23 @@ export class AcpAdapter implements AgentAdapter {
           console.warn(`[acp-adapter] ${agentLabel} 的命名用臨時對話要求工具權限(${ctx.params.toolCall.title ?? "?"}),已拒絕`);
           return Promise.resolve(buildPermissionResponse(ctx.params.options, "deny"));
         }
+        // 2026-10-21:codex-acp(1.13.1)對**已經送過 `tool_call`** 的 MCP 工具發權限請求時只帶 `toolCallId`(沒有 title、
+        // 沒有 rawInput)。過去直接拿 call id 當 toolName、input 是空的,政策引擎的 config 規則與「永遠允許」對 codex 的
+        // MCP 工具一律比對不到(每次都要人核可),hard-deny 也看不到參數。依 ACP `ToolCallUpdate` 的語意(沒帶 = 沿用),
+        // 用這個 toolCallId 先前記下的值補上;請求本身有帶的欄位優先。
+        const { toolCall } = ctx.params;
+        const known = toolCallInfo.get(toolCall.toolCallId);
+        const title = toolCall.title || known?.title;
+        const input = toolCall.rawInput ?? known?.rawInput;
         return new Promise<acp.RequestPermissionResponse>((resolve) => {
           const requestId = String(ctx.requestId);
           pendingPermissions.set(requestId, { resolve, options: ctx.params.options });
           outputQueue.push({
             type: "permission-request",
             requestId,
-            toolName: ctx.params.toolCall.title ?? ctx.params.toolCall.toolCallId,
-            input: ctx.params.toolCall.rawInput,
-            description: ctx.params.toolCall.title ?? undefined,
+            toolName: title || toolCall.toolCallId,
+            input,
+            description: title || undefined,
           });
         });
       });
@@ -399,6 +425,7 @@ export class AcpAdapter implements AgentAdapter {
         pendingPermissions,
         toolTitles: new Map(),
         toolInputs: new Map(),
+        toolCallInfo,
         currentMessageId: null,
         sessionCapabilities: initialized.agentCapabilities?.sessionCapabilities ?? undefined,
         titleSessionIds,
@@ -516,6 +543,7 @@ export class AcpAdapter implements AgentAdapter {
       pending.resolve(buildPermissionResponse(pending.options, "deny"));
     }
     internal.pendingPermissions.clear();
+    internal.toolCallInfo.clear();
     // 進行中的命名臨時對話一併中止(連線馬上要關了)。
     for (const controller of internal.titleAborts) controller.abort();
     internal.lastCost = undefined;
@@ -1032,6 +1060,8 @@ interface InternalSession {
    * 呼叫進入終態(completed/failed)後記成 `null`:不再補送。
    */
   toolInputs: Map<string, string | null>;
+  /** toolCallId -> 收到訊息當下記住的 title/rawInput,權限請求補欄位用,見 `rememberToolCallInfo()`。 */
+  toolCallInfo: Map<string, ToolCallInfo>;
   currentMessageId: string | null;
   /**
    * S3a(usage-metering)L4 §2:最近一次從 `usage_update` 拿到的累計花費
@@ -1109,6 +1139,52 @@ function isInformativeToolInput(input: unknown): boolean {
 /** 供「這次的 input 和上次送出的一樣嗎」比對用;`rawInput` 來自 JSON-RPC,必定可序列化。 */
 function serializeToolInput(input: unknown): string {
   return JSON.stringify(input) ?? "undefined";
+}
+
+/** 權限請求補欄位用的工具資訊,見 `rememberToolCallInfo()`。 */
+interface ToolCallInfo {
+  title?: string;
+  rawInput?: unknown;
+}
+
+/**
+ * 同時記住的工具數上限。正常情況下工具一進終態(completed/failed)就刪掉;這個上限只防「永遠等不到終態」的工具
+ * (被中斷、agent 中途掛掉)在長時間 session 裡越積越多。超過就丟最久沒動靜的——那種工具不會再來權限請求了。
+ */
+const MAX_REMEMBERED_TOOL_CALLS = 256;
+
+/**
+ * 連線讀到的每一則訊息都先過這裡(見 spawn() 建立 `stream` 的地方),記下 `session/update` 的 `tool_call`/`tool_call_update`
+ * 帶來的 title 與 rawInput:`tool_call` 重新開始一筆,`tool_call_update` 依 ACP 語意合併(有帶、非 null 的欄位覆蓋,
+ * 沒帶的沿用);工具進入終態就刪掉。命名用臨時 session 的工具不記——它們的權限請求一律當場拒絕,也等不到終態。
+ * 訊息這時還沒經過 SDK 的驗證,只取型別對得上的欄位。
+ */
+function rememberToolCallInfo(info: Map<string, ToolCallInfo>, message: acp.AnyMessage, titleSessionIds: ReadonlySet<string>): void {
+  if (!("method" in message) || "id" in message || message.method !== acp.methods.client.session.update) return;
+  const params = asRecord(message.params);
+  if (!params || typeof params.sessionId !== "string" || titleSessionIds.has(params.sessionId)) return;
+  const update = asRecord(params.update);
+  if (!update || (update.sessionUpdate !== "tool_call" && update.sessionUpdate !== "tool_call_update")) return;
+  const toolCallId = update.toolCallId;
+  if (typeof toolCallId !== "string") return;
+  if (update.status === "completed" || update.status === "failed") {
+    info.delete(toolCallId);
+    return;
+  }
+  const entry: ToolCallInfo = update.sessionUpdate === "tool_call" ? {} : (info.get(toolCallId) ?? {});
+  if (typeof update.title === "string" && update.title) entry.title = update.title;
+  if (update.rawInput !== undefined && update.rawInput !== null) entry.rawInput = update.rawInput;
+  // 刪掉再放回去:Map 依插入順序迭代,最近有動靜的排到最後,超過上限時丟的就是最久沒動靜的那筆。
+  info.delete(toolCallId);
+  info.set(toolCallId, entry);
+  if (info.size > MAX_REMEMBERED_TOOL_CALLS) {
+    const oldest = info.keys().next().value;
+    if (oldest !== undefined) info.delete(oldest);
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
 function findDiffBlock(content: acp.ToolCallContent[] | null | undefined): acp.Diff | undefined {

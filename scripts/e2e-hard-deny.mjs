@@ -32,6 +32,11 @@
  * 每一類都同時測「該擋的有擋」與「不該擋的沒誤擋」——只測前者的話,一個
  * 「永遠回傳 matched:true」的實作也會全綠。
  *
+ * 2026-10-22:codex-acp 把工具參數包在 `arguments` 裡(MCP 工具是 `{server, tool, arguments}`),
+ * 「codex 的 arguments 外殼」一節驗證四類都看得到這一層、只解一層,以及同一個 input 裡無害的
+ * 欄位遮不住危險的那一個(見 apps/core/src/permissions/tool-input.ts 的 `inputLayers()`);C5/C6 驗證參考實作
+ * filesystem MCP 的 `source`/`destination`(move_file)與 `paths` 陣列(read_multiple_files)也看得到。
+ *
  * 用法:node scripts/e2e-hard-deny.mjs
  * 前置需求:pnpm build 已跑過
  */
@@ -376,6 +381,121 @@ console.log("\n=== 第 1 類:worktree-escape(補邊界案例)===\n");
     "1b 第1類只管 mutating 工具:唯讀工具讀 worktree 外的無害檔案不算 escape,但讀秘密路徑仍會被第2類擋下",
     !readOutside.matched && readSecret.matched && readSecret.category === "secret-path",
     `唯讀+worktree外無害檔=${readOutside.matched}, 唯讀+秘密路徑=${readSecret.category}`,
+  );
+}
+
+// ===========================================================================
+// codex 的 arguments 外殼(2026-10-22)
+// ===========================================================================
+console.log("\n=== codex 的 arguments 外殼:四類都要看得到 MCP 工具真正的參數 ===\n");
+
+/** codex-acp 1.13.1 給 MCP 工具的 rawInput(dist 的 `createMcpRawInput()`)與 title(`createMcpToolCallUpdate()`)。 */
+const codexMcp = (server, tool, args) => ({ toolName: `mcp.${server}.${tool}`, input: { server, tool, arguments: args } });
+
+{
+  const cases = [
+    ["filesystem MCP read_file 讀 ~/.ssh/id_rsa", codexMcp("filesystem", "read_file", { path: path.join(HOME, ".ssh", "id_rsa") }), "secret-path"],
+    ["filesystem MCP write_file 寫到 worktree 外", codexMcp("filesystem", "write_file", { path: path.join(os.tmpdir(), "outside.txt"), content: "x" }), "worktree-escape"],
+    ["shell MCP 的 command 是 force-push", codexMcp("shell", "run", { command: "git push --force origin main" }), "dangerous-git"],
+    ["fetch MCP 的 url 不在白名單", codexMcp("fetch", "fetch", { url: "https://evil.example.com/x" }), "non-allowlisted-network"],
+    // codex 其餘兩種外殼:function call 是 `{name, arguments}`、dynamic tool 是 `{arguments}`。
+    ["function call 外殼 {name, arguments}", { toolName: "Read file", input: { name: "read", arguments: { file_path: path.join(HOME, ".aws", "credentials") } } }, "secret-path"],
+    ["dynamic tool 外殼 {arguments}", { toolName: "Read file", input: { arguments: { path: path.join(WORKTREE, ".env") } } }, "secret-path"],
+  ];
+  const missed = cases.filter(([, c, category]) => {
+    const r = check(c);
+    return !(r.matched && r.category === category);
+  });
+  record(
+    `C1 codex 的 arguments 外殼:${cases.length} 種(四類 + function call/dynamic tool 兩種外殼)全部命中對應類別`,
+    missed.length === 0,
+    missed.length === 0 ? `全部 ${cases.length} 種都命中` : `未命中:${missed.map(([l, c]) => `${l} → ${JSON.stringify(check(c))}`).join("、")}`,
+  );
+}
+
+{
+  // 對照組:外殼裡的參數無害時不誤擋;白名單內的 host 照樣放行。
+  const benign = [
+    ["worktree 內寫檔", codexMcp("filesystem", "write_file", { path: path.join(WORKTREE, "src", "a.ts"), content: "x" })],
+    ["唯讀工具讀 worktree 外的無害檔", codexMcp("filesystem", "read_file", { path: path.join(os.tmpdir(), "harmless.txt") })],
+    ["一般 git push", codexMcp("shell", "run", { command: "git push origin main" })],
+    ["白名單內的 host", { ...codexMcp("fetch", "fetch", { url: "https://api.example.com/v1" }), allowedHosts: ["api.example.com"] }],
+    ["沒有任何認得的欄位", codexMcp("github", "create_issue", { title: "t", body: "b" })],
+  ];
+  const wrongly = benign.filter(([, c]) => check(c).matched);
+  record(
+    "C2 codex 的 arguments 外殼不誤擋:worktree 內寫檔、唯讀讀無害檔、一般 push、白名單 host、沒有認得欄位的工具都不命中",
+    wrongly.length === 0,
+    wrongly.length === 0 ? `${benign.length} 個對照組皆未命中(正確)` : `被誤擋:${wrongly.map(([l]) => l).join("、")}`,
+  );
+}
+
+{
+  // 只取第一個候選的話,最外層一個無害的值會把外殼裡(或同一層別的欄位裡)危險的那一個遮住。
+  const maskedCommand = check({ toolName: "Bash", input: { command: "ls", arguments: { command: "git push --force origin main" } } });
+  const maskedHost = check({ toolName: "WebFetch", input: { host: "api.example.com", url: "https://evil.example.com" }, allowedHosts: ["api.example.com"] });
+  const maskedPath = check({
+    toolName: "Write file",
+    input: { path: path.join(WORKTREE, "ok.txt"), arguments: { path: path.join(os.tmpdir(), "outside.txt") } },
+  });
+  record(
+    "C3 無害的候選遮不住危險的:最外層 command 無害但外殼裡是 force-push、host 在白名單但 url 不在、最外層路徑在 worktree 內但外殼裡的在外面——三者都擋",
+    maskedCommand.category === "dangerous-git" && maskedHost.category === "non-allowlisted-network" && maskedPath.category === "worktree-escape",
+    `command=${maskedCommand.category}, host=${maskedHost.category}, path=${maskedPath.category}`,
+  );
+}
+
+{
+  /**
+   * 設計邊界,刻意斷言**不**命中:只解一層 `arguments`。更深的物件是工具的資料,不是它要碰的路徑——
+   * 遞迴進去會讓不可學習的 hard-deny 開始誤擋(理由見 tool-input.ts 的 `inputLayers()`)。`arguments`
+   * 是字串(未解析的 JSON)時也看不進去。這兩種情況交給 PolicyEngine 的 default-deny 兜底(猜不到 ≠ 放行)。
+   * 若哪天改成遞迴或會解析字串,這條會失敗——那是提醒要一起更新 inputLayers() 的註解與這裡。
+   */
+  const deeper = check(codexMcp("filesystem", "read_file", { options: { path: path.join(HOME, ".ssh", "id_rsa") } }));
+  const stringArgs = check({ toolName: "mcp.filesystem.read_file", input: { server: "filesystem", tool: "read_file", arguments: JSON.stringify({ path: path.join(HOME, ".ssh", "id_rsa") }) } });
+  record(
+    "C4 【設計邊界,刻意斷言不命中】只解一層:arguments 裡再一層的物件、字串形式的 arguments 都不看",
+    !deeper.matched && !stringArgs.matched,
+    `更深一層=${deeper.matched}, 字串 arguments=${stringArgs.matched}`,
+  );
+}
+
+{
+  // 參考實作 filesystem MCP 另外兩種路徑欄位:move_file 的 `source`/`destination`、read_multiple_files 的 `paths` 陣列。
+  // 搬檔會改動來源那一端,所以來源在 worktree 外也算 worktree-escape。Claude SDK 的 MCP 工具沒有外殼,最外層也要看得到。
+  const cases = [
+    ["move_file 的 destination 在 worktree 外", codexMcp("filesystem", "move_file", { source: path.join(WORKTREE, "a.txt"), destination: path.join(os.tmpdir(), "outside.txt") }), "worktree-escape"],
+    ["move_file 的 source 在 worktree 外(搬走 = 改動來源)", codexMcp("filesystem", "move_file", { source: path.join(os.tmpdir(), "outside.txt"), destination: path.join(WORKTREE, "a.txt") }), "worktree-escape"],
+    ["read_multiple_files 的 paths 裡夾一個 ~/.ssh/id_rsa", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, "a.ts"), path.join(HOME, ".ssh", "id_rsa")] }), "secret-path"],
+    ["read_multiple_files 的 paths 裡有 .env", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, ".env")] }), "secret-path"],
+    ["Claude SDK 形狀(無外殼)的 move_file", { toolName: "mcp__filesystem__move_file", input: { source: path.join(WORKTREE, "a.txt"), destination: path.join(os.tmpdir(), "outside.txt") } }, "worktree-escape"],
+  ];
+  const missed = cases.filter(([, c, category]) => {
+    const r = check(c);
+    return !(r.matched && r.category === category);
+  });
+  record(
+    `C5 filesystem MCP 的 source/destination/paths 欄位:${cases.length} 種(move_file 兩端、read_multiple_files 陣列、無外殼形狀)全部命中對應類別`,
+    missed.length === 0,
+    missed.length === 0 ? `全部 ${cases.length} 種都命中` : `未命中:${missed.map(([l, c]) => `${l} → ${JSON.stringify(check(c))}`).join("、")}`,
+  );
+}
+
+{
+  // 對照組:兩端都在 worktree 內的搬檔、全是無害檔案的 paths、拿 `source` 放非路徑字串的工具(會被當成 worktree 內的相對路徑)、
+  // paths 裡夾非字串元素——都不命中。
+  const benign = [
+    ["move_file 兩端都在 worktree 內", codexMcp("filesystem", "move_file", { source: path.join(WORKTREE, "a.txt"), destination: path.join(WORKTREE, "b.txt") })],
+    ["read_multiple_files 全是無害檔", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, "a.ts"), path.join(os.tmpdir(), "harmless.txt")] })],
+    ["source 放的不是路徑", codexMcp("search", "query", { source: "web", query: "deskmony" })],
+    ["paths 裡夾非字串元素", codexMcp("filesystem", "read_multiple_files", { paths: [path.join(WORKTREE, "a.ts"), 42, null, { nested: true }] })],
+  ];
+  const wrongly = benign.filter(([, c]) => check(c).matched);
+  record(
+    "C6 source/destination/paths 不誤擋:worktree 內搬檔、無害的 paths、source 放非路徑字串、paths 夾非字串元素都不命中",
+    wrongly.length === 0,
+    wrongly.length === 0 ? `${benign.length} 個對照組皆未命中(正確)` : `被誤擋:${wrongly.map(([l, c]) => `${l} → ${JSON.stringify(check(c))}`).join("、")}`,
   );
 }
 

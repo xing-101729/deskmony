@@ -1,12 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import {
-  extractCommandFromInput,
-  extractHostFromInput,
-  extractPathCandidates,
-  isPathUnder,
-  resolveRealpathBestEffort,
-} from "./tool-input.js";
+import { extractCommandCandidates, extractPathCandidates } from "@deskmony/shared";
+import { extractHostCandidates, isPathUnder, resolveRealpathBestEffort } from "./tool-input.js";
 
 /**
  * hard-deny.ts(S1:內建、config 不可關閉的硬性 deny 類 — F4)。
@@ -205,8 +200,7 @@ export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
   // 3) force-push / 危險 git——只對猜得到「指令字串」的工具做 regex 掃描
   //    (見 policy-engine_detail.md §2「shell 的誠實限制」:這裡的 pattern 只
   //    擋明顯的意外,擋不住 `bash -c`/`$()`/base64 刻意繞過)。
-  const command = extractCommandFromInput(req.input);
-  if (command !== undefined) {
+  for (const command of extractCommandCandidates(req.input)) {
     for (const { category, test } of DANGEROUS_GIT_PATTERNS) {
       if (test(command)) {
         return {
@@ -223,8 +217,8 @@ export function checkHardDeny(req: HardDenyCheckInput): HardDenyResult {
   //    `isDeskmonyBrowserNavigateTool()`,完整比對三種 adapter 的寫法、綁 `deskmony` server 名稱)不做這個檢查——loopback 依 Q5 不算外連,
   //    外部網站則由 core 的 `BrowserRelay` 導覽規則擋(只放行 loopback、`policy.allowedHosts`、或該 session 開著真.無限制,
   //    而且比這裡**更嚴**:沒有「逐次強確認放行」這條路)。WebFetch 等其他工具的第 4 類判斷完全不變。
-  const host = isDeskmonyBrowserNavigateTool(req.toolName) ? undefined : extractHostFromInput(req.input);
-  if (host !== undefined) {
+  const hostCandidates = isDeskmonyBrowserNavigateTool(req.toolName) ? [] : extractHostCandidates(req.input);
+  for (const host of hostCandidates) {
     const allowed = req.allowedHosts.some((h) => h.toLowerCase() === host.toLowerCase());
     if (!allowed) {
       return {

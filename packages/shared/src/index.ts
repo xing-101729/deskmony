@@ -20,3 +20,5 @@ export * from "./terminal.js";
 export * from "./workspace.js";
 export * from "./browser.js";
 export * from "./errors.js";
+export * from "./tool-input.js";
+export * from "./remember-rule.js";

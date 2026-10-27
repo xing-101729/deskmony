@@ -195,6 +195,8 @@ local:    !gateway.hasRemoteClient()            // 見下
 | 檔案類 | `pathUnder: "<該檔案所在目錄>"` | `pathUnder: "<worktree 根>"` |
 | 其他 | `tool: "<toolName>"` 精確 | (無) |
 
+> **2026-10-22**:候選由 `packages/shared/src/remember-rule.ts` 的 `rememberRuleCandidates()` 產生,桌面彈窗與 CLI/TUI 的 `[A]`(取第一個)共用,指令/路徑的抽取也與政策引擎同一份(`packages/shared/src/tool-input.ts`,含 codex 的 `arguments` 外殼)。因為 allow 規則要**全部**候選值都符合才命中(見 policy-engine_detail.md §2),只提議比對得到這個請求本身的規則:指令候選不全相同就不給指令規則;多個路徑時「所在目錄」改成它們的共同祖先,退到根目錄(彼此無關)時不提議,只留 worktree 根那個候選。
+
 - 區塊頂端顯示 **「你將永遠允許:<規則的人話描述>」**。
 - 送出 `rememberRule` → Core 寫入 `config.json` 的 `policy.rules`,**unshift 或 push 依 effect**(allow → push 到尾端,deny → unshift,見 S1 L4 §2)。
 - 寫入後**需重啟才生效**(policy 無熱重載,S1 L4 §5 判斷)⇒ **UI 必須明示這點**,否則使用者會困惑「我按了永遠允許怎麼又問我」。

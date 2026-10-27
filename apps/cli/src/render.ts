@@ -1,4 +1,11 @@
-import type { AgentEvent, PolicyRule, SessionEventEnvelope } from "@deskmony/shared";
+import {
+  extractCommandCandidates,
+  extractPathCandidates,
+  rememberRuleCandidates,
+  type AgentEvent,
+  type PolicyRule,
+  type SessionEventEnvelope,
+} from "@deskmony/shared";
 
 /**
  * 事件 → 終端輸出,以及色彩/ASCII 降級,全部集中在這個檔案(HLD §4.2 對
@@ -41,16 +48,12 @@ const ARROW = "->";
 // ---- 已知輸入鍵(§13.3 陷阱:絕不能只顯示 description) --------------------
 
 /**
- * 與 apps/desktop/src/views/PermissionModal.tsx 的 `COMMAND_KEYS`/
- * `PATH_KEYS` **刻意維持同一份清單**(手動同步,不是 import——CLI 不依賴
- * apps/desktop,兩邊各自是獨立的 client,見 cli_hld.md §4.2 的套件邊界)。
- * 兩處讀的是同一個 `PermissionRequestEvent.input`(同一個 gateway 事件),
- * 「認得哪些鍵、優先顯示哪個」理應完全一致——不然使用者在桌面殼按「永遠
- * 允許」記住的規則範圍,會跟在 CLI 裡看到的提示文字對不上。若之後
- * `PermissionModal.tsx` 那份清單改了,這裡也要跟著改。
+ * 指令/路徑用 @deskmony/shared 的 `extractCommandCandidates()`/`extractPathCandidates()`——core 的政策引擎、
+ * 桌面殼的權限彈窗都用同一份(2026-10-22 起;在此之前這裡與 PermissionModal.tsx 各抄一份清單、靠註解手動同步,
+ * 兩份都漏了 OpenCode 的 `filepath`,也都看不到 codex 包在 `arguments` 外殼裡的參數)。兩處讀的是同一個
+ * `PermissionRequestEvent.input`,「認得哪些鍵、優先顯示哪個」理應完全一致——不然使用者在桌面殼按「永遠
+ * 允許」記住的規則範圍,會跟在 CLI 裡看到的提示文字對不上。顯示時取第一個候選。
  */
-const COMMAND_KEYS = ["command", "cmd", "script"];
-const PATH_KEYS = ["file_path", "filePath", "path", "notebook_path", "directory", "dir_path", "target_path"];
 /** 這幾個不影響「永遠允許」規則要多窄(見 buildNarrowestRememberRule()),
  *  純粹是讓提示訊息對更多常見工具(WebFetch/Grep/Write 的 content)更有
  *  資訊量,滿足 §13.3「絕不能只顯示 description」的精神。 */
@@ -64,14 +67,6 @@ const EXTRA_DISPLAY_KEYS: Array<{ key: string; label: string }> = [
 function asRecord(input: unknown): Record<string, unknown> | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
   return input as Record<string, unknown>;
-}
-
-function firstStringByKeys(obj: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return undefined;
 }
 
 function truncate(s: string, maxLen: number): string {
@@ -103,9 +98,9 @@ export function summarizeToolInputLines(input: unknown, maxFieldLen = 300): stri
   if (!obj) return [`參數:${truncate(safeJsonStringify(input), maxFieldLen)}`];
 
   const lines: string[] = [];
-  const command = firstStringByKeys(obj, COMMAND_KEYS);
+  const command = extractCommandCandidates(input)[0];
   if (command !== undefined) lines.push(`指令:${truncate(command, maxFieldLen)}`);
-  const filePath = firstStringByKeys(obj, PATH_KEYS);
+  const filePath = extractPathCandidates(input)[0];
   if (filePath !== undefined) lines.push(`路徑:${filePath}`);
   for (const { key, label } of EXTRA_DISPLAY_KEYS) {
     const value = obj[key];
@@ -123,48 +118,27 @@ export function summarizeToolInputLines(input: unknown, maxFieldLen = 300): stri
 export function summarizeToolCallOneLine(toolName: string, input: unknown): string {
   const obj = asRecord(input);
   if (!obj) return toolName;
-  const command = firstStringByKeys(obj, COMMAND_KEYS);
+  const command = extractCommandCandidates(input)[0];
   if (command !== undefined) return `${toolName} ${truncate(command, 120)}`;
-  const filePath = firstStringByKeys(obj, PATH_KEYS);
+  const filePath = extractPathCandidates(input)[0];
   if (filePath !== undefined) return `${toolName} ${filePath}`;
   if (input === undefined) return toolName;
   return `${toolName} ${truncate(safeJsonStringify(input), 120)}`;
 }
 
-function dirnameOf(p: string): string {
-  const normalized = p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const idx = normalized.lastIndexOf("/");
-  if (idx <= 0) return normalized.startsWith("/") ? "/" : normalized;
-  return normalized.slice(0, idx);
-}
-
 /**
- * 「永遠允許(最窄規則)」——與 apps/desktop/src/views/PermissionModal.tsx
- * 的 `buildRememberCandidates()` 選出的**第一個(預設)候選**規則刻意採用
- * 完全相同的邏輯(HLD §6:「[A] 只送最窄的規則,與 PermissionModal.tsx 的
- * 預設一致」):
- *   1. 有 command 類的鍵 → `commandEquals`(完整比對這一次的指令字串)。
- *   2. 沒有 command、但有 path 類的鍵 → `pathUnder`(這個檔案所在的目錄,
- *      不是檔案本身——目錄前綴比對比「只允許這一個檔名」更常用,也是
- *      PermissionModal.tsx 選的預設候選)。
- *   3. 都沒有 → 對這個工具整體放行(`{tool, effect:"allow"}`,不帶
- *      `when`)。
- * CLI 不提供 PermissionModal.tsx 那個「commandMatches 前綴規則」的第二個
- * candidate 選項——單鍵互動(見 prompt.ts)沒有位置放「選單」,Phase 1 只
- * 給預設(最窄)這一種,想要更寬的規則仍然可以到桌面殼的「權限」設定頁
- * 手動加。
+ * 「永遠允許(最窄規則)」——@deskmony/shared 的 `rememberRuleCandidates()` 的**第一個(最窄)候選**,與桌面殼
+ * apps/desktop/src/views/PermissionModal.tsx 預設選的那個是同一份程式(HLD §6:「[A] 只送最窄的規則,與
+ * PermissionModal.tsx 的預設一致」;2026-10-22 之前兩邊各寫一份、靠註解同步)。大致是:
+ *   1. 有 command 類的鍵(所有候選都相同)→ `commandEquals`(完整比對這一次的指令字串)。
+ *   2. 否則有 path 類的鍵 → `pathUnder`(所在目錄;多個路徑取共同祖先,退到根目錄時改用 `workingDir`)。
+ *   3. 都沒有 → 對這個工具整體放行(`{tool, effect:"allow"}`,不帶 `when`)。
+ * 細節與理由見該函式的註解。CLI 不提供 PermissionModal.tsx 那個「commandMatches 前綴規則」的第二個
+ * candidate 選項——單鍵互動(見 prompt.ts)沒有位置放「選單」,Phase 1 只給預設(最窄)這一種,想要更寬的
+ * 規則仍然可以到桌面殼的「權限」設定頁手動加。`workingDir` 是這個 session 的工作目錄(桌面殼同樣會傳)。
  */
-export function buildNarrowestRememberRule(toolName: string, input: unknown): PolicyRule {
-  const obj = asRecord(input);
-  const command = obj ? firstStringByKeys(obj, COMMAND_KEYS) : undefined;
-  if (command !== undefined) {
-    return { tool: toolName, when: { commandEquals: command }, effect: "allow" };
-  }
-  const filePath = obj ? firstStringByKeys(obj, PATH_KEYS) : undefined;
-  if (filePath !== undefined) {
-    return { tool: toolName, when: { pathUnder: dirnameOf(filePath) }, effect: "allow" };
-  }
-  return { tool: toolName, effect: "allow" };
+export function buildNarrowestRememberRule(toolName: string, input: unknown, workingDir?: string): PolicyRule {
+  return rememberRuleCandidates(toolName, input, workingDir)[0].rule;
 }
 
 // ---- 換行狀態追蹤 ---------------------------------------------------------
