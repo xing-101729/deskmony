@@ -26,6 +26,11 @@
  * `e2e-cli.mjs` 額外走 fake-acp-agent 但驅動的是編譯後的 CLI 子程序本身),
  * 在沒有任何憑證的機器上也能重現同樣結果。
  *
+ * ---- 多個 worktree 同時跑 ----------------------------------------------
+ *
+ * 2026-10-27 起各支 e2e 的 core port 都是動態挑選的(見 lib/e2e-ports.mjs),
+ * 不同 worktree 可以同時跑這支總跑器或單支 e2e,不會連到彼此的 core。
+ *
  * 用法:
  *   node scripts/run-e2e.mjs              # 全部跑完(即使中途有失敗)
  *   node scripts/run-e2e.mjs --bail       # 第一支失敗就停
@@ -36,6 +41,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { PORT_CONFLICT_EXIT_CODE } from "./lib/e2e-ports.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -162,9 +168,23 @@ function extractTally(output) {
 const results = [];
 console.log(`\n跑 ${selected.length} 支決定性 e2e(不含需要真實憑證的 e2e-gateway.mjs)\n`);
 
+/**
+ * 2026-10-27:core 綁不到動態挑選的 port 時(取號到 core 開始 listen 之間被別人搶走),
+ * 那支 e2e 會以 PORT_CONFLICT_EXIT_CODE 主動中止(見 lib/e2e-ports.mjs 的 guardCorePort)。
+ * 那不是測試失敗、是環境撞號,整支重跑會抽到新的 port。最多重跑兩次——連續三次都撞號
+ * 代表機器上有東西在大量佔用 20000-31999,應該讓人看到,而不是無限重試蓋掉它。
+ */
+const MAX_PORT_CONFLICT_RETRIES = 2;
+
 for (const name of selected) {
   process.stdout.write(`  ${name} ... `);
-  const r = await runSuite(name);
+  let r = await runSuite(name);
+  let portRetries = 0;
+  while (r.code === PORT_CONFLICT_EXIT_CODE && portRetries < MAX_PORT_CONFLICT_RETRIES) {
+    portRetries++;
+    process.stdout.write(`port 衝突,重跑(第 ${portRetries} 次)... `);
+    r = await runSuite(name);
+  }
   const tally = extractTally(r.output);
   results.push({ ...r, tally });
   const secs = (r.durationMs / 1000).toFixed(0);

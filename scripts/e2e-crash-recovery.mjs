@@ -40,6 +40,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
@@ -192,6 +193,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;
@@ -216,6 +218,7 @@ function startCoreGraceful({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     env,
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core-graceful:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core-graceful:${port}:err] ${chunk}`));
   return proc;
@@ -330,9 +333,10 @@ async function testShutdownVsCrash() {
   let coreA, coreB, client;
   try {
     // ---- 先起一個 core,建立 idle / busy / waiting 三種狀態的 session -----
-    coreA = startCore({ port: 4380, dataDir, homeDir, workspaceDir });
-    await waitForPort("ws://127.0.0.1:4380", 20_000);
-    client = new MiniGatewayClient("ws://127.0.0.1:4380");
+    const portA = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
+    coreA = startCore({ port: portA, dataDir, homeDir, workspaceDir });
+    await waitForPort(`ws://127.0.0.1:${portA}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${portA}`);
     await client.connect();
 
     // idle:送一個一般 prompt,等 completed。
@@ -372,9 +376,10 @@ async function testShutdownVsCrash() {
     await insertSyntheticSessionRow(dataDir, { id: syntheticClosedId, status: "closed" });
 
     // ---- 重啟一個全新的 core,指向同一個 dataDir/homeDir → 觸發啟動對帳 ----
-    coreB = startCore({ port: 4381, dataDir, homeDir, workspaceDir });
-    await waitForPort("ws://127.0.0.1:4381", 20_000);
-    const clientB = new MiniGatewayClient("ws://127.0.0.1:4381");
+    const portB = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
+    coreB = startCore({ port: portB, dataDir, homeDir, workspaceDir });
+    await waitForPort(`ws://127.0.0.1:${portB}`, 20_000);
+    const clientB = new MiniGatewayClient(`ws://127.0.0.1:${portB}`);
     await clientB.connect();
 
     const { sessions } = await clientB.rpc("session.list", {});
@@ -444,9 +449,10 @@ async function testGracefulShutdown() {
 
   let coreC, coreD, client;
   try {
-    coreC = startCoreGraceful({ port: 4382, dataDir, homeDir, workspaceDir });
-    await waitForPort("ws://127.0.0.1:4382", 20_000);
-    client = new MiniGatewayClient("ws://127.0.0.1:4382");
+    const portC = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
+    coreC = startCoreGraceful({ port: portC, dataDir, homeDir, workspaceDir });
+    await waitForPort(`ws://127.0.0.1:${portC}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${portC}`);
     await client.connect();
 
     const { sessionId } = await createAcpSession(client, workspaceDir, "A2-graceful");
@@ -459,9 +465,10 @@ async function testGracefulShutdown() {
     const exitedCleanly = await gracefulShutdown(coreC, 10_000);
     coreC = null;
 
-    coreD = startCore({ port: 4383, dataDir, homeDir, workspaceDir });
-    await waitForPort("ws://127.0.0.1:4383", 20_000);
-    const clientD = new MiniGatewayClient("ws://127.0.0.1:4383");
+    const portD = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
+    coreD = startCore({ port: portD, dataDir, homeDir, workspaceDir });
+    await waitForPort(`ws://127.0.0.1:${portD}`, 20_000);
+    const clientD = new MiniGatewayClient(`ws://127.0.0.1:${portD}`);
     await clientD.connect();
 
     const { sessions } = await clientD.rpc("session.list", {});
@@ -501,9 +508,10 @@ async function testContinueAbandonTakeover() {
 
   let coreA, coreB, client;
   try {
-    coreA = startCore({ port: 4384, dataDir, homeDir, workspaceDir });
-    await waitForPort("ws://127.0.0.1:4384", 20_000);
-    client = new MiniGatewayClient("ws://127.0.0.1:4384");
+    const portA = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
+    coreA = startCore({ port: portA, dataDir, homeDir, workspaceDir });
+    await waitForPort(`ws://127.0.0.1:${portA}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${portA}`);
     await client.connect();
 
     // B 的目標是 PTY session:終端程式沒有後端 session 可接,是 `recovery.continue` 仍然明確拒絕的後端
@@ -524,9 +532,10 @@ async function testContinueAbandonTakeover() {
     await killProcessTreeHard(coreA);
     coreA = null;
 
-    coreB = startCore({ port: 4385, dataDir, homeDir, workspaceDir });
-    await waitForPort("ws://127.0.0.1:4385", 20_000);
-    const clientB = new MiniGatewayClient("ws://127.0.0.1:4385");
+    const portB = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
+    coreB = startCore({ port: portB, dataDir, homeDir, workspaceDir });
+    await waitForPort(`ws://127.0.0.1:${portB}`, 20_000);
+    const clientB = new MiniGatewayClient(`ws://127.0.0.1:${portB}`);
     await clientB.connect();
 
     // ---- B: §4.1 continue 明確拒絕(PTY 沒有後端 session 可接)---------------------

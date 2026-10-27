@@ -52,6 +52,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { FAKE_OPENCODE_REPLY_CHUNKS, SESSION_ERROR_PREFIX, SESSION_ERROR_MESSAGE } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_OPENCODE } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -60,8 +61,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const ADAPTERS_ENTRY = path.join(REPO_ROOT, "packages", "adapters", "dist", "index.js");
-/** 避開其他 e2e 用過的 port(見 e2e-cli.mjs 檔頭的盤點;4740/4745/4748 是 opencode 與 agent-env)。 */
-const PORT = 4750;
+/** 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。 */
+const PORT = await allocatePort();
 const EXPECTED_REPLY = FAKE_OPENCODE_REPLY_CHUNKS.join("");
 /** 回合結束後靜置多久,確認沒有「遲到的」error(adapter 若誤報,事件會在這段期間冒出來)。 */
 const SETTLE_MS = 1_500;
@@ -199,6 +200,7 @@ function startCore({ dataDir, homeDir, workspaceDir }) {
     if (name.startsWith("FAKE_OPENCODE_") && name !== "FAKE_OPENCODE_REQUEST_LOG_FILE") delete env[name];
   }
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, PORT);
   let stdoutBuffer = "";
   const dbPathPromise = new Promise((resolve) => {
     proc.stdout.on("data", (chunk) => {

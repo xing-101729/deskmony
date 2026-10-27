@@ -41,6 +41,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { FAKE_ACP_REPLY_CHUNKS } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP, FAKE_OPENCODE, FAKE_PTY, E2E_PROVIDERS_ENV_NAME } from "./lib/e2e-providers.mjs";
 
 // 在啟動 core 之前確認 dist/ 不比 src/ 舊(見 scripts/lib/require-fresh-build.mjs)。
@@ -189,6 +190,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   const out = { text: "" };
   proc.stdout.on("data", (chunk) => {
     out.text += chunk.toString();
@@ -592,7 +594,9 @@ async function catalogUnitTests() {
 // =======================================================================
 async function gatewayChecks() {
   const dirs = tmpDirs("gw");
-  const PORT = 4395;
+  // 2026-10-27:主 core 與「壞掉的 extras」core 各用一個動態挑選的 port(原本是 4395/4396,見 lib/e2e-ports.mjs)。
+  const PORT = await allocatePort();
+  const PORT_BAD_EXTRAS = await allocatePort();
   let core;
   let client;
   const created = [];
@@ -707,9 +711,9 @@ async function gatewayChecks() {
   let core2;
   let client2;
   try {
-    core2 = startCore({ port: PORT + 1, ...dirs, extraEnv: { [E2E_PROVIDERS_ENV_NAME]: "{this is not json" } });
-    await waitForPort(`ws://127.0.0.1:${PORT + 1}`, 20_000);
-    client2 = new MiniGatewayClient(`ws://127.0.0.1:${PORT + 1}`);
+    core2 = startCore({ port: PORT_BAD_EXTRAS, ...dirs, extraEnv: { [E2E_PROVIDERS_ENV_NAME]: "{this is not json" } });
+    await waitForPort(`ws://127.0.0.1:${PORT_BAD_EXTRAS}`, 20_000);
+    client2 = new MiniGatewayClient(`ws://127.0.0.1:${PORT_BAD_EXTRAS}`);
     await client2.connect();
     const sdk = await client2.rpc("session.create", { providerId: "claude-agent-sdk", workingDir: dirs.workspaceDir }, 30_000);
     let fakeCode;
@@ -738,7 +742,10 @@ async function gatewayChecks() {
 // =======================================================================
 async function rebuildAfterRestart() {
   const dirs = tmpDirs("rebuild");
-  const P = 4397;
+  // 2026-10-27:三次啟動各用一個動態挑選的 port(原本是 4397/+1/+2,見 lib/e2e-ports.mjs)。
+  const P = await allocatePort();
+  const P1 = await allocatePort();
+  const P2 = await allocatePort();
   let coreA;
   let coreB;
   let coreC;
@@ -771,9 +778,9 @@ async function rebuildAfterRestart() {
     }
 
     // ---- 2) core B(同樣的 extras):接手 → 仍是 acp ----
-    coreB = startCore({ port: P + 1, ...dirs });
-    await waitForPort(`ws://127.0.0.1:${P + 1}`, 20_000);
-    client = new MiniGatewayClient(`ws://127.0.0.1:${P + 1}`);
+    coreB = startCore({ port: P1, ...dirs });
+    await waitForPort(`ws://127.0.0.1:${P1}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${P1}`);
     await client.connect();
     const recoveryList = (await client.rpc("recovery.list", {})).sessions;
     const info1 = recoveryList.find((r) => r.sessionId === s1.id);
@@ -805,9 +812,9 @@ async function rebuildAfterRestart() {
     coreB = null;
 
     // ---- 3) core C:provider 已不在偵測清單(沒有 extras)→ 接手仍然成功(退回 session 自己存的 launch_*)----
-    coreC = startCore({ port: P + 2, ...dirs, extraEnv: { [E2E_PROVIDERS_ENV_NAME]: "" } });
-    await waitForPort(`ws://127.0.0.1:${P + 2}`, 20_000);
-    client = new MiniGatewayClient(`ws://127.0.0.1:${P + 2}`);
+    coreC = startCore({ port: P2, ...dirs, extraEnv: { [E2E_PROVIDERS_ENV_NAME]: "" } });
+    await waitForPort(`ws://127.0.0.1:${P2}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${P2}`);
     await client.connect();
     let createCode;
     try {
@@ -857,7 +864,9 @@ async function rebuildAfterRestart() {
 // =======================================================================
 async function legacyMigration() {
   const dirs = tmpDirs("legacy");
-  const P = 4400;
+  // 2026-10-27:兩次啟動各用一個動態挑選的 port(原本是 4400/4401,見 lib/e2e-ports.mjs)。
+  const P = await allocatePort();
+  const P1 = await allocatePort();
   const dbPath = path.join(dirs.dataDir, "deskmony.db");
 
   // 用**舊 schema**(P2 之前的 CREATE TABLE:sessions 沒有 provider_id/launch_* 欄位、agent_profiles 完整)建 DB。
@@ -985,9 +994,9 @@ async function legacyMigration() {
     core1 = null;
 
     // 冪等:再啟動一次(新增了新 session,舊的已回填),不重複回填、不改值
-    core2 = startCore({ port: P + 1, ...dirs });
-    await waitForPort(`ws://127.0.0.1:${P + 1}`, 20_000);
-    client = new MiniGatewayClient(`ws://127.0.0.1:${P + 1}`);
+    core2 = startCore({ port: P1, ...dirs });
+    await waitForPort(`ws://127.0.0.1:${P1}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${P1}`);
     await client.connect();
     const sessions2 = (await client.rpc("session.list", {})).sessions;
     const byId2 = Object.fromEntries(sessions2.map((s) => [s.id, s]));
