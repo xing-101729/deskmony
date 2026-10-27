@@ -74,6 +74,7 @@ import {
 } from "./fake-acp-agent.mjs";
 import { QUESTION_PREFIX } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, fakeOpencodeVariantsProvider, FAKE_ACP, FAKE_OPENCODE, FAKE_OPENCODE_VARIANTS, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -238,11 +239,6 @@ class MiniGatewayClient {
 
 // ---- core 行程 -----------------------------------------------------------
 
-let portCounter = 4930;
-function nextPort() {
-  return portCounter++;
-}
-
 function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv, graceful }) {
   const env = {
     ...process.env,
@@ -259,6 +255,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv, graceful })
     env,
     stdio: graceful ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
   });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;
@@ -329,7 +326,7 @@ function newDirs(tag) {
 
 /** 起一個 core(同一組 dirs)並連線。`graceful` = 之後用 IPC 優雅關閉。 */
 async function boot(dirs, { graceful = false, extraEnv = {} } = {}) {
-  const port = nextPort();
+  const port = await allocatePort(); // 2026-10-27:動態挑選(原本從 4930 遞增),見 lib/e2e-ports.mjs
   const proc = startCore({
     port,
     dataDir: dirs.dataDir,

@@ -56,6 +56,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
@@ -214,6 +215,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   let stdout = "";
   let stderr = "";
   proc.stdout.on("data", (chunk) => {
@@ -288,7 +290,7 @@ function findNonLoopbackIPv4() {
 
 // =======================================================================
 async function testAutoAndYolo() {
-  const PORT = 4341;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-ws-"));
@@ -612,7 +614,7 @@ async function testAutoAndYolo() {
 //    core 實例,避免影響上面測試的時序假設。
 // =======================================================================
 async function testYoloExpiry() {
-  const PORT = 4342;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const YOLO_DURATION_MS = 1500;
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-expiry-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-yolo-expiry-home-"));
@@ -768,7 +770,7 @@ async function testRemoteRejection() {
     return;
   }
 
-  const PORT = 4343;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const TOKEN = "e2e-remote-token";
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-remote-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-remote-home-"));
@@ -1131,7 +1133,7 @@ async function testRemoteRejection() {
 //    `permissionLevel:"auto-accept-all"`/`agentProfileId` 時,不會被「誤解成」任何提權。
 // =======================================================================
 async function testInitialPermissionModeIsAlwaysAsk() {
-  const PORT = 4344;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-schema-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-schema-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-schema-ws-"));

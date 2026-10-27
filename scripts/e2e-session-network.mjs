@@ -46,6 +46,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 import {
   CALL_BRIDGE_TOOL_PREFIX,
@@ -64,8 +65,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 // 序幕 core(只用來造出一個 closed/interrupted 的 session)與主 core 各用一個 port。
-const PRELUDE_PORT = 5322;
-const CORE_PORT = 5321;
+// 2026-10-27:動態挑選,不再寫死 5321/5322——多個 worktree 同時跑時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+const PRELUDE_PORT = await allocatePort();
+const CORE_PORT = await allocatePort();
 const PERMISSION_TIMEOUT_MS = 10_000;
 /** 鏈預算:每條訊息鏈最多 3 則 agent→agent 訊息,達 66% 發軟警告(ceil(3 × 0.66) = 第 2 則)。 */
 const MAX_MESSAGES_PER_CHAIN = 3;
@@ -115,6 +117,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir }) {
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;

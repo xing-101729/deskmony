@@ -30,6 +30,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP, FAKE_OPENCODE, FAKE_PTY } from "./lib/e2e-providers.mjs";
 import {
   TITLE_MODE_HANG,
@@ -52,8 +53,8 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const SHARED_TITLE = path.join(REPO_ROOT, "packages", "shared", "dist", "session-title.js");
 const BETTER_SQLITE3_PATH = path.join(REPO_ROOT, "apps", "core", "node_modules", "better-sqlite3", "lib", "index.js");
-/** 避開其他 e2e 用過的 port(4740/4745/4748/4750 是 opencode/agent-env 那幾支)。 */
-const PORT = 4755;
+/** 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。 */
+const PORT = await allocatePort();
 /** 命名臨時對話的逾時(core 讀 DESKMONY_TITLE_TIMEOUT_MS,只給 e2e 用),「卡住」的情境不用真的等 60 秒。 */
 const TITLE_TIMEOUT_MS = 2_500;
 
@@ -96,6 +97,7 @@ function startCore(dirs) {
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, PORT);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:err] ${chunk}`));
   proc.on("exit", (code, signal) => console.log(`[core] process exited (code=${code} signal=${signal})`));

@@ -35,16 +35,11 @@
  *
  * ---- port 配置 ----------------------------------------------------------
  *
- * `grep -noE "port: ?[0-9]{4}|PORT = [0-9]{4}" scripts/*.mjs` 過一輪既有
- * e2e,佔用的區段是:4319-4334(e2e-gateway)、4341-4344(auto-mode-yolo)、
- * 4351(notification)、4360-4364(cost-governor)、4370-4376(message-budget)、
- * 4380-4389(crash-recovery)、4700-4705(agent-lifecycle)、4710-4713
- * (lead-gate)、5321-5322(session-network)。4720/4721 兩個都不在其中,選用:
- *   - 4720:一般(無認證)core,案例 5/6/7/8/9/10 共用。
- *   - 4721:啟用 `DESKMONY_AUTH_TOKEN` 的 core,只給案例 4 用。
- * （`run-e2e.mjs` 依序、不平行執行各支套件,port 其實不必跨檔案互斥;獨立
- * 挑一段空的純粹是比照既有慣例,方便單獨執行這支檔案時不會跟其他仍在跑的
- * 套件衝突。）
+ * 兩個 core,各用一個 port:
+ *   - PORT_MAIN:一般(無認證)core,案例 5/6/7/8/9/10 共用。
+ *   - PORT_AUTH:啟用 `DESKMONY_AUTH_TOKEN` 的 core,只給案例 4 用。
+ * 2026-10-27 起兩個都由 lib/e2e-ports.mjs 動態挑選(原本寫死 4720/4721,靠
+ * 檔頭盤點避開其他套件)——寫死的號碼防不了另一個 worktree 同時跑**同一支**。
  *
  * 前置需求:`pnpm build` 已跑過(`apps/cli/dist/bin.js` 存在且是最新的——見
  * scripts/lib/require-fresh-build.mjs 的 `@deskmony/cli` 項目)。
@@ -68,6 +63,7 @@ import {
   WRITE_FILE_PREFIX,
 } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補)引入的守門員,2026-09-09 補上 @deskmony/cli 項目
@@ -80,9 +76,9 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const CLI_ENTRY = path.join(REPO_ROOT, "apps", "cli", "dist", "bin.js");
 
-/** 見檔頭「port 配置」——4700-4713 已被 agent-lifecycle/lead-gate 佔用。 */
-const PORT_MAIN = 4720;
-const PORT_AUTH = 4721;
+/** 見檔頭「port 配置」。 */
+const PORT_MAIN = await allocatePort();
+const PORT_AUTH = await allocatePort();
 
 const results = [];
 function record(name, ok, detail) {
@@ -114,6 +110,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;

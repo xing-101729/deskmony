@@ -41,6 +41,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WRITE_FILE_PREFIX, USAGE_UPDATE_PREFIX, MANY_TOOL_CALLS_PREFIX, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
@@ -196,6 +197,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;
@@ -262,7 +264,7 @@ async function createAcpSession(client, workspaceDir, title) {
 // 從未回報過任何 usage/cost,仍然被回合上限攔下」(§0.1 最重要的宣稱)。
 // =======================================================================
 async function testTurnLimitToolCalls() {
-  const PORT = 4360;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-a-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-a-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-a-ws-"));
@@ -352,7 +354,7 @@ async function testTurnLimitToolCalls() {
 // B:回合硬上限——時間超標 → 立即 interrupt。
 // =======================================================================
 async function testTurnLimitDuration() {
-  const PORT = 4361;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-b-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-b-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-b-ws-"));
@@ -420,7 +422,7 @@ async function testTurnLimitDuration() {
 // D:每日 kill-switch → 全部 session interrupt,且擋後續 prompt。
 // =======================================================================
 async function testDailyKillSwitch() {
-  const PORT = 4363;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-d-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-d-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-d-ws-"));
@@ -508,7 +510,7 @@ async function testDailyKillSwitch() {
 // E + F:掛起處理——T1(防遺忘,只通知不 halt)/ T2(資源回收,真 trip)。
 // =======================================================================
 async function testWaitingWatchdog() {
-  const PORT = 4364;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-ef-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-ef-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-cost-ef-ws-"));

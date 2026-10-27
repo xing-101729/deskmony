@@ -37,13 +37,15 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { QUESTION_PREFIX, TEST_QUESTIONS } from "./fake-opencode-server.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_OPENCODE } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const CORE_PORT = 4740;
+// 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+const CORE_PORT = await allocatePort();
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const [Q_COLOR, Q_FEATURES] = TEST_QUESTIONS.map((q) => q.question);
 
@@ -78,6 +80,7 @@ function startCore(port, homeDir, dataDir, workspaceDir) {
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:err] ${chunk}`));
   proc.on("exit", (code, signal) => console.log(`[core] process exited (code=${code} signal=${signal})`));

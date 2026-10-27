@@ -52,6 +52,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
@@ -595,6 +596,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, permissionTimeoutMs }
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:err] ${chunk}`));
   return proc;
@@ -642,7 +644,7 @@ async function killProcessTree(proc) {
 }
 
 async function liveE2e() {
-  const PORT = 4331;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const PERMISSION_TIMEOUT_MS = 3000; // 縮短逾時,測試「attended 才逾時」用
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-home-"));
@@ -1018,7 +1020,7 @@ async function liveE2e() {
 // 也需要捕捉 core 的 stdout 驗證啟動警告。
 // =======================================================================
 async function legacyScopeLiveE2e() {
-  const PORT = 4335;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-legacy-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-legacy-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-legacy-ws-"));
@@ -1076,6 +1078,7 @@ async function legacyScopeLiveE2e() {
       ...e2eProvidersEnv(),
     };
     coreProc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+    guardCorePort(coreProc, PORT);
     coreProc.stdout.on("data", (chunk) => {
       coreStdout += chunk.toString();
       process.stdout.write(`[core:legacy] ${chunk}`);

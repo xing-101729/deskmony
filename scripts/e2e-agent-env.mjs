@@ -55,6 +55,7 @@ import {
   CALL_BRIDGE_TOOL_PREFIX,
 } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, fakeAcpOpencodeProvider, FAKE_OPENCODE, FAKE_ACP, FAKE_ACP_OPENCODE, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -64,8 +65,8 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const ADAPTERS_ENTRY = path.join(REPO_ROOT, "packages", "adapters", "dist", "index.js");
 const PROBE_SCRIPT = path.join(__dirname, "probe-claude-sdk-env.mjs");
-/** 避開其他 e2e 用過的 port(見 e2e-cli.mjs 檔頭的盤點;4740/4745 是 opencode 兩支)。 */
-const PORT = 4748;
+/** 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。 */
+const PORT = await allocatePort();
 
 /** 不得出現在任何 agent 子行程環境裡的 Deskmony 憑證(opencode 伺服器密碼另外依 backend 處理,見各測試)。 */
 const DESKMONY_SECRET_NAMES = [
@@ -226,6 +227,7 @@ function startCore({ dataDir, homeDir, workspaceDir, authReportFile }) {
   delete env.OPENCODE_CONFIG_CONTENT;
   delete env.FAKE_OPENCODE_DISABLE_AUTH;
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, PORT);
   let stdoutBuffer = "";
   const dbPathPromise = new Promise((resolve) => {
     proc.stdout.on("data", (chunk) => {
