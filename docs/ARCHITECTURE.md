@@ -359,8 +359,8 @@ DELETE,記錄權限決策、三斷路器 trip、啟動對帳。**這不是 event
 ```
 連線建立 → remoteAddress 正規化 → isLocal = 是否 loopback(終生不變)
               ↓
-handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS 檢查
-                                                    ↓
+handleMessage() 依序:①schema 驗證(未認證只解析 auth)②認證閘門 ③LOCAL_ONLY_METHODS 檢查
+                                                                       ↓
     ③ config.setFile / settings.setProviderPrefs
                               → 遠端一律拒絕
 ```
@@ -411,6 +411,10 @@ handleMessage() 依序:①schema 驗證 ②認證閘門 ③LOCAL_ONLY_METHODS �
 - 綁定安全檢查用**合併後**的 `config.daemon.bindHost`:非 loopback 綁定且未設
   `DESKMONY_AUTH_TOKEN` → **拒絕啟動**。改設定檔一樣擋得住。
 - token 用 `crypto.timingSafeEqual()` 常數時間比對;認證失敗 5 次 / 30 秒冷卻。
+- **認證前不做昂貴的解析**(2026-10-27):尚未認證的連線只用 `AuthRequestSchema` 解析 `auth`,其他方法在
+  完整的 `ClientRequestSchema` 解析之前就回 `auth.notYetAuthenticated`;超過 64 KiB 的訊息連 `JSON.parse` 都不做,
+  直接以 1009 關閉。`WebSocketServer` 的 `maxPayload` 是 `GATEWAY_MAX_MESSAGE_BYTES`(64 MiB,依附件大小估算)。
+  `gateway.invalidRequest` 的 `detail` 只列前 3 個 zod issue(zod 3 對陣列逐元素產生 issue)。
 - **`DESKMONY_AUTH_TOKEN` 刻意不是設定檔欄位**,永遠只從環境變數讀。
 
 ---

@@ -69,6 +69,9 @@ const SUITES = [
   // 安靜地連到佔用者)。三次 core 啟動、不需要 agent 後端,約半分鐘——放在啟動 core 的測試最前面:這是其餘
   // 每一支「連得上的就是自己的 core」的前提。
   "e2e-core-port-in-use",
+  // 2026-10-27(安全):WS gateway 在認證之前只解析 auth、太大的訊息直接關閉、`maxPayload`、zod 錯誤細節截斷——一個帶
+  // DESKMONY_AUTH_TOKEN 的 core,不建 session、不啟動 agent,幾秒跑完。
+  "e2e-gateway-preauth",
   // 2026-10-02(P3:session 網路):五個工具(list_agents/list_sessions/read_session/create_session/send_to_session)
   // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
   // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。
