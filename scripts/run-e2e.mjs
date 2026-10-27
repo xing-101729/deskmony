@@ -65,6 +65,10 @@ const SUITES = [
   // 2026-10-20:右側面板的兩個純函式(面板寬度/聊天視圖最小寬度/覆蓋層切換、大段貼上分段不拆 surrogate pair)——
   // 同上,不啟動 core、不需要 build,毫秒級。
   "e2e-side-panel-pure",
+  // 2026-10-27:core 的 gateway 綁不到 port 時以明確訊息、exit code 78 退出(而不是活著卻沒在 listen,讓 client
+  // 安靜地連到佔用者)。三次 core 啟動、不需要 agent 後端,約半分鐘——放在啟動 core 的測試最前面:這是其餘
+  // 每一支「連得上的就是自己的 core」的前提。
+  "e2e-core-port-in-use",
   // 2026-10-02(P3:session 網路):五個工具(list_agents/list_sessions/read_session/create_session/send_to_session)
   // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
   // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。

@@ -162,6 +162,10 @@ function resolveCoreEntry(): string {
 // 使用者正常關閉 app 導致的結束),用來決定要不要跳出錯誤對話框。
 const CORE_STARTUP_GRACE_MS = 10_000;
 
+// core 的 gateway 綁不到 port 時的 exit code。與 apps/core/src/gateway/ws-gateway.ts 的
+// `CORE_EXIT_CODE_BIND_FAILED` 同值——main process 不 import core,改了要一起改。
+const CORE_EXIT_CODE_BIND_FAILED = 78;
+
 /**
  * 嘗試找出系統安裝的 Node.js 執行檔路徑(不透過 shell,避免 shell:false 下
  * Windows 找不到 `node` 這個非 .exe 名稱的問題)。找不到回傳 undefined。
@@ -270,6 +274,21 @@ function startCore(): void {
 
   coreProcess.on("exit", (code) => {
     console.log(`[electron] core process exited with code ${code}`);
+    if (!intentionalShutdown && code === CORE_EXIT_CODE_BIND_FAILED) {
+      // 2026-10-27:core 綁不到 port 就退出了,app 不能繼續開著——renderer 會一直重連
+      // ws://localhost:CORE_PORT,連上的是佔用這個 port 的程序;若那是另一個 Deskmony 而且 token 相同
+      // (同一份本機保存的 token),甚至會通過認證,使用者操作的是別人的 session。不看寬限期:core 在
+      // listen 之前要先回收孤兒、對帳,在慢的機器上可能超過 CORE_STARTUP_GRACE_MS。
+      dialog.showErrorBox(
+        "Core 啟動失敗:port 已被佔用",
+        `apps/core 無法在 port ${CORE_PORT} 上啟動(port 被別的程序佔用,或無法綁定)。\n` +
+          "常見原因是另一個 Deskmony 正在執行——請先關閉它;或設定環境變數 DESKMONY_CORE_PORT 改用別的 port " +
+          "後重新開啟 Deskmony。\n\nDeskmony 將會結束。詳細錯誤見終端機輸出。",
+      );
+      coreProcess = undefined;
+      app.quit();
+      return;
+    }
     const elapsedMs = Date.now() - startedAt;
     // 若是我方主動呼叫 stopCore() 中止(app 關閉/退出中),不視為啟動失敗 ——
     // Windows 上實測 kill() 會讓 exit 事件回報 code=1、signal=null,與真正的
