@@ -1414,7 +1414,7 @@ async function legacyScopeLiveE2e() {
 // 獨立一個 core:需要自己的規則(Part 2 的 2i 斷言 config.json 剛好兩條規則)。
 // =======================================================================
 async function codexMcpPermissionLiveE2e() {
-  const PORT = 4336;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-policy-codex-ws-"));

@@ -49,6 +49,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { FAKE_ACP_REPLY_CHUNKS, REPORT_CONFIG_PREFIX, REVIVE_REPORT_MARKER, SLEEP_TURN_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP, FAKE_OPENCODE, FAKE_PTY } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -206,11 +207,6 @@ class MiniGatewayClient {
 
 // ---- core 行程 -----------------------------------------------------------
 
-let portCounter = 4960;
-function nextPort() {
-  return portCounter++;
-}
-
 function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
   const env = {
     ...process.env,
@@ -223,6 +219,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
   };
   // 一律走 graceful bootstrap(有 IPC 通道):要正常關閉時送 "graceful-shutdown";要模擬崩潰時直接殺行程樹。
   const proc = spawn(process.execPath, [GRACEFUL_BOOTSTRAP], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${port}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${port}:err] ${chunk}`));
   return proc;
@@ -291,7 +288,7 @@ function newDirs(tag) {
 
 /** 起一個 core(同一組 dirs)並連線。回傳 `{ proc, client, url }`。 */
 async function boot(dirs) {
-  const port = nextPort();
+  const port = await allocatePort(); // 2026-10-27:動態挑選(原本從 4960 遞增),見 lib/e2e-ports.mjs
   const proc = startCore({
     port,
     dataDir: dirs.dataDir,
