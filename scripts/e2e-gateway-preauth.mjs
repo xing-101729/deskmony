@@ -44,6 +44,7 @@ import os from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -52,8 +53,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const SHARED_ENTRY = path.join(REPO_ROOT, "packages", "shared", "dist", "index.js");
-/** 避開其他 e2e 用過的 port(見 e2e-cli.mjs 檔頭的盤點;47xx 已用到 4760)。 */
-const PORT = 4765;
+/** 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。 */
+const PORT = await allocatePort();
 const WS_URL = `ws://127.0.0.1:${PORT}`;
 const MASTER_TOKEN = `e2e-preauth-${randomBytes(16).toString("hex")}`;
 
@@ -180,6 +181,7 @@ function startCore({ dataDir, homeDir, workspaceDir }) {
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, PORT);
   let stdoutBuffer = "";
   const dbPathPromise = new Promise((resolve) => {
     proc.stdout.on("data", (chunk) => {
