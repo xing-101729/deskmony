@@ -95,6 +95,7 @@ import {
 } from "./fake-opencode-server.mjs";
 import { REPORT_ENV_PREFIX as ACP_REPORT_ENV, REPORT_SHELL_ENV_PREFIX as ACP_REPORT_SHELL_ENV } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, fakeAcpOpencodeProvider, FAKE_OPENCODE, FAKE_ACP, FAKE_ACP_OPENCODE } from "./lib/e2e-providers.mjs";
 
 requireFreshBuild();
@@ -102,7 +103,8 @@ requireFreshBuild();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
-const PORT = 4745;
+// 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+const PORT = await allocatePort();
 
 const QUERY_TOOLS = ["deskmony_list_agents", "deskmony_list_sessions", "deskmony_read_session"];
 /**
@@ -262,6 +264,7 @@ function startCore({ dataDir, homeDir, workspaceDir }) {
   delete env.OPENCODE_CONFIG_CONTENT;
   delete env.FAKE_OPENCODE_DISABLE_AUTH;
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, PORT);
   let stdoutBuffer = "";
   const dbPathPromise = new Promise((resolve) => {
     proc.stdout.on("data", (chunk) => {

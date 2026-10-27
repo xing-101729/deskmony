@@ -30,6 +30,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WRITE_FILE_PREFIX } from "./fake-acp-agent.mjs";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
@@ -552,6 +553,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir, extraEnv }) {
     ...extraEnv,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:err] ${chunk}`));
   return proc;
@@ -599,7 +601,7 @@ async function killProcessTree(proc) {
 }
 
 async function liveE2e() {
-  const PORT = 4351;
+  const PORT = await allocatePort(); // 2026-10-27:動態挑選,見 lib/e2e-ports.mjs
   // 給生成 ACP fake-agent 子程序(Windows 上每個 session 都是新的子程序)+
   // 前面測試步驟本身的 RPC 往返留足夠餘裕,避免 B/C 兩筆 escalate 因為單純的
   // 測試腳本開銷就跨出批次視窗(見 2d 一開始的實測:2000ms 太緊,子程序啟動
