@@ -26,28 +26,43 @@ const baseRequest = { id: z.string() };
 /** `session.forwardMessage` 的 `text` 字元上限(UI 轉傳的是畫面上單一氣泡的文字,實務上遠小於此)。 */
 export const FORWARD_MESSAGE_MAX_CHARS = 100_000;
 
+/**
+ * 2026-10-27:client → core 單一 WS 訊息的位元組上限(core 的 `WebSocketServer` `maxPayload`;ws 套件預設 100 MiB)。
+ *
+ * 最大的合法訊息是帶附件的 `session.sendPrompt`:附件以 base64 內嵌(+33%),桌面端每個附件上限 10 MB(ChatView.tsx 的
+ * `MAX_ATTACHMENT_BYTES`,個數不限)。64 MiB 容得下 4 個上限大小的附件,也是 Anthropic Messages API 單次請求上限
+ * (32 MB)的兩倍——超過這個大小的 prompt 本來就送不到模型那邊。超過時 ws 在讀到 frame header 就以 1009 關閉連線,
+ * 不會先把整則訊息讀進記憶體。
+ */
+export const GATEWAY_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * M5 Round A 新增:token-based 認證(見 apps/core/src/gateway/ws-gateway.ts
+ * 頂端註解、README「認證(token-based)」章節的完整設計取捨)。只有在 core
+ * 啟動時設定了 DESKMONY_AUTH_TOKEN 才需要——client 連上後必須把這個當作
+ * "第一則訊息"送出,帶正確 token 才能繼續發送其他 request;未設定 token
+ * 時(向下相容本機開發),呼叫這個方法一律直接成功(見 WsGateway 的
+ * 判斷)。刻意選擇「連線後的第一則訊息」而非 Sec-WebSocket-Protocol 或
+ * URL query string 傳遞 token,理由見 README 對應章節。
+ *
+ * ⚠️ 修正(原為 `z.string().min(1)`):`token` 刻意**不要求非空**——
+ * ConnectScreen.tsx 明講「伺服器未啟用認證則留空」,client 端(見
+ * gateway-client.ts 的 `probeGatewayConnection()`)因此會送出 `token: ""`。
+ * `.min(1)` 會讓這則請求在 schema 驗證這關就被拒絕(`too_small`),連
+ * WsGateway 內「未設定 authToken 時 auth 一律直接成功」這條既有的向下相容
+ * 判斷都碰不到,UI 端看到的是一個誤導的「認證失敗:token 不正確」——使用者
+ * 完全照著畫面指示操作(留空),卻被回報成憑證錯誤。空字串本身不會削弱
+ * 安全性:core 若真的設定了 authToken,`timingSafeTokenEqual()` 的長度檢查
+ * 一樣會讓空字串比對失敗(見 ws-gateway.ts),真正的認證判斷不依賴這裡的
+ * schema 下限。
+ *
+ * 2026-10-27:獨立匯出——尚未認證的連線只用這個 schema 解析(見 ws-gateway.ts 的 `handleMessage()`),
+ * 不跑整個 `ClientRequestSchema`。
+ */
+export const AuthRequestSchema = z.object({ ...baseRequest, method: z.literal("auth"), params: z.object({ token: z.string() }) });
+
 export const ClientRequestSchema = z.discriminatedUnion("method", [
-  /**
-   * M5 Round A 新增:token-based 認證(見 apps/core/src/gateway/ws-gateway.ts
-   * 頂端註解、README「認證(token-based)」章節的完整設計取捨)。只有在 core
-   * 啟動時設定了 DESKMONY_AUTH_TOKEN 才需要——client 連上後必須把這個當作
-   * "第一則訊息"送出,帶正確 token 才能繼續發送其他 request;未設定 token
-   * 時(向下相容本機開發),呼叫這個方法一律直接成功(見 WsGateway 的
-   * 判斷)。刻意選擇「連線後的第一則訊息」而非 Sec-WebSocket-Protocol 或
-   * URL query string 傳遞 token,理由見 README 對應章節。
-   *
-   * ⚠️ 修正(原為 `z.string().min(1)`):`token` 刻意**不要求非空**——
-   * ConnectScreen.tsx 明講「伺服器未啟用認證則留空」,client 端(見
-   * gateway-client.ts 的 `probeGatewayConnection()`)因此會送出 `token: ""`。
-   * `.min(1)` 會讓這則請求在 schema 驗證這關就被拒絕(`too_small`),連
-   * WsGateway 內「未設定 authToken 時 auth 一律直接成功」這條既有的向下相容
-   * 判斷都碰不到,UI 端看到的是一個誤導的「認證失敗:token 不正確」——使用者
-   * 完全照著畫面指示操作(留空),卻被回報成憑證錯誤。空字串本身不會削弱
-   * 安全性:core 若真的設定了 authToken,`timingSafeTokenEqual()` 的長度檢查
-   * 一樣會讓空字串比對失敗(見 ws-gateway.ts),真正的認證判斷不依賴這裡的
-   * schema 下限。
-   */
-  z.object({ ...baseRequest, method: z.literal("auth"), params: z.object({ token: z.string() }) }),
+  AuthRequestSchema,
   /**
    * S7(auto-mode-and-yolo)L4 §5.3 新增:握手能力集,消除 UI/Gateway 對「這個
    * 連線是不是本機」的認知漂移——UI 純依此渲染(遠端隱藏 auto/YOLO/policy
