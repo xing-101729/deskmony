@@ -43,6 +43,7 @@ import os from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 import { REPORT_MCP_SERVERS_PREFIX } from "./fake-acp-agent.mjs";
 
@@ -51,8 +52,8 @@ requireFreshBuild();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
-/** 避開其他 e2e 用過的 port(見 e2e-cli.mjs 檔頭的盤點;4842 沒人用,4870 留給 review)。 */
-const PORT = 4842;
+// 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+const PORT = await allocatePort();
 const IS_WIN = process.platform === "win32";
 const MASTER_TOKEN = `e2e-master-${randomBytes(16).toString("hex")}`;
 /** 1x1 透明 PNG(同 e2e-session-network.mjs)。 */
@@ -97,6 +98,7 @@ function startCore({ dataDir, homeDir, workspaceDir, gitHome }) {
     DESKMONY_AUTH_TOKEN: MASTER_TOKEN,
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, PORT);
   proc.stdout.on("data", (chunk) => process.stdout.write(`[core:${PORT}] ${chunk}`));
   proc.stderr.on("data", (chunk) => process.stderr.write(`[core:${PORT}:err] ${chunk}`));
   return proc;

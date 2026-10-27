@@ -51,6 +51,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { requireFreshBuild } from "./lib/require-fresh-build.mjs";
+import { allocatePort, guardCorePort } from "./lib/e2e-ports.mjs";
 import { e2eProvidersEnv, FAKE_ACP } from "./lib/e2e-providers.mjs";
 import { REPORT_MCP_SERVERS_PREFIX } from "./fake-acp-agent.mjs";
 
@@ -60,9 +61,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const BRIDGE_ENTRY = path.join(REPO_ROOT, "packages", "adapters", "dist", "mcp-bridge-server.js");
-/** 避開其他 e2e 用過的 port(4870–4872 留給 review);兩個 core 依序使用,不同時存在。 */
-const PORT = 4885;
-const PORT_OFF = 4887;
+// 兩個 core 依序使用,不同時存在。
+// 2026-10-27:動態挑選,不再寫死——多個 worktree 同時跑 e2e 時才不會連到別人的 core(見 lib/e2e-ports.mjs)。
+const PORT = await allocatePort();
+const PORT_OFF = await allocatePort();
 const IS_WIN = process.platform === "win32";
 /** 用環境變數縮短的逾時(core 預設是導覽 30 秒、其他 15 秒)。 */
 const NAVIGATE_TIMEOUT_MS = 2500;
@@ -106,6 +108,7 @@ function startCore({ port, dataDir, homeDir, workspaceDir }) {
     ...e2eProvidersEnv(),
   };
   const proc = spawn(process.execPath, [CORE_ENTRY], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  guardCorePort(proc, port);
   const logs = [];
   proc.stdout.on("data", (chunk) => {
     logs.push(String(chunk));
