@@ -48,10 +48,15 @@
  *               (修正前永遠不結束,core 偵測不到)。
  *   S9-S12 agent 在等使用者回覆(waiting)時不在了:修正前 PermissionGateway 的待決項目(連同逾時計時器)與 UI 的彈窗永遠不會
  *       被清掉,按「允許/拒絕」也沒反應(`resolvePermission()` 找不到 runtime 直接 return)、client 收不到 permission-resolved。
- *         S9-S10 ACP 權限請求等回覆時行程被殺 → permission-resolved(deny、source=agent-stopped);復活後對舊請求按允許沒有作用、
- *               等過舊請求的逾時時間也沒有逾時推播(計時器清掉了)。
- *         S11   OpenCode 提問(user-dialog-request,不經過 PermissionGateway)等回答時 server 被殺 → user-dialog-resolved(cancelled)。
+ *         S9-S10 ACP 權限請求等回覆時行程被殺 → permission-resolved(deny、source=agent-stopped);復活後對舊請求按允許不轉給新 agent
+ *               (只再推一次 agent-stopped)、等過舊請求的逾時時間也沒有逾時推播(計時器清掉了)。
+ *         S11   OpenCode 提問(user-dialog-request,不經過 PermissionGateway)等回答時 server 被殺 → user-dialog-resolved(cancelled);
+ *               復活後對舊提問送答案只再推一次 cancelled。
  *         S12   等權限回覆時刪除 session → 同樣收到 permission-resolved(agent-stopped)。
+ *   S13-S14 復活後的新 agent 再要一次權限:ACP 的 requestId 是 JSON-RPC id,每個 agent 行程從 0 數起,新請求在 adapter 那邊跟舊的
+ *       同號。修正前錯過 agent-stopped 推播的 client 對舊彈窗按「允許」,core 以 (sessionId, requestId) 認,就批准了使用者沒看過的
+ *       新請求(檔案被寫入)。現在 core 對外的 requestId 帶 runtime 前綴:舊的回覆不轉給新 agent、新請求維持待決,用新的 requestId
+ *       回覆才寫檔。
  *
  * 前置需求:`pnpm build` 已跑過。用法:node scripts/e2e-session-revive.mjs
  */
@@ -1437,12 +1442,12 @@ async function testClaudeExitProbe() {
 const WAITING_PERMISSION_TIMEOUT_MS = 12_000;
 
 /** 讓 fake ACP agent 對工作目錄裡的一個檔案發出寫檔權限請求,等到 core 廣播 permission-request、session 進入 waiting。 */
-async function askWritePermission(client, sessionId, targetPath) {
+async function askWritePermission(client, sessionId, targetPath, content = "should never be written") {
   const from = client.events.length;
   const posixPath = targetPath.split(path.sep).join("/");
   await client.rpc("session.sendPrompt", {
     sessionId,
-    prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath, content: "should never be written" })}` },
+    prompt: { text: `${WRITE_FILE_PREFIX}${JSON.stringify({ path: posixPath, content })}` },
   });
   const request = await client.waitFor(client.events, (e) => e.sessionId === sessionId && e.event.type === "permission-request", 15_000, from);
   const waiting = await waitStatus(client, sessionId, "waiting", 10_000);
@@ -1493,19 +1498,19 @@ async function testAgentCrashWhileWaitingPermission() {
     const { reply } = await turn(c.client, sid, "剛才那個寫檔請求不用了,回個話就好");
     const revived = await waitStatus(c.client, sid, "idle", 10_000);
     const newCalls = callsSince(dirs, pidsBefore);
-    // 錯過推播、畫面上還留著彈窗的 client 對舊請求按「允許」:core 已經沒有這筆登記,不會轉給復活的新 agent、也不會再推播一次
+    // 錯過推播、畫面上還留著彈窗的 client 對舊請求按「允許」:core 已經沒有這筆登記,不轉給復活的新 agent,只再推一次 agent-stopped 讓那個彈窗關掉
     await c.client.rpc("permission.resolve", { sessionId: sid, requestId, decision: "allow" });
     // 等過舊請求的逾時時間:計時器有清掉的話,不會再冒出一筆 source=timeout 的 permission-resolved
     await sleep(Math.max(0, requestedAt + WAITING_PERMISSION_TIMEOUT_MS + 1_500 - Date.now()));
     const pushes = resolvedPushesFor(c.client, sid, requestId);
     const after = await getSession(c.client, sid);
     record(
-      "S10 送訊息 → agent 復活並回覆(只 spawn 一個新行程)、回到 idle;之後對舊請求按「允許」沒有任何作用(不轉給新 agent、不再推播),等過舊請求的逾時時間也沒有逾時推播——這筆請求從頭到尾只收到一次 permission-resolved;狀態維持 idle,檔案沒有被寫入",
+      "S10 送訊息 → agent 復活並回覆(只 spawn 一個新行程)、回到 idle;之後對舊請求按「允許」不轉給新 agent,只再收到一次 agent-stopped(關掉錯過推播的彈窗);等過舊請求的逾時時間也沒有逾時推播;狀態維持 idle,檔案沒有被寫入",
       reply === FAKE_ACP_REPLY &&
         revived.status === "idle" &&
         pidsOf(newCalls).size === 1 &&
-        pushes.length === 1 &&
-        pushes[0].source === "agent-stopped" &&
+        pushes.length === 2 &&
+        pushes.every((p) => p.decision === "deny" && p.source === "agent-stopped") &&
         after?.status === "idle" &&
         !existsSync(target),
       `reply=${clip(reply, 60)}, revived=${revived.status}, newAgentPids=${pidsOf(newCalls).size}, pushesForOldRequest=${JSON.stringify(pushes)}, after=${after?.status}, fileWritten=${existsSync(target)}`,
@@ -1545,17 +1550,28 @@ async function testOpencodeCrashWhileQuestion() {
     const { stopped, pushed } = await waitAgentStopped(c.client, sid, pushFrom);
     const { reply } = await turn(c.client, sid, "問題不用回答了");
     const revived = await waitStatus(c.client, sid, "idle", 10_000);
-    const pushes = c.client.userDialogResolved.filter((p) => p.sessionId === sid && p.requestId === requestId);
+    const pushesForQuestion = () => c.client.userDialogResolved.filter((p) => p.sessionId === sid && p.requestId === requestId);
+    const pushesAfterRevive = pushesForQuestion().length;
+    // 錯過推播、畫面上還留著表單的 client 送出答案:不轉給復活的新 server,再推一次 cancelled 讓那份表單收掉
+    const staleFrom = c.client.userDialogResolved.length;
+    await c.client.rpc("dialog.resolve", { sessionId: sid, requestId, result: { behavior: "completed", result: { answers: { q: "late" } } } });
+    const staleClosed = await c.client
+      .waitFor(c.client.userDialogResolved, (p) => p.sessionId === sid && p.requestId === requestId, 5_000, staleFrom)
+      .catch(() => undefined);
+    const after = await getSession(c.client, sid);
     record(
-      "S11 OpenCode:server 在等使用者回答提問(waiting)時被殺 → 所有 client 收到 user-dialog-resolved(cancelled)收掉待答表單;session 轉 error + agentStopped 說明;送訊息後復活、回到 idle,這筆提問只收到一次推播",
+      "S11 OpenCode:server 在等使用者回答提問(waiting)時被殺 → 所有 client 收到 user-dialog-resolved(cancelled)收掉待答表單;session 轉 error + agentStopped 說明;送訊息後復活、回到 idle,這筆提問只收到一次推播;之後對舊提問送出答案只再收到一次 cancelled,狀態維持 idle",
       waiting.status === "waiting" &&
         resolved.result?.behavior === "cancelled" &&
         stopped.status === "error" &&
         pushed &&
         reply.length > 0 &&
         revived.status === "idle" &&
-        pushes.length === 1,
-      `waiting=${waiting.status}, resolved=${JSON.stringify(resolved)}, status=${stopped.status}, pushed=${pushed}, reply=${clip(reply, 60)}, revived=${revived.status}, pushes=${pushes.length}`,
+        pushesAfterRevive === 1 &&
+        staleClosed?.result?.behavior === "cancelled" &&
+        pushesForQuestion().length === 2 &&
+        after?.status === "idle",
+      `waiting=${waiting.status}, resolved=${JSON.stringify(resolved)}, status=${stopped.status}, pushed=${pushed}, reply=${clip(reply, 60)}, revived=${revived.status}, pushesAfterRevive=${pushesAfterRevive}, staleAnswerPush=${JSON.stringify(staleClosed)}, after=${after?.status}`,
     );
   } catch (err) {
     record("S11 執行過程發生未預期錯誤", false, String(err?.stack ?? err));
@@ -1596,6 +1612,81 @@ async function testDeleteWhileWaitingPermission() {
 }
 
 // =======================================================================
+// S13-S14:復活後的新 agent 發出的請求,在 adapter 那邊跟死掉那個 agent 的請求同號(ACP 的 JSON-RPC id 每個行程從 0 數起)
+// → 錯過 agent-stopped 推播的 client 對舊彈窗按「允許」,不能批准新請求
+// =======================================================================
+/** requestId 裡 adapter 自己的編號:core 加的 runtime 前綴(`<前綴>:`)之後的部分;沒有前綴就是整個字串。 */
+const adapterPartOf = (requestId) => requestId.slice(requestId.indexOf(":") + 1);
+
+async function testStaleRequestIdAfterRevive() {
+  const dirs = newDirs("stale-request-id");
+  let c;
+  try {
+    c = await boot(dirs);
+    const sid = await createSession(c.client, FAKE_ACP, dirs.workspaceDir, "revive-stale-request-id");
+    await turn(c.client, sid, SECRET_PROMPT);
+    const agentPid = onlyAgentPid(dirs);
+    const oldTarget = path.join(dirs.workspaceDir, "stale-old.txt");
+    const { requestId: oldId } = await askWritePermission(c.client, sid, oldTarget);
+    const stoppedFrom = c.client.permissionResolved.length;
+
+    killAgentProcess(agentPid);
+    await c.client.waitFor(c.client.permissionResolved, (p) => p.sessionId === sid && p.requestId === oldId, 15_000, stoppedFrom);
+    await waitStatus(c.client, sid, "error", 15_000);
+    await turn(c.client, sid, "剛才那個寫檔請求不用了,回個話就好");
+    await waitStatus(c.client, sid, "idle", 10_000);
+
+    // 復活後的新 agent 再要一次寫檔權限:它的第一筆 JSON-RPC 請求,adapter 那邊的編號跟舊的一樣
+    const newTarget = path.join(dirs.workspaceDir, "stale-new.txt");
+    const newContent = "approved with the new request id";
+    const { requestId: newId, waiting } = await askWritePermission(c.client, sid, newTarget, newContent);
+    const staleFrom = c.client.permissionResolved.length;
+
+    // 錯過 agent-stopped 推播、畫面上還留著舊彈窗的 client 按「允許」
+    await c.client.rpc("permission.resolve", { sessionId: sid, requestId: oldId, decision: "allow" });
+    const staleClosed = await c.client
+      .waitFor(c.client.permissionResolved, (p) => p.sessionId === sid && p.requestId === oldId, 5_000, staleFrom)
+      .catch(() => undefined);
+    await sleep(1_500); // 給「不該發生的寫檔」一點時間現形
+    const afterStale = await getSession(c.client, sid);
+    const newPushesAfterStale = resolvedPushesFor(c.client, sid, newId);
+    record(
+      "S13 agent 等權限時被殺、送訊息復活後又要一次權限(adapter 那邊同號):client 看到的新舊 requestId 不同;對舊 requestId 按「允許」不會批准新請求——新請求沒有收到任何 permission-resolved、session 仍在 waiting、檔案沒有被寫入;舊彈窗收到 agent-stopped 關閉",
+      adapterPartOf(oldId) === adapterPartOf(newId) &&
+        oldId !== newId &&
+        waiting.status === "waiting" &&
+        staleClosed?.decision === "deny" &&
+        staleClosed?.source === "agent-stopped" &&
+        newPushesAfterStale.length === 0 &&
+        afterStale?.status === "waiting" &&
+        !existsSync(newTarget) &&
+        !existsSync(oldTarget),
+      `oldId=${oldId}, newId=${newId}, waiting=${waiting.status}, staleClosed=${JSON.stringify(staleClosed)}, pushesForNewRequest=${JSON.stringify(newPushesAfterStale)}, status=${afterStale?.status}, newFileWritten=${existsSync(newTarget)}, oldFileWritten=${existsSync(oldTarget)}`,
+    );
+
+    // ---- 新請求一直待決,用它自己的 requestId 回覆才有效 ----
+    const answerFrom = c.client.permissionResolved.length;
+    await c.client.rpc("permission.resolve", { sessionId: sid, requestId: newId, decision: "allow" });
+    const answered = await c.client
+      .waitFor(c.client.permissionResolved, (p) => p.sessionId === sid && p.requestId === newId, 10_000, answerFrom)
+      .catch(() => undefined);
+    const done = await waitStatus(c.client, sid, "idle", 15_000).catch(() => undefined);
+    const written = existsSync(newTarget) ? readFileSync(newTarget, "utf8") : undefined;
+    record(
+      "S14 之後用新的 requestId 回覆「允許」:新請求被批准(allow、source=user)、檔案寫入、回到 idle",
+      answered?.decision === "allow" && answered?.source === "user" && written === newContent && done?.status === "idle",
+      `answered=${JSON.stringify(answered)}, written=${JSON.stringify(written)}, status=${done?.status}`,
+    );
+  } catch (err) {
+    record("S13-S14 執行過程發生未預期錯誤", false, String(err?.stack ?? err));
+  } finally {
+    c?.client.close();
+    await killProcessTreeHard(c?.proc);
+    dirs.cleanup();
+  }
+}
+
+// =======================================================================
 // 可以只跑名稱含這些片段的 scenario:node scripts/e2e-session-revive.mjs load double
 const filters = process.argv.slice(2);
 const scenarios = [
@@ -1624,6 +1715,7 @@ const scenarios = [
   ["crash-waiting-permission", () => testAgentCrashWhileWaitingPermission()],
   ["crash-waiting-question", () => testOpencodeCrashWhileQuestion()],
   ["delete-waiting", () => testDeleteWhileWaitingPermission()],
+  ["stale-request-id", () => testStaleRequestIdAfterRevive()],
 ];
 for (const [name, run] of scenarios) {
   if (filters.length === 0 || filters.some((f) => name.includes(f))) await run();

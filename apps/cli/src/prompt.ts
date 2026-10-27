@@ -15,6 +15,8 @@ export interface PermissionAskParams {
   toolName: string;
   input: unknown;
   strong: boolean;
+  /** 這個 session 的工作目錄——`[A]` 的最窄規則在多個路徑沒有共同目錄時退回它(見 render.ts 的 `buildNarrowestRememberRule()`)。 */
+  workingDir?: string;
 }
 
 export interface PermissionAnswer {
@@ -68,7 +70,7 @@ export async function askPermission(rl: Interface, params: PermissionAskParams, 
     const answer = (await question(rl, "  > ")).trim();
     if (answer === "" || answer === "d" || answer === "D") return { decision: "deny" };
     if (answer === "a") return { decision: "allow" };
-    if (answer === "A") return { decision: "allow", rememberRule: buildNarrowestRememberRule(params.toolName, params.input) };
+    if (answer === "A") return { decision: "allow", rememberRule: buildNarrowestRememberRule(params.toolName, params.input, params.workingDir) };
     process.stdout.write(`  看不懂「${answer}」,請輸入 a / d / A,或直接 Enter 拒絕。\n`);
   }
   process.stdout.write("  已達重試上限,視為拒絕。\n");

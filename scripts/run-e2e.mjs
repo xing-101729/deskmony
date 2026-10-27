@@ -54,8 +54,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SUITES = [
   // 單元層級、毫秒級跑完(不啟動 core)—— 放第一個當快速煙霧測試。
   "e2e-hard-deny",
+  // 2026-10-22:「永遠允許」的規則候選(packages/shared/src/remember-rule.ts,桌面彈窗與 CLI 共用)——每個候選丟進
+  // PolicyEngine 都要放行產生它的請求。單元層級、不啟動 core,毫秒級。
+  "e2e-remember-candidates",
   // 2026-10-14:GatewayClient 首次連線失敗後的補載(假 WebSocket,不啟動 core,約 4 秒)。
   "e2e-gateway-client-startup",
+  // 2026-10-16:對話串「連續工具呼叫收成一組」的純函式(apps/desktop/src/lib/chat-groups.ts)——不啟動 core、
+  // 不需要 build(直接用 Node 載入 .ts,需 Node >= 22.18),毫秒級。
+  "e2e-chat-groups",
   // 2026-10-02(P3:session 網路):五個工具(list_agents/list_sessions/read_session/create_session/send_to_session)
   // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
   // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。
@@ -103,6 +109,9 @@ const SUITES = [
   // Claude resume、PTY 全新程序;接不回時退回對話紀錄),復原視圖的「繼續」走同一個流程。十幾個 core 開關,約 1~2 分鐘;
   // 放在 e2e-crash-recovery 之後:它疊在崩潰對帳(interrupted/closed 的分類)之上。
   "e2e-session-revive",
+  // 2026-10-16:訊息 hover 動作列的倒回 / 分支(session.rewind / session.fork)——疊在 session 自動復活的對話紀錄機制之上,
+  // 所以放在 e2e-session-revive 之後。一個 core 開關三次(活著 / 重啟後沒有 runtime / 崩潰後 interrupted),一次只開一個 core。
+  "e2e-session-rewind",
   "e2e-auto-mode-yolo",
   // 2026-09-09(cli_hld.md §9):驅動編譯後的 `apps/cli/dist/bin.js` 子程序,
   // 疊在其餘每一支都假設能正常運作的 gateway/adapters/policy-engine 之上

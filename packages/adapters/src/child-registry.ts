@@ -673,7 +673,7 @@ export function reapOrphans(): { killed: number; skipped: number } {
     }
     try {
       if (isWindows) {
-        spawnSync("taskkill", ["/pid", String(entry.pid), "/T", "/F"], { stdio: "ignore" });
+        spawnSync("taskkill", ["/pid", String(entry.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
         snapshotIsStale = true;
       } else {
         process.kill(entry.pid, "SIGTERM");

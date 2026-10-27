@@ -14,6 +14,13 @@
     "cannotForwardToSelf": "A message cannot be forwarded to its own source session"
   },
   "session": {
-    "reviveFailed": "Could not restart the agent for session {{sessionId}}: {{detail}}"
+    "reviveFailed": "Could not restart the agent for session {{sessionId}}: {{detail}}",
+    "messageIdConflict": "A message with this id already exists, so it was not sent (it may be a duplicate send)"
+  },
+  "sessionHistory": {
+    "unsupported": "A terminal program ({{adapterType}}) has no conversation to rewind or fork",
+    "busy": "Session {{sessionId}} is running (status: {{status}}) — wait until it is idle to rewind or fork",
+    "messageNotFound": "That message could not be found in this session (it may have been removed)",
+    "messageNotRewindable": "You can only rewind or fork at a message you typed in this session"
   }
 }

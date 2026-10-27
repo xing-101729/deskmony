@@ -5,7 +5,10 @@
     "switchAriaLabel": "Switch model"
   },
   "effort": {
-    "switchAriaLabel": "Switch thinking effort"
+    "switchAriaLabel": "Switch thinking effort",
+    "unsupportedOption": "Thinking effort: not supported",
+    "unsupportedTitle": "The current model ({{model}}) has no selectable thinking effort. Switch to a model that supports it to choose one.",
+    "unsupportedTitleNoModel": "The current model has no selectable thinking effort. Switch to a model that supports it to choose one."
   },
   "control": {
     "notSpecifiedOption": "(Not specified, uses the CLI default)",
@@ -16,7 +19,15 @@
     "statusFailed": "Failed",
     "statusDone": "Done",
     "inputLabel": "Input",
-    "outputLabel": "Output"
+    "outputLabel": "Output",
+    "group": {
+      "usedTools_one": "Used {{count}} tool",
+      "usedTools_other": "Used {{count}} tools",
+      "runningNow": "Running {{name}}",
+      "failedCount_one": "{{count}} failed",
+      "failedCount_other": "{{count}} failed",
+      "nameSeparator": ", "
+    }
   },
   "code": {
     "copyAriaLabel": "Copy code",
@@ -95,5 +106,24 @@
     "submit": "Forward",
     "sending": "Forwarding…",
     "tooLong": "This message is too long to forward (the limit is {{max}} characters)"
+  },
+  "messageActions": {
+    "copy": "Copy",
+    "copyTitle": "Copy this message's text",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "rewind": "Rewind",
+    "rewindTitle": "Rewind to just before this message was sent — its text goes back into the input box so you can edit and resend",
+    "rewinding": "Rewinding…",
+    "fork": "Fork",
+    "forkTitle": "Fork a new conversation from just before this message (the original stays unchanged)",
+    "forking": "Forking…",
+    "forkTitleSuffix": "(fork)",
+    "busyTitle": "The agent is running — wait until it is idle to rewind or fork",
+    "rewindConfirm": {
+      "title": "Rewind to before this message?",
+      "message": "The conversation goes back to just before this message was sent: this message and everything after it are removed from this session, and the message text is put back into the input box so you can edit and resend it.\n\nThe agent is replaced with a fresh conversation. It only gets a text transcript of the earlier messages (no tool results from back then) — it reads them, it doesn't remember them.\n\nFiles the agent has already changed are not restored.",
+      "confirm": "Rewind"
+    }
   }
 }

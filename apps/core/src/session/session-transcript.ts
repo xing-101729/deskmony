@@ -58,12 +58,33 @@ function renderEntry(message: TranscriptMessage): string | undefined {
   return `${roleLabel(message)}: ${content}${attachmentMark ? ` ${attachmentMark}` : ""}`.trimEnd();
 }
 
+/**
+ * 紀錄為什麼會出現(說明文字開頭那句不同,其餘相同):
+ *   - `revive`:app 重新開啟/agent 行程結束後重新啟動(預設,session 自動復活)。
+ *   - `rewind`:2026-10-16 使用者把對話倒回到先前某則訊息,後面的內容已被移除、agent 換成全新的後端對話。
+ *   - `fork`:2026-10-16 使用者從另一個 session 的某則訊息分支出這個新 session。
+ * 三種都是「全新的後端對話 + 讀紀錄接續」,所以共用同一個格式;只有「為什麼你不記得」那句要講對,
+ * 否則 agent 會被「app 重新開啟」這種不存在的情境誤導。
+ */
+export type TranscriptIntro = "revive" | "rewind" | "fork";
+
+const INTRO_SENTENCE: Record<TranscriptIntro, string> = {
+  revive: "Deskmony(管理這個對話的桌面程式)在 app 重新開啟後重新啟動了你,你原本的對話狀態沒有保留。",
+  rewind:
+    "使用者在 Deskmony(管理這個對話的桌面程式)把這個對話倒回到先前的某個時間點:那之後的對話已被移除," +
+    "你也被換成全新的對話,原本的對話狀態沒有保留(你不會記得被移除的部分)。",
+  fork:
+    "使用者在 Deskmony(管理這個對話的桌面程式)從另一個對話的某個時間點分支出這個新對話:" +
+    "你是全新啟動的,沒有那段對話的記憶。",
+};
+
 /** 完整區塊;`note` 是截斷說明(沒有截斷時為空字串)。 */
-function frame(body: string, note: string): string {
+function frame(body: string, note: string, intro: TranscriptIntro): string {
+  const what = intro === "revive" ? "這個 session 先前的對話紀錄" : "保留下來的先前對話紀錄";
   return [
     "【Deskmony 補充的先前對話】",
-    "Deskmony(管理這個對話的桌面程式)在 app 重新開啟後重新啟動了你,你原本的對話狀態沒有保留。" +
-      "下面是這個 session 先前的對話紀錄,由 Deskmony 補上,讓你接續脈絡:只含使用者的訊息與你當時的文字回覆," +
+    INTRO_SENTENCE[intro] +
+      `下面是${what},由 Deskmony 補上,讓你接續脈絡:只含使用者的訊息與你當時的文字回覆,` +
       "不含工具呼叫與其結果、檔案內容。請把它當作背景資料,不要逐字複述,也不必特別說明你讀過它;直接回應最後面的新訊息。" +
       note,
     FRAME_START,
@@ -96,15 +117,19 @@ function sliceTailSafe(text: string, keep: number): string {
  */
 export function buildTranscript(
   messages: TranscriptMessage[],
-  options: { maxChars?: number; olderNotLoaded?: boolean } = {},
+  options: { maxChars?: number; olderNotLoaded?: boolean; intro?: TranscriptIntro } = {},
 ): BuiltTranscript | undefined {
   const maxChars = options.maxChars ?? TRANSCRIPT_MAX_CHARS;
   const olderNotLoaded = options.olderNotLoaded === true;
+  const intro = options.intro ?? "revive";
   const entries = messages.map(renderEntry).filter((e): e is string => e !== undefined);
   if (entries.length === 0) return undefined;
 
   // 說明文字的長度先用「最長的截斷說明」預留,內容預算 = 上限 - 框架 - 預留。
-  const reserve = Math.max(frame("", omittedNote(entries.length, true)).length, frame("", omittedNote(entries.length, false)).length);
+  const reserve = Math.max(
+    frame("", omittedNote(entries.length, true), intro).length,
+    frame("", omittedNote(entries.length, false), intro).length,
+  );
   const budget = Math.max(maxChars - reserve, 0);
 
   // 從最新往舊收,收到放不下為止。每則之間隔一個空行(2 個換行字元)。
@@ -127,7 +152,7 @@ export function buildTranscript(
   }
 
   const truncated = omittedCount > 0 || olderNotLoaded || kept[0].startsWith(TRIM_NOTE);
-  const text = frame(kept.join("\n\n"), omittedNote(omittedCount, olderNotLoaded));
+  const text = frame(kept.join("\n\n"), omittedNote(omittedCount, olderNotLoaded), intro);
   return { text, includedCount: kept.length, omittedCount, truncated };
 }
 

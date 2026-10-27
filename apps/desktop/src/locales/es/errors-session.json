@@ -14,6 +14,13 @@
     "cannotForwardToSelf": "No se puede reenviar un mensaje a su propia sesión de origen"
   },
   "session": {
-    "reviveFailed": "No se pudo reiniciar el agent de la sesión {{sessionId}}: {{detail}}"
+    "reviveFailed": "No se pudo reiniciar el agent de la sesión {{sessionId}}: {{detail}}",
+    "messageIdConflict": "Ya existe un mensaje con este id, así que no se envió (puede ser un envío duplicado)"
+  },
+  "sessionHistory": {
+    "unsupported": "Un programa de terminal ({{adapterType}}) no tiene una conversación que rebobinar o bifurcar",
+    "busy": "La sesión {{sessionId}} se está ejecutando (estado: {{status}}): espera a que esté inactiva para rebobinar o bifurcar",
+    "messageNotFound": "No se encontró ese mensaje en esta sesión (puede que se haya eliminado)",
+    "messageNotRewindable": "Solo puedes rebobinar o bifurcar en un mensaje que hayas escrito tú en esta sesión"
   }
 }

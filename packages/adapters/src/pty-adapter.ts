@@ -330,7 +330,7 @@ export class GenericPtyAdapter implements AgentAdapter {
     // 但為了與 acp-adapter.ts 的 killChild() 一致的保守作法,仍嘗試用
     // taskkill /T /F 補一刀(找不到 pid 或已結束時忽略錯誤)。
     if (process.platform === "win32" && internal.ptyProcess.pid) {
-      spawnSync("taskkill", ["/pid", String(internal.ptyProcess.pid), "/T", "/F"], { stdio: "ignore" });
+      spawnSync("taskkill", ["/pid", String(internal.ptyProcess.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
     }
   }
 }

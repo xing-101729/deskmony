@@ -5,7 +5,10 @@
     "switchAriaLabel": "切換 model"
   },
   "effort": {
-    "switchAriaLabel": "切換思考程度"
+    "switchAriaLabel": "切換思考程度",
+    "unsupportedOption": "思考程度:不支援",
+    "unsupportedTitle": "目前的 model({{model}})沒有可選的思考程度,換成支援的 model 後才能選",
+    "unsupportedTitleNoModel": "目前的 model 沒有可選的思考程度,換成支援的 model 後才能選"
   },
   "control": {
     "notSpecifiedOption": "(未指定,使用 CLI 預設)",
@@ -16,7 +19,13 @@
     "statusFailed": "失敗",
     "statusDone": "完成",
     "inputLabel": "輸入",
-    "outputLabel": "輸出"
+    "outputLabel": "輸出",
+    "group": {
+      "usedTools_other": "使用了 {{count}} 個工具",
+      "runningNow": "正在執行 {{name}}",
+      "failedCount_other": "{{count}} 個失敗",
+      "nameSeparator": "、"
+    }
   },
   "code": {
     "copyAriaLabel": "複製程式碼",
@@ -95,5 +104,24 @@
     "submit": "轉傳",
     "sending": "轉傳中…",
     "tooLong": "這則訊息太長,無法轉傳(上限為 {{max}} 個字元)"
+  },
+  "messageActions": {
+    "copy": "複製",
+    "copyTitle": "複製這則訊息的文字",
+    "copied": "已複製",
+    "copyFailed": "複製失敗",
+    "rewind": "倒回",
+    "rewindTitle": "倒回到這則訊息送出之前,內容放回輸入框讓你修改後重送",
+    "rewinding": "倒回中…",
+    "fork": "分支",
+    "forkTitle": "從這則訊息之前分支出一個新對話(原本的對話不變)",
+    "forking": "分支中…",
+    "forkTitleSuffix": "(分支)",
+    "busyTitle": "agent 正在執行,等它閒置後才能倒回或分支",
+    "rewindConfirm": {
+      "title": "倒回到這則訊息之前?",
+      "message": "對話會回到這則訊息送出之前:這則訊息和它之後的所有對話都會從這個 session 移除,訊息內容會放回輸入框,讓你修改後重送。\n\nagent 會換成全新的對話,只讀得到先前對話的文字紀錄(不含當時的工具呼叫結果),不是真的記得。\n\nagent 已經改過的檔案不會還原。",
+      "confirm": "倒回"
+    }
   }
 }

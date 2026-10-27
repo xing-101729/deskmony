@@ -5,7 +5,10 @@
     "switchAriaLabel": "model を切り替え"
   },
   "effort": {
-    "switchAriaLabel": "思考の深さを切り替え"
+    "switchAriaLabel": "思考の深さを切り替え",
+    "unsupportedOption": "思考レベル:非対応",
+    "unsupportedTitle": "現在の model({{model}})には選択できる思考レベルがありません。対応している model に切り替えると選択できます。",
+    "unsupportedTitleNoModel": "現在の model には選択できる思考レベルがありません。対応している model に切り替えると選択できます。"
   },
   "control": {
     "notSpecifiedOption": "(未指定、CLI のデフォルトを使用)",
@@ -16,7 +19,13 @@
     "statusFailed": "失敗",
     "statusDone": "完了",
     "inputLabel": "入力",
-    "outputLabel": "出力"
+    "outputLabel": "出力",
+    "group": {
+      "usedTools_other": "{{count}} 個のツールを使用",
+      "runningNow": "{{name}} を実行中",
+      "failedCount_other": "{{count}} 件失敗",
+      "nameSeparator": "、"
+    }
   },
   "code": {
     "copyAriaLabel": "コードをコピー",
@@ -95,5 +104,24 @@
     "submit": "転送",
     "sending": "転送中…",
     "tooLong": "このメッセージは長すぎて転送できません(上限は {{max}} 文字です)"
+  },
+  "messageActions": {
+    "copy": "コピー",
+    "copyTitle": "このメッセージのテキストをコピー",
+    "copied": "コピーしました",
+    "copyFailed": "コピーに失敗しました",
+    "rewind": "巻き戻し",
+    "rewindTitle": "このメッセージを送信する前まで巻き戻し、内容を入力欄に戻します(編集して再送できます)",
+    "rewinding": "巻き戻し中…",
+    "fork": "分岐",
+    "forkTitle": "このメッセージの前から新しい会話を分岐します(元の会話は変わりません)",
+    "forking": "分岐中…",
+    "forkTitleSuffix": "(分岐)",
+    "busyTitle": "agent が実行中です。アイドルになってから巻き戻し・分岐できます",
+    "rewindConfirm": {
+      "title": "このメッセージの前まで巻き戻しますか?",
+      "message": "会話はこのメッセージを送信する前の状態に戻ります。このメッセージとそれ以降の会話はこのセッションから削除され、メッセージの内容は入力欄に戻るので、編集して再送できます。\n\nagent は新しい会話に切り替わり、以前の会話のテキスト記録(当時のツール実行結果は含まれません)を読むだけで、実際に覚えているわけではありません。\n\nagent がすでに変更したファイルは元に戻りません。",
+      "confirm": "巻き戻す"
+    }
   }
 }

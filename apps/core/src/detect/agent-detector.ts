@@ -108,7 +108,10 @@ export async function probeCommand(command: string, versionArgs: string[] = ["--
 function findExecutable(command: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     const finder = process.platform === "win32" ? "where" : "which";
-    execFile(finder, [command], { timeout: PROBE_TIMEOUT_MS }, (error, stdout) => {
+    // 2026-10-16:三處探測一律 `windowsHide: true`。打包版 core 是 Electron 的 Deskmony.exe 加 ELECTRON_RUN_AS_NODE 跑的,
+    // 那是 GUI subsystem 程式、沒有主控台;沒有主控台的父程序啟動 `where`/`cmd.exe`/agent CLI 這類主控台程式時,
+    // 不帶 CREATE_NO_WINDOW(= `windowsHide`)系統可能替子程序開一個新的主控台視窗(看不看得見取決於預設終端機等系統設定)。
+    execFile(finder, [command], { timeout: PROBE_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
       if (error) {
         resolve(undefined);
         return;
@@ -143,7 +146,7 @@ function runVersionCommand(resolvedPath: string, versionArgs: string[]): Promise
     const needsShell = process.platform === "win32" && (ext === ".cmd" || ext === ".bat");
     const file = needsShell ? quoteForShell(resolvedPath) : resolvedPath;
     // 2026-10-05(安全):探測的是使用者機器上的 agent 執行檔——同樣不把 core 的主認證 token 等內部憑證交給它(見 adapters 的 agent-env.ts)。
-    execFile(file, versionArgs, { timeout: PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv() }, (error, stdout, stderr) => {
+    execFile(file, versionArgs, { timeout: PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv(), windowsHide: true }, (error, stdout, stderr) => {
       if (error) {
         resolve(undefined);
         return;
@@ -178,7 +181,7 @@ function runModelsCommand(resolvedPath: string, args: string[]): Promise<Detecte
     const ext = path.extname(resolvedPath).toLowerCase();
     const needsShell = process.platform === "win32" && (ext === ".cmd" || ext === ".bat");
     const file = needsShell ? quoteForShell(resolvedPath) : resolvedPath;
-    execFile(file, args, { timeout: MODELS_PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv() }, (error, stdout) => {
+    execFile(file, args, { timeout: MODELS_PROBE_TIMEOUT_MS, shell: needsShell, env: buildAgentChildEnv(), windowsHide: true }, (error, stdout) => {
       if (error) {
         resolve([]);
         return;
