@@ -468,6 +468,30 @@ class AuthRateLimiter {
 }
 
 /**
+ * gateway 綁不到 port 時 core 的 exit code(BSD sysexits 的 EX_CONFIG——改 `DESKMONY_CORE_PORT` 等設定就能排除)。
+ * 刻意與一般啟動失敗的 1 分開:桌面殼以 `stdio: "inherit"` 起 core、讀不到它的輸出,只能靠 exit code 分辨
+ * 「port 被佔用」並顯示對症的訊息。apps/desktop/electron/main.ts 與 scripts/e2e-core-port-in-use.mjs 各有一份
+ * 同值常數(它們不 import core),改了要一起改。
+ */
+export const CORE_EXIT_CODE_BIND_FAILED = 78;
+
+/** `WsGateway.listen()` 綁不到 port(EADDRINUSE、EACCES……)。`message` 沿用 Node 原始錯誤訊息,見 index.ts 的使用處。 */
+export class GatewayListenError extends Error {
+  /** Node 的 errno 代碼,例如 `EADDRINUSE`。 */
+  readonly code: string | undefined;
+
+  constructor(
+    readonly host: string,
+    readonly port: number,
+    cause: NodeJS.ErrnoException,
+  ) {
+    super(cause.message, { cause });
+    this.name = "GatewayListenError";
+    this.code = cause.code;
+  }
+}
+
+/**
  * Gateway(ARCHITECTURE.md 3.2 節):
  *   「UI 與 Core 之間走 WebSocket:指令用 request/response,agent 輸出用事件推播」
  *
@@ -610,6 +634,9 @@ export class WsGateway {
   }
 
   /**
+   * 開始 listen;成功綁定後 resolve,綁不到 port 時以 `GatewayListenError` reject(2026-10-27 起,
+   * 原本回傳 void、錯誤只記 log)。
+   *
    * @param host 綁定位址(M5 Round A 任務1)。預設由呼叫端(apps/core/src/index.ts)
    *   決定,這裡不內建預設值,避免這個類別自己對「安全預設」做假設 ——
    *   單一 source of truth 放在啟動流程(index.ts 讀 DESKMONY_BIND_HOST +
@@ -623,8 +650,8 @@ export class WsGateway {
     port: number,
     host: string,
     staticRequestHandler?: (req: IncomingMessage, res: ServerResponse) => void,
-  ): void {
-    this.httpServer = createServer((req, res) => {
+  ): Promise<void> {
+    const httpServer = createServer((req, res) => {
       if (staticRequestHandler) {
         staticRequestHandler(req, res);
       } else {
@@ -632,17 +659,44 @@ export class WsGateway {
         res.end("Not Found");
       }
     });
+    this.httpServer = httpServer;
     const authEnabled = Boolean(this.authToken);
-    this.wss = new WebSocketServer({
-      server: this.httpServer,
+    const wss = new WebSocketServer({
+      server: httpServer,
       verifyClient: (info: { origin?: string; req: IncomingMessage }) => verifySameOrigin(info, authEnabled),
     });
-    this.wss.on("connection", (socket, request) => this.handleConnection(socket, request));
-    this.httpServer.on("error", (err) => {
-      console.error("[gateway] HTTP server error:", err);
-    });
-    this.httpServer.listen(port, host, () => {
-      console.log(`[gateway] WebSocket server listening on ws://${host}:${port}`);
+    this.wss = wss;
+    wss.on("connection", (socket, request) => this.handleConnection(socket, request));
+    /**
+     * 2026-10-27:`ws` 用 `server` 選項掛上來時,會在 httpServer 上註冊自己的 'error' listener,把錯誤原樣
+     * 轉發成 wss 的 'error'——而且它比下面我們自己的 listener 先註冊、先執行。wss 沒有 'error' listener 時
+     * EventEmitter 直接 throw,錯誤變成未捕捉例外,被 index.ts 的 uncaughtException 兜底印成 FATAL 後**刻意
+     * 不退出**,我們自己的 listener 根本輪不到。實測綁 port 失敗時 core 就這樣活著卻沒在 listen,連到這個
+     * port 的 client 安靜地連到佔用它的那個程序(可能是另一個 core、另一份 DB)。
+     *
+     * 這裡的 listener 只是讓轉發不再 throw;錯誤一律在 httpServer 那一層處理(錯誤的來源在那裡,不依賴
+     * `ws` 的轉發細節)。
+     */
+    wss.on("error", () => {});
+    return new Promise((resolve, reject) => {
+      // 還沒開始 listen 之前的錯誤只可能是綁定失敗(EADDRINUSE/EACCES/EADDRNOTAVAIL):交給呼叫端當成
+      // 啟動失敗處理(index.ts 會印出可讀訊息並退出),不能只記 log 讓 core 帶著沒開的 gateway 繼續跑。
+      const onBindError = (err: NodeJS.ErrnoException): void => {
+        httpServer.off("listening", onListening);
+        reject(new GatewayListenError(host, port, err));
+      };
+      const onListening = (): void => {
+        httpServer.off("error", onBindError);
+        // 開始 listen 之後的錯誤屬於執行期,維持原本只記錄、不退出的設計(見 index.ts 的 uncaughtException 說明)。
+        httpServer.on("error", (err) => {
+          console.error("[gateway] HTTP server error:", err);
+        });
+        console.log(`[gateway] WebSocket server listening on ws://${host}:${port}`);
+        resolve();
+      };
+      httpServer.once("error", onBindError);
+      httpServer.once("listening", onListening);
+      httpServer.listen(port, host);
     });
   }
 

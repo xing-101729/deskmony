@@ -12,12 +12,16 @@
  * 2026-10-27 實際撞到:`e2e-session-network` 序幕報「找不到 session: <id>」、
  * `e2e-notification` 15/16;等另一個 worktree 跑完再單獨重跑,全部通過。
  *
- * 更糟的是撞號**不會大聲失敗**:core 綁 port 失敗(EADDRINUSE)時,錯誤經 `ws` 的
+ * 更糟的是撞號**不會大聲失敗**:當時 core 綁 port 失敗(EADDRINUSE)時,錯誤經 `ws` 的
  * WebSocketServer 轉成未捕捉例外,core 的 uncaught-exception handler 印一行 `[FATAL]`
  * 之後**刻意不退出**(見 apps/core/src/index.ts 的說明:怕失去對 agent 子程序的控制),
  * 測試的 `waitForPort()` 只確認「那個 port 連得上」,於是 client
  * 安靜地連到**另一個 worktree 的 core、另一份 DB**——症狀是莫名其妙的「找不到
  * session」,很容易被誤判成程式回歸。
+ *
+ * (同日稍後 core 已改成綁不到 port 就以 exit code 78 退出,見 apps/core/src/gateway/ws-gateway.ts 的
+ * `listen()` 與 scripts/e2e-core-port-in-use.mjs。但測試端的防護仍然需要:core 要先回收孤兒、跑
+ * migration 才開始 listen,在它退出之前 `waitForPort()` 早就連上佔用者、測試已經開始對著別人斷言了。)
  *
  * ---- 為什麼選「動態 port」而不是「全機一把鎖、一次只准一個 worktree 跑」 ----
  *
@@ -100,9 +104,9 @@ const guarded = new Set();
 /**
  * Node 綁 port 失敗的錯誤訊息,例如 `listen EADDRINUSE: address already in use 127.0.0.1:27030`。
  *
- * 比對的是 Node 錯誤本身、不是哪個 handler 印的前綴:實測(2026-10-27)這個錯誤並沒有走
- * ws-gateway.ts 的 `[gateway] HTTP server error`,而是被 `ws` 轉成未捕捉例外、由 core 的
- * `[uncaught-exception][FATAL]` 印出——前綴是 core 內部細節,隨時會變。改為要求訊息結尾
+ * 比對的是 Node 錯誤本身、不是哪個 handler 印的前綴:最早實測(2026-10-27)這個錯誤是被 `ws` 轉成
+ * 未捕捉例外、由 core 的 `[uncaught-exception][FATAL]` 印出,修正後改由 index.ts 的「拒絕啟動」訊息
+ * 原樣附上——前綴是 core 內部細節,隨時會變(core 那邊也註明了要保留原始訊息)。改為要求訊息結尾
  * 是**這個 core 的 port**:core 底下的 agent 後端(例如 opencode server)也可能印出綁
  * port 失敗,但那是別的號碼,不是我們要攔的情況。
  */
@@ -127,9 +131,9 @@ function killTree(proc) {
  * 看管一個剛 spawn 的 core:它的 gateway 一旦綁 port 失敗,就收掉這支 e2e 啟動的
  * 所有 core 並以 `PORT_CONFLICT_EXIT_CODE` 結束整支 e2e。
  *
- * 為什麼直接結束而不是讓測試自己失敗:core 綁不到 port 時程序不會退出,而那個
- * port 上回應的是別人的 core——接下來每一個斷言都是對著錯的對象做的,錯誤訊息
- * 只會誤導人。也不在這裡換號重啟:port 早已寫進各支測試的 URL、client、重啟
+ * 為什麼直接結束而不是讓測試自己失敗:那個 port 上回應的是別人的 core——core 雖然
+ * 隨後會自己退出,但在那之前測試早已連上佔用者,接下來每一個斷言都是對著錯的對象
+ * 做的,錯誤訊息只會誤導人。也不在這裡換號重啟:port 早已寫進各支測試的 URL、client、重啟
  * 流程裡,換號重試要改的是每一支的結構;整支重跑(由 run-e2e.mjs 負責)簡單得多,
  * 而這條路徑本來就只在萬分之一的撞號時才會走到。
  *

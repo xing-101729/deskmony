@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AcpAdapter, AdapterRegistry, ClaudeAgentSdkAdapter, GenericPtyAdapter, OpenCodeAdapter } from "@deskmony/adapters";
 import { initChildRegistry, reapOrphans } from "@deskmony/adapters";
-import type { SessionNetworkPort } from "@deskmony/shared";
+import type { ConfigSource, SessionNetworkPort } from "@deskmony/shared";
 import { initDb } from "./db.js";
 import { AgentCatalog, E2E_EXTRA_PROVIDERS_ENV } from "./agents/agent-catalog.js";
 import { PermissionGateway } from "./permissions/permission-gateway.js";
@@ -18,7 +18,7 @@ import { RecoveryService } from "./recovery/recovery-service.js";
 import { TerminalManager } from "./terminal/terminal-manager.js";
 import { WorkspaceInspector } from "./workspace/workspace-inspector.js";
 import { BrowserRelay } from "./browser/browser-relay.js";
-import { WsGateway } from "./gateway/ws-gateway.js";
+import { CORE_EXIT_CODE_BIND_FAILED, GatewayListenError, WsGateway } from "./gateway/ws-gateway.js";
 import { createStaticRequestHandler } from "./http/static-server.js";
 import { SettingsStore, migrateLegacyEnabledModelIds } from "./settings/settings-store.js";
 import { applyConsoleLogLevel, loadConfig } from "./config/load-config.js";
@@ -103,6 +103,54 @@ function validateBindSafety(bindHost: string, authToken: string | undefined): vo
     );
     process.exit(1);
   }
+}
+
+/**
+ * gateway 綁不到 port 時的啟動失敗訊息。看到它的人通常是在終端機跑 `deskmony serve`、或從桌面殼的 log
+ * 回頭查,所以要直接講清楚是哪個 host:port、為什麼、該改哪個設定——而不是只丟出 Node 的 errno。
+ *
+ * 原始錯誤訊息(`listen EADDRINUSE: address already in use 127.0.0.1:4317`)一定要原樣印出:
+ * scripts/lib/e2e-ports.mjs 的 `guardCorePort()` 靠比對它判斷 e2e 撞號。
+ */
+function reportGatewayListenFailure(
+  err: GatewayListenError,
+  portSource: ConfigSource,
+  bindHostSource: ConfigSource,
+  configPath: string,
+): void {
+  const describeSource = (source: ConfigSource, envName: string, fileKey: string): string =>
+    source === "env" ? `環境變數 ${envName}` : source === "file" ? `設定檔 ${configPath} 的 ${fileKey}` : "預設值";
+  // 環境變數優先於設定檔(見 load-config.ts),所以值來自環境變數時只能叫人改環境變數,改設定檔不會生效。
+  const portFix =
+    portSource === "env"
+      ? "請把 DESKMONY_CORE_PORT 改成一個空閒的 port 後重新啟動"
+      : `請設定環境變數 DESKMONY_CORE_PORT(或修改 ${configPath} 的 daemon.port)為一個空閒的 port 後重新啟動`;
+  let reason: string;
+  let fix: string;
+  switch (err.code) {
+    case "EADDRINUSE":
+      reason = "這個 port 已經被別的程序佔用(常見情況:另一個 Deskmony core 或桌面 app 正在執行)";
+      fix = portFix;
+      break;
+    case "EACCES":
+      reason =
+        "沒有權限綁定這個 port(Windows 上常見原因是它落在系統保留的範圍內,可用 " +
+        "`netsh interface ipv4 show excludedportrange protocol=tcp` 查看)";
+      fix = portFix;
+      break;
+    case "EADDRNOTAVAIL":
+      reason = "這台機器上沒有這個位址";
+      fix = `位址來自${describeSource(bindHostSource, "DESKMONY_BIND_HOST", "daemon.bindHost")},請改成這台機器上存在的位址後重新啟動`;
+      break;
+    default:
+      reason = `作業系統拒絕綁定(${err.code ?? "未知錯誤"})`;
+      fix = portFix;
+  }
+  console.error(
+    `[core] 拒絕啟動:gateway 無法綁定 ${err.host}:${err.port} —— ${reason}。\n` +
+      `[core] port ${err.port} 來自${describeSource(portSource, "DESKMONY_CORE_PORT", "daemon.port")};${fix}。\n` +
+      `[core] 原始錯誤:${err.message}`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -446,7 +494,15 @@ async function main(): Promise<void> {
     console.log("[core] 啟動對帳:上次是乾淨關閉,沒有發現中斷的 session。");
   }
 
-  gateway.listen(port, bindHost, staticHandler);
+  try {
+    await gateway.listen(port, bindHost, staticHandler);
+  } catch (err) {
+    if (!(err instanceof GatewayListenError)) throw err;
+    // 綁不到 port 就是啟動失敗,必須退出:core 活著卻沒在 listen 時,連到這個 port 的 client(桌面殼、CLI)
+    // 會安靜地連到佔用它的那個程序。此時還沒有任何 session 在跑(對帳只標記狀態),直接退出不會丟下 agent。
+    reportGatewayListenFailure(err, effective.daemon.port.source, effective.daemon.bindHost.source, configPath);
+    process.exit(CORE_EXIT_CODE_BIND_FAILED);
+  }
 
   // 啟動摘要(M5 Round A 任務1):印出目前綁定位址與是否啟用認證,但絕不
   // 印出 token 本身(即使是 DEBUG 等級也不印,避免經由終端機 log/log 檔外流)。
