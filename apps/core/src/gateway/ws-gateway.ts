@@ -1,10 +1,13 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from "node:http";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer, WebSocket, type RawData } from "ws";
+import { ZodError } from "zod";
 import {
+  AuthRequestSchema,
   ClientRequestSchema,
   DeskmonyError,
   ErrorCodes,
+  GATEWAY_MAX_MESSAGE_BYTES,
   type ClientRequest,
   type ClientRequestMethod,
   type EffectiveCoreConfig,
@@ -72,6 +75,16 @@ interface ConnectionState {
 
 /** 未認證連線的逾時秒數(M5 Round A 任務2:逾時未認證即關閉連線)。 */
 const AUTH_TIMEOUT_MS = 5_000;
+
+/**
+ * 2026-10-27:尚未認證的連線單一訊息的位元組上限。這時唯一會被處理的是 `auth`(token 是幾十個字元的 hex),超過的
+ * 訊息連 `JSON.parse` 都不做就關閉連線(1009),見 `handleConnection()`。連線整體的上限是 `GATEWAY_MAX_MESSAGE_BYTES`。
+ */
+const PRE_AUTH_MAX_MESSAGE_BYTES = 64 * 1024;
+
+/** 2026-10-27:無效請求回給 client 的錯誤細節最多列幾個 zod issue、最多幾個字元,見 `describeRequestError()`。 */
+const INVALID_REQUEST_DETAIL_MAX_ISSUES = 3;
+const INVALID_REQUEST_DETAIL_MAX_CHARS = 1_000;
 
 /**
  * Phase 2(ACP scoped MCP bridge token):見 apps/core/src/gateway/
@@ -579,6 +592,8 @@ export class WsGateway {
     const authEnabled = Boolean(this.authToken);
     this.wss = new WebSocketServer({
       server: this.httpServer,
+      // 2026-10-27:ws 預設 100 MiB,見 GATEWAY_MAX_MESSAGE_BYTES 的估算。
+      maxPayload: GATEWAY_MAX_MESSAGE_BYTES,
       verifyClient: (info: { origin?: string; req: IncomingMessage }) => verifySameOrigin(info, authEnabled),
     });
     this.wss.on("connection", (socket, request) => this.handleConnection(socket, request));
@@ -824,6 +839,11 @@ export class WsGateway {
     }
 
     socket.on("message", (raw) => {
+      // 2026-10-27:未認證的連線只能送 auth,太大的訊息不可能是合法的認證請求——在轉成字串、JSON.parse 之前就關閉。
+      if (!state.authenticated && rawDataByteLength(raw) > PRE_AUTH_MAX_MESSAGE_BYTES) {
+        socket.close(1009, "認證前的訊息過大");
+        return;
+      }
       void this.handleMessage(socket, raw.toString());
     });
     socket.on("close", () => {
@@ -837,14 +857,27 @@ export class WsGateway {
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
+    // S7:提前拿一次 state(供下面的認證閘門、LOCAL_ONLY_METHODS 檢查、
+    // dispatch() 的 isLocal 參數共用同一份,不必各自重複 `this.clients.get()`)。
+    const connState = this.clients.get(socket);
+
+    // 2026-10-27:尚未認證(只有設了 DESKMONY_AUTH_TOKEN 才會有這種連線,見 handleConnection())時只認 `auth`,
+    // 而且只用 `AuthRequestSchema` 解析——完整的 `ClientRequestSchema` 會對不合格的陣列逐元素產生 zod issue
+    // (1M 個元素 → heap 多 ~265 MB),不能讓還沒通過認證的人觸發。其他方法在解析之前就拒絕,與下方認證閘門的
+    // 回覆相同;這只是把那個判斷提前到解析之前,認證語意不變。
+    const preAuth = Boolean(connState && !connState.authenticated);
     let parsed: ClientRequest;
     let requestId = "unknown";
     try {
       const json = JSON.parse(raw);
       requestId = typeof json?.id === "string" ? json.id : randomUUID();
-      parsed = ClientRequestSchema.parse(json);
+      if (preAuth && json?.method !== "auth") {
+        this.sendNotYetAuthenticated(socket, requestId);
+        return;
+      }
+      parsed = preAuth ? AuthRequestSchema.parse(json) : ClientRequestSchema.parse(json);
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = describeRequestError(err);
       this.send(socket, {
         kind: "response",
         id: requestId,
@@ -855,10 +888,6 @@ export class WsGateway {
       });
       return;
     }
-
-    // S7:提前拿一次 state(供下面的認證閘門、LOCAL_ONLY_METHODS 檢查、
-    // dispatch() 的 isLocal 參數共用同一份,不必各自重複 `this.clients.get()`)。
-    const connState = this.clients.get(socket);
 
     // ---- Phase 2(ACP scoped MCP bridge token):scoped token 認證 --------
     // **必須排在 `this.authToken` 分流之前**,且同樣完全同步(不含任何
@@ -926,14 +955,10 @@ export class WsGateway {
     if (this.authToken) {
       const state = connState;
       if (state && !state.authenticated) {
+        // 2026-10-27:非 auth 請求已在解析之前擋掉(見上方 `preAuth`);這裡保留,讓下面的 `parsed.params.token`
+        // 有型別收窄,也多一層保險。
         if (parsed.method !== "auth") {
-          this.send(socket, {
-            kind: "response",
-            id: parsed.id,
-            ok: false,
-            error: "尚未完成認證:第一則訊息必須是帶正確 token 的 auth 請求",
-            errorCode: ErrorCodes.AUTH_NOT_YET_AUTHENTICATED,
-          });
+          this.sendNotYetAuthenticated(socket, parsed.id);
           return;
         }
         // M5 Round B 任務3:先檢查這個來源 IP 是否在冷卻期內——不論這次帶的
@@ -1322,6 +1347,16 @@ export class WsGateway {
     socket.send(JSON.stringify(message));
   }
 
+  private sendNotYetAuthenticated(socket: WebSocket, id: string): void {
+    this.send(socket, {
+      kind: "response",
+      id,
+      ok: false,
+      error: "尚未完成認證:第一則訊息必須是帶正確 token 的 auth 請求",
+      errorCode: ErrorCodes.AUTH_NOT_YET_AUTHENTICATED,
+    });
+  }
+
   private broadcast(message: ServerPush): void {
     const payload = JSON.stringify(message);
     // M5 Round A:只推播給已認證的連線(未認證的連線在 auth 通過前不應該
@@ -1370,5 +1405,33 @@ function toErrorResponse(id: string, err: unknown): GatewayServerResponse {
   if (err instanceof DeskmonyError) {
     return { kind: "response", id, ok: false, error: err.message, errorCode: err.code, errorParams: err.params };
   }
+  // 2026-10-27:dispatch 內部拋出的 ZodError 同樣不回傳整份 issue 清單,見 describeRequestError()。
+  if (err instanceof ZodError) return { kind: "response", id, ok: false, error: describeRequestError(err) };
   return { kind: "response", id, ok: false, error: err instanceof Error ? err.message : String(err) };
+}
+
+/**
+ * 2026-10-27:回給 client 的請求驗證錯誤細節(`GATEWAY_INVALID_REQUEST` 的 `detail`)。zod 3 對陣列**每一個**不合格的
+ * 元素各產生一個 issue,而 `ZodError.message` 是一個 getter,每次讀取都把整份 issue 清單 `JSON.stringify(…, 2)`——
+ * 1M 個元素的陣列,`message` 是 189 MB。這裡只讀前幾個 issue、完全不碰 `message`;其他錯誤(`JSON.parse` 的
+ * SyntaxError 等)只截斷長度。
+ */
+function describeRequestError(err: unknown): string {
+  let detail: string;
+  if (err instanceof ZodError) {
+    const shown = err.issues
+      .slice(0, INVALID_REQUEST_DETAIL_MAX_ISSUES)
+      .map((issue) => (issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message));
+    const more = err.issues.length - shown.length;
+    detail = more > 0 ? `${shown.join("; ")} (+${more} more issues)` : shown.join("; ");
+  } else {
+    detail = err instanceof Error ? err.message : String(err);
+  }
+  return detail.length > INVALID_REQUEST_DETAIL_MAX_CHARS ? `${detail.slice(0, INVALID_REQUEST_DETAIL_MAX_CHARS)}…` : detail;
+}
+
+/** `ws` 的 `message` 事件資料的位元組數(預設 `binaryType` 是 Buffer;另外兩種形狀一併處理)。 */
+function rawDataByteLength(raw: RawData): number {
+  if (Array.isArray(raw)) return raw.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  return raw.byteLength;
 }
