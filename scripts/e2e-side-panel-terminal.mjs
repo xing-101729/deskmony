@@ -32,7 +32,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -323,8 +323,18 @@ async function readAudit(dataDir, kind) {
   }
 }
 
+/** 比較兩個資料夾是不是同一個。存在的路徑先過 `realpathSync.native`:Windows 的 os.tmpdir() 可能是
+ *  8.3 短檔名(GitHub runner 是 `C:\Users\RUNNER~1\...`),shell 印出的 cwd 則是長檔名;非 native 的
+ *  realpathSync 不會展開短檔名。 */
 function sameDir(a, b) {
-  const norm = (p) => path.resolve(p).replace(/[\\/]+$/, "");
+  const real = (p) => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      return p;
+    }
+  };
+  const norm = (p) => real(path.resolve(p)).replace(/[\\/]+$/, "");
   return IS_WIN ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
 }
 
