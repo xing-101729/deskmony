@@ -1,0 +1,9 @@
+{
+  "terminal": {
+    "notFound": "La terminal {{terminalId}} ya no existe",
+    "sessionNotFound": "La conversación {{sessionId}} ya no existe",
+    "cwdMissing": "La carpeta de trabajo de la conversación no existe: {{cwd}}",
+    "limitReached": "Se alcanzó el límite de terminales (máximo {{perSession}} por conversación, {{global}} en total); cierra una primero",
+    "spawnFailed": "No se pudo iniciar {{shell}}: {{detail}}"
+  }
+}

@@ -2,8 +2,20 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { client, providerLabelOf, selectAvailableProviders, useSessionStore } from "./stores/session-store.js";
 import { useRecoveryStore } from "./stores/recovery-store.js";
+import { usePanelStore } from "./stores/panel-store.js";
 import { SessionList } from "./views/SessionList.js";
 import { SessionView } from "./views/SessionView.js";
+import { SidePanel } from "./views/panel/SidePanel.js";
+import { BrowserHost } from "./views/panel/BrowserHost.js";
+import { isBrowserSupported } from "./stores/browser-store.js";
+import {
+  openBrowserPanel,
+  openChangesPanel,
+  openFilesPanel,
+  openNewTerminal,
+  openTerminalPanel,
+  togglePanel,
+} from "./views/panel/panel-actions.js";
 import { PermissionModal } from "./views/PermissionModal.js";
 import { ConnectScreen } from "./views/ConnectScreen.js";
 import { SettingsDialog } from "./views/SettingsDialog.js";
@@ -77,6 +89,7 @@ export default function App(): JSX.Element {
   const increaseFontScale = useFontScale((s) => s.increase);
   const decreaseFontScale = useFontScale((s) => s.decrease);
   const resetFontScale = useFontScale((s) => s.reset);
+  const panelOpen = usePanelStore((s) => s.open);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -198,6 +211,10 @@ export default function App(): JSX.Element {
         { combo: "mod+,", handler: () => setSettingsOpen(true) },
         { combo: "alt+arrowdown", handler: () => cycleSession(1), allowInTerminal: true },
         { combo: "alt+arrowup", handler: () => cycleSession(-1), allowInTerminal: true },
+        // 2026-10-20(右側面板):`mod+j` 開/關面板;`ctrl+``(Ctrl + 反引號)開面板並切到 Terminal(沒有終端就自動建一個)。
+        // 兩者在終端裡也要生效——面板的終端聚焦時最常需要的就是「收起面板」與「回到終端」。
+        { combo: "mod+j", handler: () => togglePanel(), allowInTerminal: true },
+        { combo: "ctrl+`", handler: () => openTerminalPanel(), allowInTerminal: true },
         // 字級調整:這三組組合鍵在終端裡沒有 readline/既定終端語意(不像
         // ui/hotkeys.ts 檔頭註解警告的 Ctrl+K/B/N 那樣被終端本身佔用),而
         // 「正在看終端輸出時調整字級」恰好是最常見的使用情境之一,所以明確
@@ -209,6 +226,16 @@ export default function App(): JSX.Element {
       [cycleSession, decreaseFontScale, handleCreateSession, increaseFontScale, resetFontScale],
     ),
   );
+
+  // 2026-10-20(Browser 分頁):焦點在 webview 裡時按鍵進的是 guest 行程,上面的 `useHotkeys` 收不到。Electron main 的
+  // `before-input-event` 只攔 Ctrl/Cmd+J、Ctrl+`、Ctrl/Cmd+K 這三個(其餘按鍵一律給網頁),攔下後經 IPC 轉到這裡執行同樣的動作。
+  useEffect(() => {
+    return window.deskmony?.onAppShortcut?.((action) => {
+      if (action === "toggle-panel") togglePanel();
+      else if (action === "open-terminal") openTerminalPanel();
+      else if (action === "open-palette") setPaletteOpen(true);
+    });
+  }, []);
 
   /** 命令面板的指令清單——每一項都對應畫面上原本就存在的入口,不新增能力。
    *  i18n 專案新增:`t` 進入依賴陣列(比照 PermissionModal.tsx 的
@@ -250,6 +277,15 @@ export default function App(): JSX.Element {
         run: () => setSidebarCollapsed((collapsed) => !collapsed),
       },
       {
+        id: "action:toggle-panel",
+        group: t("app:commands.groupActions"),
+        title: panelOpen ? t("app:commands.togglePanel.hide") : t("app:commands.togglePanel.show"),
+        icon: "panel-right",
+        hint: `${MOD_LABEL}J`,
+        keywords: t("app:commands.togglePanel.keywords"),
+        run: () => togglePanel(),
+      },
+      {
         id: "action:toggle-theme",
         group: t("app:commands.groupActions"),
         title: resolvedTheme === "dark" ? t("app:commands.toggleTheme.toLight") : t("app:commands.toggleTheme.toDark"),
@@ -285,6 +321,51 @@ export default function App(): JSX.Element {
         run: () => resetFontScale(),
       },
     ];
+
+    if (currentSessionId) {
+      list.push({
+        id: "action:new-terminal",
+        group: t("app:commands.groupActions"),
+        title: t("app:commands.newTerminal.title"),
+        subtitle: t("app:commands.newTerminal.subtitle"),
+        icon: "terminal",
+        hint: "Ctrl+`",
+        keywords: t("app:commands.newTerminal.keywords"),
+        run: () => openNewTerminal(),
+      });
+      list.push(
+        {
+          id: "action:open-changes",
+          group: t("app:commands.groupActions"),
+          title: t("app:commands.openChanges.title"),
+          subtitle: t("app:commands.openChanges.subtitle"),
+          icon: "branch",
+          keywords: t("app:commands.openChanges.keywords"),
+          run: () => openChangesPanel(),
+        },
+        {
+          id: "action:open-files",
+          group: t("app:commands.groupActions"),
+          title: t("app:commands.openFiles.title"),
+          subtitle: t("app:commands.openFiles.subtitle"),
+          icon: "folder",
+          keywords: t("app:commands.openFiles.keywords"),
+          run: () => openFilesPanel(),
+        },
+      );
+      // 瀏覽器分頁只有 Electron 殼有(<webview>);純瀏覽器 client 不出現這個指令。
+      if (isBrowserSupported()) {
+        list.push({
+          id: "action:open-browser",
+          group: t("app:commands.groupActions"),
+          title: t("app:commands.openBrowser.title"),
+          subtitle: t("app:commands.openBrowser.subtitle"),
+          icon: "globe",
+          keywords: t("app:commands.openBrowser.keywords"),
+          run: () => openBrowserPanel(),
+        });
+      }
+    }
 
     if (interruptedSessions.length > 0) {
       list.push({
@@ -330,6 +411,8 @@ export default function App(): JSX.Element {
     handleCreateSession,
     increaseFontScale,
     interruptedSessions.length,
+    panelOpen,
+    currentSessionId,
     resetFontScale,
     resolvedTheme,
     selectSession,
@@ -426,10 +509,29 @@ export default function App(): JSX.Element {
           仍然可用。`resetKey` 綁 currentSessionId:切到別的 session 會自動清掉
           錯誤狀態,不會一路卡著同一張錯誤畫面。
         */}
-        <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
-          <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
-        </ErrorBoundary>
+        {/*
+          2026-10-20:聊天視圖與右側面板放進**同一個容器**——容器的寬度就是側欄佔掉之後實際剩下的寬度(側欄展開/收合都會
+          反映在這裡),SidePanel 量它來決定面板寬度與是否改成覆蓋層,不必寫死側欄寬度(見 lib/panel-layout.ts)。
+        */}
+        <div className="flex min-h-0 min-w-0 flex-1">
+          <ErrorBoundary label="聊天視圖" resetKey={currentSessionId ?? ""}>
+            <SessionView onOpenSidebar={() => setSidebarOpen(true)} />
+          </ErrorBoundary>
+          {/* 右側面板(Terminal 等分頁)——自己一層 ErrorBoundary,面板內容(終端、之後的瀏覽器/檔案預覽)壞掉不拖垮聊天視圖。 */}
+          <ErrorBoundary label="側邊面板" resetKey={currentSessionId ?? ""}>
+            <SidePanel />
+          </ErrorBoundary>
+        </div>
       </div>
+
+      {/*
+        Browser 分頁的 webview 宿主(portal 到 document.body,z-45:在面板之上、所有對話框之下)。放在 App 這一層而不是面板裡,
+        因為 webview 的 DOM 節點不能搬家也不能因為面板關閉/切換分頁而卸載(見 stores/browser-store.ts 開頭)。不帶 resetKey:
+        切換 session 不該重建 webview。
+      */}
+      <ErrorBoundary label="瀏覽器">
+        <BrowserHost />
+      </ErrorBoundary>
 
       {/* 對話框各自也包一層:一個對話框壞掉不該把底下的主畫面一起帶走。 */}
       <ErrorBoundary label="權限請求">

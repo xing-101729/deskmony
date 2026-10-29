@@ -2,9 +2,11 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import {
+  BrowserErrorCodes,
   ClientRequestSchema,
   DeskmonyError,
   ErrorCodes,
+  type BrowserCommandPush,
   type ClientRequest,
   type ClientRequestMethod,
   type EffectiveCoreConfig,
@@ -20,13 +22,18 @@ import {
   type SessionEventEnvelope,
   type SessionHistoryResetPush,
   type SessionMessagePush,
+  type TerminalOutputPush,
+  type TerminalUpdatedPush,
   type UserDialogResolvedPush,
 } from "@deskmony/shared";
 import { applyConfigFilePatch } from "../config/config-file-writer.js";
+import type { BrowserHostConnection, BrowserRelay } from "../browser/browser-relay.js";
 import type { SessionManager } from "../session/session-manager.js";
 import type { AgentCatalog } from "../agents/agent-catalog.js";
 import type { CostGovernor } from "../cost/cost-governor.js";
 import type { RecoveryService } from "../recovery/recovery-service.js";
+import type { TerminalManager } from "../terminal/terminal-manager.js";
+import type { WorkspaceInspector } from "../workspace/workspace-inspector.js";
 import {
   getEnabledClaudeModelIds,
   getProviderPrefsMap,
@@ -68,6 +75,11 @@ interface ConnectionState {
    * 模式),完全不受這層額外限制,行為與這輪之前完全相同。
    */
   scopedGrant?: ScopedTokenGrant;
+  /**
+   * 2026-10-21(右側面板 P4a):這條連線登記成 browser host(`browser.registerHost`)時用的物件,每條連線最多一個、第一次登記時才建立。
+   * `browser-command` push 只經由它送給這一條連線(見 `createBrowserHostConnection()`),連線關閉時一併註銷。
+   */
+  browserHost?: BrowserHostConnection;
 }
 
 /** 未認證連線的逾時秒數(M5 Round A 任務2:逾時未認證即關閉連線)。 */
@@ -110,6 +122,8 @@ interface ScopedTokenGrant {
   token: string;
   sessionId: string;
   network: boolean;
+  /** 2026-10-21(P4a):授權瀏覽器七個方法;核發時已與 `features.agentBrowserTools` 取交集。 */
+  browser: boolean;
   allowedMethods: ReadonlySet<ClientRequestMethod>;
   expiresAt: number;
 }
@@ -129,8 +143,16 @@ interface ScopedTokenGrant {
  *   read_session     → session.readForAgent
  *   create_session   → session.createFromAgent
  *   send_to_session  → session.sendFromAgent
+ *   browser_navigate → browser.navigateForAgent(以下七個要 `scope.browser`,2026-10-21 P4a)
+ *   browser_screenshot → browser.screenshotForAgent
+ *   browser_read_page  → browser.readPageForAgent
+ *   browser_click      → browser.clickForAgent
+ *   browser_type       → browser.typeForAgent
+ *   browser_press_key  → browser.pressKeyForAgent
+ *   browser_scroll     → browser.scrollForAgent
+ * **`browser.registerHost` / `browser.commandResult` 絕不在任何 scoped 白名單裡**——agent 不能自己當瀏覽器 host、也不能偽造結果。
  *
- * 這五個方法的參數**都沒有 caller/parent 欄位**:呼叫者 session 由 token 綁定的 `sessionId` 決定
+ * 這些方法的參數**都沒有 caller/parent 欄位**:呼叫者 session 由 token 綁定的 `sessionId` 決定
  * (見 `checkScopedGrantAccess()` 回傳的 `callerSessionId` 與 `dispatch()` 的第三個參數)。
  */
 function computeAllowedMethods(scope: McpBridgeTokenScope): ReadonlySet<ClientRequestMethod> {
@@ -141,6 +163,15 @@ function computeAllowedMethods(scope: McpBridgeTokenScope): ReadonlySet<ClientRe
     methods.add("session.readForAgent");
     methods.add("session.createFromAgent");
     methods.add("session.sendFromAgent");
+  }
+  if (scope.browser) {
+    methods.add("browser.navigateForAgent");
+    methods.add("browser.screenshotForAgent");
+    methods.add("browser.readPageForAgent");
+    methods.add("browser.clickForAgent");
+    methods.add("browser.typeForAgent");
+    methods.add("browser.pressKeyForAgent");
+    methods.add("browser.scrollForAgent");
   }
   return methods;
 }
@@ -199,6 +230,17 @@ function resolveMcpBridgeConnectHost(bindHost: string): string {
  * (同一次翻案的一部分)。`config.setFile`(daemon/workspace/features/log 這類
  * 一般設定,不含 policy)使用者沒有要求開放,維持 local-only。
  * (2026-10-02 P2:原本同批的 `profile.create`/`profile.delete` 已隨 profile 一併移除。)
+ *
+ * 2026-10-20(右側面板,見 docs/DECISIONS.md §L.1):`terminal.*` **刻意不在這個清單裡**——終端是完全不經政策引擎的
+ * 執行路徑(性質與下面的 `settings.setProviderPrefs` 同類,甚至更直接),但使用者被攤開取捨之後明確選擇「遠端也可用」。
+ * 代價(主 token 外洩 = shell 外洩)靠稽核(`kind: "terminal-session"`,含是否遠端與來源位址)、終端環境變數濾掉內部憑證
+ * (`buildAgentChildEnv()`)、與「agent 永遠開不了終端」(`terminal.*` 不在任何 scoped token 的 `computeAllowedMethods()`
+ * 白名單)緩解。之後有人想「補上」這一項遺漏前,先讀 §L.1。
+ *
+ * 同日(右側面板 P2):`workspace.listDir`/`readFile`/`gitStatus`/`gitDiff` 同理**刻意不在這個清單裡**——遠端已能開 shell,
+ * 唯讀查看工作資料夾內的檔案是更弱的能力(§L.1)。它們靠路徑安全(realpath + 前綴比對,擋 symlink/junction 逃逸,
+ * apps/core/src/workspace/workspace-paths.ts)與 git 執行的防護(不執行 repo 設定裡的任意指令)限制範圍,
+ * 同樣不在任何 scoped token 的 `computeAllowedMethods()` 白名單裡。
  */
 const LOCAL_ONLY_METHODS = new Set<ClientRequestMethod>([
   "config.setFile", // 一般設定(daemon/workspace/features/log,不含 policy)
@@ -500,6 +542,12 @@ export class WsGateway {
     private readonly effectiveConfig: EffectiveCoreConfig,
     /** `<DESKMONY_HOME>/config.json` 的絕對路徑,`config.setFile` 寫入用。 */
     private readonly configPath: string,
+    /** 2026-10-20(右側面板 P1):`terminal.*` 方法的資料來源,輸出/狀態變化經 `broadcast()` 轉播(見下方訂閱)。 */
+    private readonly terminalManager: TerminalManager,
+    /** 2026-10-20(右側面板 P2):`workspace.*` 四個唯讀查詢的資料來源。 */
+    private readonly workspaceInspector: WorkspaceInspector,
+    /** 2026-10-21(右側面板 P4a):agent 瀏覽器指令的轉送層(host 註冊、排隊、導覽規則),`browser.*` 方法的資料來源。 */
+    private readonly browserRelay: BrowserRelay,
     private readonly authToken?: string,
     authFailureLimit: number = DEFAULT_AUTH_FAILURE_LIMIT,
     authFailureCooldownMs: number = DEFAULT_AUTH_FAILURE_COOLDOWN_MS,
@@ -551,6 +599,14 @@ export class WsGateway {
     this.sessionManager.on("session-history-reset", (payload: SessionHistoryResetPush) => {
       this.broadcast({ kind: "event", channel: "session-history-reset", payload });
     });
+    // 2026-10-20(右側面板 P1):面板終端的輸出與狀態變化。經 `broadcast()`——scoped bridge 連線(agent)收不到(P0),
+    // 使用者的 shell 畫面不會外流給 agent。
+    this.terminalManager.on("terminal-output", (payload: TerminalOutputPush) => {
+      this.broadcast({ kind: "event", channel: "terminal-output", payload });
+    });
+    this.terminalManager.on("terminal-updated", (payload: TerminalUpdatedPush) => {
+      this.broadcast({ kind: "event", channel: "terminal-updated", payload });
+    });
   }
 
   /**
@@ -599,8 +655,9 @@ export class WsGateway {
   /**
    * S7 L4 §2.1(`attended` 的真值來源):**現在有沒有人看得到彈窗?**
    *
-   * 判定與 `broadcast()` 完全一致——「連線是 OPEN **且已認證**」,因為那正是
-   * 會收到 `permission-request` 推播的連線集合。未認證的連線刻意**不算**:
+   * 判定與 `broadcast()` 完全一致——「連線是 OPEN、**已認證**、且不是 scoped
+   * bridge 連線」,因為那正是會收到 `permission-request` 推播的連線集合
+   * (2026-10-20:scoped 連線不再收任何 push,所以它不算「有人看得到彈窗」)。未認證的連線刻意**不算**:
    * 它收不到任何推播(見 `broadcast()`),也還不能呼叫 `permission.resolve`,
    * 把它當成「有人在」會讓 escalate 進入 5 分鐘逾時 deny 的路徑,而那正是
    * S11 §4 論證要避免的錯誤(「沒人回應 ≠ 拒絕」)。**不確定時倒向
@@ -612,7 +669,7 @@ export class WsGateway {
    */
   hasConnectedClient(): boolean {
     for (const [socket, state] of this.clients) {
-      if (socket.readyState === WebSocket.OPEN && state.authenticated) return true;
+      if (socket.readyState === WebSocket.OPEN && state.authenticated && state.scopedGrant === undefined) return true;
     }
     return false;
   }
@@ -675,11 +732,14 @@ export class WsGateway {
     this.sweepExpiredScopedTokens();
     const token = `${MCP_BRIDGE_TOKEN_PREFIX}${randomBytes(32).toString("hex")}`;
     const expiresAt = Date.now() + this.mcpBridgeTokenTtlMs;
+    // 瀏覽器範圍一律與 `features.agentBrowserTools` 取交集:設定關閉時,即使 adapter 要求了也拿不到(安全開關在 core,不在 adapter)。
+    const browser = scope.browser === true && this.effectiveConfig.features.agentBrowserTools.value;
     const grant: ScopedTokenGrant = {
       token,
       sessionId: scope.sessionId,
       network: scope.network,
-      allowedMethods: computeAllowedMethods(scope),
+      browser,
+      allowedMethods: computeAllowedMethods({ ...scope, browser }),
       expiresAt,
     };
     this.scopedTokens.set(token, grant);
@@ -689,7 +749,7 @@ export class WsGateway {
 
     const host = resolveMcpBridgeConnectHost(this.effectiveConfig.daemon.bindHost.value);
     const port = this.effectiveConfig.daemon.port.value;
-    return { token, gatewayUrl: `ws://${host}:${port}`, expiresAt };
+    return { token, gatewayUrl: `ws://${host}:${port}`, expiresAt, browser };
   }
 
   /**
@@ -799,6 +859,15 @@ export class WsGateway {
       case "session.sendFromAgent":
         if (!current.network) return { allowed: false, reason: "此 token 未授權 session 網路相關方法" };
         return { allowed: true, callerSessionId: current.sessionId };
+      case "browser.navigateForAgent":
+      case "browser.screenshotForAgent":
+      case "browser.readPageForAgent":
+      case "browser.clickForAgent":
+      case "browser.typeForAgent":
+      case "browser.pressKeyForAgent":
+      case "browser.scrollForAgent":
+        if (!current.browser) return { allowed: false, reason: "此 token 未授權瀏覽器相關方法" };
+        return { allowed: true, callerSessionId: current.sessionId };
       default:
         // 不應該發生——allowedMethods 只可能含上面列出的方法(見
         // computeAllowedMethods()),這裡 fail-closed 而非假設安全。
@@ -829,10 +898,13 @@ export class WsGateway {
     socket.on("close", () => {
       if (state.authTimer) clearTimeout(state.authTimer);
       this.clients.delete(socket);
+      // host 連線斷開就註銷——它還沒回的瀏覽器指令全部以 browser.hostDisconnected 收場。
+      if (state.browserHost) this.browserRelay.unregisterHost(state.browserHost);
     });
     socket.on("error", () => {
       if (state.authTimer) clearTimeout(state.authTimer);
       this.clients.delete(socket);
+      if (state.browserHost) this.browserRelay.unregisterHost(state.browserHost);
     });
   }
 
@@ -1051,7 +1123,13 @@ export class WsGateway {
     // session-manager.ts 的 `resolvePermission()`)。
 
     try {
-      const result = await this.dispatch(parsed, connState?.isLocal ?? false, callerSessionId);
+      const result = await this.dispatch(
+        parsed,
+        connState?.isLocal ?? false,
+        callerSessionId,
+        connState?.remoteAddress ?? "unknown",
+        connState ? { socket, state: connState } : undefined,
+      );
       this.send(socket, { kind: "response", id: parsed.id, ok: true, result });
     } catch (err) {
       this.send(socket, toErrorResponse(parsed.id, err));
@@ -1078,8 +1156,17 @@ export class WsGateway {
    * @param callerSessionId 只有用 scoped MCP bridge token 認證的連線才有值(= token 綁定的 session id,
    *   見 `checkScopedGrantAccess()`);session 網路五個 `*ForAgent`/`*FromAgent` 方法靠它知道「是誰在呼叫」。
    *   一般連線(master token/免認證)是 `undefined`,呼叫那五個方法一律被拒(fail-closed)。
+   * @param remoteAddress 發出請求的那條連線的來源位址(2026-10-20:`terminal.create`/`terminal.close` 的稽核要記錄來源)。
+   * @param connection 發出請求的那條連線(2026-10-21:`browser.registerHost`/`browser.commandResult` 要知道「是哪一條連線」——
+   *   host 的身分就是連線本身)。
    */
-  private async dispatch(request: ClientRequest, isLocal: boolean, callerSessionId?: string): Promise<unknown> {
+  private async dispatch(
+    request: ClientRequest,
+    isLocal: boolean,
+    callerSessionId?: string,
+    remoteAddress: string = "unknown",
+    connection?: { socket: WebSocket; state: ConnectionState },
+  ): Promise<unknown> {
     switch (request.method) {
       case "auth":
         // 已在 handleMessage() 頂端的認證閘門處理完畢,不會走到這裡
@@ -1310,6 +1397,77 @@ export class WsGateway {
       case "recovery.abandon":
         await this.recoveryService.abandon(request.params.sessionId);
         return { ok: true };
+      /**
+       * 2026-10-20(右側面板 P1):session 底下的獨立終端,見 packages/shared/src/gateway.ts 對應 case 與
+       * apps/core/src/terminal/terminal-manager.ts。**不在** `LOCAL_ONLY_METHODS`(使用者明確選擇遠端也可用,
+       * docs/DECISIONS.md §L.1),**不在**任何 scoped token 的白名單(`computeAllowedMethods()`,agent 開不了終端)。
+       * 開/關的稽核需要來源(`isLocal`、位址),所以傳 `{remote, remoteAddress}` 給 manager。
+       */
+      case "terminal.list":
+        return { terminals: await this.terminalManager.list(request.params.sessionId) };
+      case "terminal.create":
+        return { terminal: await this.terminalManager.create(request.params, { remote: !isLocal, remoteAddress }) };
+      case "terminal.attach":
+        return this.terminalManager.attach(request.params.terminalId);
+      case "terminal.input":
+        this.terminalManager.input(request.params.terminalId, request.params.data);
+        return { ok: true };
+      case "terminal.resize":
+        this.terminalManager.resize(request.params.terminalId, request.params.cols, request.params.rows);
+        return { ok: true };
+      case "terminal.close":
+        await this.terminalManager.close(request.params.terminalId, { remote: !isLocal, remoteAddress });
+        return { ok: true };
+      /**
+       * 2026-10-20(右側面板 P2):session 工作資料夾的唯讀查詢,見 packages/shared/src/gateway.ts 對應 case 與
+       * apps/core/src/workspace/。**不在** `LOCAL_ONLY_METHODS`、**不在**任何 scoped token 的白名單(理由見上方
+       * `LOCAL_ONLY_METHODS` 的註解)。
+       */
+      case "workspace.listDir":
+        return await this.workspaceInspector.listDir(request.params.sessionId, request.params.path);
+      case "workspace.readFile":
+        return await this.workspaceInspector.readFile(request.params.sessionId, request.params.path);
+      case "workspace.gitStatus":
+        return await this.workspaceInspector.gitStatus(request.params.sessionId);
+      case "workspace.gitDiff":
+        return await this.workspaceInspector.gitDiff(request.params.sessionId, request.params.path, request.params.oldPath);
+      /**
+       * 2026-10-21(右側面板 P4a):agent 瀏覽器工具,見 packages/shared/src/browser.ts 與 apps/core/src/browser/browser-relay.ts。
+       * `browser.registerHost`:**只收非 scoped、且本機的連線**(scoped 連線在白名單那一關就進不來,這裡再擋一次是縱深防禦)。
+       * `browser.commandResult`:是不是 host、commandId 對不對都由 relay 判斷,不是 host 的連線送來一律被忽略(回 `accepted: false`)。
+       * 七個 `*ForAgent` 與 session 網路那五個一樣:呼叫者 session 只能是 token 綁定的那一個(`requireBridgeCaller()`)。
+       */
+      case "browser.registerHost": {
+        if (!connection || connection.state.scopedGrant !== undefined || !isLocal) {
+          console.warn(
+            `[gateway][security] 拒絕 browser.registerHost:連線來源 ${remoteAddress},${connection?.state.scopedGrant ? "是 scoped bridge 連線" : "不是本機連線"}`,
+          );
+          throw new DeskmonyError(
+            BrowserErrorCodes.REGISTER_NOT_ALLOWED,
+            undefined,
+            "只有本機、非 scoped 的連線(Deskmony 桌面 app)才能註冊成瀏覽器 host",
+          );
+        }
+        const hostConnection = (connection.state.browserHost ??= this.createBrowserHostConnection(connection.socket));
+        this.browserRelay.registerHost(hostConnection);
+        return { ok: true };
+      }
+      case "browser.commandResult":
+        return { accepted: this.browserRelay.handleCommandResult(connection?.state.browserHost, request.params) };
+      case "browser.navigateForAgent":
+        return await this.browserRelay.navigate(this.requireBridgeCaller(request.method, callerSessionId), request.params);
+      case "browser.screenshotForAgent":
+        return await this.browserRelay.screenshot(this.requireBridgeCaller(request.method, callerSessionId));
+      case "browser.readPageForAgent":
+        return await this.browserRelay.readPage(this.requireBridgeCaller(request.method, callerSessionId), request.params);
+      case "browser.clickForAgent":
+        return await this.browserRelay.click(this.requireBridgeCaller(request.method, callerSessionId), request.params);
+      case "browser.typeForAgent":
+        return await this.browserRelay.type(this.requireBridgeCaller(request.method, callerSessionId), request.params);
+      case "browser.pressKeyForAgent":
+        return await this.browserRelay.pressKey(this.requireBridgeCaller(request.method, callerSessionId), request.params);
+      case "browser.scrollForAgent":
+        return await this.browserRelay.scroll(this.requireBridgeCaller(request.method, callerSessionId), request.params);
       default: {
         const exhaustiveCheck: never = request;
         throw new Error(`未知的方法: ${JSON.stringify(exhaustiveCheck)}`);
@@ -1322,13 +1480,44 @@ export class WsGateway {
     socket.send(JSON.stringify(message));
   }
 
+  /**
+   * 2026-10-21(右側面板 P4a):**把 push 只送給單一連線**(`browser-command` 專用,**不走 `broadcast()`**)。
+   * 與 `broadcast()` 同一套防線,而且更嚴:只送給**已認證、非 scoped**、連線還開著的那一條——scoped bridge 連線(agent)
+   * 絕不會收到(P0),即使呼叫端傳進來的 socket 剛好是 scoped 的也一樣(縱深防禦,正常情況 `browser.registerHost` 已經拒絕它了)。
+   * 回傳 `false` = 沒送出去(連線不在線、未認證、或是 scoped)。
+   */
+  private pushToConnection(socket: WebSocket, message: ServerPush): boolean {
+    const state = this.clients.get(socket);
+    if (!state || !state.authenticated || state.scopedGrant !== undefined) return false;
+    if (socket.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify(message));
+    return true;
+  }
+
+  /** 為一條 WS 連線建立它的 `BrowserHostConnection`(送指令 = 對這一條連線的 targeted push)。 */
+  private createBrowserHostConnection(socket: WebSocket): BrowserHostConnection {
+    return {
+      id: randomUUID(),
+      sendCommand: (command: BrowserCommandPush) =>
+        this.pushToConnection(socket, { kind: "event", channel: "browser-command", payload: command }),
+    };
+  }
+
   private broadcast(message: ServerPush): void {
     const payload = JSON.stringify(message);
     // M5 Round A:只推播給已認證的連線(未認證的連線在 auth 通過前不應該
     // 收到任何 agent 輸出等潛在敏感內容)。未設定 authToken 時
     // 所有連線一律 authenticated=true,行為與過去完全相同。
     for (const [client, state] of this.clients) {
-      if (client.readyState === WebSocket.OPEN && state.authenticated) client.send(payload);
+      if (client.readyState !== WebSocket.OPEN || !state.authenticated) continue;
+      // 2026-10-20(右側面板 P0,見 docs/DECISIONS.md §L.4):scoped MCP bridge 連線一律不收 push。
+      // bridge 子行程本身不讀 push(只處理自己 request 的 response),但 agent 有辦法從 bridge 子行程讀到 token——
+      // 拿到它的人自己開一條 WS 認證,就會收到**所有 session** 的對話事件與權限請求(含工具 input),
+      // 之後還有終端輸出。scoped 連線只該拿到自己 request 的 response,所以這裡直接跳過。
+      // 這是 gateway 裡**唯一**把 push 送給多條連線的地方(`send()` 只用在回應單一 request;`pushToConnection()` 是送給**單一**連線的
+      // targeted push,見該方法),新增任何「推給多個連線」的路徑時都要照這個條件過濾,或直接走 `broadcast()`。
+      if (state.scopedGrant !== undefined) continue;
+      client.send(payload);
     }
   }
 }

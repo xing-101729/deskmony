@@ -1,0 +1,15 @@
+{
+  "workspace": {
+    "sessionNotFound": "会話 {{sessionId}} は存在しません",
+    "rootMissing": "この会話の作業フォルダーが存在しません:{{cwd}}",
+    "pathOutsideRoot": "そのパスは会話の作業フォルダーの外にあります:{{path}}",
+    "notFound": "見つかりません:{{path}}",
+    "notADirectory": "フォルダーではありません:{{path}}",
+    "notAFile": "通常のファイルではありません:{{path}}",
+    "accessDenied": "読み取る権限がありません:{{path}}",
+    "ioError": "{{path}} を読み取れませんでした:{{detail}}",
+    "gitUnavailable": "git が見つかりません——git をインストールし、PATH に含まれていることを確認してください",
+    "gitFailed": "git の実行に失敗しました:{{detail}}",
+    "notARepo": "この作業フォルダーは git リポジトリではありません"
+  }
+}

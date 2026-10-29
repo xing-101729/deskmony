@@ -62,10 +62,26 @@ const SUITES = [
   // 2026-10-16:對話串「連續工具呼叫收成一組」的純函式(apps/desktop/src/lib/chat-groups.ts)——不啟動 core、
   // 不需要 build(直接用 Node 載入 .ts,需 Node >= 22.18),毫秒級。
   "e2e-chat-groups",
+  // 2026-10-20:右側面板的兩個純函式(面板寬度/聊天視圖最小寬度/覆蓋層切換、大段貼上分段不拆 surrogate pair)——
+  // 同上,不啟動 core、不需要 build,毫秒級。
+  "e2e-side-panel-pure",
   // 2026-10-02(P3:session 網路):五個工具(list_agents/list_sessions/read_session/create_session/send_to_session)
   // + 信封/來源標記 + 排隊 + 每條訊息鏈的預算熔斷 + UI 轉傳 + bridge token 方法白名單,全部用 fake ACP agent
   // 決定性驗證(兩個 core:一個序幕造出 closed session、一個主測試),放在前面——它是 session 之間互傳的基礎。
   "e2e-session-network",
+  // 2026-10-20(右側面板 P1):session 底下的獨立 shell 終端(`terminal.*` gateway 方法)——真的開 shell:cwd、輸出/attach 的
+  // seq 一致、環境變數不含內部憑證、resize/input 上限、shell 自己結束、關閉/刪除 session 連帶關閉(pid 確實消失)、
+  // 每個 session 8 個的上限、scoped bridge token 不能呼叫也收不到輸出、稽核、core 重啟後不保留。一個 core 開關兩次,
+  // 帶 DESKMONY_AUTH_TOKEN 啟動;放在 e2e-session-network 之後——它疊在 scoped token 不收 push 的 P0 修補之上。
+  "e2e-side-panel-terminal",
+  // 2026-10-20(右側面板 P2):session 工作資料夾的唯讀查詢(`workspace.listDir/readFile/gitStatus/gitDiff`)——真的 git repo:
+  // 各種狀態與 diff、沒有 commit 的 repo、不是 repo、檔案預覽的各種上限、**路徑逃逸**(每種寫法對每個方法各測一次,含 junction)、
+  // scoped token 不能呼叫、repo 設定埋的指令(fsmonitor/filter/textconv/external diff)不會被執行。一個 core,約半分鐘。
+  "e2e-side-panel-workspace",
+  // 2026-10-21(右側面板 P4a):agent 瀏覽器工具——真的 mcp-bridge 子行程 + 假的 browser host:導覽規則(loopback/allowedHosts/真.無限制/scheme)、
+  // host 看不到被擋的指令、`browser-command` 只送給 host、commandResult 驗證、逾時/斷線/取代、排隊、結果驗證、features.agentBrowserTools 開關。
+  // 三個 core 依序開關(含一次重啟),約一分鐘;疊在 scoped token 的 P0 修補與 e2e-session-network 的 bridge 之上,所以放在這裡。
+  "e2e-side-panel-browser",
   // 2026-10-06:session 手動改名 + AI 自動命名(臨時對話不污染主對話、不得用工具、各種退回截取首句、使用者改過不覆蓋、
   // title_source 遷移)——一個 core + fake ACP/OpenCode/PTY,一分多鐘跑完。
   "e2e-session-title",

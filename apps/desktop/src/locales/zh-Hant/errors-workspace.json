@@ -1,0 +1,15 @@
+{
+  "workspace": {
+    "sessionNotFound": "對話 {{sessionId}} 已不存在",
+    "rootMissing": "這個對話的工作資料夾不存在:{{cwd}}",
+    "pathOutsideRoot": "這個路徑不在對話的工作資料夾內:{{path}}",
+    "notFound": "找不到:{{path}}",
+    "notADirectory": "不是資料夾:{{path}}",
+    "notAFile": "不是一般檔案:{{path}}",
+    "accessDenied": "沒有權限讀取:{{path}}",
+    "ioError": "無法讀取 {{path}}:{{detail}}",
+    "gitUnavailable": "找不到 git——請安裝 git 並確認它在 PATH 裡",
+    "gitFailed": "git 執行失敗:{{detail}}",
+    "notARepo": "這個工作資料夾不是 git repository"
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "title": "側邊面板",
+  "show": "顯示側邊面板",
+  "hide": "隱藏側邊面板",
+  "close": "關閉面板",
+  "resize": "調整側邊面板寬度",
+  "noSession": "選擇一個對話才能使用側邊面板",
+  "retry": "重試",
+  "dismiss": "關閉訊息",
+  "tabs": {
+    "terminal": "終端",
+    "changes": "變更",
+    "files": "檔案",
+    "browser": "瀏覽器"
+  },
+  "terminal": {
+    "tabsLabel": "終端清單",
+    "new": "新增終端",
+    "close": "關閉 {{title}}",
+    "empty": "這個對話還沒有終端",
+    "exited": "程序已結束(代碼 {{code}})",
+    "exitedUnknown": "程序已結束",
+    "restart": "重新啟動"
+  },
+  "refresh": "重新整理",
+  "changes": {
+    "branch": "分支 {{name}}",
+    "detached": "分離的 HEAD",
+    "fileCount": "變更檔案:{{count}}",
+    "notRepo": "這個資料夾不是 git repository",
+    "notRepoHint": "「變更」顯示這個對話工作資料夾裡的 git 變更。",
+    "clean": "沒有變更——工作樹是乾淨的",
+    "truncated": "變更的檔案太多——只顯示前 {{count}} 個",
+    "binary": "二進位檔——沒有文字 diff 可以顯示",
+    "noContentChanges": "沒有內容變更(只有改名或權限變更)",
+    "diffTruncated": "diff 很大——只顯示開頭的部分",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "已修改",
+      "A": "新增",
+      "D": "刪除",
+      "R": "改名",
+      "C": "複製",
+      "U": "衝突",
+      "T": "型別變更",
+      "?": "未追蹤"
+    }
+  },
+  "files": {
+    "filter": "篩選已載入的檔案",
+    "loading": "載入中…",
+    "empty": "這個資料夾是空的",
+    "truncated": "這個資料夾還有更多項目——只列出前 {{count}} 個",
+    "symlink": "符號連結或 junction",
+    "copyPath": "複製路徑",
+    "closePreview": "關閉預覽",
+    "binary": "二進位檔({{size}})——不預覽",
+    "tooLarge": "檔案太大,無法預覽({{size}})",
+    "previewTruncated": "只顯示前 {{shown}}(共 {{total}})",
+    "emptyFile": "空檔案"
+  },
+  "browser": {
+    "back": "上一頁",
+    "forward": "下一頁",
+    "reload": "重新整理",
+    "stop": "停止載入",
+    "addressLabel": "網址",
+    "addressPlaceholder": "輸入網址,例如 localhost:3000",
+    "openExternal": "用預設瀏覽器開啟",
+    "devTools": "開啟開發者工具",
+    "blankTitle": "空白頁",
+    "unavailable": "瀏覽器只有桌面版 app 才能使用",
+    "invalidAddress": "這看起來不是網址。請輸入像 localhost:3000 或 example.com 的網址。",
+    "invalidScheme": "這裡只能開啟 http:// 與 https:// 開頭的網址。",
+    "crashed": "頁面當掉了,請重新整理再試一次。",
+    "loadFailed": "無法載入 {{url}}({{description}})",
+    "agent": {
+      "working": "agent 正在操作瀏覽器 · {{action}}",
+      "recent": "agent 剛操作過瀏覽器 · {{action}}",
+      "actions": {
+        "navigate": "前往 {{url}}",
+        "back": "上一頁",
+        "forward": "下一頁",
+        "reload": "重新整理頁面",
+        "screenshot": "截圖",
+        "readText": "讀取頁面文字",
+        "readInteractive": "列出可點擊的元素",
+        "clickRef": "點擊元素 {{ref}}",
+        "clickPoint": "點擊 ({{x}}, {{y}})",
+        "type": "輸入 {{count}} 個字元",
+        "typeSubmit": "輸入 {{count}} 個字元並按 Enter",
+        "pressKey": "按下 {{key}}",
+        "scrollUp": "向上捲動",
+        "scrollDown": "向下捲動",
+        "unknown": "執行 {{op}}"
+      }
+    }
+  }
+}

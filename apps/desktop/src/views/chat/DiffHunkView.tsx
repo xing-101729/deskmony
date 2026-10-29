@@ -128,18 +128,31 @@ export function DiffHunkView({
         <div className="border-t border-line-subtle px-2.5 py-2 text-2xs text-fg-faint">{t("chat:diff.noChangesLabel")}</div>
       ) : (
         <div className="max-h-[26.25rem] overflow-auto border-t border-line-subtle">
-          {diff.hunks.map((hunk, i) => (
-            <div key={i}>
-              <div className="bg-canvas px-2.5 py-1 font-mono text-2xs text-fg-faint">
-                @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
-              </div>
-              {hunk.lines.map((line, j) => (
-                <DiffLine key={j} line={line} />
-              ))}
-            </div>
-          ))}
+          <DiffHunks hunks={diff.hunks} />
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * 只渲染 hunk 本體(`@@` 標頭 + 各行),不含 `DiffHunkView` 那層工具呼叫標頭與外框。
+ * 2026-10-20(右側面板 Changes 分頁):`workspace.gitDiff` 回傳的 hunk 與 SDK 的 `structuredPatch` 同一個形狀,
+ * Changes 分頁用同一份渲染(同樣的行配色),外框是它自己的檔案列——不另外寫一個 diff 顯示元件。
+ */
+export function DiffHunks({ hunks }: { hunks: DiffHunk[] }): JSX.Element {
+  return (
+    <>
+      {hunks.map((hunk, i) => (
+        <div key={i}>
+          <div className="bg-canvas px-2.5 py-1 font-mono text-2xs text-fg-faint">
+            @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
+          </div>
+          {hunk.lines.map((line, j) => (
+            <DiffLine key={j} line={line} />
+          ))}
+        </div>
+      ))}
+    </>
   );
 }

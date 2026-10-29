@@ -355,3 +355,79 @@ gateway 方法 `session.rewind` / `session.fork`,參數 `{ sessionId, messageId 
 
 **驗證**:`scripts/e2e-session-rewind.mjs`(假 ACP agent 的 `--resume` / `--config-options`、假 OpenCode、假 PTY;一個 core 開關三次:活著 / 重啟後沒有 runtime / 崩潰後 interrupted,約 1.5 分鐘)與
 `e2e-session-network` P3.7-8;桌面端用隔離 core 搭配瀏覽器實測(hover 三種訊息、版面不跳、時間戳、複製、倒回與分支全流程)。
+
+---
+
+## L. 2026-10-20 修訂:右側面板(Terminal / Browser / Changes / Files)與 agent 瀏覽器
+
+規格:[`LAYER-4-detail-design/side-panel_detail.md`](./LAYER-4-detail-design/side-panel_detail.md)。以下是使用者在被攤開取捨後親自選的、會動到安全罩的部分。
+
+**1. 終端遠端也可用(與 `config.setFile`/`settings.setProviderPrefs` 的 local-only 慣例不同)**
+
+`terminal.*` 不列入 `LOCAL_ONLY_METHODS`。終端是**完全不經政策引擎**的執行路徑——這與 2026-09-04 把 `settings.setProviderPrefs` 改成 local-only 的理由同類,
+但使用者明確選擇「遠端也可用」:用 Tailscale/手機連進來的人(已持有主 token)可以直接開 shell。代價:主 token 外洩 = shell 外洩。緩解:
+
+- 每次開/關終端寫稽核(`kind: "terminal-session"`,含是否遠端與來源位址)。
+- 終端的環境變數經 `buildAgentChildEnv()`,不含 `DESKMONY_AUTH_TOKEN` 等內部憑證(§J)。
+- agent 永遠開不了終端:`terminal.*` 不在任何 scoped bridge token 的方法白名單裡。
+- Changes/Files 的唯讀查詢同理不列 local-only(比開 shell 弱),路徑一律限制在 session 工作資料夾內(realpath 比對,擋 symlink/junction)。
+- **git 設定也是攻擊面**:工作資料夾是 agent 能寫的,使用者打開 Changes 就會跑 `git status`/`git diff`——repo 的 `core.fsmonitor`、
+  `filter.<n>.clean`、`diff.<n>.textconv`、`diff.external` 都會執行指令(實測),等於讓 agent 在政策引擎之外以使用者身分執行程式。
+  所以這幾個鉤子在 core 執行 git 時一律關閉/中和(細節見 `apps/core/src/workspace/workspace-git.ts`),並有 e2e 對照(直接跑 git 會執行、經 gateway 不會)。
+  filter 的列舉**不限 scope**:agent 寫得到的不只 `.git/config`,`extensions.worktreeConfig` 開啟時的 `.git/config.worktree`(worktree scope)與 `include.path` 引進的檔案也算;
+  規則是 fail-closed——scope 不是使用者自己的 `system`/`global` 就一律中和(全域安裝的 LFS 保留,repo 本地/worktree 層級的 filter 被停用)。
+
+**2. agent 可以操作面板瀏覽器**
+
+工具走既有的 session 網路 MCP(`mcp__deskmony__browser_*`)。截圖/讀頁面/捲動自動放行;導覽/點擊/輸入/按鍵走一般政策。
+**導覽目標由 core 強制檢查**(不依賴 adapter 有沒有問權限——三種後端對 MCP 工具的權限請求行為不一致):只允許 http/https,host 必須是 loopback 或在
+`policy.allowedHosts` 裡(或該 session 開著「真.無限制」)。
+
+- **C5 第 4 類的調整範圍**:只有 Deskmony 自己的 `browser_navigate` 跳過 hard-deny 的 host 檢查——loopback 依使用者決定不算外連;外部 host 改由上面的 core 規則擋,
+  而且比 hard-deny **更嚴**(不給本機 attended 的逐次強確認放行,只能進 allowedHosts)。WebFetch 等其他工具的第 4 類判斷不變。
+- `file://` 等非 http(s) scheme 在 core 與 Electron main 兩層都擋——否則 agent 導覽到 `file:///~/.ssh/id_rsa` 再讀頁面,等於繞過「讀秘密路徑」hard-deny。
+  (Electron main 的主框架只放行 http(s) 與 `about:blank`;**子框架**另放行 `about:srcdoc`、`blob:`、`data:`——頁面自己產生的內容,讀不到本機檔案,擋掉會讓許多網站的內嵌 iframe 壞掉。)
+- 瀏覽器指令只送給**一條**本機的桌面 app 連線(`browser.registerHost` 只收 `isLocal` 的非 scoped 連線),不 broadcast。
+- agent 只能操作**自己 session** 的瀏覽器(方法參數沒有 sessionId,由 token 決定)。
+- 下載一律取消、網頁的裝置權限(相機/麥克風/定位/通知…)一律拒絕、彈出視窗改在同一頁開(`<webview>` 帶 `allowpopups` 且由 main 強制;`setWindowOpenHandler` 永遠 `deny`,不會建立新視窗,只有 http(s) 目標在同一個 webview 導過去)。
+- 第一版不提供執行任意 JavaScript 的工具。
+- 設定開關 `features.agentBrowserTools`(預設開)可整個關掉:關掉時 core 不核發帶瀏覽器範圍的 bridge token(安全開關在 gateway,不在 adapter)、不注入 in-process 的 `BrowserPort`,
+  所有 adapter 的 tools/list 都沒有 `browser_*`。
+- **導覽規則實際落地在 `BrowserRelay`(2026-10-21)**:只放行 loopback(`localhost`、`*.localhost`、`127.0.0.0/8`、`[::1]`)、`policy.allowedHosts`(不分大小寫、完全比對 hostname,子網域不繼承)、
+  或該 session 開著「真.無限制」;http/https 以外的 scheme 一律 `browser.unsupportedScheme`;被拒的指令 host **完全收不到**,core 印 `console.warn`(含 session 與原因,不另建稽核表)。
+  IPv4-mapped IPv6、`0.0.0.0`、結尾有點的 `localhost.` 刻意不算 loopback。`browser-command` 只經 targeted push 送給 `browser.registerHost` 註冊的那一條(本機、非 scoped)連線,不走 `broadcast()`。
+
+**3. 瀏覽器登入狀態:每個 session 獨立、不落地**
+
+每個 session 一個記憶體 partition(`deskmony-browser-<sessionId>`,不帶 `persist:`),session 刪除時清空,app 重開就沒了。agent 只碰得到使用者在
+**該 session 活著期間**於該 session 瀏覽器裡登入的東西。
+
+**4. 順帶修掉的既有漏洞:scoped bridge 連線收得到所有推播**
+
+`WsGateway.broadcast()` 原本把 push 送給所有已認證連線,包含 scoped MCP bridge token 的連線——拿到 bridge token 的人能看到所有 session 的事件與權限請求。
+bridge 本身不讀 push,改成 scoped 連線一律不收 push。
+
+**5. 已知限制**
+
+- core 只擋 agent **明確要求**的導覽;到了頁面上之後的連結、表單、重新導向可以走到 allowedHosts 以外——瀏覽器本質上能對外連線。要嚴格隔離就關 `features.agentBrowserTools`。
+- `policy.allowedHosts` 沒有 UI、也沒有 RPC(安全罩地基,刻意如此),只能手改 `~/.deskmony/config.json`。
+- 瀏覽器工具需要桌面 app 開著;純 headless core 或只有遠端瀏覽器 client 時,工具回 `browser.noHost`。
+- codex 的 MCP 工具權限請求(codex-acp 在已有 tool_call 時只帶 `toolCallId`)沒有工具名與參數——`AcpAdapter` 把 call id 當 toolName、input 是空的,所以政策規則與「永遠允許」對 codex 的 MCP 工具無從比對
+  (包含 `browser_navigate`;它因此不會被 hard-deny 誤擋,導覽主機限制仍由 core 強制)。這是既有限制,查證細節與三種 adapter 的 toolName 見 `side-panel_detail.md` 的 P4a 實作備註。
+- agent 與使用者**共用同一個 webview**:agent 操作期間使用者自己點頁面會互相干擾(沒有鎖);agent 輸入的文字會進到頁面目前聚焦的元素——工具描述叫 agent 不要輸入密碼,但沒有技術上的擋(使用者看得到這個瀏覽器)。
+- 「agent 操作中」的指示只是讓使用者**看得到**發生什麼事,不是安全控制;真正的限制是上面的導覽規則、`features.agentBrowserTools` 與一般的工具權限政策。
+
+**6. 桌面端執行器(P4b,2026-10-21)的決定**
+
+執行 agent 瀏覽器指令的是 Electron **main**(CDP:`webContents.debugger` + isolated world),renderer 只是 host 的中繼;各層都不信任上一層:
+
+- **網頁內容一律是不可信資料**:`readPage` 只回文字與元素描述;ref → 元素的對照表放在 isolated world(頁面的 JS 看不到),腳本不在頁面 DOM 上留任何東西;從頁面來的所有值在 host 端重新檢查型別與長度;
+  文字與密碼輸入框的 `value` 絕不回給 agent(使用者可能在裡面輸入了機密)。座標換算用的 viewport 也從 isolated world 讀,頁面騙不了。
+- **導覽 scheme 在 main 再擋一次**(core、`will-attach-webview`/導覽鎖、這裡),即使 core 的檢查有洞,main 也不會 `loadURL` 非 http(s)。
+- **舊截圖的座標在導覽/捲動/viewport 尺寸改變後一律作廢**(`browser.noScreenshot`/`browser.staleScreenshot`),寧可要求 agent 重新截圖也不點錯位置;點錯位置在使用者的登入狀態下可能是有副作用的動作。
+- **停放中的 webview 退出 Tab 順序**(`<webview tabindex="-1">`,不讓 Tab 把焦點送進看不見的頁面;可見時移除)。最初用外框 `inert`,真 app 完整驗證時停放階段 click 失敗而改用 tabindex——
+  **但事後發現那個失敗是驗證腳本的計數 bug(頁面重新載入後點擊計數歸零,腳本卻用累計事件數比對),與 inert 無關**,所以「inert 會擋 CDP 點擊」**沒有成立也沒有被推翻**;
+  tabindex 能不能擋住 Tab、會不會影響 CDP 點擊同樣還沒在真 Electron 驗證。實驗腳本(`parked-inert`/`parked-tabindex` 並排)與修好的驗證腳本負責決定;細節與換回 inert 的方式見 `side-panel_detail.md` 的 P4b 實作備註。
+- **有 `commandId` 就一定回一個結果**(`browser.hostError` 兜底):host 這邊任何一環出錯都不讓 core 乾等到逾時,錯誤訊息是給 agent 看的、不含頁面內容。
+- 實作這一階段時**沒有啟動 Electron**;之後 review 方在真 Electron 跑過實驗腳本與驗證腳本(結果與其中一個腳本 bug 見上一項),但 `debugger` 與 DevTools 並存、停放時 Tab 防護(tabindex)對 Tab 與 CDP 點擊的影響、最小化視窗時的截圖等
+  還沒有完整的真機驗證(清單見 `side-panel_detail.md` 的 P4b 實作備註),要靠 `scripts/spike/webview-offscreen.cjs` 與修好的 `scripts/verify-browser-host-real.mjs` 在真 app 上補驗。

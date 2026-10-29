@@ -635,6 +635,69 @@ async function unitTests() {
     );
   }
 
+  // ---- 1w/1x/1y【P4a,2026-10-21】agent 瀏覽器工具的 hard-deny 例外(見 hard-deny.ts 的 `isDeskmonyBrowserNavigateTool()`)----
+  //   Deskmony 自己的 `browser_navigate`(三種 adapter 的名稱寫法)到任何主機都不被第 4 類 hard-deny——在 adapter 層它是一般的未分類工具
+  //   (未開 auto 會問、auto 自動放行、可「永遠允許」);外部網站由 core 的 BrowserRelay 擋。其他工具的第 4 類判斷完全不變。
+  {
+    const NAMES = ["mcp__deskmony__browser_navigate", "deskmony_browser_navigate", "mcp.deskmony.browser_navigate"];
+    const EXTERNAL = { url: "https://evil.example.com/steal" };
+    const LOOPBACK = { url: "http://localhost:3000/" };
+    const engine = new PolicyEngine({ rules: [], allowedHosts: [] });
+    const effects = (toolName, input, ctx) => engine.decide(baseReq({ toolName, input }), ctx).effect;
+    const rows = [];
+    for (const name of NAMES) {
+      rows.push({
+        name,
+        // 未開 auto + 本機 + 有 client:未分類 → escalate(一般彈窗,不是強確認、不是 deny)
+        ask: effects(name, EXTERNAL, { attended: true, local: true, autoMode: false }),
+        askLoopback: effects(name, LOOPBACK, { attended: true, local: true, autoMode: false }),
+        // auto 模式:自動放行(之後由 core 的 BrowserRelay 擋外部網站)
+        auto: effects(name, EXTERNAL, { attended: true, local: true, autoMode: true }),
+        // 遠端/無人值守:一樣是 escalate(掛起等人),不會被誤判成 hard-deny 的直接 deny
+        remote: effects(name, EXTERNAL, { attended: true, local: false, autoMode: false }),
+        unattended: effects(name, EXTERNAL, { attended: false, local: true, autoMode: false }),
+      });
+    }
+    record(
+      "1w browser_navigate(Claude SDK / OpenCode / codex-acp 三種名稱)到外部網站與 loopback:未開 auto → escalate(一般彈窗)、auto → allow、遠端或無人值守 → escalate;從不是 hard-deny(escalate-strong/deny)",
+      rows.every((r) => r.ask === "escalate" && r.askLoopback === "escalate" && r.auto === "allow" && r.remote === "escalate" && r.unattended === "escalate"),
+      JSON.stringify(rows),
+    );
+
+    // 對照組:WebFetch 到同一個外部 host、別的 MCP server 的同名工具,第 4 類 hard-deny 照舊(本機+attended → escalate-strong;auto/遠端/無人值守 → deny)
+    const CONTROL = ["WebFetch", "mcp__evil__browser_navigate", "evil_browser_navigate", "mcp.evil.browser_navigate", "browser_navigate"];
+    const control = CONTROL.map((name) => ({
+      name,
+      ask: effects(name, EXTERNAL, { attended: true, local: true, autoMode: false }),
+      auto: effects(name, EXTERNAL, { attended: true, local: true, autoMode: true }),
+      remote: effects(name, EXTERNAL, { attended: true, local: false, autoMode: false }),
+      unattended: effects(name, EXTERNAL, { attended: false, local: true, autoMode: false }),
+    }));
+    record(
+      "1x 對照組:WebFetch 到同一個外部 host、別的 MCP server 的同名工具(三種寫法)、只比結尾的 browser_navigate,仍被第 4 類 hard-deny(本機+attended → escalate-strong;auto、遠端、無人值守 → deny)——例外沒有外溢",
+      control.every((r) => r.ask === "escalate-strong" && r.auto === "deny" && r.remote === "deny" && r.unattended === "deny"),
+      JSON.stringify(control),
+    );
+
+    // 「永遠允許」對 browser_navigate 有效(adapter 層是一般工具);YOLO(auto-accept-all)照樣放行;config deny 規則對非 YOLO 的 auto 仍然生效
+    const allowEngine = new PolicyEngine({
+      rules: [{ tool: "mcp__deskmony__browser_navigate", effect: "allow" }],
+      allowedHosts: [],
+    });
+    const denyEngine = new PolicyEngine({
+      rules: [{ tool: "mcp__deskmony__browser_navigate", effect: "deny" }],
+      allowedHosts: [],
+    });
+    const viaAllowRule = allowEngine.decide(baseReq({ toolName: "mcp__deskmony__browser_navigate", input: EXTERNAL }), { attended: true, local: true, autoMode: false }).effect;
+    const viaDenyRuleAuto = denyEngine.decide(baseReq({ toolName: "mcp__deskmony__browser_navigate", input: EXTERNAL }), { attended: true, local: true, autoMode: true }).effect;
+    const viaDenyRuleYolo = denyEngine.decide(baseReq({ toolName: "mcp__deskmony__browser_navigate", input: EXTERNAL }), { attended: true, local: true, autoMode: true, yolo: true }).effect;
+    record(
+      "1y browser_navigate 在 adapter 層是一般工具:「永遠允許」的 allow 規則放行;config deny 規則在 auto 下仍擋、YOLO 才跳過(與其他工具一致)",
+      viaAllowRule === "allow" && viaDenyRuleAuto === "deny" && viaDenyRuleYolo === "allow",
+      `allowRule=${viaAllowRule}, denyRule(auto)=${viaDenyRuleAuto}, denyRule(yolo)=${viaDenyRuleYolo}`,
+    );
+  }
+
   rmSync(workingDir, { recursive: true, force: true });
   rmSync(outsideDir, { recursive: true, force: true });
 }

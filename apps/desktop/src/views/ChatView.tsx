@@ -14,6 +14,7 @@ import {
 import { AutoModeControl } from "./AutoModeControl.js";
 import { fuzzyScore } from "./CommandPalette.js";
 import { IconButton } from "../ui/Button.js";
+import { PanelToggleButton } from "./panel/PanelToggleButton.js";
 import { Select } from "../ui/Field.js";
 import { Badge, Meta } from "../ui/Badge.js";
 import { Icon } from "../ui/icons.js";
@@ -938,7 +939,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
 
   if (!currentSessionId || !session) {
     return (
-      <main className="flex h-full flex-1 flex-col bg-canvas">
+      <main className="flex h-full min-w-0 flex-1 flex-col bg-canvas">
         <MobileHeaderBar onOpenSidebar={onOpenSidebar} />
         <div className="flex flex-1 items-center justify-center text-fg-subtle">
           <p className="text-sm">{t("chat:empty.selectOrCreateSession")}</p>
@@ -979,7 +980,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
   };
 
   return (
-    <main className="flex h-full flex-1 flex-col bg-canvas">
+    <main className="flex h-full min-w-0 flex-1 flex-col bg-canvas">
       <header className="flex flex-shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line-subtle px-4 py-2.5 sm:px-5">
         <IconButton icon="menu" aria-label={t("chat:sidebar.openAriaLabel")} onClick={onOpenSidebar} className="sm:hidden" />
         {/* 2026-10-06:標題是可點擊的改名入口,給它最小寬度——控制項多時讓右側那組換行,而不是把標題擠到剩一個字。 */}
@@ -989,7 +990,9 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
             <span className="text-fg-subtle">{agentLabel}</span> · {shortenPath(session.workingDir)}
           </p>
         </div>
-        <div className="flex flex-shrink-0 flex-wrap items-center gap-1.5">
+        {/* 2026-10-20:不再 flex-shrink-0——右側面板開著時聊天區可能只剩 22rem,這組控制項要能在容器內換行(面板切換鈕
+            本身仍是 flex-shrink-0,不會被裁掉),而不是撐出標頭被截斷。 */}
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
           <UsageBadge session={session} />
           <CostBudgetBadge session={session} />
           <AutoModeControl session={session} />
@@ -1005,6 +1008,7 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
               className="hover:!border-danger hover:!text-danger"
             />
           )}
+          <PanelToggleButton />
         </div>
       </header>
 

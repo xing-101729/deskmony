@@ -75,6 +75,9 @@
         "staticDir": {
           "type": "string",
           "minLength": 1
+        },
+        "agentBrowserTools": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

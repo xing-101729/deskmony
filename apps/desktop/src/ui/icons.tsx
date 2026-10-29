@@ -28,12 +28,14 @@ export type IconName =
   | "folder"
   | "forward"
   | "gauge"
+  | "globe"
   | "image"
   | "logout"
   | "menu"
   | "message"
   | "moon"
   | "more"
+  | "panel-right"
   | "pause"
   | "pencil"
   | "play"
@@ -137,6 +139,14 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="12" cy="14" r="1.4" />
     </>
   ),
+  // 2026-10-20(右側面板 Browser 分頁):地球。
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17" />
+      <path d="M12 3.5c2.3 2.4 3.5 5.3 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.3-3.5-8.5s1.2-6.1 3.5-8.5Z" />
+    </>
+  ),
   image: (
     <>
       <rect x="3" y="4.5" width="18" height="15" rx="2" />
@@ -165,6 +175,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="6" cy="12" r="1.2" />
       <circle cx="12" cy="12" r="1.2" />
       <circle cx="18" cy="12" r="1.2" />
+    </>
+  ),
+  // 2026-10-20(右側面板):視窗右側有一欄的版面示意(對照左側的 sidebar 圖示)。
+  "panel-right": (
+    <>
+      <rect x="3" y="4.5" width="18" height="15" rx="2" />
+      <path d="M15 4.5v15" />
     </>
   ),
   pause: (

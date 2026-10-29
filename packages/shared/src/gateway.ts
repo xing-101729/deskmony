@@ -10,6 +10,16 @@ import { MaskedProviderPrefsSchema, ProviderPrefsPatchInputSchema } from "./prov
 import { ConfigSetFilePatchSchema, EffectiveCoreConfigSchema, PolicyAddRuleInputSchema, PolicyRuleSchema } from "./core-config.js";
 import { NetworkAgentSummarySchema, NetworkSessionSummarySchema, ReadSessionResultSchema } from "./session-network.js";
 import { RecoveryListResultSchema } from "./recovery.js";
+import { TERMINAL_INPUT_MAX_CHARS } from "./terminal.js";
+import {
+  BrowserClickArgsSchema,
+  BrowserCommandResultParamsSchema,
+  BrowserNavigateArgsSchema,
+  BrowserPressKeyArgsSchema,
+  BrowserReadPageArgsSchema,
+  BrowserScrollArgsSchema,
+  BrowserTypeArgsSchema,
+} from "./browser.js";
 
 /**
  * Gateway WS 訊息協議(ARCHITECTURE.md 3.2 節):
@@ -517,6 +527,93 @@ export const ClientRequestSchema = z.discriminatedUnion("method", [
    *  2026-10-02:原本還有 `recovery.rerun`/`recovery.gitStatus`/
    *  `recovery.resolveDirtyWorktree`(任務 worktree 專用),已隨 task 一併移除。 */
   z.object({ ...baseRequest, method: z.literal("recovery.abandon"), params: z.object({ sessionId: z.string() }) }),
+  // ---- 2026-10-20(右側面板 P1):session 底下的獨立終端(見 packages/shared/src/terminal.ts、
+  // docs/LAYER-4-detail-design/side-panel_detail.md §P1、docs/DECISIONS.md §L.1)------------------
+  /**
+   * ⚠️ **刻意不列入 `LOCAL_ONLY_METHODS`**(使用者明確選擇「遠端也可用」,代價是主 token 外洩 = shell 外洩,
+   * 緩衝與稽核見 DECISIONS §L.1),也**刻意不在任何 scoped bridge token 的方法白名單裡**——agent 永遠開不了終端。
+   * 終端是完全不經政策引擎的執行路徑,所以每次開/關都寫稽核(`kind: "terminal-session"`)。
+   *
+   * `terminal.create`:cwd = 該 session 的工作資料夾;`cols`/`rows` 是 UI 目前量到的尺寸(core 再夾到合理範圍)。
+   * `terminal.attach`:回傳目前緩衝與最後一個片段的 `seq`(client 先訂閱 `terminal-output` push 再 attach,丟掉
+   * `seq <= 回傳 seq` 的 push,見 `TerminalOutputPushSchema`)。`terminal.input` 的 `data` 上限 `TERMINAL_INPUT_MAX_CHARS`,
+   * 超過由 schema 驗證直接拒絕(無效的請求格式)。
+   */
+  z.object({ ...baseRequest, method: z.literal("terminal.list"), params: z.object({ sessionId: z.string() }) }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("terminal.create"),
+    params: z.object({
+      sessionId: z.string(),
+      cols: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    }),
+  }),
+  z.object({ ...baseRequest, method: z.literal("terminal.attach"), params: z.object({ terminalId: z.string() }) }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("terminal.input"),
+    params: z.object({ terminalId: z.string(), data: z.string().max(TERMINAL_INPUT_MAX_CHARS) }),
+  }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("terminal.resize"),
+    params: z.object({
+      terminalId: z.string(),
+      cols: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    }),
+  }),
+  z.object({ ...baseRequest, method: z.literal("terminal.close"), params: z.object({ terminalId: z.string() }) }),
+  // ---- 2026-10-20(右側面板 P2):唯讀 workspace 查詢(見 packages/shared/src/workspace.ts、
+  // docs/LAYER-4-detail-design/side-panel_detail.md §P2、docs/DECISIONS.md §L.1)------------------
+  /**
+   * 四個方法**都不列入 `LOCAL_ONLY_METHODS`**(理由同終端:遠端已能開 shell,唯讀查看檔案是更弱的能力),**也不在任何
+   * scoped bridge token 的方法白名單裡**(agent 不需要、也不該透過 gateway 看這些——它本來就有自己的檔案工具與政策)。
+   * 每個方法的 `path` 都是相對 session 工作資料夾(root)、以 `/` 分隔的字串(空字串 = root);絕對路徑、`..`、
+   * 以及 realpath 之後跑出 root 的(symlink/junction)一律拒絕(`workspace.pathOutsideRoot`)。
+   * `workspace.gitDiff` 的 `oldPath` 是 rename/copy 的舊路徑(選填,讓 diff 顯示改名後真正的內容差異),同樣要過路徑檢查。
+   */
+  z.object({
+    ...baseRequest,
+    method: z.literal("workspace.listDir"),
+    params: z.object({ sessionId: z.string(), path: z.string().max(4096) }),
+  }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("workspace.readFile"),
+    params: z.object({ sessionId: z.string(), path: z.string().max(4096) }),
+  }),
+  z.object({ ...baseRequest, method: z.literal("workspace.gitStatus"), params: z.object({ sessionId: z.string() }) }),
+  z.object({
+    ...baseRequest,
+    method: z.literal("workspace.gitDiff"),
+    params: z.object({ sessionId: z.string(), path: z.string().max(4096), oldPath: z.string().max(4096).optional() }),
+  }),
+  // ---- 2026-10-21(右側面板 P4a):agent 瀏覽器工具(見 packages/shared/src/browser.ts、
+  // docs/LAYER-4-detail-design/side-panel_detail.md §P4a、docs/DECISIONS.md §L.2)------------------
+  /**
+   * `browser.registerHost`:桌面 app 宣告「我是 agent 瀏覽器指令的執行端」。**只收非 scoped、且本機(`isLocal`)的連線**——
+   * 遠端 client 沒有 webview,也不該能攔截 agent 的瀏覽器指令(攔截 = 看得到 agent 在瀏覽什麼、能偽造頁面內容給 agent)。
+   * 多個 host 時以最後註冊的為準;host 連線斷開就自動註銷。`browser-command` push 之後只送給這一條連線。
+   * `browser.commandResult`:host 回報某個指令的結果——必須來自**同一條 host 連線**、`commandId` 必須是還在等的指令,
+   * 否則被忽略(記 warning)。**這兩個方法絕不在任何 scoped token 的白名單裡**(agent 不能自己當 host、也不能偽造結果)。
+   */
+  z.object({ ...baseRequest, method: z.literal("browser.registerHost"), params: z.object({}).default({}) }),
+  z.object({ ...baseRequest, method: z.literal("browser.commandResult"), params: BrowserCommandResultParamsSchema }),
+  /**
+   * 七個 bridge 專用方法,一個工具一個(`browser_navigate`…`browser_scroll`),**精確**加進 `computeAllowedMethods()`
+   * (`McpBridgeTokenScope.browser` 為真才有)。與 session 網路那五個一樣:**參數裡沒有 sessionId**——目標一律是 token 綁定的
+   * 呼叫者自己的 session;一般連線呼叫一律被拒(沒有呼叫者身分,fail-closed)。導覽規則(scheme、loopback/`allowedHosts`)
+   * 由 core 在 `BrowserRelay` 強制執行,不依賴 adapter 有沒有問權限。
+   */
+  z.object({ ...baseRequest, method: z.literal("browser.navigateForAgent"), params: BrowserNavigateArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.screenshotForAgent"), params: z.object({}).default({}) }),
+  z.object({ ...baseRequest, method: z.literal("browser.readPageForAgent"), params: BrowserReadPageArgsSchema.default({}) }),
+  z.object({ ...baseRequest, method: z.literal("browser.clickForAgent"), params: BrowserClickArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.typeForAgent"), params: BrowserTypeArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.pressKeyForAgent"), params: BrowserPressKeyArgsSchema }),
+  z.object({ ...baseRequest, method: z.literal("browser.scrollForAgent"), params: BrowserScrollArgsSchema }),
 ]);
 export type ClientRequest = z.infer<typeof ClientRequestSchema>;
 export type ClientRequestMethod = ClientRequest["method"];
@@ -588,6 +685,20 @@ export const ServerPushSchema = z.object({
      * **之後**才推,所以重新載入拿到的就是最終狀態。
      */
     "session-history-reset",
+    /**
+     * 2026-10-20(右側面板 P1):session 底下某個獨立終端的輸出(約 16 ms 合併成一筆)與狀態變化——payload 見
+     * packages/shared/src/terminal.ts 的 `TerminalOutputPushSchema`/`TerminalUpdatedPushSchema`。
+     * 一樣經 `broadcast()`:scoped bridge 連線(agent)一律收不到(P0),使用者的 shell 畫面不會外流給 agent。
+     */
+    "terminal-output",
+    "terminal-updated",
+    /**
+     * 2026-10-21(右側面板 P4a):core 要 host(桌面 app 的瀏覽器執行端)執行一個 agent 的瀏覽器指令——payload 見
+     * packages/shared/src/browser.ts 的 `BrowserCommandPushSchema`。**只送給 `browser.registerHost` 註冊的那一條連線**
+     * (`WsGateway` 的 targeted push),**不走 `broadcast()`**:其他 client 看不到 agent 在瀏覽什麼,scoped 連線更收不到。
+     * 沒有註冊成 host 的 client 永遠不會收到這個 channel;收到不認得的 channel 要安全忽略(桌面端的 push 分派本來就如此)。
+     */
+    "browser-command",
   ]),
   payload: z.unknown(),
 });

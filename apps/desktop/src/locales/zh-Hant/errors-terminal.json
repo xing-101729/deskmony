@@ -1,0 +1,9 @@
+{
+  "terminal": {
+    "notFound": "終端 {{terminalId}} 已不存在",
+    "sessionNotFound": "對話 {{sessionId}} 已不存在",
+    "cwdMissing": "這個對話的工作資料夾不存在:{{cwd}}",
+    "limitReached": "已達終端數量上限(單一對話最多 {{perSession}} 個、全部合計最多 {{global}} 個),請先關閉一個",
+    "spawnFailed": "無法啟動 {{shell}}:{{detail}}"
+  }
+}

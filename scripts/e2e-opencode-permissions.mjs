@@ -107,8 +107,18 @@ const CORE_ENTRY = path.join(REPO_ROOT, "apps", "core", "dist", "index.js");
 const PORT = await allocatePort();
 
 const QUERY_TOOLS = ["deskmony_list_agents", "deskmony_list_sessions", "deskmony_read_session"];
-/** HTTP(opencode)session 的預期 permission:所有工具 ask + 三個唯讀查詢工具預先放行(bridge 掛上了)。 */
-const HTTP_EXPECTED_PERMISSION = { "*": "ask", "**": "ask", ...Object.fromEntries(QUERY_TOOLS.map((t) => [t, "allow"])) };
+/**
+ * 2026-10-21(右側面板 P4a):瀏覽器工具裡唯讀/無副作用的三個也預先放行(預設 `features.agentBrowserTools` 為真,bridge 掛了瀏覽器);
+ * 會改變頁面的四個(navigate/click/type/press_key)不放行,走一般的 default-deny 流程。
+ */
+const BROWSER_QUERY_TOOLS = ["deskmony_browser_screenshot", "deskmony_browser_read_page", "deskmony_browser_scroll"];
+const BROWSER_ASK_TOOLS = ["deskmony_browser_navigate", "deskmony_browser_click", "deskmony_browser_type", "deskmony_browser_press_key"];
+/** HTTP(opencode)session 的預期 permission:所有工具 ask + 六個唯讀工具預先放行(session 網路三個 + 瀏覽器三個;bridge 掛上了)。 */
+const HTTP_EXPECTED_PERMISSION = {
+  "*": "ask",
+  "**": "ask",
+  ...Object.fromEntries([...QUERY_TOOLS, ...BROWSER_QUERY_TOOLS].map((t) => [t, "allow"])),
+};
 
 /**
  * PM14/PM16:模擬「使用者的 shell 環境本來就有 OPENCODE_SERVER_PASSWORD/USERNAME」——core 以它們啟動。Deskmony 啟動 opencode 家族
@@ -441,6 +451,8 @@ async function testAcpFamily(client, workspaceDir) {
     plainPerm["*"] === "ask" &&
     plainPerm["**"] === "ask" &&
     QUERY_TOOLS.every((t) => plainPerm[t] === "allow" && plainKeys.indexOf(t) > plainKeys.indexOf("**")) &&
+    BROWSER_QUERY_TOOLS.every((t) => plainPerm[t] === "allow" && plainKeys.indexOf(t) > plainKeys.indexOf("**")) &&
+    BROWSER_ASK_TOOLS.every((t) => plainPerm[t] === undefined) &&
     plainPerm.task === "deny" &&
     plainKeys.indexOf("task") > plainKeys.indexOf("**") &&
     // create_session / send_to_session 不預先放行(走一般的 default-deny:always-ask 會跳確認,auto/YOLO 自動放行)
@@ -469,6 +481,7 @@ async function testAcpFamily(client, workspaceDir) {
     keys.indexOf("bash") < keys.indexOf("**") &&
     keys.indexOf("edit") < keys.indexOf("**") &&
     QUERY_TOOLS.every((t) => perm[t] === "allow") &&
+    BROWSER_QUERY_TOOLS.every((t) => perm[t] === "allow") &&
     perm.task === "deny";
   record(
     "PM4b ACP(family=opencode):使用者既有的 OPENCODE_CONFIG_CONTENT 同樣深度合併,Deskmony 的 permission 優先",
@@ -487,7 +500,14 @@ async function testAcpControl(client, workspaceDir) {
 }
 
 // =======================================================================
-const BRIDGE_ENV_KEYS = ["DESKMONY_MCP_BRIDGE_TOKEN", "DESKMONY_MCP_BRIDGE_GATEWAY_URL", "DESKMONY_MCP_BRIDGE_SESSION_ID", "DESKMONY_MCP_BRIDGE_NETWORK_ENABLED"];
+const BRIDGE_ENV_KEYS = [
+  "DESKMONY_MCP_BRIDGE_TOKEN",
+  "DESKMONY_MCP_BRIDGE_GATEWAY_URL",
+  "DESKMONY_MCP_BRIDGE_SESSION_ID",
+  "DESKMONY_MCP_BRIDGE_NETWORK_ENABLED",
+  // 2026-10-21(P4a):預設 features.agentBrowserTools 為真,bridge 也掛瀏覽器七個工具。
+  "DESKMONY_MCP_BRIDGE_BROWSER_ENABLED",
+];
 
 async function testHttpSessionNetwork(client, workspaceDir) {
   // 使用者自己寫了一個同名的 mcp.deskmony(想把 command 換成別的東西)——必須被 Deskmony 的取代。
@@ -519,6 +539,7 @@ async function testHttpSessionNetwork(client, workspaceDir) {
       mcp.environment.DESKMONY_MCP_BRIDGE_GATEWAY_URL === `ws://127.0.0.1:${PORT}` &&
       mcp.environment.DESKMONY_MCP_BRIDGE_SESSION_ID === sessionId &&
       mcp.environment.DESKMONY_MCP_BRIDGE_NETWORK_ENABLED === "1" &&
+      mcp.environment.DESKMONY_MCP_BRIDGE_BROWSER_ENABLED === "1" &&
       !("EVIL" in mcp.environment) &&
       // 使用者其他的 MCP server 還在
       isDeepStrictEqual(got.config.mcp.mine, USER_CONFIG.mcp.mine) &&
@@ -526,9 +547,10 @@ async function testHttpSessionNetwork(client, workspaceDir) {
       isDeepStrictEqual(perm, HTTP_EXPECTED_PERMISSION) &&
       perm.deskmony_create_session === undefined &&
       perm.deskmony_send_to_session === undefined &&
+      BROWSER_ASK_TOOLS.every((t) => perm[t] === undefined) &&
       perm.task === undefined;
     record(
-      "PM9 HTTP:OPENCODE_CONFIG_CONTENT 多一個 mcp.deskmony(local;command=[node, mcp-bridge-server.js];environment 帶 scoped token/gateway 位址/session id/NETWORK_ENABLED);token 只在 environment、不在 command;使用者同名的 mcp.deskmony 被取代、其他 MCP 保留;三個查詢工具預先放行、create/send 不放行、task 不停用",
+      "PM9 HTTP:OPENCODE_CONFIG_CONTENT 多一個 mcp.deskmony(local;command=[node, mcp-bridge-server.js];environment 帶 scoped token/gateway 位址/session id/NETWORK_ENABLED);token 只在 environment、不在 command;使用者同名的 mcp.deskmony 被取代、其他 MCP 保留;三個查詢工具與三個瀏覽器唯讀工具(screenshot/read_page/scroll)預先放行、create/send 與瀏覽器的 navigate/click/type/press_key 不放行、task 不停用",
       ok,
       mcp ? `command=${JSON.stringify(mcp.command)}, envKeys=${JSON.stringify(Object.keys(mcp.environment ?? {}))}` : "沒有 mcp.deskmony",
     );
@@ -991,6 +1013,28 @@ async function testShellEnvPlugin(client, workspaceDir) {
       markerFacts.every((f) => f.consumed && f.noWarning),
       JSON.stringify(markerFacts),
     );
+
+    // ---- PM22:瀏覽器工具的預先放行只在 bridge 真的掛了瀏覽器(browserTools)時才有(直接呼叫編譯後的函式,不經 core)----
+    {
+      const { buildOpencodeConfigContent } = await import(
+        pathToFileURL(path.join(REPO_ROOT, "packages", "adapters", "dist", "opencode-config.js")).href
+      );
+      const permOf = (opts) => JSON.parse(buildOpencodeConfigContent(undefined, opts)).permission;
+      const on = permOf({ sessionNetwork: {}, browserTools: true });
+      const off = permOf({ sessionNetwork: {}, browserTools: false });
+      const none = permOf({ sessionNetwork: {} });
+      const noBridge = permOf({});
+      const keysOn = Object.keys(on);
+      record(
+        "PM22 瀏覽器工具預先放行:browserTools=true 時 screenshot/read_page/scroll 放行且排在 `**` 之後、navigate/click/type/press_key 不放行;browserTools 為 false/省略(features.agentBrowserTools 關閉)或根本沒掛 bridge 時,一個瀏覽器工具都不放行",
+        BROWSER_QUERY_TOOLS.every((t) => on[t] === "allow" && keysOn.indexOf(t) > keysOn.indexOf("**")) &&
+          BROWSER_ASK_TOOLS.every((t) => on[t] === undefined) &&
+          [off, none, noBridge].every((perm) => [...BROWSER_QUERY_TOOLS, ...BROWSER_ASK_TOOLS].every((t) => perm[t] === undefined)) &&
+          QUERY_TOOLS.every((t) => off[t] === "allow") &&
+          QUERY_TOOLS.every((t) => noBridge[t] === undefined),
+        `on=${JSON.stringify(on)}, off=${JSON.stringify(off)}`,
+      );
+    }
 
     // ---- PM20b:偵測函式本身的語意(直接呼叫編譯後的函式,不經 core)----
     {

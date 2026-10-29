@@ -1,0 +1,99 @@
+{
+  "title": "Side panel",
+  "show": "Show side panel",
+  "hide": "Hide side panel",
+  "close": "Close panel",
+  "resize": "Resize side panel",
+  "noSession": "Select a conversation to use the side panel",
+  "retry": "Retry",
+  "dismiss": "Dismiss",
+  "tabs": {
+    "terminal": "Terminal",
+    "changes": "Changes",
+    "files": "Files",
+    "browser": "Browser"
+  },
+  "terminal": {
+    "tabsLabel": "Terminals",
+    "new": "New terminal",
+    "close": "Close {{title}}",
+    "empty": "No terminals in this conversation yet",
+    "exited": "Process exited (code {{code}})",
+    "exitedUnknown": "Process exited",
+    "restart": "Restart"
+  },
+  "refresh": "Refresh",
+  "changes": {
+    "branch": "Branch {{name}}",
+    "detached": "Detached HEAD",
+    "fileCount": "Changed files: {{count}}",
+    "notRepo": "This folder is not a git repository",
+    "notRepoHint": "Changes shows the git changes in this conversation's working folder.",
+    "clean": "No changes — the working tree is clean",
+    "truncated": "Too many changed files — showing the first {{count}}",
+    "binary": "Binary file — there is no text diff to show",
+    "noContentChanges": "No content changes (rename or mode change only)",
+    "diffTruncated": "The diff is large — only the beginning is shown",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "Modified",
+      "A": "Added",
+      "D": "Deleted",
+      "R": "Renamed",
+      "C": "Copied",
+      "U": "Conflict",
+      "T": "Type changed",
+      "?": "Untracked"
+    }
+  },
+  "files": {
+    "filter": "Filter loaded files",
+    "loading": "Loading…",
+    "empty": "This folder is empty",
+    "truncated": "This folder has more entries — only the first {{count}} are listed",
+    "symlink": "Symbolic link or junction",
+    "copyPath": "Copy path",
+    "closePreview": "Close preview",
+    "binary": "Binary file ({{size}}) — no preview",
+    "tooLarge": "Too large to preview ({{size}})",
+    "previewTruncated": "Showing only the first {{shown}} of {{total}}",
+    "emptyFile": "Empty file"
+  },
+  "browser": {
+    "back": "Back",
+    "forward": "Forward",
+    "reload": "Reload",
+    "stop": "Stop loading",
+    "addressLabel": "Address",
+    "addressPlaceholder": "Enter a URL, e.g. localhost:3000",
+    "openExternal": "Open in your default browser",
+    "devTools": "Open developer tools",
+    "blankTitle": "Blank page",
+    "unavailable": "The browser is only available in the desktop app",
+    "invalidAddress": "That doesn't look like a web address. Enter a URL such as localhost:3000 or example.com.",
+    "invalidScheme": "Only http:// and https:// addresses can be opened here.",
+    "crashed": "The page crashed. Reload to try again.",
+    "loadFailed": "Couldn't load {{url}} ({{description}})",
+    "agent": {
+      "working": "agent is operating the browser · {{action}}",
+      "recent": "agent just used the browser · {{action}}",
+      "actions": {
+        "navigate": "Go to {{url}}",
+        "back": "Go back",
+        "forward": "Go forward",
+        "reload": "Reload the page",
+        "screenshot": "Take a screenshot",
+        "readText": "Read the page text",
+        "readInteractive": "List the clickable elements",
+        "clickRef": "Click element {{ref}}",
+        "clickPoint": "Click at ({{x}}, {{y}})",
+        "type": "Type {{count}} characters",
+        "typeSubmit": "Type {{count}} characters and press Enter",
+        "pressKey": "Press {{key}}",
+        "scrollUp": "Scroll up",
+        "scrollDown": "Scroll down",
+        "unknown": "Run {{op}}"
+      }
+    }
+  }
+}

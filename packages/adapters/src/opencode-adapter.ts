@@ -239,6 +239,11 @@ export class OpenCodeAdapter implements AgentAdapter {
   setTokenMinter(minter: McpBridgeTokenPort): void {
     this.tokenMinter = minter;
   }
+  // 2026-10-21(P4a):同 acp-adapter.ts——要不要請求瀏覽器工具,實際有沒有掛以核發結果為準。
+  private browserToolsEnabled = false;
+  setBrowserToolsEnabled(enabled: boolean): void {
+    this.browserToolsEnabled = enabled;
+  }
 
   capabilities(): AdapterCapabilities {
     return {
@@ -288,7 +293,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     // 2026-10-15(session 自動復活):復活既有 session 時沿用呼叫端指定的 Deskmony session id(見 `ResumeOptions.sessionId`)。
     const handleId = resume?.sessionId ?? randomUUID();
     const bridgeLaunch = mintMcpBridgeLaunch(
-      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
+      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter, browserTools: this.browserToolsEnabled },
       handleId,
       "opencode-adapter",
     );
@@ -315,6 +320,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     const shellEnvPlugin = prepareOpencodeShellEnvPlugin("opencode-adapter", handleId);
     childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
       shellEnvPlugin: shellEnvPlugin?.entry,
+      browserTools: bridgeLaunch?.browserTools,
       sessionNetwork: bridgeLaunch
         ? { localMcpServer: { command: [bridgeLaunch.command, ...bridgeLaunch.args], environment: bridgeLaunch.env } }
         : undefined,

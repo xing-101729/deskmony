@@ -74,6 +74,37 @@ function onNotificationClick(callback: (sessionId: string) => void): () => void 
   return () => ipcRenderer.removeListener("deskmony:notification-clicked", listener);
 }
 
+/**
+ * 右側面板 Browser 分頁(2026-10-20,見 electron/main.ts 的 `deskmony:browser*` handler 與 browser-rules.ts):
+ * 用外部瀏覽器開網址(只收 http(s))、對某個 webview 開開發者工具(main 會驗證 webContentsId 確實是本視窗的 webview)、
+ * 清掉某個 session 的瀏覽器 partition(session 刪除時),以及訂閱「焦點在 webview 裡時被 main 攔下並轉回來」的 app 組合鍵。
+ */
+function browserOpenExternal(url: string): Promise<void> {
+  return ipcRenderer.invoke("deskmony:browserOpenExternal", url);
+}
+
+function browserOpenDevTools(webContentsId: number): Promise<void> {
+  return ipcRenderer.invoke("deskmony:browserOpenDevTools", webContentsId);
+}
+
+/**
+ * 2026-10-21(P4b):執行 agent 的一個瀏覽器指令(op 與 args 的形狀見 packages/shared/src/browser.ts 的 `BrowserOpMap`)。
+ * 回傳 `{ok:true, result}` 或 `{ok:false, error:{code, message}}`——期待中的失敗(ref 過期、截圖座標失準……)不丟例外。
+ */
+function browserExec(webContentsId: number, op: string, args: unknown): Promise<unknown> {
+  return ipcRenderer.invoke("deskmony:browserExec", webContentsId, op, args);
+}
+
+function browserClearPartition(sessionId: string): Promise<void> {
+  return ipcRenderer.invoke("deskmony:browserClearPartition", sessionId);
+}
+
+function onAppShortcut(callback: (action: "toggle-panel" | "open-terminal" | "open-palette") => void): () => void {
+  const listener = (_event: IpcRendererEvent, action: "toggle-panel" | "open-terminal" | "open-palette"): void => callback(action);
+  ipcRenderer.on("deskmony:app-shortcut", listener);
+  return () => ipcRenderer.removeListener("deskmony:app-shortcut", listener);
+}
+
 interface AuthTokenInfo {
   token: string;
   locked: boolean;
@@ -110,4 +141,9 @@ contextBridge.exposeInMainWorld("deskmony", {
   getAuthTokenInfo,
   setAuthToken,
   regenerateAuthToken,
+  browserOpenExternal,
+  browserOpenDevTools,
+  browserClearPartition,
+  browserExec,
+  onAppShortcut,
 });

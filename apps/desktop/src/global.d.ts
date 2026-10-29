@@ -1,4 +1,5 @@
-export {};
+import type { AppShortcutAction } from "../electron/browser-rules.js";
+import type { BrowserExecOutcome } from "../electron/browser-exec.js";
 
 declare global {
   interface Window {
@@ -44,6 +45,17 @@ declare global {
       /** 隨機產生一組新 token(32 bytes hex)並嘗試加密保存。語意同
        *  `setAuthToken`。 */
       regenerateAuthToken?: () => Promise<{ token: string; locked: boolean; persisted: boolean }>;
+      /** 右側面板 Browser 分頁(2026-10-20):用外部瀏覽器開網址(main 只接受 http(s))。只在 Electron 場景存在——
+       *  純瀏覽器 client 沒有 webview,Browser 分頁整個不顯示(`views/panel/panel-tabs.tsx` 的 `isAvailable`)。 */
+      browserOpenExternal?: (url: string) => Promise<void>;
+      /** 對某個 webview 開開發者工具(main 驗證 webContentsId 確實是本視窗的 webview,否則拋錯)。 */
+      browserOpenDevTools?: (webContentsId: number) => Promise<void>;
+      /** 清掉某個 session 的瀏覽器 partition(cookie/storage/快取;session 刪除時呼叫)。 */
+      browserClearPartition?: (sessionId: string) => Promise<void>;
+      /** 2026-10-21(P4b):執行 agent 的一個瀏覽器指令(CDP + isolated world,在 Electron main 端);期待中的失敗回 `{ok:false}`,不丟例外。 */
+      browserExec?: (webContentsId: number, op: string, args: unknown) => Promise<BrowserExecOutcome>;
+      /** 焦點在 webview 裡時,main 攔下 `mod+j`/`mod+k`/`ctrl+\`` 並轉回 renderer 執行同樣的動作;回傳取消訂閱函式。 */
+      onAppShortcut?: (callback: (action: AppShortcutAction) => void) => () => void;
     };
   }
 }

@@ -1,0 +1,19 @@
+{
+  "browser": {
+    "noHost": "目前沒有開著的 Deskmony 桌面 app——瀏覽器工具需要桌面 app 的右側面板。請開啟桌面 app 後再試一次。",
+    "hostDisconnected": "瀏覽器指令執行途中,Deskmony 桌面 app 斷線了。請確認它還開著,然後再試一次。",
+    "timeout": "瀏覽器在 {{timeoutMs}} 毫秒內沒有回應({{op}})。頁面可能卡住了,稍後再試。",
+    "hostNotAllowed": "瀏覽器工具只能開啟 localhost 或 policy.allowedHosts 內的網站;「{{host}}」不在其中。若要放行,請把「{{host}}」加進 ~/.deskmony/config.json 的 policy.allowedHosts,然後重新啟動 Deskmony。",
+    "unsupportedScheme": "瀏覽器工具只能開啟 http:// 或 https:// 網址,不支援「{{scheme}}:」。",
+    "invalidArgs": "瀏覽器工具的參數不正確:{{detail}}",
+    "registerNotAllowed": "只有 Deskmony 桌面 app 的本機、非 scoped 連線才能註冊成瀏覽器 host。",
+    "resultTooLarge": "瀏覽器回傳的截圖太大({{bytes}} 位元組,上限 {{maxBytes}})。",
+    "invalidResult": "瀏覽器回傳的結果格式不正確({{op}}):{{detail}}",
+    "staleRef": "頁面已經導覽,那個元素的 ref 已失效。請重新執行 browser_read_page(interactive)取得新的 ref。",
+    "staleScreenshot": "自上次截圖之後頁面的視窗大小變了,座標已經不準。請先重新截圖。",
+    "noScreenshot": "請先截圖——browser_click 的 x/y 是最近一次截圖上的座標。",
+    "elementNotFound": "那個元素已不存在,或沒有可以點擊的位置。",
+    "navigationFailed": "頁面載入失敗:{{detail}}",
+    "hostError": "瀏覽器回報了錯誤:{{detail}}"
+  }
+}

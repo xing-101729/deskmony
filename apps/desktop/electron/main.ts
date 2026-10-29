@@ -1,9 +1,19 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, safeStorage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, safeStorage, session, shell, webContents } from "electron";
+import type { IpcMainInvokeEvent, WebContents } from "electron";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import {
+  browserPartitionForSession,
+  enforceWebviewAttachPolicy,
+  isAllowedNavigationUrl,
+  isExternallyOpenableUrl,
+  matchAppShortcut,
+  popupRedirectUrl,
+} from "./browser-rules.js";
+import { runBrowserOp } from "./browser-executor.js";
 
 const RESOURCES_CORE_DIR = "core";
 
@@ -377,6 +387,40 @@ function registerIpcHandlers(): void {
     return currentAuthTokenInfo();
   });
 
+  // ---- 右側面板 Browser 分頁(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P3.1)----
+  // 三個 IPC 都先驗證呼叫端是主視窗的 renderer(webview guest 沒有 preload、本來就呼叫不到,這裡是縱深防禦),
+  // 再驗證參數;收到 webContentsId 的一律走 `resolveBrowserGuest()`。
+  ipcMain.handle("deskmony:browserOpenExternal", async (event, url: unknown) => {
+    assertFromMainWindow(event);
+    if (!isExternallyOpenableUrl(url)) throw new Error("Only http(s) URLs can be opened externally");
+    await shell.openExternal(url as string);
+  });
+
+  ipcMain.handle("deskmony:browserOpenDevTools", (event, webContentsId: unknown) => {
+    assertFromMainWindow(event);
+    resolveBrowserGuest(webContentsId).openDevTools({ mode: "detach" });
+  });
+
+  // 2026-10-21(P4b):agent 的瀏覽器指令在桌面端的執行(CDP + isolated world,邏輯見 browser-exec.ts / browser-executor.ts)。
+  // 與上面幾個一樣:呼叫端必須是主視窗的 renderer、webContentsId 必須是主視窗的 webview guest;op/args 的細部檢查在執行器裡
+  // (renderer 是 core 指令的轉手,core 已經驗證過參數;這裡的檢查是縱深防禦,期待中的失敗回 {ok:false},不丟例外)。
+  ipcMain.handle("deskmony:browserExec", async (event, webContentsId: unknown, op: unknown, args: unknown) => {
+    assertFromMainWindow(event);
+    const guest = resolveBrowserGuest(webContentsId);
+    if (typeof op !== "string") throw new Error("Invalid browser op");
+    return await runBrowserOp(guest, op, args);
+  });
+
+  ipcMain.handle("deskmony:browserClearPartition", async (event, sessionId: unknown) => {
+    assertFromMainWindow(event);
+    const partition = browserPartitionForSession(sessionId);
+    if (!partition) throw new Error("Invalid session id");
+    // 記憶體 partition(沒有 persist:):清掉 cookie/storage/快取,session 刪除時呼叫(DECISIONS §L.3)。
+    const browserSession = session.fromPartition(partition);
+    await browserSession.clearStorageData();
+    await browserSession.clearCache();
+  });
+
   ipcMain.handle("deskmony:regenerateAuthToken", (): AuthTokenInfo => {
     if (authTokenLockedByEnv) throw new Error("Locked by the DESKMONY_AUTH_TOKEN environment variable");
     CORE_AUTH_TOKEN = randomBytes(32).toString("hex");
@@ -388,6 +432,106 @@ function registerIpcHandlers(): void {
     }
     return currentAuthTokenInfo();
   });
+}
+
+/**
+ * 右側面板 Browser 分頁的 webview 安全強化(2026-10-20,見 docs/LAYER-4-detail-design/side-panel_detail.md §P3.1、
+ * docs/DECISIONS.md §L.2/§L.3)。每個 session 一個 `<webview>`,載入的是**不可信的網頁**,而它和主視窗同一個 app:
+ *  - `will-attach-webview`(`installWebviewAttachGuard()`):guest 的 webPreferences 一律強制成最嚴格的值、刪掉 preload,
+ *    partition 必須是 `deskmony-browser-<id>`(不帶 `persist:` = 記憶體)、起始網址必須是 http(s)/about:blank,否則整個 attach 被取消;
+ *  - 每個 webview guest(`web-contents-created`,`installGuestGuards()`):彈出視窗一律拒絕(http(s) 的改在同一個 webview 導過去)、
+ *    導覽/重新導向只允許 http(s)/about:blank、轉發少數 app 組合鍵;
+ *  - 每個 `deskmony-browser-*` partition(第一次 attach 時設定一次,`configureBrowserPartition()`):權限一律拒絕、下載一律取消、擋 `file://`;
+ *  - IPC:呼叫端與 webContentsId 都要驗證(`assertFromMainWindow()`、`resolveBrowserGuest()`)。
+ * 網址/partition 的判斷全部來自 `./browser-rules.ts`(與 renderer 共用同一份)。
+ */
+const configuredBrowserPartitions = new Set<string>();
+
+function configureBrowserPartition(partition: string): void {
+  if (configuredBrowserPartitions.has(partition)) return;
+  configuredBrowserPartitions.add(partition);
+  const browserSession = session.fromPartition(partition);
+  // 網頁要相機/麥克風/定位/通知/剪貼簿讀取/裝置……一律拒絕(沒有任何 UI 讓使用者授權,第一版也不開放)。
+  browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  browserSession.setPermissionCheckHandler(() => false);
+  browserSession.setDevicePermissionHandler(() => false);
+  // 第一版不開放下載:下載等於在政策引擎之外寫檔。
+  browserSession.on("will-download", (event) => event.preventDefault());
+  // 縱深防禦:即使某條導覽路徑漏網,`file://` 的請求在網路層就被取消(否則 agent 導覽到 file:///~/.ssh/id_rsa 再讀頁面,等於繞過「讀秘密路徑」hard-deny)。
+  browserSession.webRequest.onBeforeRequest({ urls: ["file://*"] }, (_details, callback) => callback({ cancel: true }));
+}
+
+function installWebviewAttachGuard(contents: WebContents): void {
+  contents.on("will-attach-webview", (event, webPreferences, params) => {
+    // 政策本體在共用的純函式(有測試):partition/src 不合法回 false → 取消 attach;否則原地把 webPreferences 與 params 改成最嚴格的值,
+    // 並**強制** `allowpopups`——沒有它時 `window.open`/`target=_blank` 在 guest 端就被吞掉、`setWindowOpenHandler` 根本不會被呼叫。
+    // 開它是安全的:每次彈出都進 `installGuestGuards()` 的 `setWindowOpenHandler`,它永遠回傳 `deny`(不會建立任何新視窗),
+    // 只有 http(s) 目標改成在同一個 webview 導過去。
+    if (!enforceWebviewAttachPolicy(webPreferences, params)) {
+      event.preventDefault();
+      return;
+    }
+    configureBrowserPartition(params.partition);
+  });
+}
+
+function installGuestGuards(): void {
+  app.on("web-contents-created", (_event, contents) => {
+    if (contents.getType() !== "webview") return;
+
+    // 彈出視窗(target=_blank、window.open)一律拒絕(永遠 `deny`,不會有新視窗);http(s) 的改在**同一個 webview** 導過去(第一版不做多分頁),
+    // `about:blank`(`window.open()` 不帶網址)與其他 scheme 什麼都不做(判斷見 `popupRedirectUrl()`)。
+    // 這個 handler 要被呼叫到,`<webview>` 必須帶 `allowpopups`——見 `installWebviewAttachGuard()`。
+    contents.setWindowOpenHandler(({ url }) => {
+      const target = popupRedirectUrl(url);
+      if (target) {
+        setImmediate(() => {
+          if (!contents.isDestroyed()) void contents.loadURL(target).catch(() => undefined);
+        });
+      }
+      return { action: "deny" };
+    });
+
+    // 導覽與重新導向只允許 http(s)/about:blank(子框架另外放行 srcdoc/blob/data,見 isAllowedNavigationUrl)。
+    // `will-frame-navigate` 涵蓋主框架與子框架;`will-navigate`/`will-redirect` 是舊事件,一起掛——哪個先觸發都擋得住。
+    const blockDisallowed = (details: { url: string; isMainFrame: boolean; preventDefault: () => void }): void => {
+      if (!isAllowedNavigationUrl(details.url, details.isMainFrame)) details.preventDefault();
+    };
+    contents.on("will-navigate", blockDisallowed);
+    contents.on("will-redirect", blockDisallowed);
+    contents.on("will-frame-navigate", blockDisallowed);
+
+    // 焦點在 webview 裡時,鍵盤事件進的是 guest 行程,app 的組合鍵收不到。只攔 `matchAppShortcut()` 認得的三個組合鍵,
+    // preventDefault 之後經 IPC 轉給 renderer 執行同樣的動作;其餘按鍵完全不碰,照常給網頁。
+    contents.on("before-input-event", (event, input) => {
+      const action = matchAppShortcut(input, process.platform === "darwin");
+      if (!action) return;
+      event.preventDefault();
+      if (input.isAutoRepeat || !mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send("deskmony:app-shortcut", action);
+      // 鍵盤焦點要一併交還給 app 的 renderer:Ctrl+J 收起面板後 webview 被停放起來(看不見、不吃滑鼠),Ctrl+K 要讓命令面板的輸入框拿到打字、
+      // Ctrl+` 要讓終端拿到焦點——焦點若還留在 guest 行程,這些動作做完後按鍵仍進不了 app。
+      mainWindow.webContents.focus();
+    });
+  });
+}
+
+/** IPC 呼叫端必須是主視窗自己的 renderer。 */
+function assertFromMainWindow(event: IpcMainInvokeEvent): void {
+  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Unauthorized IPC sender");
+}
+
+/**
+ * 收到 webContentsId 的 IPC 一律驗證:id 是整數、webContents 存在、是 `webview`、而且**宿主是主視窗**——
+ * 否則 renderer(或被攻陷的 renderer)能叫 main 對任意 webContents(包括主視窗自己)開 DevTools 或下指令。
+ */
+function resolveBrowserGuest(webContentsId: unknown): WebContents {
+  if (typeof webContentsId !== "number" || !Number.isInteger(webContentsId)) throw new Error("Invalid webContents id");
+  const contents = webContents.fromId(webContentsId);
+  if (!contents || contents.isDestroyed()) throw new Error("webContents not found");
+  if (contents.getType() !== "webview") throw new Error("Not a webview");
+  if (!mainWindow || contents.hostWebContents !== mainWindow.webContents) throw new Error("webview does not belong to the main window");
+  return contents;
 }
 
 /**
@@ -461,8 +605,11 @@ function createWindow(): void {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      // 右側面板的 Browser 分頁用 <webview>(每個 session 一個,記憶體 partition)。強化見 installWebviewAttachGuard()。
+      webviewTag: true,
     },
   });
+  installWebviewAttachGuard(mainWindow.webContents);
 
   if (isDev && process.env.VITE_DEV_SERVER_URL) {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
@@ -479,6 +626,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   resolveAuthToken();
   registerIpcHandlers();
+  installGuestGuards(); // 必須在 createWindow() 之前:webview guest 建立時 handler 就要已經掛好
   startCore();
   installApplicationMenu();
   createWindow();

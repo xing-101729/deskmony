@@ -816,7 +816,7 @@ defaults(packages/shared/src/core-config.ts 的 CoreConfigSchema)
 
 1. **`DESKMONY_AUTH_TOKEN` 完全不是設定檔欄位**——設定檔出現疑似 token 欄位一律
    忽略並警告。
-2. **`config.setFile` 只允許安全子集**:`workspace.*` / `features.staticDir` /
+2. **`config.setFile` 只允許安全子集**:`workspace.*` / `features.staticDir` / `features.agentBrowserTools` /
    `log.level` / `daemon.permissionTimeoutMs` / `daemon.authRateLimit.*`。
    **刻意不允許 `daemon.port` / `daemon.bindHost`**(決定網路曝露面)與 `policy`
    ——這兩個欄位只能手動編輯設定檔。⚠️ `policy`(政策允許清單)本身 2026-08-25

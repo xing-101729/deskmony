@@ -28,6 +28,8 @@
  *           (2026-10-03:參數改成 `{sourceSessionId, targetSessionId, text, note?}`——`text` 是畫面上氣泡的文字,
  *           core 不回頭查原訊息;9d 釘住「只轉氣泡片段就剛好送那一段」與「來源沒有對應訊息也能轉」,9c 釘住
  *           自己/不存在/空白/超長的錯誤。)
+ * 2026-10-21(右側面板 P4a)新增 `P4a.1`/`P4a.6`:瀏覽器七個工具的兩份實作——開(掛了瀏覽器)與關(`features.agentBrowserTools=false`、沒掛)
+ * 兩種情況,in-process 與 bridge 的 tools/list、instructions 都逐字一致;in-process 的呼叫者身分由閉包捕捉、allowedTools 只多放行三個唯讀工具。
  * 另外加了(不在規格九條裡、但同一輪該釘住的)三組:`P3.1`(in-process 工具的呼叫者身分由閉包捕捉、allowedTools
  * 只放查詢類)、`P3.3`(沒有任何 S12 的子結果 push、`session.spawnChild` 已移除)、`P3.6`(in-process 與 ACP bridge
  * 的工具名稱/參數/描述/instructions 逐字一致)。
@@ -161,6 +163,9 @@ class GatewayClient {
     this.notifications = [];
     /** 收過的 push channel 名稱(用來斷言「從頭到尾沒有 S12 的子結果 push」)。 */
     this.channelsSeen = new Set();
+    /** 收過的 push 總數與逐筆 channel(P0:scoped bridge 連線必須一則都收不到)。 */
+    this.pushCount = 0;
+    this.pushChannels = [];
     this.waiters = [];
   }
 
@@ -210,6 +215,8 @@ class GatewayClient {
     }
     if (msg.kind === "event") {
       this.channelsSeen.add(msg.channel);
+      this.pushCount += 1;
+      this.pushChannels.push(msg.channel);
       if (msg.channel === "session-event") {
         this.events.push(msg.payload);
         for (const w of [...this.waiters]) w(msg.payload);
@@ -476,6 +483,86 @@ async function testToolLayer() {
     "P3.1 instructions 明講「收到訊息要不要回、回給誰由你決定;要回覆就用 send_to_session,系統不會自動把你的回答送回去」與「使用者也可能直接在畫面上開 session,不確定時先 list_sessions」",
     Boolean(mentionsNoAutoReply) && inProcInstructions.includes("使用者也可能直接在畫面上開 session"),
     undefined,
+  );
+
+  // ---- P4a.1/P4a.6:瀏覽器七個工具(2026-10-21)——掛了(browserPort 有值 / bridge 帶 BROWSER_ENABLED)與沒掛兩種情況 ----
+  const { BROWSER_AUTO_ALLOWED_TOOL_NAMES, BROWSER_TOOL_NAMES } = await importDist("packages", "adapters", "dist", "session-network-mcp.js");
+  const BROWSER_NAMES = ["browser_click", "browser_navigate", "browser_press_key", "browser_read_page", "browser_screenshot", "browser_scroll", "browser_type"];
+  const browserCalls = [];
+  const ok = { url: "http://localhost/", title: "t" };
+  const stubBrowser = {
+    navigate: async (i) => (browserCalls.push(["navigate", i]), { ...ok, loaded: true }),
+    screenshot: async (i) => (browserCalls.push(["screenshot", i]), { mimeType: "image/jpeg", data: "QUJD", width: 10, height: 20, ...ok }),
+    readPage: async (i) => (browserCalls.push(["readPage", i]), { mode: "text", ...ok, text: "page text", truncated: false }),
+    click: async (i) => (browserCalls.push(["click", i]), ok),
+    type: async (i) => (browserCalls.push(["type", i]), {}),
+    pressKey: async (i) => (browserCalls.push(["pressKey", i]), {}),
+    scroll: async (i) => (browserCalls.push(["scroll", i]), {}),
+  };
+  const withBrowser = createSessionNetworkMcpServer(stubPort, "closure-caller-id", stubBrowser);
+  const [bct, bst] = InMemoryTransport.createLinkedPair();
+  await withBrowser.instance.connect(bst);
+  const withBrowserClient = new Client({ name: "e2e-inproc-browser", version: "1.0.0" });
+  await withBrowserClient.connect(bct);
+  const withBrowserTools = (await withBrowserClient.listTools()).tools;
+  const withBrowserInstructions = withBrowserClient.getInstructions();
+  // 每個工具都叫一次,參數裡故意夾帶偽造的 callerSessionId/sessionId——呼叫者身分必須仍是閉包捕捉的那個。
+  await withBrowserClient.callTool({ name: "browser_navigate", arguments: { url: "http://localhost/", callerSessionId: "forged", sessionId: "forged" } });
+  await withBrowserClient.callTool({ name: "browser_screenshot", arguments: { callerSessionId: "forged" } });
+  await withBrowserClient.callTool({ name: "browser_read_page", arguments: { mode: "text", callerSessionId: "forged" } });
+  await withBrowserClient.callTool({ name: "browser_click", arguments: { ref: "e1", callerSessionId: "forged" } });
+  await withBrowserClient.callTool({ name: "browser_type", arguments: { text: "hi", callerSessionId: "forged" } });
+  await withBrowserClient.callTool({ name: "browser_press_key", arguments: { key: "Enter", callerSessionId: "forged" } });
+  const scrollResult = await withBrowserClient.callTool({ name: "browser_scroll", arguments: { direction: "down", callerSessionId: "forged" } });
+  await withBrowserClient.close();
+  const bt = withBrowserTools.map((t) => t.name).sort();
+  record(
+    "P4a.1 in-process 瀏覽器工具:有 browserPort 時多七個工具(名稱 browser_*)、呼叫者身分由閉包捕捉(參數夾帶 callerSessionId/sessionId 無效)、allowedTools 只多放行三個唯讀的(screenshot/read_page/scroll),navigate/click/type/press_key 走權限流程;沒有 browserPort 時一個瀏覽器工具都沒有",
+    JSON.stringify(bt) === JSON.stringify([...expectedNames, ...BROWSER_NAMES].sort()) &&
+      JSON.stringify(toolNames) === JSON.stringify(expectedNames) &&
+      browserCalls.length === 7 &&
+      browserCalls.every(([, input]) => input.callerSessionId === "closure-caller-id" && input.sessionId === undefined) &&
+      scrollResult.isError !== true &&
+      JSON.stringify([...BROWSER_AUTO_ALLOWED_TOOL_NAMES].sort()) ===
+        JSON.stringify(["browser_read_page", "browser_screenshot", "browser_scroll"].map((n) => `mcp__${SESSION_NETWORK_MCP_SERVER_NAME}__${n}`).sort()) &&
+      JSON.stringify([...BROWSER_TOOL_NAMES].sort()) === JSON.stringify(BROWSER_NAMES.map((n) => `mcp__${SESSION_NETWORK_MCP_SERVER_NAME}__${n}`).sort()),
+    `tools=${bt.join(",")}, calls=${JSON.stringify(browserCalls.map(([n, i]) => [n, i.callerSessionId]))}`,
+  );
+
+  const browserBridgeTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [bridgeEntry],
+    env: {
+      ...process.env,
+      DESKMONY_MCP_BRIDGE_TOKEN: "dmbt_parity-check-not-a-real-token",
+      DESKMONY_MCP_BRIDGE_GATEWAY_URL: "ws://127.0.0.1:1",
+      DESKMONY_MCP_BRIDGE_SESSION_ID: "parity-session",
+      DESKMONY_MCP_BRIDGE_NETWORK_ENABLED: "1",
+      DESKMONY_MCP_BRIDGE_BROWSER_ENABLED: "1",
+    },
+  });
+  const browserBridgeClient = new Client({ name: "e2e-bridge-browser-parity", version: "1.0.0" });
+  await browserBridgeClient.connect(browserBridgeTransport);
+  const browserBridgeTools = (await browserBridgeClient.listTools()).tools;
+  const browserBridgeInstructions = browserBridgeClient.getInstructions();
+  await browserBridgeClient.close();
+  const withA = JSON.stringify(normalizeTools(withBrowserTools));
+  const withB = JSON.stringify(normalizeTools(browserBridgeTools));
+  record(
+    "P4a.6 掛了瀏覽器工具時:in-process 與 ACP mcp-bridge 的十二個工具(名稱、參數型別/描述/必填)與 MCP server instructions 逐字一致,instructions 比沒掛時多一段瀏覽器說明(含「使用者看得到」「不可信資料」「被拒絕要轉告使用者」);沒掛時(上面 P3.6)兩邊都沒有瀏覽器工具、instructions 也沒有瀏覽器段落",
+    withA === withB &&
+      browserBridgeTools.length === 12 &&
+      typeof withBrowserInstructions === "string" &&
+      withBrowserInstructions === browserBridgeInstructions &&
+      withBrowserInstructions.startsWith(inProcInstructions) &&
+      withBrowserInstructions.length > inProcInstructions.length &&
+      withBrowserInstructions.includes("使用者看得到它") &&
+      withBrowserInstructions.includes("不可信資料") &&
+      withBrowserInstructions.includes("轉告使用者") &&
+      !inProcInstructions.includes("browser_navigate") &&
+      !bridgeInstructions.includes("browser_navigate") &&
+      !bridgeTools.some((t) => t.name.startsWith("browser_")),
+    withA === withB ? `instructions 長度 掛=${withBrowserInstructions?.length} 沒掛=${inProcInstructions?.length}` : `tools 不一致:\n  inproc=${withA}\n  bridge=${withB}`,
   );
 }
 
@@ -974,6 +1061,52 @@ async function main() {
       );
     } catch (err) {
       record("P3.7-8 ACP bridge token 方法白名單", false, String(err?.stack ?? err));
+    }
+
+    // =====================================================================================
+    // P0(右側面板,見 docs/DECISIONS.md §L.4)scoped bridge 連線一則 push 都收不到;一般連線收得到(證明事件確實發生)
+    // =====================================================================================
+    try {
+      // 取出 A 這個 session 真實核發的 scoped token(同上面 P3.7-8 的手法)。連線之前的事件不算,下面只看連線之後的。
+      const { text } = await client.drivePrompt(A, REPORT_MCP_SERVERS_PREFIX, { timeoutMs: 30_000 });
+      const marker = "MCP_SERVERS:";
+      const mcpServers = JSON.parse(text.slice(text.indexOf(marker) + marker.length));
+      const env = Object.fromEntries((mcpServers[0].env ?? []).map((e) => [e.name, e.value]));
+      const scoped = new GatewayClient(env.DESKMONY_MCP_BRIDGE_GATEWAY_URL);
+      await scoped.connect();
+      await scoped.rpc("auth", { token: env.DESKMONY_MCP_BRIDGE_TOKEN });
+      // 另開一條**一般**連線當對照組:同一批事件它必須收得到,否則「scoped 沒收到」可能只是事件根本沒發生。
+      const control = new GatewayClient(url);
+      await control.connect();
+
+      // 觸發會 broadcast 的事件:建立 session(session-list-updated/session-updated)、人類送 prompt(session-event/
+      // session-updated)、scoped 連線**自己**呼叫 session.sendFromAgent(session-message)——連自己動作引起的 push 都不該收。
+      const probe = (await createSession(client, wsB, "net-p0-probe")).id;
+      await client.drivePrompt(probe, `p0 ${delayEchoMarker(0)}`, { timeoutMs: 30_000 });
+      await scoped.rpc("session.sendFromAgent", { sessionId: probe, message: "p0 scoped 自己送的訊息" });
+      await waitForHistory(client, probe, (ms) => ms.find((m) => m.role === "user" && m.origin?.sessionId === A), 20_000);
+      await waitForStatus(client, probe, "idle", 30_000);
+      // 給 push 足夠的時間抵達(若修法被拿掉,這段期間 scoped 連線就會收到)。
+      await sleep(1_500);
+
+      const listed = await scoped.rpc("session.listForAgent", {}).then(
+        (r) => ({ ok: true, count: r.sessions.length }),
+        (err) => ({ ok: false, message: String(err) }),
+      );
+      const controlSeen = new Set(control.pushChannels);
+      scoped.close();
+      control.close();
+      record(
+        "P0 scoped bridge 連線(含自己呼叫 session.sendFromAgent 引起的事件)一則 push 都收不到、自己 request 的 response 仍正常;同一批事件一般連線收得到(session-list-updated/session-updated/session-event/session-message)",
+        scoped.pushCount === 0 &&
+          listed.ok === true &&
+          control.pushCount > 0 &&
+          ["session-list-updated", "session-updated", "session-event", "session-message"].every((c) => controlSeen.has(c)),
+        `scoped push=${scoped.pushCount}(${[...new Set(scoped.pushChannels)].join(",")}), control push=${control.pushCount}(${[...controlSeen].join(",")}), listForAgent=${JSON.stringify(listed)}`,
+      );
+      await client.rpc("session.delete", { sessionId: probe });
+    } catch (err) {
+      record("P0 scoped bridge 連線收不到任何 push", false, String(err?.stack ?? err));
     }
 
     // =====================================================================================

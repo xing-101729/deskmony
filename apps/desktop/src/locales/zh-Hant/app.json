@@ -26,6 +26,31 @@
       "hide": "收合側欄",
       "keywords": "sidebar 側欄 collapse"
     },
+    "togglePanel": {
+      "show": "顯示側邊面板",
+      "hide": "隱藏側邊面板",
+      "keywords": "side panel terminal 側邊面板 終端 切換 右側"
+    },
+    "newTerminal": {
+      "title": "新終端",
+      "subtitle": "在這個對話的工作資料夾開一個 shell",
+      "keywords": "terminal shell console 終端 新增 powershell bash"
+    },
+    "openChanges": {
+      "title": "開啟變更",
+      "subtitle": "這個對話工作資料夾的 git 變更",
+      "keywords": "changes git diff status 變更 修改 側邊面板"
+    },
+    "openFiles": {
+      "title": "開啟檔案",
+      "subtitle": "瀏覽這個對話工作資料夾的檔案",
+      "keywords": "files tree browse explorer 檔案 瀏覽 預覽 側邊面板"
+    },
+    "openBrowser": {
+      "title": "開啟瀏覽器",
+      "subtitle": "在這個對話旁邊瀏覽網頁",
+      "keywords": "browser web preview localhost url 瀏覽器 網頁 預覽 側邊面板"
+    },
     "toggleTheme": {
       "toLight": "切換為淺色主題",
       "toDark": "切換為深色主題",

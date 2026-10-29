@@ -130,6 +130,11 @@ export class AcpAdapter implements AgentAdapter {
   setTokenMinter(minter: McpBridgeTokenPort): void {
     this.tokenMinter = minter;
   }
+  // 2026-10-21(P4a):要不要請求瀏覽器工具(`features.agentBrowserTools` 為真時 apps/core 設為 true)。bridge 實際有沒有掛以核發結果為準。
+  private browserToolsEnabled = false;
+  setBrowserToolsEnabled(enabled: boolean): void {
+    this.browserToolsEnabled = enabled;
+  }
 
   capabilities(): AdapterCapabilities {
     return {
@@ -220,7 +225,7 @@ export class AcpAdapter implements AgentAdapter {
     // 2026-10-03:**提前到 spawn 子程序之前**——opencode 家族要在子程序的環境變數裡預先放行三個查詢工具,
     // 必須先知道 bridge 有沒有掛上。核發之後任何一步失敗都要撤銷(見下方 spawn 例外與 catch)。
     const bridgeLaunch = mintMcpBridgeLaunch(
-      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter },
+      { sessionNetworkPort: this.sessionNetworkPort, tokenMinter: this.tokenMinter, browserTools: this.browserToolsEnabled },
       handleId,
       "acp-adapter",
     );
@@ -242,6 +247,7 @@ export class AcpAdapter implements AgentAdapter {
       childEnv[OPENCODE_CONFIG_CONTENT_ENV] = buildOpencodeConfigContent(childEnv[OPENCODE_CONFIG_CONTENT_ENV], {
         shellEnvPlugin: shellEnvPlugin?.entry,
         sessionNetwork: bridgeLaunch ? {} : undefined,
+        browserTools: bridgeLaunch?.browserTools,
         // opencode acp 不會轉發 subagent 子 session 的權限請求 → 子 session 卡死,只能不讓它用 subagent(見該選項註解)。
         denySubagents: true,
       });

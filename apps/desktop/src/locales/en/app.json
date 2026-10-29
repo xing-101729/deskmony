@@ -26,6 +26,31 @@
       "hide": "Collapse sidebar",
       "keywords": "sidebar collapse toggle panel"
     },
+    "togglePanel": {
+      "show": "Show side panel",
+      "hide": "Hide side panel",
+      "keywords": "side panel terminal toggle show hide right"
+    },
+    "newTerminal": {
+      "title": "New terminal",
+      "subtitle": "Open a shell in this conversation's working folder",
+      "keywords": "terminal shell console new powershell bash"
+    },
+    "openChanges": {
+      "title": "Open Changes",
+      "subtitle": "Git changes in this conversation's working folder",
+      "keywords": "changes git diff status modified side panel"
+    },
+    "openFiles": {
+      "title": "Open Files",
+      "subtitle": "Browse files in this conversation's working folder",
+      "keywords": "files tree browse explorer preview side panel"
+    },
+    "openBrowser": {
+      "title": "Open Browser",
+      "subtitle": "Browse the web next to this conversation",
+      "keywords": "browser web preview localhost url side panel"
+    },
     "toggleTheme": {
       "toLight": "Switch to light theme",
       "toDark": "Switch to dark theme",

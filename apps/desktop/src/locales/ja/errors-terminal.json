@@ -1,0 +1,9 @@
+{
+  "terminal": {
+    "notFound": "ターミナル {{terminalId}} は存在しません",
+    "sessionNotFound": "会話 {{sessionId}} は存在しません",
+    "cwdMissing": "この会話の作業フォルダーが存在しません:{{cwd}}",
+    "limitReached": "ターミナル数が上限に達しています(1 つの会話につき最大 {{perSession}} 個、全体で最大 {{global}} 個)。先に 1 つ閉じてください",
+    "spawnFailed": "{{shell}} を起動できませんでした:{{detail}}"
+  }
+}

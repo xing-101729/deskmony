@@ -15,6 +15,9 @@ import { TurnLimiter } from "./cost/turn-limiter.js";
 import { CostGovernor } from "./cost/cost-governor.js";
 import { WaitingWatchdog } from "./cost/waiting-watchdog.js";
 import { RecoveryService } from "./recovery/recovery-service.js";
+import { TerminalManager } from "./terminal/terminal-manager.js";
+import { WorkspaceInspector } from "./workspace/workspace-inspector.js";
+import { BrowserRelay } from "./browser/browser-relay.js";
 import { WsGateway } from "./gateway/ws-gateway.js";
 import { createStaticRequestHandler } from "./http/static-server.js";
 import { SettingsStore, migrateLegacyEnabledModelIds } from "./settings/settings-store.js";
@@ -323,6 +326,39 @@ async function main(): Promise<void> {
   // 說明。放在這裡是因為它需要 sessionManager/catalog 建構完成。
   const recoveryService = new RecoveryService(sessionManager, catalog);
 
+  // 2026-10-20(右側面板 P1):session 底下的獨立 shell 終端。session 刪除時一併關掉;core 關閉時(shutdown())也關掉;
+  // 不持久化。`TerminalManager` 在 gateway 之前建好,gateway 只訂閱它的輸出事件並轉播。
+  const terminalManager = new TerminalManager(sessionManager, auditLog);
+  sessionManager.on("session-deleted", (sessionId: string) => {
+    void terminalManager.closeSession(sessionId).catch((err: unknown) => {
+      console.error(`[core] 關閉 session ${sessionId} 底下的終端失敗(不影響 session 刪除):`, err);
+    });
+  });
+
+  // 2026-10-20(右側面板 P2):session 工作資料夾的唯讀查詢(列資料夾/讀檔/git status/diff),路徑安全見 workspace/workspace-paths.ts。
+  const workspaceInspector = new WorkspaceInspector(sessionManager);
+
+  // 2026-10-21(右側面板 P4a):agent 瀏覽器工具的轉送層(host 註冊、指令排隊與逾時、導覽規則)。導覽規則所需的兩個輸入:
+  // `policy.allowedHosts`(啟動時合併好的設定,與 hard-deny 同一份)與「這個 session 現在是否開著真.無限制」(純讀取)。
+  // 逾時的環境變數覆寫比照 `DESKMONY_YOLO_DURATION_MS` 的慣例——純粹讓 e2e 能在合理時間內驗證逾時,不經 `loadConfig()`、不落地設定檔。
+  const browserNavigateTimeoutMs = Number(process.env.DESKMONY_BROWSER_NAVIGATE_TIMEOUT_MS);
+  const browserCommandTimeoutMs = Number(process.env.DESKMONY_BROWSER_COMMAND_TIMEOUT_MS);
+  const browserRelay = new BrowserRelay({
+    allowedHosts: config.policy.allowedHosts,
+    isTrueUnrestricted: (sessionId) => sessionManager.isSessionTrueUnrestricted(sessionId),
+    navigateTimeoutMs: Number.isFinite(browserNavigateTimeoutMs) && browserNavigateTimeoutMs > 0 ? browserNavigateTimeoutMs : undefined,
+    commandTimeoutMs: Number.isFinite(browserCommandTimeoutMs) && browserCommandTimeoutMs > 0 ? browserCommandTimeoutMs : undefined,
+  });
+  // `features.agentBrowserTools`(預設開):關閉時三個 adapter 都不掛瀏覽器工具(tools/list 沒有 `browser_*`),
+  // gateway 也不會核發帶 `browser` 範圍的 token(`WsGateway.mintMcpBridgeToken()` 再與這個設定取交集)。
+  if (config.features.agentBrowserTools) {
+    // in-process 路徑(Claude SDK)直接呼叫 relay;ACP/OpenCode 走 bridge 子行程 + scoped token 打 gateway 的 `browser.*ForAgent`。
+    claudeAdapter.setBrowserPort(browserRelay.toPort());
+    acpAdapter.setBrowserToolsEnabled(true);
+    openCodeAdapter.setBrowserToolsEnabled(true);
+  } else {
+    console.log("[core] features.agentBrowserTools=false:agent 的瀏覽器工具(browser_*)已停用");
+  }
   const gateway = new WsGateway(
     sessionManager,
     catalog,
@@ -332,6 +368,9 @@ async function main(): Promise<void> {
     notifier,
     effective,
     configPath,
+    terminalManager,
+    workspaceInspector,
+    browserRelay,
     authToken,
     config.daemon.authRateLimit.max,
     config.daemon.authRateLimit.cooldownMs,
@@ -447,7 +486,8 @@ async function main(): Promise<void> {
     turnLimiter.dispose();
     waitingWatchdog.dispose();
     await Promise.race([
-      sessionManager.shutdownAll(),
+      // 面板終端與 agent session 並行收尾,共用下面同一個逾時保護(殘留的 shell 靠下次啟動的孤兒回收)。
+      Promise.all([terminalManager.closeAll(), sessionManager.shutdownAll()]).then(() => undefined),
       new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           console.warn(

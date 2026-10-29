@@ -1,0 +1,99 @@
+{
+  "title": "サイドパネル",
+  "show": "サイドパネルを表示",
+  "hide": "サイドパネルを非表示",
+  "close": "パネルを閉じる",
+  "resize": "サイドパネルの幅を調整",
+  "noSession": "サイドパネルを使うには会話を選択してください",
+  "retry": "再試行",
+  "dismiss": "閉じる",
+  "tabs": {
+    "terminal": "ターミナル",
+    "changes": "変更",
+    "files": "ファイル",
+    "browser": "ブラウザー"
+  },
+  "terminal": {
+    "tabsLabel": "ターミナル一覧",
+    "new": "新規ターミナル",
+    "close": "{{title}} を閉じる",
+    "empty": "この会話にはまだターミナルがありません",
+    "exited": "プロセスが終了しました(コード {{code}})",
+    "exitedUnknown": "プロセスが終了しました",
+    "restart": "再起動"
+  },
+  "refresh": "再読み込み",
+  "changes": {
+    "branch": "ブランチ {{name}}",
+    "detached": "HEAD が切り離されています",
+    "fileCount": "変更されたファイル:{{count}}",
+    "notRepo": "このフォルダーは git リポジトリではありません",
+    "notRepoHint": "「変更」には、この会話の作業フォルダーの git 変更が表示されます。",
+    "clean": "変更はありません——作業ツリーはきれいです",
+    "truncated": "変更されたファイルが多すぎます——先頭の {{count}} 件のみ表示",
+    "binary": "バイナリファイル——表示できるテキスト diff はありません",
+    "noContentChanges": "内容の変更はありません(名前変更またはモード変更のみ)",
+    "diffTruncated": "diff が大きいため、先頭部分のみ表示しています",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "変更",
+      "A": "追加",
+      "D": "削除",
+      "R": "名前変更",
+      "C": "コピー",
+      "U": "競合",
+      "T": "種別変更",
+      "?": "未追跡"
+    }
+  },
+  "files": {
+    "filter": "読み込み済みのファイルを絞り込み",
+    "loading": "読み込み中…",
+    "empty": "このフォルダーは空です",
+    "truncated": "このフォルダーにはさらに項目があります——先頭の {{count}} 件のみ表示",
+    "symlink": "シンボリックリンクまたは junction",
+    "copyPath": "パスをコピー",
+    "closePreview": "プレビューを閉じる",
+    "binary": "バイナリファイル({{size}})——プレビューなし",
+    "tooLarge": "大きすぎてプレビューできません({{size}})",
+    "previewTruncated": "先頭の {{shown}} のみ表示(全体 {{total}})",
+    "emptyFile": "空のファイル"
+  },
+  "browser": {
+    "back": "戻る",
+    "forward": "進む",
+    "reload": "再読み込み",
+    "stop": "読み込みを停止",
+    "addressLabel": "アドレス",
+    "addressPlaceholder": "URL を入力(例: localhost:3000)",
+    "openExternal": "既定のブラウザーで開く",
+    "devTools": "開発者ツールを開く",
+    "blankTitle": "空白のページ",
+    "unavailable": "ブラウザーはデスクトップアプリでのみ使えます",
+    "invalidAddress": "Web アドレスとして認識できません。localhost:3000 や example.com のような URL を入力してください。",
+    "invalidScheme": "ここで開けるのは http:// と https:// のアドレスだけです。",
+    "crashed": "ページがクラッシュしました。再読み込みしてください。",
+    "loadFailed": "{{url}} を読み込めませんでした({{description}})",
+    "agent": {
+      "working": "agent がブラウザーを操作中 · {{action}}",
+      "recent": "agent が先ほどブラウザーを操作しました · {{action}}",
+      "actions": {
+        "navigate": "{{url}} を開く",
+        "back": "前のページへ戻る",
+        "forward": "次のページへ進む",
+        "reload": "ページを再読み込み",
+        "screenshot": "スクリーンショットを撮る",
+        "readText": "ページのテキストを読む",
+        "readInteractive": "クリックできる要素を一覧する",
+        "clickRef": "要素 {{ref}} をクリック",
+        "clickPoint": "({{x}}, {{y}}) をクリック",
+        "type": "{{count}} 文字を入力",
+        "typeSubmit": "{{count}} 文字を入力して Enter を押す",
+        "pressKey": "{{key}} を押す",
+        "scrollUp": "上にスクロール",
+        "scrollDown": "下にスクロール",
+        "unknown": "{{op}} を実行"
+      }
+    }
+  }
+}

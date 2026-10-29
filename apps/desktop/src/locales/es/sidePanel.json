@@ -1,0 +1,99 @@
+{
+  "title": "Panel lateral",
+  "show": "Mostrar panel lateral",
+  "hide": "Ocultar panel lateral",
+  "close": "Cerrar panel",
+  "resize": "Cambiar el ancho del panel lateral",
+  "noSession": "Selecciona una conversación para usar el panel lateral",
+  "retry": "Reintentar",
+  "dismiss": "Descartar",
+  "tabs": {
+    "terminal": "Terminal",
+    "changes": "Cambios",
+    "files": "Archivos",
+    "browser": "Navegador"
+  },
+  "terminal": {
+    "tabsLabel": "Terminales",
+    "new": "Nueva terminal",
+    "close": "Cerrar {{title}}",
+    "empty": "Esta conversación aún no tiene terminales",
+    "exited": "El proceso terminó (código {{code}})",
+    "exitedUnknown": "El proceso terminó",
+    "restart": "Reiniciar"
+  },
+  "refresh": "Actualizar",
+  "changes": {
+    "branch": "Rama {{name}}",
+    "detached": "HEAD desasociado",
+    "fileCount": "Archivos modificados: {{count}}",
+    "notRepo": "Esta carpeta no es un repositorio git",
+    "notRepoHint": "«Cambios» muestra los cambios de git en la carpeta de trabajo de esta conversación.",
+    "clean": "Sin cambios: el árbol de trabajo está limpio",
+    "truncated": "Hay demasiados archivos modificados: se muestran los primeros {{count}}",
+    "binary": "Archivo binario: no hay un diff de texto que mostrar",
+    "noContentChanges": "Sin cambios de contenido (solo cambio de nombre o de modo)",
+    "diffTruncated": "El diff es grande: solo se muestra el principio",
+    "renamedFrom": "← {{path}}",
+    "status": {
+      "M": "Modificado",
+      "A": "Añadido",
+      "D": "Eliminado",
+      "R": "Renombrado",
+      "C": "Copiado",
+      "U": "Conflicto",
+      "T": "Tipo cambiado",
+      "?": "Sin seguimiento"
+    }
+  },
+  "files": {
+    "filter": "Filtrar archivos cargados",
+    "loading": "Cargando…",
+    "empty": "Esta carpeta está vacía",
+    "truncated": "Esta carpeta tiene más elementos: solo se listan los primeros {{count}}",
+    "symlink": "Enlace simbólico o junction",
+    "copyPath": "Copiar ruta",
+    "closePreview": "Cerrar vista previa",
+    "binary": "Archivo binario ({{size}}): sin vista previa",
+    "tooLarge": "Demasiado grande para la vista previa ({{size}})",
+    "previewTruncated": "Se muestran solo los primeros {{shown}} de {{total}}",
+    "emptyFile": "Archivo vacío"
+  },
+  "browser": {
+    "back": "Atrás",
+    "forward": "Adelante",
+    "reload": "Recargar",
+    "stop": "Detener carga",
+    "addressLabel": "Dirección",
+    "addressPlaceholder": "Escribe una URL, p. ej. localhost:3000",
+    "openExternal": "Abrir en el navegador predeterminado",
+    "devTools": "Abrir herramientas de desarrollo",
+    "blankTitle": "Página en blanco",
+    "unavailable": "El navegador solo está disponible en la aplicación de escritorio",
+    "invalidAddress": "Eso no parece una dirección web. Escribe una URL como localhost:3000 o example.com.",
+    "invalidScheme": "Aquí solo se pueden abrir direcciones http:// y https://.",
+    "crashed": "La página se bloqueó. Recarga para intentarlo de nuevo.",
+    "loadFailed": "No se pudo cargar {{url}} ({{description}})",
+    "agent": {
+      "working": "El agent está usando el navegador · {{action}}",
+      "recent": "El agent acaba de usar el navegador · {{action}}",
+      "actions": {
+        "navigate": "Ir a {{url}}",
+        "back": "Volver atrás",
+        "forward": "Avanzar",
+        "reload": "Recargar la página",
+        "screenshot": "Hacer una captura de pantalla",
+        "readText": "Leer el texto de la página",
+        "readInteractive": "Listar los elementos en los que se puede hacer clic",
+        "clickRef": "Hacer clic en el elemento {{ref}}",
+        "clickPoint": "Hacer clic en ({{x}}, {{y}})",
+        "type": "Escribir {{count}} caracteres",
+        "typeSubmit": "Escribir {{count}} caracteres y pulsar Enter",
+        "pressKey": "Pulsar {{key}}",
+        "scrollUp": "Desplazar hacia arriba",
+        "scrollDown": "Desplazar hacia abajo",
+        "unknown": "Ejecutar {{op}}"
+      }
+    }
+  }
+}

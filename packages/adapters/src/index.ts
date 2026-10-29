@@ -5,6 +5,7 @@ export * from "./agent-env.js";
 export * from "./claude-sdk-adapter.js";
 export * from "./acp-adapter.js";
 export * from "./pty-adapter.js";
+export * from "./shell-pty.js";
 export * from "./opencode-adapter.js";
 export * from "./opencode-config.js";
 export * from "./opencode-shell-env.js";

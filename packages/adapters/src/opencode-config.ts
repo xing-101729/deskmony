@@ -63,6 +63,12 @@ export const OPENCODE_CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT";
  */
 export const SESSION_NETWORK_QUERY_TOOL_NAMES = ["deskmony_list_agents", "deskmony_list_sessions", "deskmony_read_session"] as const;
 
+/**
+ * 2026-10-21(P4a):瀏覽器工具裡唯讀/無副作用的三個(截圖、讀頁面、捲動),預先放行的理由同上面三個查詢工具
+ * (與 Claude SDK 的 `BROWSER_AUTO_ALLOWED_TOOL_NAMES` 同一份語意)。`browser_navigate`/`browser_click`/`browser_type`/
+ * `browser_press_key` **不**預先放行,走一般的 default-deny 流程;導覽規則由 core 的 `BrowserRelay` 強制,與有沒有放行無關。
+ */
+export const BROWSER_QUERY_TOOL_NAMES = ["deskmony_browser_screenshot", "deskmony_browser_read_page", "deskmony_browser_scroll"] as const;
 export interface DeskmonyOpencodeConfigOptions {
   /**
    * 停用 `task` 工具(subagent)。**只有 ACP 對接要設**:`opencode acp` 只把「它自己認識的 ACP session」的
@@ -83,6 +89,8 @@ export interface DeskmonyOpencodeConfigOptions {
    * 給了才會加進 `plugin` 陣列;兩種 opencode 對接都要給(外掛檔找不到時 adapter 降級成不給,session 照常啟動)。
    */
   shellEnvPlugin?: OpencodePluginEntry;
+  /** 這個 session 的 bridge 有掛瀏覽器工具(`McpBridgeLaunch.browserTools`)。給了才會預先放行上面三個瀏覽器的唯讀工具(沒掛時不放行同名的別家工具)。 */
+  browserTools?: boolean;
   sessionNetwork?: {
     /**
      * 只有 HTTP adapter 要給:把 bridge 以 `mcp.deskmony`(`type: "local"`)寫進設定。ACP 不用——
@@ -126,6 +134,9 @@ function deskmonyPermission(options: DeskmonyOpencodeConfigOptions): Record<stri
   const permission: Record<string, "ask" | "allow" | "deny"> = { "*": "ask", "**": "ask" };
   if (options.sessionNetwork) {
     for (const name of SESSION_NETWORK_QUERY_TOOL_NAMES) permission[name] = "allow";
+  }
+  if (options.browserTools) {
+    for (const name of BROWSER_QUERY_TOOL_NAMES) permission[name] = "allow";
   }
   if (options.denySubagents) permission.task = "deny";
   return permission;
