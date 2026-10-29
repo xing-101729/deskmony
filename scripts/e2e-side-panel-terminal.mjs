@@ -747,11 +747,31 @@ async function main() {
       const updates = [];
       manager.on("terminal-updated", (p) => updates.push(p.terminal));
       const origin = { remote: false, remoteAddress: "127.0.0.1" };
+      // 2026-10-29 CI(ae8030b)看過一次:指令只送一次,30 秒都等不到回應。原因沒有定論(可能是 shell 還沒就緒時
+      // 打進去的字被吃掉),所以沒看到回應就每 5 秒重送;真的逾時就把收到的輸出附在錯誤裡,下次再發生才有資料可查。
       const newShell = async () => {
         const t = await manager.create({ sessionId: S1.id, cols: 80, rows: 24 }, origin);
-        manager.input(t.id, `${cmd.pid()}\r`);
-        const m = await waitUntil(() => (chunks.get(t.id) ?? "").match(/SHELLPID=(\d+)/), 30_000, "in-process 終端回報 pid");
-        return { id: t.id, pid: Number(m[1]) };
+        let lastSent = 0;
+        let sends = 0;
+        try {
+          const m = await waitUntil(
+            () => {
+              const hit = (chunks.get(t.id) ?? "").match(/SHELLPID=(\d+)/);
+              if (!hit && Date.now() - lastSent >= 5_000) {
+                manager.input(t.id, `${cmd.pid()}\r`);
+                lastSent = Date.now();
+                sends++;
+              }
+              return hit;
+            },
+            30_000,
+            "in-process 終端回報 pid",
+          );
+          return { id: t.id, pid: Number(m[1]) };
+        } catch (err) {
+          const output = (chunks.get(t.id) ?? "").slice(-1500);
+          throw new Error(`${err.message}(送了 ${sends} 次;收到的輸出結尾:${JSON.stringify(output)})`);
+        }
       };
 
       // 儀器:記錄所有 taskkill 與對 pid 的 process.kill。對「已結束那一個」的 pid 假裝它還活著(= pid 被別的行程重用的情境),
