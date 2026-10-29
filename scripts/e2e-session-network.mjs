@@ -56,6 +56,7 @@ import {
   SAY_PREFIX,
   bridgeOnPromptMarker,
   delayEchoMarker,
+  holdEchoMarker,
 } from "./fake-acp-agent.mjs";
 
 // 2026-09-04(稽核修補):在啟動 core 之前確認 dist/ 不比 src/ 舊。
@@ -579,6 +580,8 @@ async function main() {
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-net-home-"));
   const wsA = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-net-wsA-"));
   const wsB = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-net-wsB-"));
+  /** P3.7-3 的放行檔放這裡(fake agent 等它出現才結束那一輪,見 holdEchoMarker)。 */
+  const holdDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-net-hold-"));
   // 訊息鏈預算只能靠設定檔覆寫(F4:遠端不可改,沒有對應的環境變數)——啟動前寫好 config.json。
   writeFileSync(
     path.join(homeDir, "config.json"),
@@ -724,9 +727,16 @@ async function main() {
     // =====================================================================================
     // P3.7-3 B busy 時 A 送的訊息會排隊,B 回 idle 後才送達
     // =====================================================================================
+    // 2026-10-27:B 的 busy 改成「測試明確放行才結束」(holdEchoMarker + 放行檔),不再是固定 6 秒的延遲回顯。
+    // A 的 send_to_session 要繞 fake agent → mcp-bridge 子行程 → gateway 一整圈,多個 worktree 同時跑 e2e、機器負載
+    // 高時這一圈曾超過 6 秒:B 已經 idle,訊息直接送達而不是排隊,斷言誤判失敗。現在 B 一定撐到「送出當下仍 busy、
+    // 歷史裡還沒有這則訊息」都觀察完才放行,斷言內容不變、只是不再依賴牆鐘時間窗。
+    const releaseFile = path.join(holdDir, "p3.7-3-release");
+    const releaseHold = () => writeFileSync(releaseFile, "release", "utf8");
     try {
-      const holdMs = 6_000;
-      const hold = client.drivePrompt(B, `${delayEchoMarker(holdMs)} hold`, { timeoutMs: 60_000 });
+      const holdPrompt = `${holdEchoMarker(releaseFile)} hold`;
+      // 逾時要涵蓋 callTool 自己的 60 秒上限——B 這一輪會一直撐到 callTool 回來、做完檢查才放行。
+      const hold = client.drivePrompt(B, holdPrompt, { timeoutMs: 120_000 });
       hold.catch(() => undefined);
       const busy = await waitForStatus(client, B, "busy", 15_000);
       const queuedMsg = `排隊中的訊息 ${delayEchoMarker(0)}`;
@@ -734,6 +744,7 @@ async function main() {
       const statusAfterSend = await statusOf(client, B);
       const duringBusy = await history(client, B);
       const deliveredEarly = duringBusy.some((m) => m.role === "user" && m.content === queuedMsg);
+      releaseHold();
       await hold;
       const { messages: afterIdle, hit: delivered } = await waitForHistory(
         client,
@@ -749,7 +760,7 @@ async function main() {
       );
       await waitForStatus(client, B, "idle");
       noteChain(afterIdle);
-      const holdReply = afterIdle.find((m) => m.role === "assistant" && m.content.includes("hold"));
+      const holdReply = afterIdle.find((m) => m.role === "assistant" && m.content.includes(holdPrompt));
       record(
         "P3.7-3 B busy 時 A 送的訊息排隊(送出當下 B 仍 busy、歷史裡還沒有這則訊息),B 回 idle 後才送達(送達時間晚於 B 那一輪的回覆),且 agent 收到的是信封包裝後的內容",
         busy &&
@@ -766,6 +777,9 @@ async function main() {
       );
     } catch (err) {
       record("P3.7-3 B busy 時訊息排隊", false, String(err?.stack ?? err));
+    } finally {
+      // 中途丟例外時也要放行,不然 B 一直 busy,後面每一組斷言都會被拖垮。
+      releaseHold();
     }
 
     // =====================================================================================
@@ -1282,7 +1296,7 @@ async function main() {
     client?.close();
     await killProcessTree(core1, "序幕 core");
     await killProcessTree(core2, "主 core");
-    for (const dir of [dataDir, homeDir, wsA, wsB]) {
+    for (const dir of [dataDir, homeDir, wsA, wsB, holdDir]) {
       try {
         rmSync(dir, { recursive: true, force: true });
       } catch {

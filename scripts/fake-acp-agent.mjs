@@ -53,6 +53,12 @@
  *     包裹後的字串中間),以及用可控制的延遲時間製造「session 目前 busy」的
  *     測試窗口。(原本的使用者是 2026-10-02 已移除的團隊訊息 e2e;P3 的 session
  *     互傳訊息 e2e 預期會再用到。)
+ *   - 若 prompt 文字內含 HOLD_ECHO_PATTERN 標記 `[[E2E_HOLD_ECHO:<base64>]]`(2026-10-27,
+ *     scripts/e2e-session-network.mjs 的 P3.7-3 用;`<base64>` 是「放行檔」絕對路徑的 base64,標記用
+ *     `holdEchoMarker()` 組):每 HOLD_ECHO_POLL_MS 檢查一次,**直到放行檔出現**才同 DELAY_ECHO 回顯
+ *     `ECHO:` + 完整 prompt 文字(`session/cancel` 抵達則不回顯、直接結束)。用途:讓 session 一直 busy 到
+ *     測試**明確放行**為止——DELAY_ECHO 的固定延遲是一段牆鐘時間窗,機器負載高時測試在窗口內還沒做完
+ *     要觀察的動作,session 就已經 idle 了(P3.7-3 在多個 worktree 同時跑 e2e 時就這樣誤判失敗過)。
  *   - 若 prompt 文字以 USAGE_UPDATE_PREFIX("ACP_USAGE_UPDATE ")開頭,其後接
  *     一段 JSON `{"used": number, "size": number, "cost"?: {"amount": number,
  *     "currency": string}}`(S3a usage-metering,e2e 步驟 29 用,見
@@ -419,6 +425,12 @@ export function delayEchoMarker(delayMs) {
   return `[[E2E_DELAY_ECHO:${delayMs}]]`;
 }
 const DELAY_ECHO_PATTERN = /\[\[E2E_DELAY_ECHO:(\d+)\]\]/;
+/** 建構出一段「等到 `releaseFile` 這個檔案出現才把整段 prompt 文字回顯」的標記文字(路徑以 base64 編碼,見檔頭註解)。 */
+export function holdEchoMarker(releaseFile) {
+  return `[[E2E_HOLD_ECHO:${Buffer.from(releaseFile, "utf8").toString("base64")}]]`;
+}
+const HOLD_ECHO_PATTERN = /\[\[E2E_HOLD_ECHO:([A-Za-z0-9+/=]+)\]\]/;
+const HOLD_ECHO_POLL_MS = 50;
 
 class FakeAcpAgent {
   /**
@@ -674,6 +686,8 @@ class FakeAcpAgent {
         await this.handleSay(params.sessionId, text.slice(SAY_PREFIX.length), cx);
       } else if (BRIDGE_ON_PROMPT_PATTERN.test(text)) {
         await this.handleBridgeOnPrompt(params.sessionId, text, cx);
+      } else if (HOLD_ECHO_PATTERN.test(text)) {
+        await this.handleHoldEcho(params.sessionId, text, abort, cx);
       } else if (DELAY_ECHO_PATTERN.test(text)) {
         await this.handleDelayEcho(params.sessionId, text, cx);
       } else if (text.startsWith(WRITE_FILE_PREFIX)) {
@@ -825,6 +839,28 @@ class FakeAcpAgent {
     const delayMs = match ? Number(match[1]) : 0;
     if (delayMs > 0) {
       await delay(delayMs);
+    }
+    const messageId = randomUUID();
+    await cx.notify(acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId,
+        content: { type: "text", text: `ECHO:${text}` },
+      },
+    });
+  }
+
+  /** 見檔頭註解:等放行檔出現(可被 `abort` 提早取消)後,同 handleDelayEcho 回顯整段 prompt 文字。 */
+  async handleHoldEcho(sessionId, text, abort, cx) {
+    const releaseFile = Buffer.from(text.match(HOLD_ECHO_PATTERN)[1], "base64").toString("utf8");
+    while (!existsSync(releaseFile)) {
+      try {
+        await delay(HOLD_ECHO_POLL_MS, undefined, { signal: abort.signal });
+      } catch {
+        // 被 abort(session/cancel 抵達)提早中止——正常路徑,不視為錯誤。
+        return;
+      }
     }
     const messageId = randomUUID();
     await cx.notify(acp.methods.client.session.update, {
