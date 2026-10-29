@@ -607,6 +607,10 @@ async function liveE2e() {
   // 測試腳本開銷就跨出批次視窗(見 2d 一開始的實測:2000ms 太緊,子程序啟動
   // 開銷就可能吃光)。
   const BATCH_INTERVAL_MS = 10_000;
+  /** 2d 判定「B/C 確定落在批次視窗內」時保留的安全邊際(計時器/時鐘的誤差),見 2d 的說明。 */
+  const WINDOW_SAFETY_MS = 1_000;
+  /** 2d 的前提無法確定時最多重試幾輪(每輪重開 core,通知器的批次狀態從頭開始)。 */
+  const MAX_2D_ATTEMPTS = 3;
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-notif-data-"));
   const homeDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-notif-home-"));
   const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "deskmony-e2e-notif-ws-"));
@@ -650,6 +654,44 @@ async function liveE2e() {
       startIdx,
     );
     return ev.event;
+  };
+
+  const statusOf = async (sessionId) => {
+    const { sessions } = await client.rpc("session.list", {});
+    return sessions.find((s) => s.id === sessionId)?.status;
+  };
+
+  const waitForStatus = async (sessionId, wanted, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if ((await statusOf(sessionId)) === wanted) return;
+      await sleep(100);
+    }
+    throw new Error(`等待 session ${sessionId} 變成 ${wanted} 逾時 (${timeoutMs}ms)`);
+  };
+
+  /**
+   * 收掉目前的 core(連同 session 的 agent 子行程),用同一份資料夾重開——通知器的批次狀態從頭開始。
+   * 給了 `nextConfigJson` 就在兩個 core 之間改寫 config.json(`notification` 不能遠端改,只能這樣換設定)。
+   */
+  const restartCore = async (nextConfigJson) => {
+    for (const sid of createdSessions) {
+      await client.rpc("session.delete", { sessionId: sid }).catch(() => {});
+    }
+    createdSessions.length = 0;
+    client.close();
+    await killProcessTree(coreProc);
+    if (nextConfigJson) writeFileSync(path.join(homeDir, "config.json"), JSON.stringify(nextConfigJson, null, 2), "utf8");
+    coreProc = startCore({
+      port: PORT,
+      dataDir,
+      homeDir,
+      workspaceDir,
+      extraEnv: { DESKMONY_NOTIFICATION_BATCH_INTERVAL_MS: String(BATCH_INTERVAL_MS) },
+    });
+    await waitForPort(`ws://127.0.0.1:${PORT}`, 20_000);
+    client = new MiniGatewayClient(`ws://127.0.0.1:${PORT}`);
+    await client.connect();
   };
 
   try {
@@ -696,11 +738,19 @@ async function liveE2e() {
     // ---- 2c: 第一筆 escalate 立即經 WS push 送達(不進批次佇列),payload 不含
     //          指令/路徑(SECRET_MARKER 不會出現在 push payload 裡)。webhook
     //          stub server 也收到結構相同、同樣不含 SECRET_MARKER 的 POST。 ----
+    // 2026-10-29:2d 的 B/C 在 A 開出批次視窗「之前」就建好——session.create 會當場 spawn agent 子行程,負載高時一個
+    // 就要好幾秒。原本在視窗開了之後才建:10/27 多個 worktree 同時跑 e2e 時「建兩個 session + 觸發兩筆權限」花了
+    // 10.97 秒、跨出 10 秒的視窗,B 被當成新一輪的第一筆立即推播,2d 誤判失敗。
+    let sessionB = await createSessionFor("Notif-B");
+    let sessionC = await createSessionFor("Notif-C");
+    /** A 的 escalate 開出批次視窗的時間下限(送出 A 的 prompt 之前取)——2d 用它確認 B/C 確實落在這個視窗內。 */
+    let windowFrom;
     let sessionA;
     {
       sessionA = await createSessionFor("Notif-A");
       const targetFile = path.join(workspaceDir, `${SECRET_MARKER}`, "a.txt");
       const notifPromise = client.waitForNotificationCount(1, 15_000);
+      windowFrom = Date.now();
       await triggerWritePermission(sessionA, targetFile, "content-a");
       const pushes = await notifPromise;
       const first = pushes[0];
@@ -739,30 +789,57 @@ async function liveE2e() {
 
     // ---- 2d: 批次視窗內的後續 escalate(跨多個 session)不立即推播,視窗到期
     //          後才彙總成一則(count=2,涉及 2 個 session,payload 沒有單一
-    //          sessionId——保守做法,見 notifier.ts 的 buildPayload() 說明)。 ----
+    //          sessionId——保守做法,見 notifier.ts 的 buildPayload() 說明)。
+    //          2026-10-29:批次視窗是 core 自己的牆鐘計時器,測試沒辦法讓它等測試做完,所以判定前先**證明前提**
+    //          「B/C 的 escalate 落在 A 開出的視窗內」:視窗最早在 windowFrom 才開、最早在 windowFrom +
+    //          BATCH_INTERVAL_MS 到期;B/C 立即送還是排隊,最晚在它們的狀態變成 waiting 之前就決定了
+    //          (session-manager 先同步呼叫 notifier.deliver(),之後才 setStatus("waiting"))。兩者都 waiting 時
+    //          離到期還有 WINDOW_SAFETY_MS 以上才判定;否則這一輪不算數(機器太慢,不是產品的結果),重開 core
+    //          讓通知器從頭開始、由新的 A 開視窗再試。產品若真的把視窗內的 escalate 立即送出,前提成立的
+    //          那一輪一定判 FAIL,重試蓋不掉。 ----
     {
-      const beforeCount = client.enforcementNotifications.length;
-      const sessionB = await createSessionFor("Notif-B");
-      const sessionC = await createSessionFor("Notif-C");
-      const targetFileB = path.join(workspaceDir, "b.txt");
-      const targetFileC = path.join(workspaceDir, "c.txt");
+      const attemptLog = [];
+      let verdict;
+      for (let attempt = 1; attempt <= MAX_2D_ATTEMPTS && !verdict; attempt++) {
+        if (attempt > 1) {
+          await restartCore();
+          // 同 2c 之前的理由:所有 session 都在開視窗之前建好。
+          const opener = await createSessionFor(`Notif-A${attempt}`);
+          sessionB = await createSessionFor(`Notif-B${attempt}`);
+          sessionC = await createSessionFor(`Notif-C${attempt}`);
+          const openerPush = client.waitForNotificationCount(1, 15_000);
+          windowFrom = Date.now();
+          await triggerWritePermission(opener, path.join(workspaceDir, `a${attempt}.txt`), "content-a");
+          await openerPush;
+        }
+        const beforeCount = client.enforcementNotifications.length;
 
-      // 並行觸發 B/C 兩筆(而不是依序 await),盡量縮小兩者抵達 core 的時間差
-      // ——各自是獨立的 fake-agent 子程序,平行送不會互相阻塞,只是為了讓
-      // 兩者確實落在同一個批次視窗內(見上方 BATCH_INTERVAL_MS 註解)。
-      await Promise.all([triggerWritePermission(sessionB, targetFileB, "content-b"), triggerWritePermission(sessionC, targetFileC, "content-c")]);
-      const rightAfterBoth = client.enforcementNotifications.length;
+        // 並行觸發 B/C 兩筆(而不是依序 await),盡量縮小兩者抵達 core 的時間差
+        // ——各自是獨立的 fake-agent 子程序,平行送不會互相阻塞。
+        await Promise.all([
+          triggerWritePermission(sessionB, path.join(workspaceDir, "b.txt"), "content-b"),
+          triggerWritePermission(sessionC, path.join(workspaceDir, "c.txt"), "content-c"),
+        ]);
+        await Promise.all([waitForStatus(sessionB, "waiting"), waitForStatus(sessionC, "waiting")]);
+        const marginMs = windowFrom + BATCH_INTERVAL_MS - Date.now();
+        const rightAfterBoth = client.enforcementNotifications.length;
+        attemptLog.push(`#${attempt} B/C 都 waiting 時離視窗到期還有 ${marginMs}ms`);
+        if (marginMs < WINDOW_SAFETY_MS) continue;
 
-      const noImmediatePush = rightAfterBoth === beforeCount;
-
-      const pushes = await client.waitForNotificationCount(beforeCount + 1, BATCH_INTERVAL_MS + 5_000);
-      const batched = pushes[pushes.length - 1];
-      const batchedOk = batched.count === 2 && batched.sessionId === undefined && batched.sessionNames.length === 2;
+        const noImmediatePush = rightAfterBoth === beforeCount;
+        const pushes = await client.waitForNotificationCount(beforeCount + 1, BATCH_INTERVAL_MS + 5_000);
+        const batched = pushes[pushes.length - 1];
+        const batchedOk = batched.count === 2 && batched.sessionId === undefined && batched.sessionNames.length === 2;
+        verdict = {
+          ok: noImmediatePush && batchedOk,
+          detail: `${attemptLog.join("; ")}; beforeCount=${beforeCount}, rightAfterBoth=${rightAfterBoth}, batched=${JSON.stringify(batched)}`,
+        };
+      }
 
       record(
         "2d 批次視窗內的後續 escalate(跨 2 個 session)不立即推播;視窗到期後彙總成一則(count=2,無單一 sessionId)",
-        noImmediatePush && batchedOk,
-        `beforeCount=${beforeCount}, rightAfterBoth=${rightAfterBoth}, batched=${JSON.stringify(batched)}`,
+        verdict?.ok === true,
+        verdict?.detail ?? `${MAX_2D_ATTEMPTS} 輪都無法確定 B/C 落在批次視窗內(測試環境太慢,不是產品的結果):${attemptLog.join("; ")}`,
       );
 
       // 清理這兩筆 pending 權限。
@@ -779,13 +856,6 @@ async function liveE2e() {
     //          allow/deny(核可流程完全不受通知失敗影響)。這裡因為
     //          `notification` 不可經 config.setFile 遠端修改(2b 已驗證),
     //          改用直接重啟 core、指到一個不會回應的位址來製造失敗情境。 ----
-    for (const sid of createdSessions) {
-      await client.rpc("session.delete", { sessionId: sid }).catch(() => {});
-    }
-    client.close();
-    await killProcessTree(coreProc);
-    createdSessions.length = 0;
-
     const badConfigJson = {
       version: 1,
       notification: {
@@ -794,18 +864,7 @@ async function liveE2e() {
         batchIntervalMinutes: 20,
       },
     };
-    writeFileSync(path.join(homeDir, "config.json"), JSON.stringify(badConfigJson, null, 2), "utf8");
-
-    coreProc = startCore({
-      port: PORT,
-      dataDir,
-      homeDir,
-      workspaceDir,
-      extraEnv: { DESKMONY_NOTIFICATION_BATCH_INTERVAL_MS: String(BATCH_INTERVAL_MS) },
-    });
-    await waitForPort(`ws://127.0.0.1:${PORT}`, 20_000);
-    client = new MiniGatewayClient(`ws://127.0.0.1:${PORT}`);
-    await client.connect();
+    await restartCore(badConfigJson);
 
     const sessionD = await createSessionFor("Notif-D");
     const targetFileD = path.join(workspaceDir, "d.txt");
