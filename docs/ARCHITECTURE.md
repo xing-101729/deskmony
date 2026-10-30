@@ -414,6 +414,8 @@ handleMessage() 依序:①schema 驗證(未認證只解析 auth)②認證閘門 
 - **認證前不做昂貴的解析**(2026-10-27):尚未認證的連線只用 `AuthRequestSchema` 解析 `auth`,其他方法在
   完整的 `ClientRequestSchema` 解析之前就回 `auth.notYetAuthenticated`;超過 64 KiB 的訊息連 `JSON.parse` 都不做,
   直接以 1009 關閉。`WebSocketServer` 的 `maxPayload` 是 `GATEWAY_MAX_MESSAGE_BYTES`(64 MiB,依附件大小估算)。
+  桌面端送出前用 `sendPromptMessageBytes()` 算整則 `session.sendPrompt` 的大小,超過就不送、保留輸入與附件並提示,
+  不會走到被 1009 斷線那一步(2026-10-30)。
   `gateway.invalidRequest` 的 `detail` 只列前 3 個 zod issue(zod 3 對陣列逐元素產生 issue)。
 - **`DESKMONY_AUTH_TOKEN` 刻意不是設定檔欄位**,永遠只從環境變數讀。
 

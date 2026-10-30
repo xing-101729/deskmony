@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CreateSessionInputSchema, SessionSchema, MessageRecordSchema, SessionTitleMethodSchema } from "./session.js";
-import { PromptAttachmentSchema, PromptInputSchema } from "./prompt.js";
+import { PromptAttachmentSchema, PromptInputSchema, type PromptInput } from "./prompt.js";
 import { DialogAnswerSchema, PermissionDecisionSchema, SessionEventEnvelopeSchema, SlashCommandInfoSchema } from "./events.js";
 import { AgentSoftwareSchema, SessionPermissionModeSchema } from "./agent-launch.js";
 import { EffortValueSchema } from "./session-options.js";
@@ -40,11 +40,53 @@ export const FORWARD_MESSAGE_MAX_CHARS = 100_000;
  * 2026-10-27:client → core 單一 WS 訊息的位元組上限(core 的 `WebSocketServer` `maxPayload`;ws 套件預設 100 MiB)。
  *
  * 最大的合法訊息是帶附件的 `session.sendPrompt`:附件以 base64 內嵌(+33%),桌面端每個附件上限 10 MB(ChatView.tsx 的
- * `MAX_ATTACHMENT_BYTES`,個數不限)。64 MiB 容得下 4 個上限大小的附件,也是 Anthropic Messages API 單次請求上限
+ * `MAX_ATTACHMENT_BYTES`)。64 MiB 容得下 4 個上限大小的附件,也是 Anthropic Messages API 單次請求上限
  * (32 MB)的兩倍——超過這個大小的 prompt 本來就送不到模型那邊。超過時 ws 在讀到 frame header 就以 1009 關閉連線,
- * 不會先把整則訊息讀進記憶體。
+ * 不會先把整則訊息讀進記憶體。附件個數本身不設限,總和由 client 送出前用 `sendPromptMessageBytes()` 擋下。
  */
 export const GATEWAY_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * 2026-10-30:`sendPromptMessageBytes()` 為 WS 外殼預留的位元組數——request id、method、sessionId、messageId 在
+ * 送出那一刻才產生,實際合計約 200 bytes,這裡多留一個數量級以上。
+ */
+export const SEND_PROMPT_ENVELOPE_RESERVE_BYTES = 4 * 1024;
+
+/**
+ * 2026-10-30:帶這份 prompt 的 `session.sendPrompt` 整則 WS 訊息(`JSON.stringify` 後的 UTF-8)有多少位元組——只會
+ * 高估,不會低估。client 送出前拿來跟 `GATEWAY_MAX_MESSAGE_BYTES` 比:超過的訊息 core 會以 1009 關閉連線,使用者
+ * 只看到斷線重連,訊息就這樣不見,也沒有任何錯誤提示。
+ *
+ * 附件的 `data` 是 base64(見 prompt.ts 的約定)——全是 ASCII、JSON 不需跳脫,所以直接拿字串長度當位元組數,不為了
+ * 量大小再序列化一份幾十 MB 的字串;其餘欄位(文字、檔名、mediaType……)照實序列化後算 UTF-8 長度。
+ */
+export function sendPromptMessageBytes(prompt: PromptInput): number {
+  let dataBytes = 0;
+  const skeleton = {
+    ...prompt,
+    attachments: prompt.attachments?.map((attachment) => {
+      if (attachment.type === "file") return attachment;
+      dataBytes += attachment.data.length;
+      return { ...attachment, data: "" };
+    }),
+  };
+  return utf8ByteLength(JSON.stringify(skeleton)) + dataBytes + SEND_PROMPT_ENVELOPE_RESERVE_BYTES;
+}
+
+/** 字串以 UTF-8 編碼後的位元組數(shared 的 lib 只有 ES2022,沒有 `TextEncoder`/`Buffer` 可用)。 */
+function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      bytes += 4; // surrogate pair → 一個 4 bytes 的碼位
+      i++;
+    } else bytes += 3; // 其餘 BMP 字元;落單的 surrogate 會被編成 U+FFFD,也是 3 bytes
+  }
+  return bytes;
+}
 
 /**
  * M5 Round A 新增:token-based 認證(見 apps/core/src/gateway/ws-gateway.ts

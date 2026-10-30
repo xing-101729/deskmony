@@ -82,7 +82,8 @@
     "noMatches": "No matching slash commands"
   },
   "attachment": {
-    "tooLarge": "These attachments exceed {{limit}} MB and were skipped: {{files}}"
+    "tooLarge": "These attachments exceed {{limit}} MB and were skipped: {{files}}",
+    "totalTooLarge": "This message and its attachments come to about {{size}} MB once encoded, over the {{limit}} MB limit for a single message, so it wasn't sent. Attachments are base64-encoded (about a third larger than the files). Remove some attachments and send again."
   },
   "origin": {
     "fromSession": "From {{title}}",
