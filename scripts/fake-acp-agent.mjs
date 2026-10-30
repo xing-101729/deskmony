@@ -227,7 +227,7 @@
  *     `{sessionId, kind:"main"|"title", closed, cancelled, permissionOutcomes, prompts}`(只回這些統計,不回對話內容)。
  *   - 2026-10-15(session 自動復活,scripts/e2e-session-revive.mjs 用):模擬「agent 把對話存在自己的磁碟上、重啟後能接回」。
  *     `FAKE_ACP_STATE_DIR`(環境變數,由啟動 core 的 e2e 設;子行程繼承)有設時,每個 session 的狀態(cwd + 每一輪收到的 prompt)
- *     存成 `<dir>/session-<id>.json`,每個 ACP 呼叫(initialize / session/new|resume|load)附加一行 JSON 到 `<dir>/calls.log`
+ *     存成 `<dir>/session-<id>.json`,每個 ACP 呼叫(initialize / session/new|resume|load)附加一行 JSON 到 `<dir>/calls.log`(帶 `pid` 與行程識別碼 `instance`)
  *     ——e2e 靠它斷言「走了哪條路」「agent 行程啟動了幾次」。沒設時完全維持原本的行為(只在記憶體、不支援接回)。
  *     命令列旗標決定宣告的能力:
  *       - (無旗標)`loadSession: false`、沒有 `sessionCapabilities.resume`——**不支援接回**(退路:對話紀錄)。
@@ -259,6 +259,11 @@ import { TITLE_MODE_HANG, TITLE_MODE_REFUSE, TITLE_MODE_TOOL, TITLE_TOOL_MARKER_
 export const FAKE_ACP_REPLY_CHUNKS = ["Hello", " from", " fake ACP agent"];
 /** 2026-10-15(session 自動復活)e2e 用,見檔頭註解。 */
 export const REVIVE_REPORT_MARKER = "[[E2E_REVIVE_REPORT]]";
+/**
+ * 2026-10-30:calls.log 每一行附上這個行程的識別碼,e2e 用它分辨「新啟動的 agent 行程」。不能只靠 pid:Windows 很快就重用 pid,
+ * 新行程撞到先前某個行程的 pid 時,它的呼叫會被當成舊的濾掉(CI 撞過:e2e-session-rewind U2 `calls=[]`)。
+ */
+const PROCESS_INSTANCE = randomUUID();
 /** `--load` 模式重播歷史時,每一段重播文字都帶這個標記——e2e 斷言它**絕不**出現在 core 的事件串流與 DB。 */
 export const REPLAY_MARKER = "REPLAYED-FROM-LOAD";
 /** `--load` 重播時每一輪額外補幾個填充片段(總 update 數 = 輪數 × (4 + 這個值)),e2e 用同一個常數算預期值。 */
@@ -445,7 +450,7 @@ class FakeAcpAgent {
   /** 附加一行 JSON 到 calls.log(沒設 stateDir 就不記)。 */
   appendCall(record) {
     if (!this.options.stateDir) return;
-    appendFileSync(path.join(this.options.stateDir, "calls.log"), `${JSON.stringify({ pid: process.pid, ...record })}\n`, "utf8");
+    appendFileSync(path.join(this.options.stateDir, "calls.log"), `${JSON.stringify({ pid: process.pid, instance: PROCESS_INSTANCE, ...record })}\n`, "utf8");
   }
 
   statePath(sessionId) {
