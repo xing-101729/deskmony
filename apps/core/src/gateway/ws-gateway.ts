@@ -84,6 +84,8 @@ interface ConnectionState {
    * `browser-command` push 只經由它送給這一條連線(見 `createBrowserHostConnection()`),連線關閉時一併註銷。
    */
   browserHost?: BrowserHostConnection;
+  /** 2026-10-30:這條連線是否還佔著一個未認證名額(見 `PreAuthConnectionLimiter`);認證成功或連線關閉時歸還。 */
+  holdsPreAuthSlot: boolean;
 }
 
 /** 未認證連線的逾時秒數(M5 Round A 任務2:逾時未認證即關閉連線)。 */
@@ -94,6 +96,31 @@ const AUTH_TIMEOUT_MS = 5_000;
  * 訊息連 `JSON.parse` 都不做就關閉連線(1009),見 `handleConnection()`。連線整體的上限是 `GATEWAY_MAX_MESSAGE_BYTES`。
  */
 const PRE_AUTH_MAX_MESSAGE_BYTES = 64 * 1024;
+
+/**
+ * 2026-10-30:同時「已升級成 WebSocket、尚未認證」的連線上限(只有設了 DESKMONY_AUTH_TOKEN 才有這種連線)。
+ *
+ * 上面那個 64 KiB 的檢查要等 ws 收完整則訊息才輪得到:ws 先照 `maxPayload`(`GATEWAY_MAX_MESSAGE_BYTES`,64 MiB)
+ * 把訊息收進記憶體,才交給 `message` listener。所以每條未認證的連線在 `AUTH_TIMEOUT_MS` 內——加上關閉握手,對方
+ * 不回 close frame 時 ws 最多再等 30 秒——仍能讓 core 暫存最多 64 MiB。不設上限時 N 條連線就是 N × 64 MiB,
+ * 開了遠端存取(`daemon.bindHost`)的 core 會被網路上沒有 token 的人撐到 OOM。
+ *
+ *   - `PRE_AUTH_MAX_CONNECTIONS`(全部來源合計):記憶體的硬上限,16 × 64 MiB = 1 GiB。
+ *   - `PRE_AUTH_MAX_REMOTE_CONNECTIONS`(非本機來源合計):比總數少 4,這 4 個名額只有本機用得到——遠端連線再多,
+ *     也擠不掉桌面殼連自己的 core。
+ *   - `PRE_AUTH_MAX_CONNECTIONS_PER_REMOTE_ADDRESS`(單一非本機位址):一台遠端主機佔不滿遠端名額,其他遠端裝置
+ *     仍連得進來。本機(127.0.0.1 / ::1)不設這一層:桌面殼、CLI、每個 MCP bridge 子行程都從同一個位址連進來,
+ *     對它設上限只會先擋到自己人。
+ *
+ * 正常 client 一連上就送 auth,佔名額的時間只有一個來回。被拒時:`GatewayClient`(桌面殼、CLI)兩秒後自動重連;
+ * MCP bridge 在工具呼叫時才連線,被拒的那次工具呼叫回錯誤,下次呼叫再連。
+ */
+const PRE_AUTH_MAX_CONNECTIONS = 16;
+const PRE_AUTH_MAX_REMOTE_CONNECTIONS = 12;
+const PRE_AUTH_MAX_CONNECTIONS_PER_REMOTE_ADDRESS = 4;
+
+/** 2026-10-30:名額滿了被拒的升級請求,最多每隔多久記一行 log(洪水時每個請求都記會把 log 本身變成負擔)。 */
+const PRE_AUTH_REJECTION_LOG_INTERVAL_MS = 10_000;
 
 /** 2026-10-27:無效請求回給 client 的錯誤細節最多列幾個 zod issue、最多幾個字元,見 `describeRequestError()`。 */
 const INVALID_REQUEST_DETAIL_MAX_ISSUES = 3;
@@ -481,6 +508,59 @@ class AuthRateLimiter {
   }
 }
 
+/** `PreAuthConnectionLimiter.check()` 拒絕時回給升級請求的 HTTP 狀態與內文。 */
+interface PreAuthRejection {
+  status: 429 | 503;
+  reason: string;
+}
+
+/**
+ * 2026-10-30:未認證連線的名額帳本,上限與理由見 `PRE_AUTH_MAX_CONNECTIONS`。
+ *
+ * `verifyClient` 用 `check()` 在升級之前就拒絕(還沒建立 WebSocket,也就沒有接收緩衝);真正扣名額的是
+ * `handleConnection()` 的 `tryAcquire()`——升級途中失敗(例如對方已經斷線)的連線不會發出 `connection`,
+ * 在 `verifyClient` 裡就扣會漏還。ws 從 `verifyClient` 到發出 `connection` 是同步的,中間插不進別的連線;
+ * `tryAcquire()` 再檢查一次,只是為了不依賴這個實作細節。
+ */
+class PreAuthConnectionLimiter {
+  private total = 0;
+  private remoteTotal = 0;
+  private readonly perRemoteAddress = new Map<string, number>();
+
+  check(address: string): PreAuthRejection | undefined {
+    if (this.total >= PRE_AUTH_MAX_CONNECTIONS) {
+      return { status: 503, reason: "尚未認證的連線過多,請稍後再試" };
+    }
+    if (isLoopbackAddress(address)) return undefined;
+    if ((this.perRemoteAddress.get(address) ?? 0) >= PRE_AUTH_MAX_CONNECTIONS_PER_REMOTE_ADDRESS) {
+      return { status: 429, reason: "這個位址尚未認證的連線過多,請稍後再試" };
+    }
+    if (this.remoteTotal >= PRE_AUTH_MAX_REMOTE_CONNECTIONS) {
+      return { status: 503, reason: "尚未認證的遠端連線過多,請稍後再試" };
+    }
+    return undefined;
+  }
+
+  tryAcquire(address: string): boolean {
+    if (this.check(address)) return false;
+    this.total += 1;
+    if (!isLoopbackAddress(address)) {
+      this.remoteTotal += 1;
+      this.perRemoteAddress.set(address, (this.perRemoteAddress.get(address) ?? 0) + 1);
+    }
+    return true;
+  }
+
+  release(address: string): void {
+    this.total -= 1;
+    if (isLoopbackAddress(address)) return;
+    this.remoteTotal -= 1;
+    const remaining = (this.perRemoteAddress.get(address) ?? 1) - 1;
+    if (remaining > 0) this.perRemoteAddress.set(address, remaining);
+    else this.perRemoteAddress.delete(address);
+  }
+}
+
 /**
  * gateway 綁不到 port 時 core 的 exit code(BSD sysexits 的 EX_CONFIG——改 `DESKMONY_CORE_PORT` 等設定就能排除)。
  * 刻意與一般啟動失敗的 1 分開:桌面殼以 `stdio: "inherit"` 起 core、讀不到它的輸出,只能靠 exit code 分辨
@@ -539,6 +619,10 @@ export class WsGateway {
   private httpServer: NodeHttpServer | undefined;
   private clients = new Map<WebSocket, ConnectionState>();
   private readonly authRateLimiter: AuthRateLimiter;
+  private readonly preAuthLimiter = new PreAuthConnectionLimiter();
+  /** 見 `PRE_AUTH_REJECTION_LOG_INTERVAL_MS`:上次記 log 的時間,與之後被拒、還沒記進 log 的次數。 */
+  private preAuthRejectionLoggedAt = 0;
+  private preAuthRejectionsSinceLog = 0;
   /**
    * Phase 2(ACP scoped MCP bridge token):`token -> grant`(認證閘門查表用)
    * 與 `sessionId -> 該 session 核發過的所有 token`(`revokeMcpBridgeTokensForSession()`
@@ -679,7 +763,22 @@ export class WsGateway {
       server: httpServer,
       // 2026-10-27:ws 預設 100 MiB,見 GATEWAY_MAX_MESSAGE_BYTES 的估算。
       maxPayload: GATEWAY_MAX_MESSAGE_BYTES,
-      verifyClient: (info: { origin?: string; req: IncomingMessage }) => verifySameOrigin(info, authEnabled),
+      // 兩個參數的形式才能自訂拒絕的 HTTP 狀態;callback 一律同步呼叫,同源檢查失敗照舊回 401。
+      verifyClient: (
+        info: { origin?: string; req: IncomingMessage },
+        done: (verified: boolean, code?: number, message?: string) => void,
+      ) => {
+        if (!verifySameOrigin(info, authEnabled)) return done(false, 401);
+        if (authEnabled) {
+          const remoteAddress = normalizeRemoteAddress(info.req.socket?.remoteAddress);
+          const rejection = this.preAuthLimiter.check(remoteAddress);
+          if (rejection) {
+            this.logPreAuthRejection(remoteAddress, rejection);
+            return done(false, rejection.status, rejection.reason);
+          }
+        }
+        done(true);
+      },
     });
     this.wss = wss;
     wss.on("connection", (socket, request) => this.handleConnection(socket, request));
@@ -948,8 +1047,19 @@ export class WsGateway {
   private handleConnection(socket: WebSocket, request: IncomingMessage): void {
     const remoteAddress = normalizeRemoteAddress(request.socket?.remoteAddress);
     const needsAuth = Boolean(this.authToken);
+    // 2026-10-30:名額滿的升級請求已在 `verifyClient` 被拒,這裡才是真正扣名額的地方(見 `PreAuthConnectionLimiter`)。
+    if (needsAuth && !this.preAuthLimiter.tryAcquire(remoteAddress)) {
+      socket.terminate();
+      return;
+    }
     const isLocal = isLoopbackAddress(remoteAddress);
-    const state: ConnectionState = { authenticated: !needsAuth, authTimer: undefined, remoteAddress, isLocal };
+    const state: ConnectionState = {
+      authenticated: !needsAuth,
+      authTimer: undefined,
+      remoteAddress,
+      isLocal,
+      holdsPreAuthSlot: needsAuth,
+    };
     this.clients.set(socket, state);
 
     if (needsAuth) {
@@ -970,17 +1080,49 @@ export class WsGateway {
       }
       void this.handleMessage(socket, raw.toString());
     });
+    // 未認證名額在這裡(連線真的關閉)才歸還,不是在逾時計時器關閉連線的當下:關閉握手期間 ws 仍會收訊息。
     socket.on("close", () => {
       if (state.authTimer) clearTimeout(state.authTimer);
+      this.releasePreAuthSlot(state);
       this.clients.delete(socket);
       // host 連線斷開就註銷——它還沒回的瀏覽器指令全部以 browser.hostDisconnected 收場。
       if (state.browserHost) this.browserRelay.unregisterHost(state.browserHost);
     });
     socket.on("error", () => {
       if (state.authTimer) clearTimeout(state.authTimer);
+      this.releasePreAuthSlot(state);
       this.clients.delete(socket);
       if (state.browserHost) this.browserRelay.unregisterHost(state.browserHost);
     });
+  }
+
+  /** master token 或 scoped token 認證成功:停掉逾時計時器、歸還未認證名額。 */
+  private markAuthenticated(state: ConnectionState): void {
+    state.authenticated = true;
+    if (state.authTimer) {
+      clearTimeout(state.authTimer);
+      state.authTimer = undefined;
+    }
+    this.releasePreAuthSlot(state);
+  }
+
+  /** 2026-10-30:歸還這條連線佔的未認證名額;沒佔(無認證模式、已歸還過)時什麼都不做。 */
+  private releasePreAuthSlot(state: ConnectionState): void {
+    if (!state.holdsPreAuthSlot) return;
+    state.holdsPreAuthSlot = false;
+    this.preAuthLimiter.release(state.remoteAddress);
+  }
+
+  private logPreAuthRejection(remoteAddress: string, rejection: PreAuthRejection): void {
+    this.preAuthRejectionsSinceLog += 1;
+    const now = Date.now();
+    if (now - this.preAuthRejectionLoggedAt < PRE_AUTH_REJECTION_LOG_INTERVAL_MS) return;
+    console.warn(
+      `[gateway][security] 拒絕 WS 升級(${rejection.status}):${rejection.reason}。` +
+        `最近一次來源 ${remoteAddress},距上一行記錄共拒絕 ${this.preAuthRejectionsSinceLog} 次。`,
+    );
+    this.preAuthRejectionLoggedAt = now;
+    this.preAuthRejectionsSinceLog = 0;
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
@@ -1048,12 +1190,8 @@ export class WsGateway {
     if (connState && parsed.method === "auth" && this.isMcpBridgeTokenCandidate(parsed.params.token)) {
       const grant = this.matchScopedToken(parsed.params.token);
       if (grant) {
-        connState.authenticated = true;
         connState.scopedGrant = grant;
-        if (connState.authTimer) {
-          clearTimeout(connState.authTimer);
-          connState.authTimer = undefined;
-        }
+        this.markAuthenticated(connState);
         this.send(socket, {
           kind: "response",
           id: parsed.id,
@@ -1108,12 +1246,8 @@ export class WsGateway {
           return;
         }
         if (timingSafeTokenEqual(parsed.params.token, this.authToken)) {
-          state.authenticated = true;
+          this.markAuthenticated(state);
           this.authRateLimiter.recordSuccess(state.remoteAddress);
-          if (state.authTimer) {
-            clearTimeout(state.authTimer);
-            state.authTimer = undefined;
-          }
           this.send(socket, {
             kind: "response",
             id: parsed.id,
