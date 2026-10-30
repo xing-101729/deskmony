@@ -33,6 +33,15 @@
  *        由 dispatch 回「session 沒在跑」——上限沒有把合法的大訊息擋掉。
  *   GP9  上面這些之後 core 仍正常:新連線帶正確 token 認證、`session.list` 成功。
  *
+ * 2026-10-30:已認證的連線(含持 scoped bridge token 的 agent 子行程)原本仍能讓 zod 逐元素產生 issue,數量只受
+ * `maxPayload` 限制(64 MiB 的 `[0,0,…]` 約 32M 個)。core 現在 `JSON.parse` 之後先數陣列元素 + 物件屬性,超過
+ * `GATEWAY_MAX_REQUEST_JSON_VALUES` 就不交給 zod:
+ *
+ *   GP10 已認證、`GATEWAY_MAX_REQUEST_JSON_VALUES + 1` 個不合格元素 → `GATEWAY_INVALID_REQUEST`,`detail` 是 JSON 值
+ *        上限那一句,不是 zod 的 issue 摘要(代表 zod 沒跑)。修正前:`(+99998 more issues)`。
+ *   GP11 同上,但多出來的值放在一個有 `GATEWAY_MAX_REQUEST_JSON_VALUES + 1` 個屬性的物件裡(走訪的物件分支)。
+ *   (GP6 的 50,000 個元素在上限以內,仍由 zod 回報——上限沒有擋到正常大小的請求。)
+ *
  * core 的 DESKMONY_HOME/DATA_DIR/WORKSPACE/CORE_PORT 都指向暫存目錄;只砍自己 spawn 的那個 core。
  */
 
@@ -58,7 +67,9 @@ const PORT = await allocatePort();
 const WS_URL = `ws://127.0.0.1:${PORT}`;
 const MASTER_TOKEN = `e2e-preauth-${randomBytes(16).toString("hex")}`;
 
-const { ErrorCodes, GATEWAY_MAX_MESSAGE_BYTES } = await import(pathToFileURL(SHARED_ENTRY).href);
+const { ErrorCodes, GATEWAY_MAX_MESSAGE_BYTES, GATEWAY_MAX_REQUEST_JSON_VALUES } = await import(
+  pathToFileURL(SHARED_ENTRY).href
+);
 
 const results = [];
 function record(name, ok, detail) {
@@ -418,6 +429,38 @@ async function testLargeLegitMessage() {
   );
 }
 
+/** 已認證的連線送 `params`,回傳結果與 detail;用來驗證 JSON 值上限在 zod 之前就擋下。 */
+async function authedOverBudget(params) {
+  const c = await authed();
+  const id = randomUUID();
+  const text = JSON.stringify({ id, method: "settings.setEnabledModels", params });
+  const started = Date.now();
+  const out = await c.request(id, text);
+  const elapsed = Date.now() - started;
+  c.close();
+  const detail = out.response?.errorParams?.detail ?? "";
+  const ok =
+    out.response?.errorCode === ErrorCodes.GATEWAY_INVALID_REQUEST &&
+    detail.includes(`超過 ${GATEWAY_MAX_REQUEST_JSON_VALUES} 個 JSON 值`) &&
+    !detail.includes("more issues") &&
+    out.bytes < 1024;
+  return { ok, info: `payload=${text.length} bytes / ${fmt(out)} / ${elapsed}ms / detail=${JSON.stringify(detail.slice(0, 200))}` };
+}
+
+async function testAuthedArrayOverBudget() {
+  const n = GATEWAY_MAX_REQUEST_JSON_VALUES + 1;
+  const { ok, info } = await authedOverBudget({ enabledModelIds: badArray(n) });
+  record(`GP10 已認證、${n} 個不合格元素(超過 JSON 值上限)→ zod 不解析,detail 是上限那一句(回應 < 1 KB)`, ok, info);
+}
+
+async function testAuthedObjectOverBudget() {
+  const n = GATEWAY_MAX_REQUEST_JSON_VALUES + 1;
+  const junk = {};
+  for (let i = 0; i < n; i++) junk[`k${i}`] = 0;
+  const { ok, info } = await authedOverBudget({ enabledModelIds: [], junk });
+  record(`GP11 已認證、一個有 ${n} 個屬性的物件 → 同樣在 zod 之前擋下`, ok, info);
+}
+
 async function testStillHealthy() {
   const c = await authed();
   const out = await c.rpc("session.list", {});
@@ -449,6 +492,8 @@ async function main() {
     await testAuthedBadArrayDetail();
     await testMaxPayload();
     await testLargeLegitMessage();
+    await testAuthedArrayOverBudget();
+    await testAuthedObjectOverBudget();
     await testStillHealthy();
   } catch (err) {
     record("執行過程發生未預期錯誤", false, err instanceof Error ? err.stack : String(err));

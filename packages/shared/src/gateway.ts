@@ -47,6 +47,16 @@ export const FORWARD_MESSAGE_MAX_CHARS = 100_000;
 export const GATEWAY_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 
 /**
+ * 2026-10-30:client → core 單一請求的 JSON 值(陣列元素 + 物件屬性)個數上限。core 在 `JSON.parse` 之後、zod 解析
+ * 之前先數(見 ws-gateway.ts 的 `exceedsJsonValueBudget()`),超過就不解析、直接回 `GATEWAY_INVALID_REQUEST`。zod 3
+ * 對陣列每個不合格的元素各產生一個 issue(加了 `.max()` 也一樣;1M 個 issue ≈ heap +265 MB),而 64 MiB 的 `[0,0,…]`
+ * 約有 32M 個元素——已認證的連線也包括持 scoped bridge token 的 agent 子行程,以及未設 token 時的每一條連線。
+ * 最大的合法請求遠低於此:瀏覽器 readPage 最多回 500 個元素(約 2,500 個值),其他陣列(模型清單、規則、附件)都在
+ * 百筆等級;附件內容是單一 base64 字串,只算一個值。
+ */
+export const GATEWAY_MAX_REQUEST_JSON_VALUES = 100_000;
+
+/**
  * M5 Round A 新增:token-based 認證(見 apps/core/src/gateway/ws-gateway.ts
  * 頂端註解、README「認證(token-based)」章節的完整設計取捨)。只有在 core
  * 啟動時設定了 DESKMONY_AUTH_TOKEN 才需要——client 連上後必須把這個當作
