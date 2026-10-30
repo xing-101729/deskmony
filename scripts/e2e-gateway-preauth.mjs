@@ -31,7 +31,7 @@
  *        header 就以 1009 關閉。修正前(100 MiB 預設值)這個長度合法,server 會一直等 body,這裡等不到關閉。
  *   GP8  已認證、帶兩個上限大小(10 MB → base64 約 14 MB)附件的 `session.sendPrompt`(約 28 MB)→ 通過 ws 與 schema,
  *        由 dispatch 回「session 沒在跑」——上限沒有把合法的大訊息擋掉。
- *   GP9  上面這些之後 core 仍正常:新連線帶正確 token 認證、`session.list` 成功。
+ *   GP9  上面這些之後 core 仍正常:新連線帶正確 token 認證、`session.list` 成功(最後才跑)。
  *
  * 2026-10-30:已認證的連線(含持 scoped bridge token 的 agent 子行程)原本仍能讓 zod 逐元素產生 issue,數量只受
  * `maxPayload` 限制(64 MiB 的 `[0,0,…]` 約 32M 個)。core 現在 `JSON.parse` 之後先數陣列元素 + 物件屬性,超過
@@ -41,6 +41,17 @@
  *        上限那一句,不是 zod 的 issue 摘要(代表 zod 沒跑)。修正前:`(+99998 more issues)`。
  *   GP11 同上,但多出來的值放在一個有 `GATEWAY_MAX_REQUEST_JSON_VALUES + 1` 個屬性的物件裡(走訪的物件分支)。
  *   (GP6 的 50,000 個元素在上限以內,仍由 zod 回報——上限沒有擋到正常大小的請求。)
+ *
+ * 2026-10-30:未認證連線的名額(`PRE_AUTH_MAX_CONNECTIONS` 等,見 ws-gateway.ts)。上面 GP5 的 64 KiB 檢查要等 ws 收完
+ * 整則訊息,ws 先照 `maxPayload` 收進記憶體——沒有名額上限時,N 條未認證連線就能讓 core 暫存 N × 64 MiB。
+ *
+ *   GP12 非本機來源:從 127.0.0.2、127.0.0.3……連進來(core 只把 127.0.0.1 / ::1 當本機,見 `isLoopbackAddress()`)。
+ *        同一個位址佔滿 4 條後第 5 條被拒(HTTP 429),其他位址不受影響;非本機合計 12 條後新位址也被拒(503),
+ *        本機仍連得進來並能認證。平台不能用 127.0.0.2 當來源位址(macOS 預設)時略過。
+ *   GP13 本機 16 條未認證連線佔滿名額 → 下一個升級請求被拒(503),Node 內建 WebSocket 也連不上。
+ *   GP14 其中一條認證成功 → 名額立刻歸還:新的升級請求被接受,接受之後名額又滿(帳目精確)。
+ *   GP15 其中一條未認證連線關閉 → 名額歸還,新的升級請求被接受。
+ *   GP16 其餘未認證連線被 core 逾時關閉(1008)→ 名額全部歸還(已認證那條不佔名額):又能開滿 16 條,第 17 條被拒。
  *
  * core 的 DESKMONY_HOME/DATA_DIR/WORKSPACE/CORE_PORT 都指向暫存目錄;只砍自己 spawn 的那個 core。
  */
@@ -70,6 +81,11 @@ const MASTER_TOKEN = `e2e-preauth-${randomBytes(16).toString("hex")}`;
 const { ErrorCodes, GATEWAY_MAX_MESSAGE_BYTES, GATEWAY_MAX_REQUEST_JSON_VALUES } = await import(
   pathToFileURL(SHARED_ENTRY).href
 );
+
+/** 與 apps/core/src/gateway/ws-gateway.ts 的同名常數同值(core 不匯出它們),改了要一起改。 */
+const PRE_AUTH_MAX_CONNECTIONS = 16;
+const PRE_AUTH_MAX_REMOTE_CONNECTIONS = 12;
+const PRE_AUTH_MAX_CONNECTIONS_PER_REMOTE_ADDRESS = 4;
 
 const results = [];
 function record(name, ok, detail) {
@@ -336,6 +352,82 @@ async function testAuthedBadArrayDetail() {
   );
 }
 
+/** WS 升級請求(不帶 Origin,比照非瀏覽器 client)。 */
+function upgradeRequest() {
+  return [
+    "GET / HTTP/1.1",
+    `Host: 127.0.0.1:${PORT}`,
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Key: ${randomBytes(16).toString("base64")}`,
+    "Sec-WebSocket-Version: 13",
+    "",
+    "",
+  ].join("\r\n");
+}
+
+/**
+ * 自己做 WS 握手,回傳 server 回應的 HTTP 狀態。升級成功(101)時一併回傳仍開著的 socket——它佔著一個未認證名額,
+ * 呼叫端用完要 `destroy()`(它不會回 close frame,留著的話 core 逾時後還要再等 30 秒的關閉握手才歸還名額)。
+ * `localAddress` 指定來源位址(GP12 用 127.0.0.x 模擬非本機來源)。
+ */
+function rawUpgrade({ localAddress } = {}, timeoutMs = 10_000) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ port: PORT, host: "127.0.0.1", localAddress });
+    let buffered = Buffer.alloc(0);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`WS 握手逾時(${timeoutMs}ms)`));
+    }, timeoutMs);
+    socket.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    socket.on("connect", () => socket.write(upgradeRequest()));
+    socket.on("data", function onData(chunk) {
+      buffered = Buffer.concat([buffered, chunk]);
+      const end = buffered.indexOf("\r\n\r\n");
+      if (end < 0) return;
+      clearTimeout(timer);
+      socket.off("data", onData);
+      const statusLine = buffered.subarray(0, end).toString().split("\r\n")[0];
+      const status = Number(statusLine.split(" ")[1]);
+      if (status === 101) {
+        resolve({ status, statusLine, socket });
+      } else {
+        socket.destroy();
+        resolve({ status, statusLine });
+      }
+    });
+  });
+}
+
+/**
+ * 重試 `rawUpgrade()` 直到升級成功或逾時,回傳最後一次的結果。名額是在 core 處理到連線關閉時才歸還,client 這邊看到
+ * 關閉的當下 core 可能還差幾毫秒——用在「關閉之後應該能再連」的地方。
+ */
+async function rawUpgradeWithin(timeoutMs, options) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const outcome = await rawUpgrade(options);
+    if (outcome.status === 101 || Date.now() >= deadline) return outcome;
+    await sleep(100);
+  }
+}
+
+/** 同上,但開的是 `Conn`(之後要送 auth 或等 core 逾時關閉的連線)。 */
+async function openConnWithin(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await new Conn().open();
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await sleep(100);
+    }
+  }
+}
+
 /**
  * 自己做 WS 握手,再送一個宣稱 payload 長度為 `length` 的 binary frame header(不送 body),回傳 server 送來的
  * close frame 的 code;`timeoutMs` 內沒關就回傳 undefined。不配置任何大 buffer。
@@ -356,20 +448,7 @@ function sendOversizedFrameHeader(length, timeoutMs) {
       if (upgraded) resolve(undefined);
       else reject(err);
     });
-    socket.on("connect", () => {
-      socket.write(
-        [
-          "GET / HTTP/1.1",
-          `Host: 127.0.0.1:${PORT}`,
-          "Upgrade: websocket",
-          "Connection: Upgrade",
-          `Sec-WebSocket-Key: ${randomBytes(16).toString("base64")}`,
-          "Sec-WebSocket-Version: 13",
-          "",
-          "",
-        ].join("\r\n"),
-      );
-    });
+    socket.on("connect", () => socket.write(upgradeRequest()));
     socket.on("data", (chunk) => {
       buffered = Buffer.concat([buffered, chunk]);
       if (!upgraded) {
@@ -461,6 +540,129 @@ async function testAuthedObjectOverBudget() {
   record(`GP11 已認證、一個有 ${n} 個屬性的物件 → 同樣在 zod 之前擋下`, ok, info);
 }
 
+async function testRemoteAddressCaps() {
+  const sockets = [];
+  let local;
+  const upgradeFrom = async (localAddress) => {
+    const outcome = await rawUpgrade({ localAddress });
+    if (outcome.socket) sockets.push(outcome.socket);
+    return outcome.status;
+  };
+  try {
+    const perAddress = PRE_AUTH_MAX_CONNECTIONS_PER_REMOTE_ADDRESS;
+    const hosts = Array.from({ length: Math.ceil(PRE_AUTH_MAX_REMOTE_CONNECTIONS / perAddress) }, (_, i) => `127.0.0.${i + 2}`);
+    const [hostA, ...otherHosts] = hosts;
+
+    const fromA = [];
+    try {
+      fromA.push(await upgradeFrom(hostA));
+    } catch (err) {
+      if (err?.code === "EADDRNOTAVAIL") {
+        console.log(`SKIP  GP12 這個平台不能用 ${hostA} 當來源位址(${err.code}),略過非本機來源的名額檢查`);
+        return;
+      }
+      throw err;
+    }
+    while (fromA.length < perAddress) fromA.push(await upgradeFrom(hostA));
+    const overA = await upgradeFrom(hostA);
+    let remote = fromA.length;
+    const fromOthers = [];
+    for (const host of otherHosts) {
+      for (let i = 0; i < perAddress && remote < PRE_AUTH_MAX_REMOTE_CONNECTIONS; i++, remote++) {
+        fromOthers.push(await upgradeFrom(host));
+      }
+    }
+    record(
+      `GP12a 同一個非本機位址佔滿 ${perAddress} 條未認證連線後,下一條被拒(429);其他非本機位址不受影響`,
+      fromA.every((s) => s === 101) && overA === 429 && fromOthers.every((s) => s === 101),
+      `${hostA}: ${fromA.join(",")} → 第 ${perAddress + 1} 條 ${overA} / ${otherHosts.join("、")}: ${fromOthers.join(",")}`,
+    );
+
+    const overflowHost = `127.0.0.${hosts.length + 2}`;
+    const overRemote = await upgradeFrom(overflowHost);
+    local = await openConnWithin(3_000);
+    const localAuth = await local.rpc("auth", { token: MASTER_TOKEN });
+    record(
+      `GP12b 非本機未認證連線合計 ${PRE_AUTH_MAX_REMOTE_CONNECTIONS} 條後,沒用過的位址也被拒(503);本機仍連得進來並能認證`,
+      remote === PRE_AUTH_MAX_REMOTE_CONNECTIONS && overRemote === 503 && localAuth.response?.ok === true,
+      `非本機 ${remote} 條 / ${overflowHost}: ${overRemote} / 本機 auth: ${fmt(localAuth)}`,
+    );
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    local?.close();
+  }
+}
+
+async function testPreAuthConnectionCap() {
+  const held = [];
+  const sockets = [];
+  const keep = (outcome) => {
+    if (outcome.socket) sockets.push(outcome.socket);
+    return outcome.status;
+  };
+  try {
+    const started = Date.now();
+    for (let i = 0; i < PRE_AUTH_MAX_CONNECTIONS; i++) held.push(await openConnWithin(3_000));
+    const openedIn = Date.now() - started;
+    const overRaw = keep(await rawUpgrade());
+    const overWs = await new Conn().open().then(
+      (c) => {
+        held.push(c);
+        return "opened";
+      },
+      () => "rejected",
+    );
+    record(
+      `GP13 本機 ${PRE_AUTH_MAX_CONNECTIONS} 條未認證連線佔滿名額 → 下一個升級請求被拒(503),Node 內建 WebSocket 也連不上`,
+      overRaw === 503 && overWs === "rejected",
+      `開 ${PRE_AUTH_MAX_CONNECTIONS} 條花了 ${openedIn}ms / raw: ${overRaw} / WebSocket: ${overWs}`,
+    );
+
+    // 用最後開的兩條:離 core 的認證逾時最遠。
+    const authedConn = held[PRE_AUTH_MAX_CONNECTIONS - 1];
+    const closedConn = held[PRE_AUTH_MAX_CONNECTIONS - 2];
+    const authOut = await authedConn.rpc("auth", { token: MASTER_TOKEN });
+    const afterAuth = keep(await rawUpgrade());
+    const fullAgain = keep(await rawUpgrade());
+    record(
+      "GP14 其中一條認證成功 → 名額立刻歸還:新的升級請求被接受,接受之後名額又滿",
+      authOut.response?.ok === true && afterAuth === 101 && fullAgain === 503,
+      `auth: ${fmt(authOut)} / 之後: ${afterAuth} / 再一條: ${fullAgain}`,
+    );
+
+    closedConn.close();
+    const closed = await closedConn.waitClosed(5_000);
+    const afterClose = keep(await rawUpgradeWithin(3_000));
+    record(
+      "GP15 其中一條未認證連線關閉 → 名額歸還,新的升級請求被接受",
+      Boolean(closed) && afterClose === 101,
+      `close=${closed?.code ?? "5 秒內沒關"} / 之後: ${afterClose}`,
+    );
+
+    // 自己做握手的 socket 不會回 close frame,先收掉;剩下的 Conn 等 core 的認證逾時(5 秒)關閉。
+    for (const socket of sockets.splice(0)) socket.destroy();
+    const waiting = held.slice(0, PRE_AUTH_MAX_CONNECTIONS - 2);
+    const timedOut = await Promise.all(waiting.map((c) => c.waitClosed(15_000)));
+    const refill = [];
+    for (let i = 0; i < PRE_AUTH_MAX_CONNECTIONS; i++) refill.push(keep(await rawUpgradeWithin(3_000)));
+    const overRefill = keep(await rawUpgrade());
+    record(
+      `GP16 其餘未認證連線被 core 逾時關閉(1008)→ 名額全部歸還(已認證那條不佔名額):又能開滿 ${PRE_AUTH_MAX_CONNECTIONS} 條,下一條被拒`,
+      timedOut.every((c) => c?.code === 1008) &&
+        !authedConn.closed &&
+        refill.every((s) => s === 101) &&
+        overRefill === 503,
+      `逾時關閉: ${timedOut.map((c) => c?.code ?? "沒關").join(",")} / 已認證那條仍開著: ${!authedConn.closed} / ` +
+        `重開: ${refill.join(",")} / 再一條: ${overRefill}`,
+    );
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    for (const c of held) c.close();
+  }
+  // GP9 接著要開新連線:等 core 處理完上面這些關閉。
+  (await rawUpgradeWithin(3_000)).socket?.destroy();
+}
+
 async function testStillHealthy() {
   const c = await authed();
   const out = await c.rpc("session.list", {});
@@ -494,6 +696,8 @@ async function main() {
     await testLargeLegitMessage();
     await testAuthedArrayOverBudget();
     await testAuthedObjectOverBudget();
+    await testRemoteAddressCaps();
+    await testPreAuthConnectionCap();
     await testStillHealthy();
   } catch (err) {
     record("執行過程發生未預期錯誤", false, err instanceof Error ? err.stack : String(err));

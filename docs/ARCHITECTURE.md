@@ -419,6 +419,11 @@ handleMessage() 依序:①schema 驗證(未認證只解析 auth)②認證閘門 
   `gateway.invalidRequest` 的 `detail` 只列前 3 個 zod issue(zod 3 對陣列逐元素產生 issue)。
   2026-10-30:已認證的連線(含 scoped token 的 agent 子行程)也一樣——`JSON.parse` 之後先數陣列元素 + 物件屬性,
   超過 `GATEWAY_MAX_REQUEST_JSON_VALUES`(100,000)就不交給 zod,直接回 `gateway.invalidRequest`。
+- **未認證連線有名額上限**(2026-10-30):ws 先照 `maxPayload` 把整則訊息收進記憶體,上面那個 64 KiB 檢查才輪得到,
+  所以每條未認證連線仍能讓 core 暫存最多 64 MiB。同時未認證的連線全部來源合計 16 條(記憶體上限 1 GiB)、非本機合計
+  12 條(留 4 條只給本機,遠端再多也擠不掉桌面殼)、單一非本機位址 4 條;超過的升級請求在 `verifyClient` 就回
+  503 / 429,不建立 WebSocket。名額在認證成功或連線真的關閉時歸還。常數與理由在 ws-gateway.ts 的
+  `PRE_AUTH_MAX_CONNECTIONS`。
 - **`DESKMONY_AUTH_TOKEN` 刻意不是設定檔欄位**,永遠只從環境變數讀。
 
 ---
