@@ -418,11 +418,14 @@ function readCalls(dirs) {
     .map((line) => JSON.parse(line));
 }
 
-/** 比 `pidsBefore` 之後才出現的行程寫的紀錄。 */
-function callsSince(dirs, pidsBefore) {
-  return readCalls(dirs).filter((c) => !pidsBefore.has(c.pid));
+/**
+ * 比 `instancesBefore` 之後才出現的行程寫的紀錄。2026-10-30:用假後端的行程識別碼 `instance`,不用 pid——Windows 很快重用 pid,
+ * 新行程撞到舊 pid 時它的紀錄會被當成舊的濾掉(e2e-session-rewind U2 在 CI 撞過 `calls=[]`)。
+ */
+function callsSince(dirs, instancesBefore) {
+  return readCalls(dirs).filter((c) => !instancesBefore.has(c.instance));
 }
-const pidsOf = (calls) => new Set(calls.map((c) => c.pid));
+const instancesOf = (calls) => new Set(calls.map((c) => c.instance));
 const callNames = (calls) => calls.map((c) => c.call);
 
 function clip(text, n = 160) {
@@ -444,7 +447,7 @@ async function testResume() {
     const sid = await createSession(c1.client, PROVIDER_RESUME, dirs.workspaceDir, "revive-resume");
     await turn(c1.client, sid, SECRET_PROMPT);
     const before = await getSession(c1.client, sid);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     const exited = await gracefulShutdown(c1.proc);
     c1 = undefined;
@@ -453,13 +456,13 @@ async function testResume() {
     const closed = await getSession(c2.client, sid);
     record(
       "R1 正常關閉 → 重啟:session 是 closed,還沒有任何新的 agent 行程(自動復活是在人類送訊息時才發生)",
-      exited && closed?.status === "closed" && callsSince(dirs, pidsBefore).length === 0 && typeof before?.backendSessionId === "string",
-      `exited=${exited}, status=${closed?.status}, backendSessionId=${before?.backendSessionId}, newCalls=${callsSince(dirs, pidsBefore).length}`,
+      exited && closed?.status === "closed" && callsSince(dirs, instancesBefore).length === 0 && typeof before?.backendSessionId === "string",
+      `exited=${exited}, status=${closed?.status}, backendSessionId=${before?.backendSessionId}, newCalls=${callsSince(dirs, instancesBefore).length}`,
     );
 
     const { sent, report: rep } = await report(c2.client, sid, "你還記得什麼?");
     const after = await getSession(c2.client, sid);
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     record(
       "R2 對 closed session sendPrompt → 自動復活並收到回覆;agent 走 session/resume(沒有 session/new)、掛上同一個 session 網路 MCP server、接回原本的 ACP session id",
       JSON.stringify(callNames(newCalls)) === JSON.stringify(["initialize", "session/resume"]) &&
@@ -514,7 +517,7 @@ async function testLoadReplay() {
     const turns = ["第一輪:蘋果", "第二輪:香蕉", "第三輪:櫻桃"];
     for (const text of turns) await turn(c1.client, sid, text);
     const before = await getSession(c1.client, sid);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     await gracefulShutdown(c1.proc);
     c1 = undefined;
@@ -530,7 +533,7 @@ async function testLoadReplay() {
       reportError = err;
     }
     await sleep(300); // 讓任何晚到的(不該出現的)重播事件有機會抵達
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const replayed = newCalls.find((c) => c.call === "session/load.replayed");
     record(
       `L1 走 session/load(沒有 session/new);假 agent 在回應前真的重播了歷史(3 輪 × ${4 + REPLAY_FILLER_PER_TURN} 個 session/update)`,
@@ -583,14 +586,14 @@ async function transcriptFallbackScenario(tag, providerId, attemptedCall) {
     const sid = await createSession(c1.client, providerId, dirs.workspaceDir, `revive-${tag}`);
     await turn(c1.client, sid, SECRET_PROMPT);
     const before = await getSession(c1.client, sid);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     await gracefulShutdown(c1.proc);
     c1 = undefined;
 
     c2 = await boot(dirs, { graceful: true });
     const { sent, report: rep } = await report(c2.client, sid, "剛才的暗號是什麼?");
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const expectedCalls = ["initialize", ...(attemptedCall ? [attemptedCall] : []), "session/new"];
     record(
       `${label}-1 這次送出成功(沒有因為接回失敗而失敗),新 agent 行程的呼叫順序 = ${expectedCalls.join(" → ")}`,
@@ -656,7 +659,7 @@ async function testDoubleSend() {
     c1 = await boot(dirs, { graceful: true });
     const sid = await createSession(c1.client, PROVIDER_RESUME, dirs.workspaceDir, "revive-double");
     await turn(c1.client, sid, SECRET_PROMPT);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     await gracefulShutdown(c1.proc);
     c1 = undefined;
@@ -674,7 +677,7 @@ async function testDoubleSend() {
       await sleep(80);
     }
     await sleep(200);
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const history = await getHistory(c2.client, sid);
     const notices = noticeEvents(history).map((e) => e.event);
     record(
@@ -682,7 +685,7 @@ async function testDoubleSend() {
       results2.every((r) => r.status === "fulfilled") &&
         newCalls.filter((c) => c.call === "initialize").length === 1 &&
         newCalls.filter((c) => c.call === "session/resume").length === 1 &&
-        pidsOf(newCalls).size === 1 &&
+        instancesOf(newCalls).size === 1 &&
         notices.length === 1 &&
         history.filter((m) => m.role === "user").map((m) => m.content).join("|") === [SECRET_PROMPT, "連按一", "連按二"].join("|"),
       `settled=${results2.map((r) => r.status).join(",")}, calls=${JSON.stringify(callNames(newCalls))}, notices=${notices.join(",")}`,
@@ -711,7 +714,7 @@ async function testRecoveryContinue() {
     const plain = await createSession(c1.client, FAKE_ACP, dirs.workspaceDir, "revive-continue-plain");
     const direct = await createSession(c1.client, PROVIDER_RESUME, dirs.workspaceDir, "revive-direct-send");
     for (const sid of [resumable, plain, direct]) await turn(c1.client, sid, SECRET_PROMPT);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     await killProcessTreeHard(c1.proc); // 崩潰:shutdown handler 沒機會跑
     c1 = undefined;
@@ -727,7 +730,7 @@ async function testRecoveryContinue() {
 
     // ---- 「繼續」:後端支援 resume → 原生接回 ----
     const continued = (await c2.client.rpc("recovery.continue", { sessionId: resumable }, 60_000)).session;
-    const callsAfterContinue = callsSince(dirs, pidsBefore);
+    const callsAfterContinue = callsSince(dirs, instancesBefore);
     const hist1 = await getHistory(c2.client, resumable);
     const r1 = await report(c2.client, resumable, "繼續之後");
     record(
@@ -791,14 +794,14 @@ async function openCodeScenario(tag, { forget }) {
     const sid = await createSession(c1.client, FAKE_OPENCODE, dirs.workspaceDir, `revive-${tag}`);
     await turn(c1.client, sid, SECRET_PROMPT);
     const before = await getSession(c1.client, sid);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     await gracefulShutdown(c1.proc);
     c1 = undefined;
 
     c2 = await boot(dirs, { graceful: true, extraEnv: forget ? { FAKE_OPENCODE_FORGET: "1" } : {} });
     const { sent, report: rep } = await report(c2.client, sid, "剛才的暗號是什麼?");
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const history = await getHistory(c2.client, sid);
     const events = noticeEvents(history);
     const after = await getSession(c2.client, sid);
@@ -983,7 +986,7 @@ async function testNetworkDoesNotRevive() {
 
     c2 = await boot(dirs, { graceful: true });
     const callerId = await createSession(c2.client, FAKE_ACP, dirs.workspaceDir, "revive-network-caller");
-    const pidsAfterCaller = pidsOf(readCalls(dirs));
+    const instancesAfterCaller = instancesOf(readCalls(dirs));
     const { reply } = await turn(
       c2.client,
       callerId,
@@ -993,7 +996,7 @@ async function testNetworkDoesNotRevive() {
     const parsed = reply.startsWith("BRIDGE_TOOL_RESULT:") ? JSON.parse(reply.slice("BRIDGE_TOOL_RESULT:".length)) : undefined;
     const target = await getSession(c2.client, closedId);
     const targetHistory = await getHistory(c2.client, closedId);
-    const newCalls = callsSince(dirs, pidsAfterCaller);
+    const newCalls = callsSince(dirs, instancesAfterCaller);
     record(
       "X agent 的 send_to_session 傳給 closed 的 session:維持明確錯誤(isError),目標仍是 closed、沒有新的 agent 行程被啟動、目標的對話沒有被寫入任何東西",
       parsed?.isError === true &&
@@ -1044,7 +1047,7 @@ async function acpOptionsScenario(tag, providerId, expectedRestoreCalls) {
     await c1.client.rpc("session.setEffort", { sessionId: sid, effort: WANT_EFFORT });
     const before = await waitSession(c1.client, sid, (s) => s.options?.effort?.current === WANT_EFFORT);
     await turn(c1.client, sid, SECRET_PROMPT);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     await gracefulShutdown(c1.proc);
     c1 = undefined;
@@ -1061,7 +1064,7 @@ async function acpOptionsScenario(tag, providerId, expectedRestoreCalls) {
 
     const { sent, report: rep } = await report(c2.client, sid, "復活後");
     const revived = await waitSession(c2.client, sid, (s) => s.options?.model?.current === WANT_MODEL && s.options?.effort?.current === WANT_EFFORT);
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const agentCfg = JSON.parse((await turn(c2.client, sid, REPORT_CONFIG_PREFIX)).reply.replace(/^CONFIG:/, ""));
     const optionValues = (opt) => opt?.choices?.map((c) => c.value) ?? [];
     record(
@@ -1104,7 +1107,7 @@ async function opencodeOptionsScenario(tag, { forget }) {
     await c1.client.rpc("session.setEffort", { sessionId: sid, effort: "high" });
     const before = await waitSession(c1.client, sid, (s) => s.options?.effort?.current === "high");
     const first = await turn(c1.client, sid, SECRET_PROMPT);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     c1.client.close();
     await gracefulShutdown(c1.proc);
     c1 = undefined;
@@ -1113,7 +1116,7 @@ async function opencodeOptionsScenario(tag, { forget }) {
     const closed = await getSession(c2.client, sid);
     const second = await turn(c2.client, sid, "復活後的普通訊息");
     const revived = await waitSession(c2.client, sid, (s) => s.options?.effort?.current === "high");
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const expectedCalls = forget ? ["GET /session/:id miss", "POST /session"] : ["GET /session/:id hit"];
     record(
       `${label} OpenCode${forget ? "(opencode 那邊的 session 已不在 → 新建 + 對話紀錄)" : "(沿用既有 opencode session)"}:重啟前 model-b / high 的 wire 標記;復活前 options 為空;復活後第一則訊息的 wire 上帶 [model:fake/model-b] [variant:high]、Session.options 的目前思考程度是 high、model/effort 沒被重設`,
@@ -1190,7 +1193,7 @@ function killAgentProcess(pid) {
 
 /** calls.log 裡唯一的 agent 行程 pid(scenario 到這裡只建了一個 session)。 */
 function onlyAgentPid(dirs) {
-  const pids = [...pidsOf(readCalls(dirs))];
+  const pids = [...new Set(readCalls(dirs).map((c) => c.pid))];
   if (pids.length !== 1) throw new Error(`預期只有一個 agent 行程,calls.log 有 ${pids.length} 個: ${pids.join(",")}`);
   return pids[0];
 }
@@ -1221,7 +1224,7 @@ async function testAgentCrashWhileIdle() {
     await turn(c.client, sid, SECRET_PROMPT);
     const before = await waitStatus(c.client, sid, "idle", 10_000);
     const agentPid = onlyAgentPid(dirs);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     const pushFrom = c.client.sessionMessages.length;
 
     killAgentProcess(agentPid);
@@ -1233,13 +1236,13 @@ async function testAgentCrashWhileIdle() {
       stopped.status === "error" &&
         JSON.stringify(stoppedNotices) === JSON.stringify(["session.agentStopped"]) &&
         pushed &&
-        callsSince(dirs, pidsBefore).length === 0,
-      `status=${stopped.status}, notices=${noticeEvents(stoppedHistory).map((e) => e.event).join(",")}, pushed=${pushed}, newCalls=${callsSince(dirs, pidsBefore).length}`,
+        callsSince(dirs, instancesBefore).length === 0,
+      `status=${stopped.status}, notices=${noticeEvents(stoppedHistory).map((e) => e.event).join(",")}, pushed=${pushed}, newCalls=${callsSince(dirs, instancesBefore).length}`,
     );
 
     // ---- 跨 session 的 send_to_session 仍然不能喚醒它 ----
     const callerId = await createSession(c.client, FAKE_ACP, dirs.workspaceDir, "revive-crash-caller");
-    const pidsWithCaller = pidsOf(readCalls(dirs));
+    const instancesWithCaller = instancesOf(readCalls(dirs));
     const targetHistoryLength = (await getHistory(c.client, sid)).length;
     const { reply } = await turn(
       c.client,
@@ -1254,18 +1257,18 @@ async function testAgentCrashWhileIdle() {
       "S2 別的 agent 用 send_to_session 傳給 agent 已停止的 session:明確錯誤(isError)、目標仍是 error、沒有啟動任何新的 agent 行程、目標的對話沒有被寫入",
       parsed?.isError === true &&
         targetAfterNetwork?.status === "error" &&
-        callsSince(dirs, pidsWithCaller).length === 0 &&
+        callsSince(dirs, instancesWithCaller).length === 0 &&
         targetHistoryAfterNetwork.length === targetHistoryLength,
-      `isError=${parsed?.isError}, text=${clip(parsed?.content?.[0]?.text ?? reply, 140)}, status=${targetAfterNetwork?.status}, newCalls=${callsSince(dirs, pidsWithCaller).length}, history ${targetHistoryLength}→${targetHistoryAfterNetwork.length}`,
+      `isError=${parsed?.isError}, text=${clip(parsed?.content?.[0]?.text ?? reply, 140)}, status=${targetAfterNetwork?.status}, newCalls=${callsSince(dirs, instancesWithCaller).length}, history ${targetHistoryLength}→${targetHistoryAfterNetwork.length}`,
     );
 
     // ---- 人類直接送訊息:自動重新啟動並回覆 ----
     const { sent, report: rep } = await report(c.client, sid, "崩潰之後你還記得什麼?");
-    const newCalls = callsSince(dirs, pidsWithCaller);
+    const newCalls = callsSince(dirs, instancesWithCaller);
     record(
       "S3 同一個 session 直接送訊息 → 自動重新啟動並收到回覆:只啟動一個新 agent 行程,走 session/resume 接回崩潰前的 ACP session(掛上 session 網路 MCP server);agent 原生記得崩潰前的 prompt,收到的是原文",
       JSON.stringify(callNames(newCalls)) === JSON.stringify(["initialize", "session/resume"]) &&
-        pidsOf(newCalls).size === 1 &&
+        instancesOf(newCalls).size === 1 &&
         newCalls[1].sessionId === before.backendSessionId &&
         newCalls[1].mcpServers === 1 &&
         rep.agentSessionId === before.backendSessionId &&
@@ -1280,7 +1283,7 @@ async function testAgentCrashWhileIdle() {
     const stoppedIndex = history.findIndex((m) => m.role === "system" && m.content.includes("session.agentStopped"));
     const tail = history.slice(sentIndex).map((m) => (m.role === "system" ? JSON.parse(m.content).event : m.role));
     const after = await getSession(c.client, sid);
-    const pidsAfterRevive = pidsOf(readCalls(dirs));
+    const instancesAfterRevive = instancesOf(readCalls(dirs));
     const second = await report(c.client, sid, "再問一次");
     record(
       "S4 對話順序 = 「agent 已停止」說明 → 使用者新訊息 → session.revivedResumed → agent 回覆;復活後 idle、權限重設 always-ask、後端識別碼不變;下一則訊息直接送給同一個 agent(沒有再 spawn),它記得前兩則",
@@ -1290,10 +1293,10 @@ async function testAgentCrashWhileIdle() {
         after?.status === "idle" &&
         after?.permissionMode === "always-ask" &&
         after?.backendSessionId === before.backendSessionId &&
-        callsSince(dirs, pidsAfterRevive).length === 0 &&
+        callsSince(dirs, instancesAfterRevive).length === 0 &&
         second.report.agentSessionId === before.backendSessionId &&
         JSON.stringify(second.report.priorPrompts) === JSON.stringify([SECRET_PROMPT, sent]),
-      `tail=${tail.join(",")}, status=${after?.status}, permissionMode=${after?.permissionMode}, callsAfterRevive=${callsSince(dirs, pidsAfterRevive).length}, priorPrompts=${JSON.stringify(second.report.priorPrompts.map((p) => clip(p, 30)))}`,
+      `tail=${tail.join(",")}, status=${after?.status}, permissionMode=${after?.permissionMode}, callsAfterRevive=${callsSince(dirs, instancesAfterRevive).length}, priorPrompts=${JSON.stringify(second.report.priorPrompts.map((p) => clip(p, 30)))}`,
     );
   } catch (err) {
     record("S1-S4 執行過程發生未預期錯誤", false, String(err?.stack ?? err));
@@ -1312,7 +1315,7 @@ async function testAgentCrashMidTurn() {
     const sid = await createSession(c.client, FAKE_ACP, dirs.workspaceDir, "revive-crash-busy");
     await turn(c.client, sid, SECRET_PROMPT);
     const agentPid = onlyAgentPid(dirs);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     const sleepPrompt = `${SLEEP_TURN_PREFIX}${JSON.stringify({ ms: 60_000 })}`;
     await c.client.rpc("session.sendPrompt", { sessionId: sid, prompt: { text: sleepPrompt } });
     const busy = await waitStatus(c.client, sid, "busy", 10_000);
@@ -1341,7 +1344,7 @@ async function testAgentCrashMidTurn() {
       await sleep(80);
     }
     const after = await waitStatus(c.client, sid, "idle", 10_000);
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const history = await getHistory(c.client, sid);
     const userMessages = history.filter((m) => m.role === "user").map((m) => m.content);
     const notices = noticesWithoutAdapterErrors(history);
@@ -1349,7 +1352,7 @@ async function testAgentCrashMidTurn() {
       "S6 崩潰後連按兩次送出:兩次都成功、只啟動一個新 agent 行程(1 次 initialize、1 次 session/new——不支援接回的 agent 退回對話紀錄)、說明 = agentStopped → revivedFromTranscript(只有一則復活說明)、兩則都得到回覆,最後回到 idle",
       settled.every((r) => r.status === "fulfilled") &&
         JSON.stringify(callNames(newCalls)) === JSON.stringify(["initialize", "session/new"]) &&
-        pidsOf(newCalls).size === 1 &&
+        instancesOf(newCalls).size === 1 &&
         JSON.stringify(notices) === JSON.stringify(["session.agentStopped", "session.revivedFromTranscript"]) &&
         JSON.stringify(userMessages) === JSON.stringify([SECRET_PROMPT, sleepPrompt, "崩潰後連按一", "崩潰後連按二"]) &&
         after.status === "idle",
@@ -1373,13 +1376,13 @@ async function testOpencodeServerCrash() {
     await turn(c.client, sid, SECRET_PROMPT);
     const before = await waitStatus(c.client, sid, "idle", 10_000);
     const serverPid = onlyAgentPid(dirs);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     const pushFrom = c.client.sessionMessages.length;
 
     killAgentProcess(serverPid);
     const { stopped, pushed } = await waitAgentStopped(c.client, sid, pushFrom);
     const { sent, report: rep } = await report(c.client, sid, "server 重啟之後還記得嗎?");
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     const history = await getHistory(c.client, sid);
     const notices = noticesWithoutAdapterErrors(history);
     const after = await getSession(c.client, sid);
@@ -1388,7 +1391,7 @@ async function testOpencodeServerCrash() {
       stopped.status === "error" &&
         pushed &&
         JSON.stringify(callNames(newCalls)) === JSON.stringify(["GET /session/:id hit"]) &&
-        pidsOf(newCalls).size === 1 &&
+        instancesOf(newCalls).size === 1 &&
         rep.agentSessionId === before.backendSessionId &&
         rep.priorPrompts[0] === SECRET_PROMPT &&
         rep.prompt === sent &&
@@ -1465,7 +1468,7 @@ async function testAgentCrashWhileWaitingPermission() {
     const sid = await createSession(c.client, FAKE_ACP, dirs.workspaceDir, "revive-crash-waiting");
     await turn(c.client, sid, SECRET_PROMPT);
     const agentPid = onlyAgentPid(dirs);
-    const pidsBefore = pidsOf(readCalls(dirs));
+    const instancesBefore = instancesOf(readCalls(dirs));
     const target = path.join(dirs.workspaceDir, "crash-waiting.txt");
     const { requestId, waiting } = await askWritePermission(c.client, sid, target);
     const requestedAt = Date.now();
@@ -1497,7 +1500,7 @@ async function testAgentCrashWhileWaitingPermission() {
     // ---- 人類送訊息讓 agent 復活之後:舊的請求什麼都沒留下 ----
     const { reply } = await turn(c.client, sid, "剛才那個寫檔請求不用了,回個話就好");
     const revived = await waitStatus(c.client, sid, "idle", 10_000);
-    const newCalls = callsSince(dirs, pidsBefore);
+    const newCalls = callsSince(dirs, instancesBefore);
     // 錯過推播、畫面上還留著彈窗的 client 對舊請求按「允許」:core 已經沒有這筆登記,不轉給復活的新 agent,只再推一次 agent-stopped 讓那個彈窗關掉
     await c.client.rpc("permission.resolve", { sessionId: sid, requestId, decision: "allow" });
     // 等過舊請求的逾時時間:計時器有清掉的話,不會再冒出一筆 source=timeout 的 permission-resolved
@@ -1508,12 +1511,12 @@ async function testAgentCrashWhileWaitingPermission() {
       "S10 送訊息 → agent 復活並回覆(只 spawn 一個新行程)、回到 idle;之後對舊請求按「允許」不轉給新 agent,只再收到一次 agent-stopped(關掉錯過推播的彈窗);等過舊請求的逾時時間也沒有逾時推播;狀態維持 idle,檔案沒有被寫入",
       reply === FAKE_ACP_REPLY &&
         revived.status === "idle" &&
-        pidsOf(newCalls).size === 1 &&
+        instancesOf(newCalls).size === 1 &&
         pushes.length === 2 &&
         pushes.every((p) => p.decision === "deny" && p.source === "agent-stopped") &&
         after?.status === "idle" &&
         !existsSync(target),
-      `reply=${clip(reply, 60)}, revived=${revived.status}, newAgentPids=${pidsOf(newCalls).size}, pushesForOldRequest=${JSON.stringify(pushes)}, after=${after?.status}, fileWritten=${existsSync(target)}`,
+      `reply=${clip(reply, 60)}, revived=${revived.status}, newAgentPids=${instancesOf(newCalls).size}, pushesForOldRequest=${JSON.stringify(pushes)}, after=${after?.status}, fileWritten=${existsSync(target)}`,
     );
   } catch (err) {
     record("S9-S10 執行過程發生未預期錯誤", false, String(err?.stack ?? err));

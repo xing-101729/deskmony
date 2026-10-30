@@ -386,8 +386,10 @@ function readCalls(dirs) {
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
 }
-const pidsOf = (calls) => new Set(calls.map((c) => c.pid));
-const callsSince = (dirs, pidsBefore) => readCalls(dirs).filter((c) => !pidsBefore.has(c.pid));
+// 2026-10-30:用假後端的行程識別碼 `instance` 分辨新行程,不用 pid——Windows 很快重用 pid,新行程撞到舊 pid 時
+// 它的紀錄會被當成舊的濾掉(CI 撞過:U2 `calls=[]`)。
+const instancesOf = (calls) => new Set(calls.map((c) => c.instance));
+const callsSince = (dirs, instancesBefore) => readCalls(dirs).filter((c) => !instancesBefore.has(c.instance));
 const callNames = (calls) => calls.map((c) => c.call);
 
 const TURNS = ["第一輪:蘋果", "第二輪:香蕉", "第三輪:櫻桃"];
@@ -426,7 +428,7 @@ async function phaseLive(dirs, filters) {
       const hist0 = await getHistory(client, A);
       const users0 = hist0.filter((m) => m.role === "user");
       const before = await getSession(client, A);
-      const pids0 = pidsOf(readCalls(dirs));
+      const instances0 = instancesOf(readCalls(dirs));
       const resetFrom = client.historyResets.length;
       const resetFrom2 = second.historyResets.length;
       const res = await client.rpc("session.rewind", { sessionId: A, messageId: users0[1].id }, 60_000);
@@ -456,7 +458,7 @@ async function phaseLive(dirs, filters) {
         `client=${client.historyResets.length - resetFrom}, second=${second.historyResets.length - resetFrom2}`,
       );
       const afterRewind = await getSession(client, A);
-      const newCalls = callsSince(dirs, pids0);
+      const newCalls = callsSince(dirs, instances0);
       record(
         "A3 agent 重新啟動走 session/new(provider 宣告了 session/resume,倒回也不得接回含被移除內容的舊對話);後端識別碼換成新的",
         JSON.stringify(callNames(newCalls)) === JSON.stringify(["initialize", "session/new"]) &&
@@ -760,10 +762,10 @@ async function phaseLive(dirs, filters) {
       for (const t of TURNS.slice(0, 2)) await turn(client, I, t);
       const before = await getSession(client, I);
       const hist0 = await getHistory(client, I);
-      const pids0 = pidsOf(readCalls(dirs));
+      const instances0 = instancesOf(readCalls(dirs));
       await client.rpc("session.rewind", { sessionId: I, messageId: hist0.filter((m) => m.role === "user")[1].id }, 60_000);
       const { sent, report: rep } = await report(client, I, "接著聊");
-      const newCalls = callsSince(dirs, pids0);
+      const newCalls = callsSince(dirs, instances0);
       record(
         "I OpenCode:倒回後新的 server 開新的 opencode session(POST /session),不沿用舊的(沒有 GET /session/:id hit);紀錄只含 M 之前",
         callNames(newCalls).includes("POST /session") &&
@@ -843,7 +845,7 @@ async function phaseStopped(dirs, filters) {
       );
       // 倒回切點用同一個鍵:ord 在 user2(created_at 1400)倒回 → 留下 created_at < 1400 的只有 user1;assistant1(1500)雖然寫入得早,
       // 依時間在 M 之後,一起移除
-      const pids0 = pidsOf(readCalls(dirs));
+      const instances0 = instancesOf(readCalls(dirs));
       const ordUsers = ordHist.filter((m) => m.role === "user");
       const ordRes = await client.rpc("session.rewind", { sessionId: ord, messageId: ordUsers[1].id }, 60_000);
       const ordAfter = await getHistory(client, ord);
@@ -860,13 +862,13 @@ async function phaseStopped(dirs, filters) {
         ROLE_ORDER(tieAfter) === "user,assistant,system" && tieAfter[0].id === prepared.tieRows[0].id && tieAfter[1].id === prepared.tieRows[1].id,
         `roles=${ROLE_ORDER(tieAfter)}`,
       );
-      record("O5 沒有 runtime 的 session 倒回不會啟動 agent(沒有新的 agent 行程)", callsSince(dirs, pids0).length === 0, `newCalls=${callsSince(dirs, pids0).length}`);
+      record("O5 沒有 runtime 的 session 倒回不會啟動 agent(沒有新的 agent 行程)", callsSince(dirs, instances0).length === 0, `newCalls=${callsSince(dirs, instances0).length}`);
     }
 
     if (want("R")) {
       const histDef = await getHistory(client, def);
       const before = await getSession(client, def);
-      const pids0 = pidsOf(readCalls(dirs));
+      const instances0 = instancesOf(readCalls(dirs));
       const res = await client.rpc("session.rewind", { sessionId: def, messageId: histDef.filter((m) => m.role === "user")[2].id }, 60_000);
       const histAfter = await getHistory(client, def);
       const after = await getSession(client, def);
@@ -877,14 +879,14 @@ async function phaseStopped(dirs, filters) {
           res.session.status === "closed" &&
           after?.status === "closed" &&
           after?.backendSessionId === undefined &&
-          callsSince(dirs, pids0).length === 0 &&
+          callsSince(dirs, instances0).length === 0 &&
           ROLE_ORDER(histAfter) === "user,assistant,user,assistant,system" &&
           noticeEvents(histAfter).at(-1).event === "session.rewoundDeferred" &&
           res.message.content === TURNS[2],
-        `status=${after?.status}, backend=${after?.backendSessionId}, newCalls=${callsSince(dirs, pids0).length}, roles=${ROLE_ORDER(histAfter)}`,
+        `status=${after?.status}, backend=${after?.backendSessionId}, newCalls=${callsSince(dirs, instances0).length}, roles=${ROLE_ORDER(histAfter)}`,
       );
       const { sent, report: rep } = await report(client, def, "復活後");
-      const newCalls = callsSince(dirs, pids0);
+      const newCalls = callsSince(dirs, instances0);
       const revivedSession = await getSession(client, def);
       record(
         "R2 下一則訊息自動復活:agent 走 session/new(provider 宣告了 session/resume,但後端識別碼已清,不得接回);紀錄只含 M 之前、措辭是 rewind(倒回)而不是「app 重新開啟」;agent 記憶是空的",
@@ -935,7 +937,7 @@ async function phaseInterrupted(dirs) {
     const before = await getSession(client, intr);
     const listBefore = (await client.rpc("recovery.list", {})).sessions.find((r) => r.sessionId === intr);
     const hist0 = await getHistory(client, intr);
-    const pids0 = pidsOf(readCalls(dirs));
+    const instances0 = instancesOf(readCalls(dirs));
     const res = await client.rpc("session.rewind", { sessionId: intr, messageId: hist0.filter((m) => m.role === "user")[1].id }, 60_000);
     const after = await getSession(client, intr);
     const listAfter = (await client.rpc("recovery.list", {})).sessions.find((r) => r.sessionId === intr);
@@ -948,11 +950,11 @@ async function phaseInterrupted(dirs) {
         after?.status === "interrupted" &&
         listAfter?.canContinue === false &&
         continueAttempt.rejected &&
-        callsSince(dirs, pids0).length === 0,
+        callsSince(dirs, instances0).length === 0,
       `before=${before?.status}/${listBefore?.canContinue}, after=${after?.status}/${listAfter?.canContinue}, continue=${continueAttempt.code}`,
     );
     const { sent, report: rep } = await report(client, intr, "直接送訊息");
-    const newCalls = callsSince(dirs, pids0);
+    const newCalls = callsSince(dirs, instances0);
     record(
       "U2 直接送訊息仍能復活:走 session/new、紀錄只含 M 之前(rewind 措辭)",
       JSON.stringify(callNames(newCalls)) === JSON.stringify(["initialize", "session/new"]) &&

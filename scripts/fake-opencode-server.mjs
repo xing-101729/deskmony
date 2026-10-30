@@ -159,11 +159,13 @@ export const FAKE_OPENCODE_REPLY_CHUNKS = ["Hello", " from", " fake", " OpenCode
 export const REVIVE_REPORT_MARKER = "[[E2E_REVIVE_REPORT]]";
 /** 有設才持久化 session、才記 calls.log,見檔頭「2026-10-15」。 */
 const STATE_DIR = process.env.FAKE_OPENCODE_STATE_DIR || undefined;
+/** 2026-10-30:calls.log 的行程識別碼,e2e 用它分辨新行程(pid 會被重用),見 fake-acp-agent.mjs 的 `PROCESS_INSTANCE`。 */
+const PROCESS_INSTANCE = randomUUID();
 
 function appendCall(call) {
   if (!STATE_DIR) return;
   mkdirSync(STATE_DIR, { recursive: true });
-  appendFileSync(path.join(STATE_DIR, "calls.log"), `${JSON.stringify({ pid: process.pid, call })}\n`, "utf8");
+  appendFileSync(path.join(STATE_DIR, "calls.log"), `${JSON.stringify({ pid: process.pid, instance: PROCESS_INSTANCE, call })}\n`, "utf8");
 }
 
 function stateFile(sessionId) {
