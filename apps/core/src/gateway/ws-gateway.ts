@@ -9,6 +9,7 @@ import {
   DeskmonyError,
   ErrorCodes,
   GATEWAY_MAX_MESSAGE_BYTES,
+  GATEWAY_MAX_REQUEST_JSON_VALUES,
   type BrowserCommandPush,
   type ClientRequest,
   type ClientRequestMethod,
@@ -1001,7 +1002,12 @@ export class WsGateway {
         this.sendNotYetAuthenticated(socket, requestId);
         return;
       }
-      parsed = preAuth ? AuthRequestSchema.parse(json) : ClientRequestSchema.parse(json);
+      // 2026-10-30:已認證的連線一樣——issue 的數量原本只受 maxPayload 限制。值太多就不交給 zod,見
+      // GATEWAY_MAX_REQUEST_JSON_VALUES。
+      if (exceedsJsonValueBudget(json, GATEWAY_MAX_REQUEST_JSON_VALUES)) {
+        throw new Error(`請求含有超過 ${GATEWAY_MAX_REQUEST_JSON_VALUES} 個 JSON 值,不予解析`);
+      }
+      parsed =preAuth ? AuthRequestSchema.parse(json) : ClientRequestSchema.parse(json);
     } catch (err) {
       const detail = describeRequestError(err);
       this.send(socket, {
@@ -1671,6 +1677,30 @@ function describeRequestError(err: unknown): string {
     detail = err instanceof Error ? err.message : String(err);
   }
   return detail.length > INVALID_REQUEST_DETAIL_MAX_CHARS ? `${detail.slice(0, INVALID_REQUEST_DETAIL_MAX_CHARS)}…` : detail;
+}
+
+/**
+ * 2026-10-30:`value`(`JSON.parse` 的結果)裡的陣列元素 + 物件屬性是否超過 `budget` 個。迭代走訪(不遞迴,深層巢狀
+ * 不會撐爆堆疊),數到超過就停——陣列整段一次加上長度,所以不論陣列多大,最多推進 `budget` 個值。
+ */
+function exceedsJsonValueBudget(value: unknown, budget: number): boolean {
+  let count = 0;
+  const pending: unknown[] = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === null || typeof current !== "object") continue;
+    if (Array.isArray(current)) {
+      count += current.length;
+      if (count > budget) return true;
+      for (const item of current) pending.push(item);
+    } else {
+      for (const key in current) {
+        if (++count > budget) return true;
+        pending.push((current as Record<string, unknown>)[key]);
+      }
+    }
+  }
+  return false;
 }
 
 /** `ws` 的 `message` 事件資料的位元組數(預設 `binaryType` 是 Buffer;另外兩種形狀一併處理)。 */
