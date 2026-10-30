@@ -80,7 +80,8 @@
     "noMatches": "找不到符合的 slash command"
   },
   "attachment": {
-    "tooLarge": "以下附件超過 {{limit}} MB,已略過:{{files}}"
+    "tooLarge": "以下附件超過 {{limit}} MB,已略過:{{files}}",
+    "totalTooLarge": "訊息連同附件編碼後約 {{size}} MB,超過單則訊息上限 {{limit}} MB,沒有送出。附件會以 base64 編碼(體積約增加三分之一),請移除部分附件後再送出。"
   },
   "origin": {
     "fromSession": "來自 {{title}}",

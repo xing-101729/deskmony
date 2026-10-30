@@ -57,6 +57,10 @@ const SUITES = [
   // 2026-10-22:「永遠允許」的規則候選(packages/shared/src/remember-rule.ts,桌面彈窗與 CLI 共用)——每個候選丟進
   // PolicyEngine 都要放行產生它的請求。單元層級、不啟動 core,毫秒級。
   "e2e-remember-candidates",
+  // 2026-10-30:`session.sendPrompt` 整則 WS 訊息大小的估算(packages/shared/src/gateway.ts 的
+  // `sendPromptMessageBytes()`,桌面送出前拿它擋超過 `maxPayload` 的附件)——用真的 GatewayClient 加假 WebSocket
+  // 攔下實際送出的字串比對。不啟動 core,一兩秒。
+  "e2e-prompt-size",
   // 2026-10-14:GatewayClient 首次連線失敗後的補載(假 WebSocket,不啟動 core,約 4 秒)。
   "e2e-gateway-client-startup",
   // 2026-10-16:對話串「連續工具呼叫收成一組」的純函式(apps/desktop/src/lib/chat-groups.ts)——不啟動 core、

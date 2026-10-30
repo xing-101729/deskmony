@@ -84,7 +84,8 @@
     "noMatches": "No hay slash commands coincidentes"
   },
   "attachment": {
-    "tooLarge": "Estos adjuntos superan {{limit}} MB y se omitieron: {{files}}"
+    "tooLarge": "Estos adjuntos superan {{limit}} MB y se omitieron: {{files}}",
+    "totalTooLarge": "Este mensaje con sus adjuntos ocupa unos {{size}} MB una vez codificado y supera el límite de {{limit}} MB por mensaje, así que no se envió. Los adjuntos se codifican en base64 (aprox. un tercio más que los archivos). Quita algunos adjuntos y vuelve a enviarlo."
   },
   "origin": {
     "fromSession": "De {{title}}",

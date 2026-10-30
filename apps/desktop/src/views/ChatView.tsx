@@ -1,7 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { MessageOrigin, Session, SessionOptionChoice, SlashCommandInfo } from "@deskmony/shared";
-import { EffortLevelSchema, PromptImageMediaTypeSchema, effortUnavailableInSession, type PromptImageMediaType } from "@deskmony/shared";
+import {
+  EffortLevelSchema,
+  GATEWAY_MAX_MESSAGE_BYTES,
+  PromptImageMediaTypeSchema,
+  effortUnavailableInSession,
+  sendPromptMessageBytes,
+  type PromptImageMediaType,
+} from "@deskmony/shared";
 import {
   useSessionStore,
   providerLabelOf,
@@ -932,8 +939,25 @@ export function ChatView({ onOpenSidebar }: { onOpenSidebar: () => void }): JSX.
     const text = draft.trim();
     if (!text || !currentSessionId) return;
     const attachments = pendingAttachments.map(({ id, ...rest }) => rest);
+    // 2026-10-30:`MAX_ATTACHMENT_BYTES` 只限單檔,擋不住「很多個檔案」——附件全部 base64 內嵌在同一則 WS 訊息裡,超過 core 的
+    // `maxPayload` 會被以 1009 關閉連線,使用者只看到斷線重連,這則訊息就這樣不見。先算好,超過就不送,輸入框與附件
+    // 原樣保留,讓使用者移除幾個再送。
+    const messageBytes = sendPromptMessageBytes({ text, attachments });
+    if (messageBytes > GATEWAY_MAX_MESSAGE_BYTES) {
+      const toMb = (bytes: number): number => Math.ceil((bytes / (1024 * 1024)) * 10) / 10;
+      setAttachmentError(
+        t("chat:attachment.totalTooLarge", {
+          size: toMb(messageBytes),
+          limit: toMb(GATEWAY_MAX_MESSAGE_BYTES),
+          defaultValue:
+            "訊息連同附件編碼後約 {{size}} MB,超過單則訊息上限 {{limit}} MB,沒有送出。附件會以 base64 編碼(體積約增加三分之一),請移除部分附件後再送出。",
+        }),
+      );
+      return;
+    }
     setDraft("");
     setPendingAttachments([]);
+    setAttachmentError(null);
     void sendPrompt(text, attachments.length > 0 ? attachments : undefined);
   };
 
