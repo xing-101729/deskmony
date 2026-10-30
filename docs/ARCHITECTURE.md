@@ -417,6 +417,8 @@ handleMessage() 依序:①schema 驗證(未認證只解析 auth)②認證閘門 
   桌面端送出前用 `sendPromptMessageBytes()` 算整則 `session.sendPrompt` 的大小,超過就不送、保留輸入與附件並提示,
   不會走到被 1009 斷線那一步(2026-10-30)。
   `gateway.invalidRequest` 的 `detail` 只列前 3 個 zod issue(zod 3 對陣列逐元素產生 issue)。
+  2026-10-30:已認證的連線(含 scoped token 的 agent 子行程)也一樣——`JSON.parse` 之後先數陣列元素 + 物件屬性,
+  超過 `GATEWAY_MAX_REQUEST_JSON_VALUES`(100,000)就不交給 zod,直接回 `gateway.invalidRequest`。
 - **`DESKMONY_AUTH_TOKEN` 刻意不是設定檔欄位**,永遠只從環境變數讀。
 
 ---
