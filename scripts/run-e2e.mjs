@@ -73,6 +73,9 @@ const SUITES = [
   // 安靜地連到佔用者)。三次 core 啟動、不需要 agent 後端,約半分鐘——放在啟動 core 的測試最前面:這是其餘
   // 每一支「連得上的就是自己的 core」的前提。
   "e2e-core-port-in-use",
+  // 2026-11-16:系統 Path 登錄值是 REG_SZ(`%SystemRoot%` 沒展開)時,core 啟動會自己展開 PATH,偵測照樣找得到 CLI——
+  // 純函式 + 一個用壞掉 PATH 起的 core(經 CLI doctor 查偵測結果),不需要 agent 後端,十幾秒。
+  "e2e-windows-path",
   // 2026-10-27(安全):WS gateway 在認證之前只解析 auth、太大的訊息直接關閉、`maxPayload`、zod 錯誤細節截斷——一個帶
   // DESKMONY_AUTH_TOKEN 的 core,不建 session、不啟動 agent,幾秒跑完。
   "e2e-gateway-preauth",
