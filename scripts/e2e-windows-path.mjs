@@ -20,7 +20,7 @@
  */
 
 import { spawn, execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -45,6 +45,20 @@ function record(name, ok, detail) {
   results.push({ name, ok, detail });
   console.log(`\n${ok ? "PASS" : "FAIL"} ${name}`);
   if (detail) console.log(`       ${detail}`);
+}
+/**
+ * 比較兩個目錄是否相同。CI runner 的暫存目錄是 8.3 短檔名(`C:\Users\RUNNER~1\…`),`where` 回的是長檔名,
+ * 所以先用 realpath 正規化再不分大小寫比較。
+ */
+function sameDir(a, b) {
+  const norm = (p) => {
+    try {
+      return realpathSync.native(p).toLowerCase();
+    } catch {
+      return path.resolve(p).toLowerCase();
+    }
+  };
+  return norm(a) === norm(b);
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -154,7 +168,7 @@ if (process.platform !== "win32") {
       "B 壞掉的 PATH 下仍偵測到 claude-code-cli",
       claude?.installed === true &&
         typeof claude.path === "string" &&
-        path.dirname(claude.path).toLowerCase() === dirs.bin.toLowerCase() &&
+        sameDir(path.dirname(claude.path), dirs.bin) &&
         claude.version === FAKE_VERSION,
       JSON.stringify(claude),
     );
