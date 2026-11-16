@@ -23,6 +23,7 @@ import { createStaticRequestHandler } from "./http/static-server.js";
 import { SettingsStore, migrateLegacyEnabledModelIds } from "./settings/settings-store.js";
 import { applyConsoleLogLevel, loadConfig } from "./config/load-config.js";
 import { backfillPolicyRuleIds } from "./config/config-file-writer.js";
+import { repairWindowsPath } from "./env/windows-path.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -154,6 +155,10 @@ function reportGatewayListenFailure(
 }
 
 async function main(): Promise<void> {
+  // 2026-11-16:必須是第一件事——在任何 spawn(偵測的 `where`、孤兒回收、agent 子程序)之前把 PATH 裡沒展開的
+  // `%SystemRoot%` 之類展開,否則系統 Path 登錄值型別是 REG_SZ 的機器上找不到 System32、偵測全部落空。見 env/windows-path.ts。
+  const pathRepair = repairWindowsPath();
+
   // M6 Round A:設定的唯一載入入口——`defaultStaticDir` 是 M5 Round B 就有的
   // monorepo 佈局推算(往上兩層到 apps/,再進 desktop/dist),依賴這個檔案的
   // `__dirname`,所以由這裡算好傳給通用的 `loadConfig()`(見 load-config.ts
@@ -167,6 +172,13 @@ async function main(): Promise<void> {
   // `applyConsoleLogLevel()`)——預設 "info" 時完全是 no-op,以下所有既有的
   // console.log/warn 呼叫點行為不變。
   applyConsoleLogLevel(config.log.level);
+
+  if (pathRepair) {
+    console.warn(
+      `[core] 環境變數 ${pathRepair.key} 含未展開的 %變數%(系統 Path 登錄值型別可能被改成 REG_SZ),已自動展開;` +
+        "建議把 HKLM 的 Path 改回 REG_EXPAND_SZ,否則從開始功能表啟動的其他程式也會找不到 System32。",
+    );
+  }
 
   const { port, bindHost } = config.daemon;
   // 安全關鍵(M6 Round A):這裡看的是「合併後」的 bindHost(可能來自設定檔),
