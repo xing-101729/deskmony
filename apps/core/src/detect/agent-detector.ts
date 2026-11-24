@@ -274,10 +274,11 @@ interface AllowlistEntry {
 }
 
 /**
- * 已知 agent CLI 的 allowlist(這輪起是 4 個,未來要擴充新工具只需要在這裡
+ * 已知 agent CLI 的 allowlist(2026-11-24 起是 5 個,未來要擴充新工具只需要在這裡
  * 加一筆,不需要改動安全機制本身)。`software` 的選擇:
  *   - `claude`/`gemini`:實務上多半經 ACP 對接(見 README/需求描述),歸類
  *     為 "acp"。
+ *   - `agy`(Google Antigravity CLI):`agy acp` 子命令講 ACP,歸類為 "acp"。
  *   - `opencode`:`AgentSoftwareSchema` 剛好已經有對應的獨立列舉值
  *     (`"opencode"`),直接沿用,不需要額外新增型別。
  *   - `aider`:目前只能透過 PTY 直通對接(無結構化協議),歸類為 "pty"。
@@ -305,6 +306,16 @@ const AGENT_ALLOWLIST: AllowlistEntry[] = [
     command: "gemini",
     software: "acp",
     modelsNote: "模型由 gemini CLI 自行管理,此處不臆測。",
+  },
+  {
+    // 2026-11-24:Google Antigravity 的 CLI(`agy`,安裝 Antigravity 時一起裝、放進 PATH)。
+    // `agy acp` 以 stdio 講 ACP(見 provider-catalog.ts 的 antigravity 項目);model 清單由它在
+    // `session/new` 的 configOptions 回報,這裡不另外跑 `agy models`(需要登入與網路,且 ACP 已經會回報)。
+    key: "antigravity-cli",
+    displayName: "Antigravity CLI",
+    command: "agy",
+    software: "acp",
+    modelsNote: "模型由 Antigravity(agy)自行管理,建立 session 後由它回報可選清單。",
   },
   {
     key: "opencode-cli",

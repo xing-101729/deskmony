@@ -354,7 +354,7 @@ export function printHelp(): void {
     "  --token <t>                認證 token(或環境變數 DESKMONY_AUTH_TOKEN)",
     "  --cwd <path>               session 的 workingDir(預設目前目錄)",
     "  --agent <id>               用哪個 agent 建 session(providerId,預設 claude-agent-sdk;",
-    "                             例如 codex / opencode / opencode-acp / gemini / claude-cli / aider)",
+    "                             例如 codex / opencode / opencode-acp / gemini / antigravity / claude-cli / aider)",
     "  --model <m>                建 session 時指定 model",
     "  --effort <e>               建 session 時指定思考程度(值依 agent 而定,例如 Claude 的 low…max)",
     "  --permission-mode <mode>   對應 session.setPermissionMode:",

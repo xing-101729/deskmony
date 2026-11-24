@@ -160,11 +160,11 @@ flowchart TB
 | Adapter | 對接方式 | 目前涵蓋的後端 | 能力等級 |
 |---|---|---|---|
 | `ClaudeAgentSdkAdapter` | Claude Agent SDK,程式內嵌 | Claude Code | 最深 —— hooks、in-process session 工具、細粒度權限事件、對話中換 model 與 effort |
-| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件——官方 `codex` 執行檔本身不原生講 ACP)、其他 ACP-native agent | 結構化事件;agent 有提供時可換 model 與 effort |
+| `AcpAdapter` | [Agent Client Protocol](https://agentclientprotocol.com),stdio JSON-RPC | Gemini CLI、Google Antigravity(`agy acp`)、Codex(經 `@agentclientprotocol/codex-acp` 橋接套件——官方 `codex` 執行檔本身不原生講 ACP)、其他 ACP-native agent | 結構化事件;agent 有提供時可換 model 與 effort |
 | `OpenCodeAdapter` | OpenCode 的 HTTP + SSE server | OpenCode | 原生 server,遠端也適用;可換 model 與 effort(variant) |
 | `GenericPtyAdapter` | 原始 `node-pty` 直通 | Claude Code CLI、Aider、任意互動式 CLI | **保底 —— 沒有權限事件** |
 
-使用者看到的那一層是七項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,session 工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY。手動輸入 command 的那一項(`custom-pty`)已於 2026-10-02 移除:session 只能從 Deskmony 自己偵測到的 agent 開出來,gateway 上也沒有任何能新增 command 的入口。
+使用者看到的那一層是八項的 **provider 目錄**,每一項在型別上保證映射到上面四者之一:`claude-agent-sdk`、`claude-cli` → PTY、`gemini` → ACP、`antigravity` → ACP(`agy acp`)、`opencode`、`opencode-acp` → ACP(走 `opencode acp` 的 OpenCode,session 工具就是靠這一項)、`codex` → ACP(經 `@agentclientprotocol/codex-acp` 橋接套件,不是本機安裝的 codex CLI)、`aider` → PTY。手動輸入 command 的那一項(`custom-pty`)已於 2026-10-02 移除:session 只能從 Deskmony 自己偵測到的 agent 開出來,gateway 上也沒有任何能新增 command 的入口。
 
 **PTY 這層缺的權限事件是安全邊界,不是待辦事項。** 它是 raw stdin 直通,**結構上**沒辦法被政策引擎管。在真正的執行沙箱做出來之前,PTY agent 一律唯讀、不給無人值守的自主權。Deskmony 刻意**不做** shell 指令攔截:`bash -c`、`$()`、base64 幾秒就能繞過,做了只是 security theater。
 
@@ -218,7 +218,7 @@ flowchart TB
 
 - **Node.js ≥ 20** 與 **pnpm 10**(repo 釘死 `pnpm@10.13.1`,跑 `corepack enable` 就會抓到)
 - 桌面版封裝安裝檔目前是 Windows 專屬。**core 與 CLI 也能在 Linux 上跑**——每次 PR 都有一個 `ubuntu-latest` CI job 建置它們並跑完整套 CLI e2e。這句話證明的範圍要說清楚:core + CLI 這條路徑在 Linux 上通,用的是不需要任何憑證的假後端;它**不**證明各 adapter 對真實後端在 Linux 上的行為,那還沒有人測過。
-- 至少一個 Deskmony 偵測得到的 agent 後端:登入 Claude Code CLI;Codex 只需設定 `OPENAI_API_KEY`/`CODEX_API_KEY`(或改用 ChatGPT 登入)——它透過內附的 `@agentclientprotocol/codex-acp` 橋接套件運作,不需要另外安裝 codex CLI;或安裝 OpenCode、Gemini CLI、Aider。core 啟動時會自己找到它們,除了憑證之外,每個 agent 都不需要另外設定。**Deskmony 負責調度 agent,不提供 model 存取本身。**
+- 至少一個 Deskmony 偵測得到的 agent 後端:登入 Claude Code CLI;Codex 只需設定 `OPENAI_API_KEY`/`CODEX_API_KEY`(或改用 ChatGPT 登入)——它透過內附的 `@agentclientprotocol/codex-acp` 橋接套件運作,不需要另外安裝 codex CLI;或安裝 OpenCode、Gemini CLI、Google Antigravity(它的 `agy` CLI)、Aider。core 啟動時會自己找到它們,除了憑證之外,每個 agent 都不需要另外設定。**Deskmony 負責調度 agent,不提供 model 存取本身。**
 
 ### 安裝
 
@@ -378,7 +378,7 @@ pnpm test:e2e:live # e2e-gateway.mjs —— 需要真實 Claude Code 憑證,會�
 - **沒有回合中途的成本熔斷。** 唯一會發 usage 的 adapter 是在回合結束時才發,根本沒有可觀測的「回合進行中收到 usage」情境可以對著做。硬分岔只是憑空編造行為。
 - **只有部分 agent 能主動傳訊息。** Claude Agent SDK 的 session(in-process)、所有走 ACP 的 agent(Codex、Gemini CLI、走 `opencode-acp` provider 的 OpenCode)與走 HTTP 的 OpenCode(`opencode` provider)能拿到那五個 session 工具 —— 後兩者透過一個持有 scoped、逐 session token 的橋接子行程。PTY agent(Claude Code CLI、Aider)沒有掛載任何工具:它們可以**接收**訊息,但不能呼叫 `send_to_session` 或 `create_session`,所以除非有人替它們轉傳,否則自己回不了話。
 - **排給忙碌 session 的訊息只存在記憶體。** 若 core 在對方這一輪結束前重啟,排隊中的訊息就遺失了(寄件者當時只被告知「已排隊」,並不是「已讀」)。
-- **agent 清單是固定的。** 偵測範圍是 Claude Agent SDK、Claude Code CLI、Gemini CLI、OpenCode、Codex、Aider。手動輸入 command 的入口是刻意移除的;要支援別的 agent,就得在目錄裡加一項。
+- **agent 清單是固定的。** 偵測範圍是 Claude Agent SDK、Claude Code CLI、Gemini CLI、Google Antigravity(`agy`)、OpenCode、Codex、Aider。手動輸入 command 的入口是刻意移除的;要支援別的 agent,就得在目錄裡加一項。
 - **provider 的密鑰對外遮罩,本機是明文儲存**,與 Paseo 對它的設定檔採取同一種取捨。
 - **孤兒 agent 行程只能在下次啟動時回收。** core 若被 SIGKILL / 強制終止 / 斷電,優雅關機路徑完全沒機會跑,已 spawn 的 agent 與它們的 MCP 孫程序會繼續活著。現在會把 pid 記到 `<dataDir>/child-pids.json`,下次啟動時比對行程建立時間後回收(對不上就**不殺**,防 pid 重用誤傷)。真正的當下回收需要 Windows Job Object,那要多一個原生相依 —— 這個專案刻意不要求打包機器具備 MSVC 工具鏈。
 - **SQLite 遷移只能加欄位。** `packages/db/src/client.ts` 是幾個「查 `PRAGMA table_info` → 沒有就 `ALTER TABLE ADD COLUMN`」的手刻函式,沒有版本表。改型別 / rename / drop / 加約束都做不到,將來要做破壞性遷移得先換成正式的 migration 機制。

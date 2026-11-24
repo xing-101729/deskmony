@@ -16,7 +16,7 @@ import { EmptyState } from "../ui/Feedback.js";
  * + **思考程度**(2026-10-06 起不只 Claude:清單由 `providerEffortChoices()` 決定——Claude 的固定 5 級、OpenCode
  * 選定 model 的 variants;建立前不知道就隱藏;2026-10-16 起 OpenCode 沒選 model / 選的 model 沒有 variants 時改顯示 disabled 的
  * 下拉說明原因,不再整個消失)+(選填)**工作資料夾**。「要等 session 開起來才知道選項」的 agent
- * (ACP:Codex / Gemini / OpenCode ACP)改顯示一行說明:建立後在對話標題列選,會記住上次的選擇。取代原本的「選 profile」下拉與
+ * (ACP:Codex / Gemini / Antigravity / OpenCode ACP)改顯示一行說明:建立後在對話標題列選,會記住上次的選擇。取代原本的「選 profile」下拉與
  * ProfileCreateDialog——SessionList 側欄頂部與「在這個 session 底下開新 session」對話框共用同一份,選擇狀態由呼叫端持有(見
  * lib/new-session-selection.ts,上次的選擇存 localStorage)。
  *
