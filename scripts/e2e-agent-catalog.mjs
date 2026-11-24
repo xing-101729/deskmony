@@ -278,6 +278,7 @@ async function catalogUnitTests() {
     { key: "claude-agent-sdk", displayName: "Claude Agent SDK", software: "claude-agent-sdk", installed: true, models: [] },
     { key: "claude-code-cli", displayName: "Claude Code CLI", software: "acp", installed: true, version: "9.9.9", path: "C:\\fake\\claude.exe", models: [] },
     { key: "gemini-cli", displayName: "Gemini", software: "acp", installed: true, path: "C:\\fake\\gemini.cmd", models: [] },
+    { key: "antigravity-cli", displayName: "Antigravity CLI", software: "acp", installed: true, path: "C:\\fake\\agy.exe", models: [] },
     {
       key: "opencode-cli",
       displayName: "OpenCode",
@@ -309,6 +310,7 @@ async function catalogUnitTests() {
     const sdk = await c.buildLaunchSpec("claude-agent-sdk", { model: "opus", effort: "high" });
     const sdkNoModel = await c.buildLaunchSpec("claude-agent-sdk");
     const gemini = await c.buildLaunchSpec("gemini");
+    const agy = await c.buildLaunchSpec("antigravity");
     const oc = await c.buildLaunchSpec("opencode", { model: "anthropic/claude-x" });
     const ocAcp = await c.buildLaunchSpec("opencode-acp");
     const codex = await c.buildLaunchSpec("codex");
@@ -319,6 +321,7 @@ async function catalogUnitTests() {
       sdk.software === "claude-agent-sdk" && sdk.providerId === "claude-agent-sdk" && sdk.model === "opus" && sdk.effort === "high" && !sdk.acpConfig && !sdk.ptyConfig &&
       sdkNoModel.model === undefined && sdkNoModel.effort === undefined &&
       gemini.software === "acp" && gemini.acpConfig?.command === "C:\\fake\\gemini.cmd" && JSON.stringify(gemini.acpConfig?.args) === '["--acp"]' &&
+      agy.software === "acp" && agy.acpConfig?.command === "C:\\fake\\agy.exe" && JSON.stringify(agy.acpConfig?.args) === '["acp"]' && agy.family === undefined &&
       oc.software === "opencode" && oc.opencodeConfig?.command === "C:\\fake\\opencode.exe" && oc.opencodeConfig?.args === undefined && oc.model === "anthropic/claude-x" &&
       ocAcp.software === "acp" && ocAcp.acpConfig?.command === "C:\\fake\\opencode.exe" && JSON.stringify(ocAcp.acpConfig?.args) === '["acp"]' &&
       codex.software === "acp" && codex.acpConfig?.command === process.execPath && JSON.stringify(codex.acpConfig?.args) === JSON.stringify(["C:\\fake\\codex-acp.js"]) &&
@@ -326,9 +329,9 @@ async function catalogUnitTests() {
       cliNoModel.ptyConfig?.args === undefined &&
       aider.software === "pty" && aider.ptyConfig?.command === "C:\\fake\\aider.exe";
     record(
-      "A1 AgentCatalog.buildLaunchSpec():claude-agent-sdk 不需 command;gemini/opencode-acp/codex 映射成 acp(帶各自的 args,codex 用偵測到的橋接進入點);opencode 映射成 opencode(args 不覆寫);claude-cli/aider 映射成 pty(claude-cli 的 model 烤進 --model)",
+      "A1 AgentCatalog.buildLaunchSpec():claude-agent-sdk 不需 command;gemini/antigravity/opencode-acp/codex 映射成 acp(帶各自的 args,antigravity 是 `agy acp`,codex 用偵測到的橋接進入點);opencode 映射成 opencode(args 不覆寫);claude-cli/aider 映射成 pty(claude-cli 的 model 烤進 --model)",
       ok,
-      JSON.stringify({ sdk, gemini, oc, ocAcp, codex, cli, aider }),
+      JSON.stringify({ sdk, gemini, agy, oc, ocAcp, codex, cli, aider }),
     );
   } catch (err) {
     record("A1 buildLaunchSpec 映射", false, String(err));

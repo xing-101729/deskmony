@@ -199,6 +199,7 @@ export type ProviderPrefsPatchInput = z.infer<typeof ProviderPrefsPatchInputSche
  *     ACP,與 agent-target.ts 對 acp 分類偵測項的既有保守預設一致)。
  *   - `gemini`:對齊需求描述引用的 Paseo 範例(`"extends": "acp", "command":
  *     ["gemini", "--acp"]`)——固定用 ACP 對接、`defaultArgs: ["--acp"]`。
+ *   - `antigravity`:Google Antigravity 的 `agy` 執行檔,`defaultArgs: ["acp"]`(`agy acp` 子命令)走 ACP。
  *   - `opencode`:對應這輪稍早新增的 `OpenCodeAdapter`(HTTP + SSE)。
  *   - `aider`:目前沒有專屬 adapter,映射成 `pty`(`AgentSoftwareSchema` 沒有
  *     對應的 `"aider"` 獨立列舉值,PTY 直通是唯一可行選項)。
@@ -269,6 +270,25 @@ export const BUILTIN_PROVIDERS: ProviderCatalogEntry[] = [
     supportsEffortSelection: true,
     optionsAfterStart: true,
     order: 20,
+  },
+  {
+    id: "antigravity",
+    label: "Google Antigravity",
+    description:
+      "Antigravity 的 CLI(agy),以 `agy acp` 子命令走 ACP(Agent Client Protocol)對接。" +
+      "沿用 Antigravity 自己的登入(Google 帳號 / Gemini API key),model 與思考程度在建立 session 後由它回報。",
+    software: "acp",
+    detectKey: "antigravity-cli",
+    // 2026-11-24 對本機 agy(CLI 1.0.15,ACP server 1.5.16)實測:`agy acp` 以 stdio 講 ACP,initialize 回
+    // protocolVersion 1;已用 Antigravity 登入過的話不需要 `authenticate`,`session/new` 直接成功,回應的
+    // configOptions 有 `model`(category model)、`thought_level`(low/medium/high/xhigh)與 `mode`
+    // (default/accept-edits/plan)——與 codex-acp 同一套形狀,session-options.ts 不需要特別處理。
+    defaultArgs: ["acp"],
+    models: [],
+    supportsModelSelection: true,
+    supportsEffortSelection: true,
+    optionsAfterStart: true,
+    order: 21,
   },
   {
     id: "opencode",
